@@ -1,0 +1,88 @@
+{
+  "name": "epg-tools",
+  "version": "0.1.0",
+  "description": "Memory-efficient EPG toolkit: parallel grabbing with day-level caching and streaming XMLTV parsing, merging and serialization",
+  "license": "MIT",
+  "author": "ruby184",
+  "homepage": "https://github.com/ruby184/epg-tools#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruby184/epg-tools.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ruby184/epg-tools/issues"
+  },
+  "type": "module",
+  "sideEffects": [
+    "./dist/cli/main.js"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/main.d.ts",
+      "import": "./dist/main.js"
+    },
+    "./xmltv": {
+      "types": "./dist/xmltv/main.d.ts",
+      "import": "./dist/xmltv/main.js"
+    },
+    "./cache": {
+      "types": "./dist/cache/main.d.ts",
+      "import": "./dist/cache/main.js"
+    },
+    "./grabber": {
+      "types": "./dist/grabber/main.d.ts",
+      "import": "./dist/grabber/main.js"
+    },
+    "./merge": {
+      "types": "./dist/merge/main.d.ts",
+      "import": "./dist/merge/main.js"
+    },
+    "./tv-grab": {
+      "types": "./dist/tv-grab/main.d.ts",
+      "import": "./dist/tv-grab/main.js"
+    }
+  },
+  "bin": {
+    "epg": "./dist/cli/main.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "bench": "vitest bench --run",
+    "bench:memory": "npm run build && node bench/memory.mjs",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+  },
+  "keywords": [
+    "epg",
+    "xmltv",
+    "iptv",
+    "grabber",
+    "guide",
+    "streaming"
+  ],
+  "dependencies": {
+    "ky": "^2.0.2",
+    "p-queue": "^9.3.0"
+  },
+  "devDependencies": {
+    "@iptv/xmltv": "^1.0.1",
+    "@types/node": "^24.0.0",
+    "epg-parser": "^0.5.0",
+    "fast-xml-parser": "^5.10.1",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

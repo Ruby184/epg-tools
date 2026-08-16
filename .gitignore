@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# npm pack output
+*.tgz
+
+# runtime artifacts from running the CLI in-repo
+.epg-cache/
+public/
+epg.config.local.*
+
+# local env
+.env
+.env.*

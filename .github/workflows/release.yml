@@ -1,0 +1,27 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Must match the environment configured on the npm package's Trusted Publisher page.
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # mints the OIDC token npm exchanges for short-lived publish rights
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      # setup-node ships npm 10.x; trusted publishing needs >= 11.5.1
+      - run: npm install -g npm@latest
+      - run: npm ci
+      # No NODE_AUTH_TOKEN: auth comes from the OIDC exchange, and
+      # provenance is attached automatically when publishing this way.
+      - run: npm publish
