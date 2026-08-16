@@ -1,7 +1,7 @@
 # epg-tools
 
 [![npm](https://img.shields.io/npm/v/epg-tools.svg)](https://www.npmjs.com/package/epg-tools)
-[![CI](https://github.com/ruby184/epg-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/ruby184/epg-tools/actions/workflows/ci.yml)
+[![CI](https://github.com/Ruby184/epg-tools/actions/workflows/ci.yml/badge.svg)](https://github.com/Ruby184/epg-tools/actions/workflows/ci.yml)
 [![node](https://img.shields.io/node/v/epg-tools.svg)](https://nodejs.org)
 [![license](https://img.shields.io/npm/l/epg-tools.svg)](./LICENSE)
 

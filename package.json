@@ -4,13 +4,13 @@
   "description": "Memory-efficient EPG toolkit: parallel grabbing with day-level caching and streaming XMLTV parsing, merging and serialization",
   "license": "MIT",
   "author": "ruby184",
-  "homepage": "https://github.com/ruby184/epg-tools#readme",
+  "homepage": "https://github.com/Ruby184/epg-tools#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ruby184/epg-tools.git"
+    "url": "git+https://github.com/Ruby184/epg-tools.git"
   },
   "bugs": {
-    "url": "https://github.com/ruby184/epg-tools/issues"
+    "url": "https://github.com/Ruby184/epg-tools/issues"
   },
   "type": "module",
   "sideEffects": [
