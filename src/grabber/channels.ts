@@ -1,4 +1,5 @@
 import ky, { type KyInstance } from 'ky';
+import PQueue from 'p-queue';
 import type { AnySiteConfig, GrabberChannel } from './types.js';
 
 /**
@@ -51,3 +52,27 @@ export async function resolveChannels(
   });
 }
 
+/**
+ * Every site with its channels resolved to a plain list.
+ *
+ * What to reach for when more than one pass has to agree about the same sites:
+ * a fetched list resolved separately by a grab and by the merge that reads what
+ * it wrote can differ between the two, leaving the guide describing channels
+ * nothing ever grabbed. Resolving up front is also one request per site instead
+ * of one per pass.
+ *
+ * `concurrency` defaults to all of them at once — one request each, to one host
+ * each; pass the run's `siteConcurrency` to hold it to the same bound the grab
+ * itself uses.
+ */
+export async function resolveSites(
+  sites: AnySiteConfig[],
+  options: { signal?: AbortSignal; concurrency?: number } = {},
+): Promise<AnySiteConfig[]> {
+  const queue = new PQueue({ concurrency: Math.max(1, options.concurrency ?? sites.length) });
+
+  return Promise.all(sites.map((site) => queue.add(async (): Promise<AnySiteConfig> => ({
+    ...site,
+    channels: await resolveChannels(site, { ...(options.signal ? { signal: options.signal } : {}) }),
+  }))));
+}

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { FsCacheStore } from './cache/main.js';
-import { grab } from './grabber/main.js';
+import { grab, resolveSites } from './grabber/main.js';
 import type { GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
 import type { BuildGuideOptions } from './merge/types.js';
@@ -111,9 +111,21 @@ export async function build(source: ConfigSource, options: RunOptions = {}): Pro
   // and the grab and the merge that follows it must agree on one answer.
   const config = await resolveConfigSource(source);
   const now = options.now ?? new Date();
-  const summary = await runGrab(config, { ...options, now });
 
-  await runMerge(config, { ...options, now });
+  // Channel lists too, and for the same reason one level down: a site that
+  // fetches its channels would otherwise be asked twice, and a list that
+  // changed in between would leave the guide describing channels the grab
+  // never went for.
+  const resolved: EpgConfig = {
+    ...config,
+    sites: await resolveSites(config.sites, {
+      ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
+    }),
+  };
+
+  const summary = await runGrab(resolved, { ...options, now });
+
+  await runMerge(resolved, { ...options, now });
 
   return summary;
 }

@@ -196,4 +196,24 @@ describe('a configuration that still needs its answers', () => {
     // second, possibly different answer.
     expect(calls).toBe(1);
   });
+
+  it('resolves a fetched channel list once for a build, not once per pass', async () => {
+    const dir = await tempDir();
+    let calls = 0;
+
+    const lazy: SiteConfig<unknown> = {
+      ...site([]),
+      channels: () => {
+        calls++;
+        return [{ xmltvId: 'one.example', siteId: '1', name: 'One' }];
+      },
+    };
+
+    await build(config(dir, { sites: [lazy] }), { now: NOW });
+
+    // The grab and the merge that reads what it wrote must not each ask the
+    // source what its channels are: the answer can change in between.
+    expect(calls).toBe(1);
+    expect(await readFile(join(dir, 'guide.xml'), 'utf8')).toContain('one.example');
+  });
 });

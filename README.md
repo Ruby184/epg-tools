@@ -663,9 +663,14 @@ list is a request to the same source as the rest, so it goes through the site's
 own queue: `delayMs` spaces the first day fetched after it instead of the two
 landing together.
 
-`epg build`, `--list-channels`, the lineups capability and the merge all resolve
-it the same way; `resolveChannels(site)` is exported for code of your own that
-wants a site's channels without caring which form they came in.
+A build resolves it **once** and hands the same list to both halves, for the
+reason it resolves a `defineConfig` factory once — the merge reads what the grab
+wrote, and a list that changed in between would leave the guide describing
+channels nothing went for. `runGrab` and `runMerge` on their own resolve for
+themselves, as does `--list-channels`; `resolveChannels(site)` and
+`resolveSites(sites)` are exported for code of your own that wants a site's
+channels without caring which form they came in, the latter being what `build`
+uses to fix the list for several passes.
 
 A proxy for one site is the same idea: ky passes options it does not recognize
 down to `fetch`, and Node's `fetch` honours a `dispatcher`.
