@@ -64,6 +64,17 @@ export const DEFAULT_STAGES: ConfigStage[] = [
 ];
 
 /**
+ * Identity helper for type inference, as `defineConfig` is for a config.
+ *
+ * Worth using rather than a bare array: a plain literal widens `type: 'string'`
+ * to `string`, so a misspelt field type is not a compile error and shows up as
+ * a question that is silently never asked — no renderer has a branch for it.
+ */
+export function defineStages<S extends readonly ConfigStage[]>(stages: S): S {
+  return stages;
+}
+
+/**
  * Add a stage that every path reaches just before it finishes — how a
  * capability asks a question of its own (`lineups` asks which lineup).
  *

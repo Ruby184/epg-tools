@@ -432,14 +432,17 @@ hands its factory:
 
 ```ts
 // epg.config.ts — one file, driven by `epg build` and by the grabber
-export const stages = [{
+import { defineConfig } from 'epg-tools';
+import { defineStages } from 'epg-tools/tv-grab';
+
+export const stages = defineStages([{
   name: 'start',              // the first stage is always `start`
   next: 'select-channels',    // …and the last leads here, or to `end`
   fields: [
     { type: 'string', id: 'username', title: 'Username', description: 'Your account name.' },
     { type: 'secretstring', id: 'password', title: 'Password', description: 'Not echoed.' },
   ],
-}];
+}]);
 
 export default defineConfig(
   (ctx) => ({
@@ -485,7 +488,9 @@ nothing, falls through to the next source.
 
 Field types are `string`, `secretstring` (hidden while typing), `selectone` and
 `selectmany`, plus `default` and — for `string` — `constant`, which is recorded
-without asking. Channel selection is appended automatically as the final stage,
+without asking. Use `defineStages` rather than a bare array: a plain literal
+widens `type` to `string`, so `'strng'` compiles and turns into a question no
+renderer ever asks. Channel selection is appended automatically as the final stage,
 so `stages` is only needed when there is something *else* to ask.
 
 `selectmany` — channel selection included — numbers its options and takes the

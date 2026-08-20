@@ -16,6 +16,7 @@ export {
   END,
   SELECT_CHANNELS,
   appendStage,
+  defineStages,
   findStage,
   renderSelectChannelsStage,
   renderStageXml,
