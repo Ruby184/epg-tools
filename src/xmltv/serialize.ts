@@ -70,7 +70,9 @@ function attrs(pairs: [string, AttrValue][]): string {
   let out = '';
 
   for (const [name, value] of pairs) {
-    if (value !== undefined) {
+    // `null` is off the type, but a model built by hand or revived from JSON
+    // can carry one, and `String(null)` would write it out as `name="null"`.
+    if (value !== undefined && value !== null) {
       out += ` ${name}="${escapeXml(String(value))}"`;
     }
   }
