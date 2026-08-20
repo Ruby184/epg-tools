@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type { CacheEntryMeta, CacheStore, ChannelDayKey } from '../src/cache/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 import { grab } from '../src/grabber/main.js';
-import type { GrabberChannel, SiteConfig } from '../src/grabber/main.js';
+import type {
+  ChannelsBatching,
+  ChannelsDaysBatching,
+  DaysBatching,
+  GrabberChannel,
+  SiteConfig,
+} from '../src/grabber/main.js';
 
 const NOW = new Date('2026-07-17T12:00:00.000Z');
 const TODAY = '2026-07-17';
@@ -74,7 +80,7 @@ function makeConfig(overrides: Partial<SiteConfig<unknown>> = {}): SiteConfig<un
     site: 'example.com',
     channels: [channel('one.example')],
     days: 1,
-    async fetchDay() {
+    async request() {
       return { canned: true };
     },
     parseDay({ day }) {
@@ -89,16 +95,39 @@ interface BatchData {
   items: { id: string }[];
 }
 
-function makeBatchConfig(overrides: Partial<SiteConfig<unknown>> = {}): SiteConfig<unknown> {
+type ChannelsConfig = SiteConfig<unknown, ChannelsBatching>;
+
+function makeBatchConfig(overrides: Partial<ChannelsConfig> = {}): ChannelsConfig {
   return {
     site: 'batch.example',
     channels: [channel('a'), channel('b'), channel('c')],
     days: 1,
-    async fetchDayBatch({ channels }) {
+    batching: { mode: 'channels' },
+    async request({ channels }) {
       return { items: channels.map((c) => ({ id: c.siteId })) } satisfies BatchData;
     },
     parseDay({ channel: ch, data, day }) {
       const item = (data as BatchData).items.find((i) => i.id === ch.siteId);
+      return item ? [programme(`${day}T06:00:00.000Z`, ch.siteId)] : [];
+    },
+    ...overrides,
+  };
+}
+
+type DaysConfig = SiteConfig<unknown, DaysBatching>;
+
+/** A day-batched site: one request covers several days of one channel. */
+function makeDaysConfig(overrides: Partial<DaysConfig> = {}): DaysConfig {
+  return {
+    site: 'days.example',
+    channels: [channel('a')],
+    days: 4,
+    batching: { mode: 'days' },
+    async request({ days }) {
+      return { items: days.map((day) => ({ id: day })) } satisfies BatchData;
+    },
+    parseDay({ channel: ch, data, day }) {
+      const item = (data as BatchData).items.find((i) => i.id === day);
       return item ? [programme(`${day}T06:00:00.000Z`, ch.siteId)] : [];
     },
     ...overrides,
@@ -118,7 +147,7 @@ describe('grab', () => {
     const config = makeConfig({
       days: 2,
       staleness: { alwaysRefetchDays: 0 },
-      async fetchDay({ day }) {
+      async request({ day }) {
         fetchedDays.push(day);
         return { canned: true };
       },
@@ -181,7 +210,7 @@ describe('grab', () => {
 
     const config = makeConfig({
       days: 2,
-      async fetchDay({ day }) {
+      async request({ day }) {
         fetchedDays.push(day);
         return {};
       },
@@ -226,7 +255,7 @@ describe('grab', () => {
 
     const config = makeConfig({
       channels: [channel('good.example'), channel('bad.example')],
-      async fetchDay({ channel: ch }) {
+      async request({ channel: ch }) {
         if (ch.xmltvId === 'bad.example') {
           throw boom;
         }
@@ -253,7 +282,7 @@ describe('grab', () => {
 
     const config = makeConfig({
       days: 4,
-      async fetchDay() {
+      async request() {
         inFlight++;
         maxInFlight = Math.max(maxInFlight, inFlight);
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -273,7 +302,7 @@ describe('grab', () => {
     let inFlight = 0;
     let maxInFlight = 0;
 
-    const fetchDay = async (): Promise<unknown> => {
+    const request = async (): Promise<unknown> => {
       inFlight++;
       maxInFlight = Math.max(maxInFlight, inFlight);
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -281,8 +310,8 @@ describe('grab', () => {
       return {};
     };
 
-    const siteA = makeConfig({ site: 'a.example', fetchDay });
-    const siteB = makeConfig({ site: 'b.example', fetchDay });
+    const siteA = makeConfig({ site: 'a.example', request });
+    const siteB = makeConfig({ site: 'b.example', request });
 
     const summary = await grab([siteA, siteB], { cache, now: NOW });
 
@@ -309,7 +338,7 @@ describe('grab', () => {
 
     const config = makeConfig({
       days: 2,
-      async fetchDay({ day }) {
+      async request({ day }) {
         fetchedDays.push(day);
         return { canned: true };
       },
@@ -337,7 +366,7 @@ describe('grab', () => {
     const config = makeConfig({
       days: 2,
       staleness: { alwaysRefetchDays: 1 },
-      async fetchDay({ day }) {
+      async request({ day }) {
         fetchedDays.push(day);
         return { canned: true };
       },
@@ -355,13 +384,14 @@ describe('grab', () => {
   });
 });
 
-describe('grab with fetchDayBatch', () => {
+
+describe('grab with batching: channels', () => {
   it('fetches a day\'s channels in one request and caches each channel-day', async () => {
     const cache = new MemoryCache();
     const batchCalls: string[][] = [];
 
     const config = makeBatchConfig({
-      async fetchDayBatch({ channels }) {
+      async request({ channels }) {
         batchCalls.push(channels.map((c) => c.xmltvId));
         return { items: channels.map((c) => ({ id: c.siteId })) } satisfies BatchData;
       },
@@ -388,7 +418,7 @@ describe('grab with fetchDayBatch', () => {
 
     const config = makeBatchConfig({
       staleness: { alwaysRefetchDays: 0 },
-      async fetchDayBatch({ channels }) {
+      async request({ channels }) {
         batchCalls.push(channels.map((c) => c.xmltvId));
         return { items: channels.map((c) => ({ id: c.siteId })) } satisfies BatchData;
       },
@@ -401,13 +431,13 @@ describe('grab with fetchDayBatch', () => {
     expect(summary.fetched).toBe(2);
   });
 
-  it('caps channels per request at batchSize', async () => {
+  it('caps channels per request at channelsPerRequest', async () => {
     const cache = new MemoryCache();
     const batchCalls: string[][] = [];
 
     const config = makeBatchConfig({
-      batchSize: 2,
-      async fetchDayBatch({ channels }) {
+      batching: { mode: 'channels', channelsPerRequest: 2 },
+      async request({ channels }) {
         batchCalls.push(channels.map((c) => c.xmltvId));
         return { items: channels.map((c) => ({ id: c.siteId })) } satisfies BatchData;
       },
@@ -418,13 +448,50 @@ describe('grab with fetchDayBatch', () => {
     expect(batchCalls).toEqual([['a', 'b'], ['c']]); // sequential at concurrency 1
   });
 
+  it('lists the channel-days it is for, matching the channels it covers', async () => {
+    const cache = new MemoryCache();
+    const wanted: string[][] = [];
+
+    const config = makeBatchConfig({
+      async request({ channels, channelDays }) {
+        wanted.push(channelDays.map(({ channel: ch, day }) => `${ch.xmltvId} ${day}`));
+        return { items: channels.map((c) => ({ id: c.siteId })) } satisfies BatchData;
+      },
+    });
+
+    await grab([config], { cache, now: NOW });
+
+    expect(wanted).toEqual([[`a ${TODAY}`, `b ${TODAY}`, `c ${TODAY}`]]);
+  });
+
+  it('still asks per day, one day at a time', async () => {
+    const cache = new MemoryCache();
+    const calls: { channels: string[]; day: string }[] = [];
+
+    const config = makeBatchConfig({
+      days: 2,
+      channels: [channel('a'), channel('b')],
+      async request({ channels, day }) {
+        calls.push({ channels: channels.map((c) => c.xmltvId), day });
+        return { items: channels.map((c) => ({ id: c.siteId })) } satisfies BatchData;
+      },
+    });
+
+    await grab([config], { cache, now: NOW });
+
+    expect(calls).toEqual([
+      { channels: ['a', 'b'], day: TODAY },
+      { channels: ['a', 'b'], day: TOMORROW },
+    ]);
+  });
+
   it('fails every channel in a batch when the request throws', async () => {
     const cache = new MemoryCache();
     const boom = new Error('batch down');
 
     const config = makeBatchConfig({
       channels: [channel('a'), channel('b')],
-      async fetchDayBatch(): Promise<BatchData> {
+      async request(): Promise<BatchData> {
         throw boom;
       },
     });
@@ -461,23 +528,263 @@ describe('grab with fetchDayBatch', () => {
     ]);
     expect(cache.get({ site: 'batch.example', channelId: 'b', day: TODAY })).toBeDefined();
   });
+});
 
-  it('rejects a site defining neither fetchDay nor fetchDayBatch', async () => {
+describe('grab with batching: days', () => {
+  it('fetches a channel\'s whole window in one request and caches each day', async () => {
     const cache = new MemoryCache();
-    const config: SiteConfig<unknown> = {
+    const calls: { channel: string; days: string[]; from: string; to: string }[] = [];
+
+    const config = makeDaysConfig({
+      async request({ channel: ch, days, from, to }) {
+        calls.push({
+          channel: ch.xmltvId,
+          days,
+          from: from.toISOString(),
+          to: to.toISOString(),
+        });
+        return { items: days.map((day) => ({ id: day })) } satisfies BatchData;
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    expect(calls).toEqual([{
+      channel: 'a',
+      days: [TODAY, TOMORROW, '2026-07-19', '2026-07-20'],
+      from: `${TODAY}T00:00:00.000Z`,
+      to: '2026-07-20T00:00:00.000Z',
+    }]);
+    expect(summary.fetched).toBe(4); // one request, four channel-days written
+    expect(summary.failed).toEqual([]);
+    for (const day of [TODAY, TOMORROW, '2026-07-19', '2026-07-20']) {
+      const written = cache.get({ site: 'days.example', channelId: 'a', day });
+      expect(written?.programmes.map((p) => p.start.toISOString())).toEqual([`${day}T06:00:00.000Z`]);
+    }
+  });
+
+  it('includes only the stale days, leaving gaps where the cache is fresh', async () => {
+    const cache = new MemoryCache();
+    cache.seed(
+      { site: 'days.example', channelId: 'a', day: TOMORROW },
+      { grabbedAt: NOW.toISOString(), programmeCount: 1 },
+    );
+    const calls: string[][] = [];
+
+    const config = makeDaysConfig({
+      staleness: { alwaysRefetchDays: 0 },
+      async request({ days }) {
+        calls.push(days);
+        return { items: days.map((day) => ({ id: day })) } satisfies BatchData;
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    expect(calls).toEqual([[TODAY, '2026-07-19', '2026-07-20']]); // tomorrow was fresh
+    expect(summary.fromCache).toBe(1);
+    expect(summary.fetched).toBe(3);
+  });
+
+  it('caps days per request at daysPerRequest', async () => {
+    const cache = new MemoryCache();
+    const calls: string[][] = [];
+
+    const config = makeDaysConfig({
+      batching: { mode: 'days', daysPerRequest: 3 },
+      async request({ days }) {
+        calls.push(days);
+        return { items: days.map((day) => ({ id: day })) } satisfies BatchData;
+      },
+    });
+
+    await grab([config], { cache, now: NOW });
+
+    expect(calls).toEqual([[TODAY, TOMORROW, '2026-07-19'], ['2026-07-20']]);
+  });
+
+  it('asks once per channel, each with its own days', async () => {
+    const cache = new MemoryCache();
+    const calls: { channel: string; days: string[] }[] = [];
+
+    const config = makeDaysConfig({
+      days: 2,
+      channels: [channel('a'), channel('b')],
+      async request({ channel: ch, days }) {
+        calls.push({ channel: ch.xmltvId, days });
+        return { items: days.map((day) => ({ id: day })) } satisfies BatchData;
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    expect(calls).toEqual([
+      { channel: 'a', days: [TODAY, TOMORROW] },
+      { channel: 'b', days: [TODAY, TOMORROW] },
+    ]);
+    expect(summary.fetched).toBe(4);
+  });
+
+  it('fails every day the request covered when it throws', async () => {
+    const cache = new MemoryCache();
+    const boom = new Error('range down');
+
+    const config = makeDaysConfig({
+      days: 2,
+      async request(): Promise<BatchData> {
+        throw boom;
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    expect(summary.fetched).toBe(0);
+    expect(summary.failed).toEqual([
+      { site: 'days.example', channelId: 'a', day: TODAY, error: boom },
+      { site: 'days.example', channelId: 'a', day: TOMORROW, error: boom },
+    ]);
+  });
+
+  it('a per-day parse failure does not sink the other days', async () => {
+    const cache = new MemoryCache();
+    const boom = new Error('bad day');
+
+    const config = makeDaysConfig({
+      days: 2,
+      parseDay({ channel: ch, day }) {
+        if (day === TODAY) {
+          throw boom;
+        }
+
+        return [programme(`${day}T06:00:00.000Z`, ch.siteId)];
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    expect(summary.fetched).toBe(1);
+    expect(summary.failed).toEqual([
+      { site: 'days.example', channelId: 'a', day: TODAY, error: boom },
+    ]);
+    expect(cache.get({ site: 'days.example', channelId: 'a', day: TOMORROW })).toBeDefined();
+  });
+});
+
+describe('grab with batching: both', () => {
+  it('covers many channels over many days in one request', async () => {
+    const cache = new MemoryCache();
+    const calls: { channels: string[]; days: string[] }[] = [];
+
+    const config: SiteConfig<unknown, ChannelsDaysBatching> = {
+      site: 'grid.example',
+      channels: [channel('a'), channel('b'), channel('c')],
+      days: 2,
+      batching: { mode: 'both' },
+      async request({ channels, days }) {
+        calls.push({ channels: channels.map((c) => c.xmltvId), days });
+        return {};
+      },
+      parseDay({ channel: ch, day }) {
+        return [programme(`${day}T06:00:00.000Z`, ch.siteId)];
+      },
+    };
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    expect(calls).toEqual([{ channels: ['a', 'b', 'c'], days: [TODAY, TOMORROW] }]);
+    expect(summary.fetched).toBe(6); // one request, the whole 3 × 2 grid
+  });
+
+  it('cuts the grid along both caps at once', async () => {
+    const cache = new MemoryCache();
+    const calls: { channels: string[]; days: string[] }[] = [];
+
+    const config: SiteConfig<unknown, ChannelsDaysBatching> = {
+      site: 'grid.example',
+      channels: [channel('a'), channel('b'), channel('c')],
+      days: 3,
+      batching: { mode: 'both', channelsPerRequest: 2, daysPerRequest: 2 },
+      async request({ channels, days }) {
+        calls.push({ channels: channels.map((c) => c.xmltvId), days });
+        return {};
+      },
+      parseDay: () => [],
+    };
+
+    await grab([config], { cache, now: NOW });
+
+    // Days are cut first, then each run's channels: 2 day-runs × 2 channel-groups.
+    expect(calls).toEqual([
+      { channels: ['a', 'b'], days: [TODAY, TOMORROW] },
+      { channels: ['c'], days: [TODAY, TOMORROW] },
+      { channels: ['a', 'b'], days: ['2026-07-19'] },
+      { channels: ['c'], days: ['2026-07-19'] },
+    ]);
+  });
+
+  it('keeps a fresh channel-day caught inside a request out of the cache write', async () => {
+    const cache = new MemoryCache();
+    cache.seed(
+      { site: 'grid.example', channelId: 'b', day: TOMORROW },
+      { grabbedAt: NOW.toISOString(), programmeCount: 1 },
+      [programme(`${TOMORROW}T20:00:00.000Z`, 'b')],
+    );
+    const parsed: string[] = [];
+    let covered: { channels: string[]; days: string[] } | undefined;
+    let wanted: string[] | undefined;
+
+    const config: SiteConfig<unknown, ChannelsDaysBatching> = {
+      site: 'grid.example',
+      channels: [channel('a'), channel('b')],
+      days: 2,
+      batching: { mode: 'both' },
+      staleness: { alwaysRefetchDays: 0 },
+      async request({ channels, days, channelDays }) {
+        covered = { channels: channels.map((c) => c.xmltvId), days };
+        wanted = channelDays.map(({ channel: ch, day, date }) => `${ch.xmltvId} ${day} ${date.toISOString()}`);
+        return {};
+      },
+      parseDay({ channel: ch, day }) {
+        parsed.push(`${ch.xmltvId} ${day}`);
+        return [programme(`${day}T06:00:00.000Z`, ch.siteId)];
+      },
+    };
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    // b/tomorrow is inside the rectangle the request covered, but it was fresh:
+    // channelDays leaves it out, and it is neither parsed nor rewritten.
+    expect(covered).toEqual({ channels: ['a', 'b'], days: [TODAY, TOMORROW] });
+    expect(wanted).toEqual([
+      `a ${TODAY} ${TODAY}T00:00:00.000Z`,
+      `a ${TOMORROW} ${TOMORROW}T00:00:00.000Z`,
+      `b ${TODAY} ${TODAY}T00:00:00.000Z`,
+    ]);
+    expect(parsed.sort()).toEqual([`a ${TODAY}`, `a ${TOMORROW}`, `b ${TODAY}`]);
+    expect(summary.fromCache).toBe(1);
+    expect(summary.fetched).toBe(3);
+    expect(cache.get({ site: 'grid.example', channelId: 'b', day: TOMORROW })?.programmes)
+      .toEqual([programme(`${TOMORROW}T20:00:00.000Z`, 'b')]);
+  });
+});
+
+describe('grab without a fetch', () => {
+  it('fails the site rather than silently grabbing nothing', async () => {
+    const cache = new MemoryCache();
+    const config = {
       site: 'example.com',
       channels: [channel('one.example')],
       days: 1,
-      parseDay({ day }) {
+      parseDay({ day }: { day: string }) {
         return [programme(`${day}T06:00:00.000Z`)];
       },
-    };
+    } as unknown as SiteConfig<unknown>;
 
     const summary = await grab([config], { cache, now: NOW });
 
     expect(summary.fetched).toBe(0);
     expect(summary.failed).toHaveLength(1);
     expect(summary.failed[0]!.error).toBeInstanceOf(Error);
-    expect((summary.failed[0]!.error as Error).message).toContain('fetchDay or fetchDayBatch');
+    expect((summary.failed[0]!.error as Error).message).toContain('must define request');
   });
 });

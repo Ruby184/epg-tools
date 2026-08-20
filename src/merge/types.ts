@@ -1,6 +1,6 @@
 import type { XmltvDocumentMeta } from '../xmltv/types.js';
 import type { CacheStore, StalenessPolicy } from '../cache/types.js';
-import type { SiteConfig } from '../grabber/types.js';
+import type { AnySiteConfig } from '../grabber/types.js';
 
 /**
  * What to do when multiple sites cover the same xmltv channel id.
@@ -34,7 +34,7 @@ export interface MergeOptions {
 
 export interface BuildGuideOptions {
   /** Site configs in priority order (first = highest). */
-  sites: SiteConfig<any>[];
+  sites: AnySiteConfig[];
   cache: CacheStore;
   /** Days to include, starting at {@link startDay}. Defaults to 7. */
   days?: number;

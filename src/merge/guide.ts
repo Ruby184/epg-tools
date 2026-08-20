@@ -1,6 +1,6 @@
 import { dayRange, toDayString } from '../core/days.js';
 import { writeOutput, type OutputTarget } from '../core/output.js';
-import type { GrabberChannel, SiteConfig } from '../grabber/types.js';
+import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { writeXmltvStream } from '../xmltv/main.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import { mergeChannels } from './channel.js';
@@ -8,7 +8,7 @@ import { mergeProgrammeLists } from './programme.js';
 import type { BuildGuideOptions } from './types.js';
 
 interface ChannelSource {
-  config: SiteConfig<any>;
+  config: AnySiteConfig;
   channel: GrabberChannel;
 }
 
@@ -18,7 +18,7 @@ interface RegistryEntry {
   sources: ChannelSource[];
 }
 
-async function resolveChannels(config: SiteConfig<any>): Promise<GrabberChannel[]> {
+async function resolveChannels(config: AnySiteConfig): Promise<GrabberChannel[]> {
   return typeof config.channels === 'function' ? await config.channels() : config.channels;
 }
 
@@ -49,7 +49,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   const programmeStrategy = options.merge?.programmeStrategy ?? 'merge';
   const { cache, logger } = options;
 
-  const resolved: { config: SiteConfig<any>; channels: GrabberChannel[] }[] = [];
+  const resolved: { config: AnySiteConfig; channels: GrabberChannel[] }[] = [];
 
   for (const config of options.sites) {
     resolved.push({ config, channels: await resolveChannels(config) });

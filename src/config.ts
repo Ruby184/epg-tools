@@ -7,7 +7,7 @@ import {
   type ConfigReader,
   type StageDefaults,
 } from './core/answers.js';
-import type { SiteConfig } from './grabber/types.js';
+import type { AnySiteConfig } from './grabber/types.js';
 import type { MergeOptions } from './merge/types.js';
 import type { XmltvDocumentMeta } from './xmltv/types.js';
 
@@ -23,7 +23,7 @@ export interface EpgCacheConfig {
 
 export interface EpgConfig {
   /** Site configs in priority order (first = highest priority on conflicts). */
-  sites: SiteConfig<any>[];
+  sites: AnySiteConfig[];
   /** Number of days to grab and include in the guide. Defaults to 7. */
   days?: number;
   /**

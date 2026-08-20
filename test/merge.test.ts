@@ -62,7 +62,7 @@ function makeSite(site: string, channels: GrabberChannel[]): SiteConfig<unknown>
   return {
     site,
     channels,
-    fetchDay: async () => ({}),
+    request: async () => ({}),
     parseDay: () => [],
   };
 }

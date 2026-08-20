@@ -39,7 +39,7 @@ function siteSource(fail = false): string {
   return `{
     site: 'example.tv',
     channels: [{ xmltvId: 'one.example.tv', siteId: '1', name: 'One' }],
-    async fetchDay({ day }) {
+    async request({ day }) {
       ${fail ? `throw new Error('the feed went away');` : ''}
       return { day };
     },

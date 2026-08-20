@@ -71,7 +71,7 @@ const example = defineSiteConfig({
     headers: { 'x-api-key': process.env.EXAMPLE_KEY! },
     retry: 2,
   },
-  async fetchDay({ channel, date, http }) {
+  async request({ channel, date, http }) {
     return http.post('epg', {
       json: { channel_id: channel.siteId, date: date.toISOString() },
     }).json<{ items: { start: string; end: string; title: string; desc?: string }[] }>();
@@ -594,7 +594,7 @@ them" would be advice that does not include them.
 Everything that shapes a request belongs to the site, not the run: each site
 gets its **own** `ky` instance built from its `ky` options, its own request
 queue (`concurrency`, `delayMs`), and its own `days`, `staleness` and
-`batchSize`. Nothing is shared, so sites with different rate limits,
+`batching`. Nothing is shared, so sites with different rate limits,
 credentials or hosts coexist in one process — you do not need a process per
 site to keep their settings apart, and since the config is TypeScript, per-site
 environment variables are just code:
@@ -602,40 +602,6 @@ environment variables are just code:
 ```ts
 ky: { prefix: 'https://api.a.example.tv', headers: { 'x-api-key': process.env.A_KEY! } },
 ```
-
-A proxy for one site is the same idea: ky passes options it does not recognize
-down to `fetch`, and Node's `fetch` honours a `dispatcher`.
-
-```ts
-import { ProxyAgent } from 'undici';
-
-const behindProxy = defineSiteConfig({
-  site: 'a.example.tv',
-  ky: {
-    prefix: 'https://api.a.example.tv',
-    dispatcher: new ProxyAgent('http://user:pass@proxy.local:3128'),
-  },
-  // …
-});
-```
-
-Only that site is tunnelled; the others go out directly. Three things to know:
-
-- **Pin `undici` to the major Node bundles** — `node -p process.versions.undici`.
-  A mismatched major fails every request with
-  `InvalidArgumentError: invalid onRequestStart method`, because the dispatcher
-  handler API differs between the standalone package and the copy inside Node.
-- **Keep the global `fetch`.** Pairing ky with undici's *own* `fetch` export
-  does not work: ky hands it a global `Request`, which it rejects with
-  `Failed to parse URL from [object Request]`.
-- `dispatcher` typechecks wherever `RequestInit` comes from Node's types
-  (`lib` without `DOM`, as in this package). With the DOM lib in scope, DOM's
-  `RequestInit` shadows it and has no `dispatcher`; then pass it through a
-  custom fetch instead:
-  `ky: { fetch: (input, init) => fetch(input, { ...init, dispatcher } as RequestInit) }`.
-
-Node 24 also understands `NODE_USE_ENV_PROXY=1` with `HTTP_PROXY`/`HTTPS_PROXY`
-/`NO_PROXY`, but that applies to the whole process — every site or none.
 
 ## How caching works
 
@@ -647,16 +613,37 @@ Each `site + channel + day` is one cache entry (`<dir>/<site>/<channel>/<day>.nd
 
 Everything else is served from disk. Old days are pruned automatically after a grab (disable with `cache.prune: false`).
 
-## Batching many channels per request
+## Batching: how much one request covers
 
-Some sources return many channels' schedules in one call (`?channels=a,b,c&date=…`). Instead of `fetchDay` (one channel-day per request), give a site a `fetchDayBatch` — the grabber groups the day's **stale** channels (only those actually needing a refetch) into one request, then runs your existing `parseDay` per channel over the shared response:
+A site has one `request`, and `batching` says how much of the channel × day grid a single call to it covers. There is always exactly one `parseDay` per channel-day, handed the shared response, so only `request` changes shape:
+
+| `batching` | one request covers | the context carries |
+| --- | --- | --- |
+| omitted / `'none'` | one channel, one day | `channel`, `day`, `date` |
+| `'channels'` | one day, many channels | `channels`, `day`, `date` |
+| `'days'` | one channel, many days | `channel`, `days`, `dates`, `from`, `to` |
+| `'both'` | many channels, many days | `channels`, `days`, `dates`, `from`, `to` |
+
+Every mode also gets `channelDays` — the channel-days the request is *for*, each
+with its `channel`, `day` and `date`, which is what a source taking an explicit
+list of pairs wants:
+
+```ts
+async request({ channelDays, http }) {
+  return http.post('epg', {
+    json: { queries: channelDays.map(({ channel, day }) => ({ id: channel.siteId, day })) },
+  }).json<Raw>();
+},
+```
+
+Sources that return many channels' schedules in one call (`?channels=a,b,c&date=…`) want `'channels'`:
 
 ```ts
 const example = defineSiteConfig({
   site: 'example.tv',
   channels: [/* … */],
-  batchSize: 50, // optional cap per request; omit to put all stale channels in one
-  async fetchDayBatch({ channels, date, http }) {
+  batching: { mode: 'channels', channelsPerRequest: 50 }, // cap optional; omit for one request
+  async request({ channels, date, http }) {
     return http.get('epg', {
       searchParams: { ids: channels.map((c) => c.siteId).join(','), date: date.toISOString() },
     }).json<{ items: { channelId: string; programmes: RawProgramme[] }[] }>();
@@ -668,7 +655,30 @@ const example = defineSiteConfig({
 });
 ```
 
-Because caching stays per channel-day, a run only ever batch-fetches the channel-days that are missing or stale — no fetching everything each time. A site provides `fetchDay` **or** `fetchDayBatch` (the latter wins if both are set); `concurrency`/`delayMs` then throttle whole batches. A failed batch request fails every channel-day it covered; a single channel's `parseDay` error only drops that channel.
+Sources that serve a date *range* for one channel (`?id=a&from=…&to=…`) want `'days'` — `from`/`to` are the first and last day of the request, and `days` names every day it is expected to yield:
+
+```ts
+const example = defineSiteConfig({
+  site: 'example.tv',
+  channels: [/* … */],
+  batching: { mode: 'days', daysPerRequest: 7 }, // cap optional; omit for the whole window
+  async request({ channel, from, to, http }) {
+    return http.get('epg', {
+      searchParams: { id: channel.siteId, from: from.toISOString(), to: to.toISOString() },
+    }).json<{ items: { day: string; programmes: RawProgramme[] }[] }>();
+  },
+  parseDay({ data, day }) {
+    const item = data.items.find((i) => i.day === day);
+    return item ? item.programmes.map(/* … */) : [];
+  },
+});
+```
+
+`'both'` combines the two, taking both caps, for an API that serves a set of channels over a range of days in one call. It is also the one mode where `channelDays` is narrower than `channels × days`: a rectangle can catch a channel-day that was already fresh, so `channels` and `days` are what the request *covers* while `channelDays` is what it is *for*.
+
+The bare string form (`batching: 'days'`) is the same thing with no caps. Each mode accepts only the caps it can use — `daysPerRequest` under `'channels'` is a type error rather than a number that is silently ignored — and the context is typed from the mode, so a `'days'` site destructuring `day` does not compile.
+
+Caching stays per channel-day whatever the mode, so a run only ever asks for the channel-days that are missing or stale: fresh ones are dropped before the grid is cut into requests, which is why a `'days'` request's `days` can have gaps in it (`from`/`to` still span them). `concurrency` and `delayMs` throttle whole requests. A failed request fails every channel-day it covered; one channel-day's `parseDay` error only drops that channel-day. Batching both axes at once is the one case where a request can span a channel-day that was already fresh — narrow the query with `channelDays`, or answer the whole rectangle and let the extra be ignored: a fresh channel-day is neither parsed nor rewritten either way.
 
 ## Merge strategies
 

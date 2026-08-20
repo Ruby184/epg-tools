@@ -1,15 +1,94 @@
 import ky from 'ky';
 import PQueue from 'p-queue';
 import { DEFAULT_STALENESS, isStale } from '../cache/main.js';
-import type { ChannelDayKey, StalenessPolicy } from '../cache/types.js';
+import type { StalenessPolicy } from '../cache/types.js';
 import { dayRange, dayToDate, toDayString } from '../core/days.js';
-import type { GrabberChannel, GrabOptions, GrabSummary, GrabTaskError, SiteConfig } from './types.js';
+import type {
+  AnySiteConfig,
+  BatchingOption,
+  BatchMode,
+  RequestContextFor,
+  GrabberChannel,
+  GrabOptions,
+  GrabSummary,
+  GrabTaskError,
+} from './types.js';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export async function grab(configs: SiteConfig<any>[], options: GrabOptions): Promise<GrabSummary> {
+/**
+ * What a site's `batching` amounts to for the planner: how wide a request may
+ * be along each axis, and whether the context says `channel`/`day` or
+ * `channels`/`days`. A mode that does not batch an axis pins it to 1; an absent
+ * or zero cap on a batched axis means "as much as it takes".
+ *
+ * Keeping the two axes as plain numbers is what lets one chunking pass serve
+ * every mode — `none` is just the grid cut into 1×1 requests.
+ */
+function resolveBatching(batching: BatchingOption | undefined): {
+  manyChannels: boolean;
+  manyDays: boolean;
+  maxChannels: number;
+  maxDays: number;
+} {
+  // Both shapes `batching` accepts, and its absence, as one object.
+  const settings: { mode: BatchMode; channelsPerRequest?: number; daysPerRequest?: number } =
+    typeof batching === 'string' ? { mode: batching } : batching ?? { mode: 'none' };
+  const manyChannels = settings.mode === 'channels' || settings.mode === 'both';
+  const manyDays = settings.mode === 'days' || settings.mode === 'both';
+  const cap = (size: number | undefined): number => (size !== undefined && size > 0 ? size : Number.POSITIVE_INFINITY);
+
+  return {
+    manyChannels,
+    manyDays,
+    maxChannels: manyChannels ? cap(settings.channelsPerRequest) : 1,
+    maxDays: manyDays ? cap(settings.daysPerRequest) : 1,
+  };
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  if (items.length <= size) {
+    return items.length > 0 ? [items] : [];
+  }
+
+  const chunks: T[][] = [];
+
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+
+  return chunks;
+}
+
+/** One channel-day: the unit of caching, parsing and failure reporting. */
+interface Pair {
+  channel: GrabberChannel;
+  day: string;
+}
+
+/**
+ * One request: the channels and days it covers, and the channel-days it is
+ * expected to yield. `pairs` is a subset of `channels × days` — batching both
+ * axes at once means a request can span a channel-day that is already fresh,
+ * and that one is neither parsed nor rewritten.
+ */
+interface Request {
+  channels: GrabberChannel[];
+  days: string[];
+  pairs: Pair[];
+}
+
+/** How a request is named in the log: a channel-day, or the span it covers. */
+function describe({ channels, days }: Request): string {
+  const channelPart = channels.length === 1 ? channels[0]!.xmltvId : `${channels.length} channels`;
+  const dayPart = days.length === 1 ? days[0]! : `${days[0]}..${days[days.length - 1]} (${days.length} days)`;
+
+  return `${channelPart} ${dayPart}`;
+}
+
+export async function grab(configs: AnySiteConfig[], options: GrabOptions): Promise<GrabSummary> {
   const now = options.now ?? new Date();
   const startDay = options.startDay ?? toDayString(now);
   const log = options.logger ?? (() => {});
@@ -19,10 +98,15 @@ export async function grab(configs: SiteConfig<any>[], options: GrabOptions): Pr
   let fromCache = 0;
   const failed: GrabTaskError[] = [];
 
-  const runSite = async (config: SiteConfig<any>): Promise<void> => {
+  const runSite = async (config: AnySiteConfig): Promise<void> => {
+    if (typeof config.request !== 'function') {
+      throw new Error(`Site "${config.site}" must define request`);
+    }
+
     const channels = typeof config.channels === 'function' ? await config.channels() : config.channels;
     const http = ky.create(config.ky ?? {});
-    const days = config.days ?? options.days ?? 7;
+    const window = [...dayRange(startDay, config.days ?? options.days ?? 7)];
+    const { manyChannels, manyDays, maxChannels, maxDays } = resolveBatching(config.batching);
     const policy: StalenessPolicy = { ...DEFAULT_STALENESS, ...options.staleness, ...config.staleness };
     const grabbedAt = now.toISOString();
 
@@ -33,9 +117,9 @@ export async function grab(configs: SiteConfig<any>[], options: GrabOptions): Pr
         : {}),
     });
 
-    // Parse one channel's slice out of `data` and cache it for the day.
-    const store = async (channel: GrabberChannel, date: Date, day: string, data: unknown): Promise<void> => {
-      const parsed = await config.parseDay({ channel, date, day, data });
+    // Parse one channel-day out of `data` and cache it.
+    const store = async (channel: GrabberChannel, day: string, data: unknown): Promise<void> => {
+      const parsed = await config.parseDay({ channel, date: dayToDate(day), day, data });
       const programmes = parsed
         .map((programme) => ({ ...programme, channel: channel.xmltvId }))
         .sort((a, b) => a.start.getTime() - b.start.getTime());
@@ -45,104 +129,99 @@ export async function grab(configs: SiteConfig<any>[], options: GrabOptions): Pr
       log(`[${config.site}] ${channel.xmltvId} ${day}: ${programmes.length} programmes`);
     };
 
-    // Split a day's channels into those needing a refetch (stale) vs served
-    // from cache. The meta reads are local, so they run off the request queue.
-    const partitionStale = async (day: string): Promise<GrabberChannel[]> => {
-      const stale: GrabberChannel[] = [];
+    // Which channel-days actually need fetching. The meta reads are local, so
+    // they run off the request queue, and a fresh one is accounted for here —
+    // exactly once, however the requests are grouped afterwards.
+    const collectStale = async (): Promise<Pair[]> => {
+      const checked = await Promise.all(
+        channels.flatMap((channel) => window.map(async (day): Promise<Pair | undefined> => {
+          const meta = await cache.getMeta({ site: config.site, channelId: channel.xmltvId, day });
 
-      await Promise.all(channels.map(async (channel) => {
-        const meta = await cache.getMeta({ site: config.site, channelId: channel.xmltvId, day });
+          if (isStale(day, meta, policy, now)) {
+            return { channel, day };
+          }
 
-        if (isStale(day, meta, policy, now)) {
-          stale.push(channel);
-        } else {
           fromCache++;
           log(`[${config.site}] ${channel.xmltvId} ${day}: fresh in cache, skipping`);
-        }
-      }));
+          return undefined;
+        })),
+      );
 
-      return stale;
+      return checked.filter((pair): pair is Pair => pair !== undefined);
     };
 
-    if (config.fetchDayBatch) {
-      const fetchDayBatch = config.fetchDayBatch;
-      const batchSize = config.batchSize && config.batchSize > 0 ? config.batchSize : Number.POSITIVE_INFINITY;
+    // Cut the stale channel-days into requests: the window into runs of at most
+    // `maxDays`, then each run's stale channels into groups of at most
+    // `maxChannels`. Both axes are trimmed to what the group actually needs, so
+    // a fresh channel-day is never what a request is made for. Channel order
+    // follows `channels`, day order the window.
+    const plan = (stale: Pair[]): Request[] =>
+      chunk(window, maxDays).flatMap((dayGroup) => {
+        const pending = stale.filter((pair) => dayGroup.includes(pair.day));
+        const staleChannels = channels.filter((channel) => pending.some((pair) => pair.channel === channel));
 
-      for (const day of dayRange(startDay, days)) {
-        const stale = await partitionStale(day);
-        const date = dayToDate(day);
+        return chunk(staleChannels, maxChannels).map((group) => {
+          const pairs = pending.filter((pair) => group.includes(pair.channel));
 
-        for (let i = 0; i < stale.length; i += batchSize) {
-          const group = stale.slice(i, i + batchSize);
+          return {
+            channels: group,
+            days: dayGroup.filter((day) => pairs.some((pair) => pair.day === day)),
+            pairs,
+          };
+        });
+      });
 
-          void inner.add(async () => {
-            let data: unknown;
+    // The context for one request, in the shape this site's mode declares —
+    // plus the channel-days it is for, which the plan already worked out.
+    const contextFor = (request: Request): RequestContextFor<BatchMode> => {
+      const dates = request.days.map(dayToDate);
+      const dateOf = new Map(request.days.map((day, index) => [day, dates[index]!]));
+      const context = {
+        channelDays: request.pairs.map(({ channel, day }) => ({ channel, day, date: dateOf.get(day)! })),
+        ...(manyChannels ? { channels: request.channels } : { channel: request.channels[0]! }),
+        ...(manyDays
+          ? { days: request.days, dates, from: dates[0]!, to: dates[dates.length - 1]! }
+          : { day: request.days[0]!, date: dates[0]! }),
+        http,
+        ...(signal ? { signal } : {}),
+      };
 
-            try {
-              if (signal?.aborted) {
-                throw signal.reason;
-              }
+      // The mode and this shape were chosen together right here; the compiler
+      // cannot follow that through the conditional type.
+      return context as RequestContextFor<BatchMode>;
+    };
 
-              data = await fetchDayBatch({ channels: group, date, day, http, ...(signal ? { signal } : {}) });
-            } catch (error) {
-              // A failed batch request fails every channel-day it covered.
-              for (const channel of group) {
-                failed.push({ site: config.site, channelId: channel.xmltvId, day, error });
-              }
+    for (const request of plan(await collectStale())) {
+      void inner.add(async () => {
+        let data: unknown;
 
-              log(`[${config.site}] batch ${day} (${group.length} channels): ${errorMessage(error)}`);
-              return;
-            }
+        try {
+          if (signal?.aborted) {
+            throw signal.reason;
+          }
 
-            // Parsing/caching is per channel, so one bad channel doesn't sink the batch.
-            await Promise.all(group.map(async (channel) => {
-              try {
-                await store(channel, date, day, data);
-              } catch (error) {
-                failed.push({ site: config.site, channelId: channel.xmltvId, day, error });
-                log(`[${config.site}] ${channel.xmltvId} ${day}: ${errorMessage(error)}`);
-              }
-            }));
-          });
+          data = await config.request(contextFor(request));
+        } catch (error) {
+          // A failed request fails every channel-day it was covering.
+          for (const { channel, day } of request.pairs) {
+            failed.push({ site: config.site, channelId: channel.xmltvId, day, error });
+          }
+
+          log(`[${config.site}] ${describe(request)}: ${errorMessage(error)}`);
+          return;
         }
-      }
 
-      await inner.onIdle();
-      return;
-    }
-
-    const fetchDay = config.fetchDay;
-
-    if (!fetchDay) {
-      throw new Error(`Site "${config.site}" must define fetchDay or fetchDayBatch`);
-    }
-
-    for (const channel of channels) {
-      for (const day of dayRange(startDay, days)) {
-        void inner.add(async () => {
+        // Parsing and caching are per channel-day, so one bad slice does not
+        // sink the rest of the response.
+        await Promise.all(request.pairs.map(async ({ channel, day }) => {
           try {
-            if (signal?.aborted) {
-              throw signal.reason;
-            }
-
-            const key: ChannelDayKey = { site: config.site, channelId: channel.xmltvId, day };
-            const meta = await cache.getMeta(key);
-
-            if (!isStale(day, meta, policy, now)) {
-              fromCache++;
-              log(`[${config.site}] ${channel.xmltvId} ${day}: fresh in cache, skipping`);
-              return;
-            }
-
-            const date = dayToDate(day);
-            const data = await fetchDay({ channel, date, day, http, ...(signal ? { signal } : {}) });
-            await store(channel, date, day, data);
+            await store(channel, day, data);
           } catch (error) {
             failed.push({ site: config.site, channelId: channel.xmltvId, day, error });
             log(`[${config.site}] ${channel.xmltvId} ${day}: ${errorMessage(error)}`);
           }
-        });
-      }
+        }));
+      });
     }
 
     await inner.onIdle();

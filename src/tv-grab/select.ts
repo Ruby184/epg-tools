@@ -1,5 +1,5 @@
 import type { EpgConfig } from '../config.js';
-import type { GrabberChannel, SiteConfig } from '../grabber/types.js';
+import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 
 /**
  * Restrict every site to the selected channel ids.
@@ -10,7 +10,7 @@ import type { GrabberChannel, SiteConfig } from '../grabber/types.js';
  * channels are dropped, which is only decidable for the eager form.
  */
 export function applyChannelSelection(config: EpgConfig, selected: Set<string>): EpgConfig {
-  const sites: SiteConfig<any>[] = [];
+  const sites: AnySiteConfig[] = [];
 
   for (const site of config.sites) {
     if (typeof site.channels === 'function') {

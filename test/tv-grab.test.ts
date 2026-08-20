@@ -64,7 +64,7 @@ function site(id: string, fetchedDays: string[] = []): SiteConfig<unknown> {
   return {
     site: 'example.tv',
     channels: [{ xmltvId: id, siteId: '1', name: `Channel ${id}` }],
-    async fetchDay({ day }) {
+    async request({ day }) {
       fetchedDays.push(day);
       return { day };
     },
@@ -1816,7 +1816,7 @@ describe('grabbing', () => {
       config(dir, {
         sites: [{
           ...site('one.example.tv'),
-          async fetchDay() {
+          async request() {
             throw new Error('upstream is down');
           },
         }],

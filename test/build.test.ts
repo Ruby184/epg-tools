@@ -21,7 +21,7 @@ function site(fetchedDays: string[]): SiteConfig<unknown> {
   return {
     site: 'example.com',
     channels: [{ xmltvId: 'one.example', siteId: '1', name: 'One' }],
-    async fetchDay({ day }) {
+    async request({ day }) {
       fetchedDays.push(day);
       return { day };
     },

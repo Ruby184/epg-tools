@@ -20,7 +20,7 @@ const example = defineSiteConfig({
   site: 'example.tv',
   channels: [{ xmltvId: 'one.example.tv', siteId: '101', name: 'Example One' }],
   ky: { prefix: 'https://api.example.tv', headers: { 'x-api-key': 'k' }, retry: 2 },
-  async fetchDay({ channel, date, http }) {
+  async request({ channel, date, http }) {
     return http.post('epg', { json: { channel_id: channel.siteId, date: date.toISOString() } })
       .json<{ items: { start: string; end: string; title: string }[] }>();
   },
@@ -35,6 +35,69 @@ const example = defineSiteConfig({
 });
 
 export const quickStart = defineConfig({ sites: [example], days: 14, output: 'public/epg.xml' });
+
+// --- Batching: how much one request covers --------------------------------
+interface RawProgramme { start: string; title: string }
+
+const byChannels = defineSiteConfig({
+  site: 'example.tv',
+  channels: [{ xmltvId: 'one.example.tv', siteId: '101' }],
+  batching: { mode: 'channels', channelsPerRequest: 50 },
+  async request({ channels, date, http }) {
+    return http.get('epg', {
+      searchParams: { ids: channels.map((c) => c.siteId).join(','), date: date.toISOString() },
+    }).json<{ items: { channelId: string; programmes: RawProgramme[] }[] }>();
+  },
+  parseDay({ data, channel }) {
+    const item = data.items.find((i) => i.channelId === channel.siteId);
+    return (item?.programmes ?? []).map((p) => ({
+      channel: channel.xmltvId,
+      start: new Date(p.start),
+      title: [{ value: p.title }],
+    }));
+  },
+});
+
+const byDays = defineSiteConfig({
+  site: 'example.tv',
+  channels: [{ xmltvId: 'one.example.tv', siteId: '101' }],
+  batching: { mode: 'days', daysPerRequest: 7 },
+  async request({ channel, from, to, http }) {
+    return http.get('epg', {
+      searchParams: { id: channel.siteId, from: from.toISOString(), to: to.toISOString() },
+    }).json<{ items: { day: string; programmes: RawProgramme[] }[] }>();
+  },
+  parseDay({ data, day, channel }) {
+    const item = data.items.find((i) => i.day === day);
+    return (item?.programmes ?? []).map((p) => ({
+      channel: channel.xmltvId,
+      start: new Date(p.start),
+      title: [{ value: p.title }],
+    }));
+  },
+});
+
+// Every mode also gets `channelDays` — what the request is for, pair by pair.
+const byPairs = defineSiteConfig({
+  site: 'example.tv',
+  channels: [{ xmltvId: 'one.example.tv', siteId: '101' }],
+  batching: { mode: 'both', channelsPerRequest: 50, daysPerRequest: 7 },
+  async request({ channelDays, http }) {
+    return http.post('epg', {
+      json: { queries: channelDays.map(({ channel, day }) => ({ id: channel.siteId, day })) },
+    }).json<{ items: { channelId: string; day: string; programmes: RawProgramme[] }[] }>();
+  },
+  parseDay({ data, channel, day }) {
+    const item = data.items.find((i) => i.channelId === channel.siteId && i.day === day);
+    return (item?.programmes ?? []).map((p) => ({
+      channel: channel.xmltvId,
+      start: new Date(p.start),
+      title: [{ value: p.title }],
+    }));
+  },
+});
+
+export const batched = defineConfig({ sites: [byChannels, byDays, byPairs], output: 'guide.xml' });
 
 // --- Asking for more than channels ----------------------------------------
 export const stages = defineStages([{
