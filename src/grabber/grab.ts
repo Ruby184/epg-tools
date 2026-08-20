@@ -14,6 +14,14 @@ import type {
   GrabTaskError,
 } from './types.js';
 
+/**
+ * How much cache work and parsing runs at once, across every site, when
+ * `localConcurrency` says nothing. Node's own file operations go through a
+ * threadpool of four by default (`UV_THREADPOOL_SIZE`), so a much larger number
+ * buys nothing but open files and live programme lists.
+ */
+const DEFAULT_LOCAL_CONCURRENCY = 16;
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -98,6 +106,27 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
   let fromCache = 0;
   const failed: GrabTaskError[] = [];
 
+  /**
+   * Everything that is not a request: the staleness sweep, and parsing a
+   * channel-day out of a response and writing it.
+   *
+   * One queue for the whole run rather than one per site, because what it
+   * bounds — open files, and how many parsed programme lists are alive at once
+   * — is a property of the process, not of a site. A site's own `concurrency`
+   * and `delayMs` are about being polite to that site, so cache work must not
+   * be throttled by them, nor take a request's slot.
+   */
+  const local = new PQueue({ concurrency: Math.max(1, options.localConcurrency ?? DEFAULT_LOCAL_CONCURRENCY) });
+
+  /**
+   * Handed to every queued task, which is what makes an abort take effect at
+   * once: p-queue drops a task that is still waiting and rejects it with the
+   * abort reason, so a cancelled run stops instead of dequeuing thousands of
+   * tasks only for each to notice and record a failure. What is already in
+   * flight aborts on its own — the same signal rides on the site's client.
+   */
+  const queued = signal ? { signal } : {};
+
   const runSite = async (config: AnySiteConfig): Promise<void> => {
     if (typeof config.request !== 'function') {
       throw new Error(`Site "${config.site}" must define request`);
@@ -121,26 +150,38 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // Fetching the channel list is a request to the same source as the rest, so
     // it goes through the same queue: a site's `delayMs` spaces the first EPG
     // request after it, rather than the two landing back to back.
-    const channels = await inner.add(() => resolveChannels(config, { http, ...(signal ? { signal } : {}) }));
+    const channels = await inner.add(
+      () => resolveChannels(config, { http, ...(signal ? { signal } : {}) }),
+      queued,
+    );
 
-    // Parse one channel-day out of `data` and cache it.
-    const store = async (channel: GrabberChannel, day: string, data: unknown): Promise<void> => {
-      const parsed = await config.parseDay({ channel, date: dayToDate(day), day, data });
-      const programmes = parsed
-        .map((programme) => ({ ...programme, channel: channel.xmltvId }))
-        .sort((a, b) => a.start.getTime() - b.start.getTime());
+    // Parse one channel-day out of `data` and cache it. Queued: `parseDay` is
+    // the site's own code and the write is a file, so a wide response must not
+    // put every one of its channel-days through both at once.
+    //
+    // Ahead of the sweep in the queue, because a response already in hand is
+    // held in memory until it is written, while a staleness check only
+    // discovers more work to do.
+    const store = (channel: GrabberChannel, day: string, data: unknown): Promise<void> =>
+      local.add(async () => {
+        const parsed = await config.parseDay({ channel, date: dayToDate(day), day, data });
+        const programmes = parsed
+          .map((programme) => ({ ...programme, channel: channel.xmltvId }))
+          .sort((a, b) => a.start.getTime() - b.start.getTime());
 
-      await cache.write({ site: config.site, channelId: channel.xmltvId, day }, programmes, { grabbedAt });
-      fetched++;
-      log(`[${config.site}] ${channel.xmltvId} ${day}: ${programmes.length} programmes`);
-    };
+        await cache.write({ site: config.site, channelId: channel.xmltvId, day }, programmes, { grabbedAt });
+        fetched++;
+        log(`[${config.site}] ${channel.xmltvId} ${day}: ${programmes.length} programmes`);
+      }, { ...queued, priority: 1 });
 
-    // Which channel-days actually need fetching. The meta reads are local, so
-    // they run off the request queue, and a fresh one is accounted for here —
-    // exactly once, however the requests are grouped afterwards.
+    // Which channel-days actually need fetching. The meta reads never leave the
+    // machine, so they go through the local queue rather than the request one —
+    // a whole grid of them at once would be a file descriptor storm — and a
+    // fresh one is accounted for here, exactly once, however the requests are
+    // grouped afterwards.
     const collectStale = async (): Promise<Pair[]> => {
       const checked = await Promise.all(
-        channels.flatMap((channel) => window.map(async (day): Promise<Pair | undefined> => {
+        channels.flatMap((channel) => window.map((day) => local.add(async (): Promise<Pair | undefined> => {
           const meta = await cache.getMeta({ site: config.site, channelId: channel.xmltvId, day });
 
           if (isStale(day, meta, policy, now)) {
@@ -150,7 +191,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
           fromCache++;
           log(`[${config.site}] ${channel.xmltvId} ${day}: fresh in cache, skipping`);
           return undefined;
-        })),
+        }, queued))),
       );
 
       return checked.filter((pair): pair is Pair => pair !== undefined);
@@ -198,14 +239,12 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     };
 
     for (const request of plan(await collectStale())) {
+      // Nothing awaits this, and the task reports its own failures, so the only
+      // rejection to swallow is the abort dropping it from the queue.
       void inner.add(async () => {
         let data: unknown;
 
         try {
-          if (signal?.aborted) {
-            throw signal.reason;
-          }
-
           data = await config.request(contextFor(request));
         } catch (error) {
           // A failed request fails every channel-day it was covering.
@@ -227,7 +266,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
             log(`[${config.site}] ${channel.xmltvId} ${day}: ${errorMessage(error)}`);
           }
         }));
-      });
+      }, queued).catch(() => {});
     }
 
     await inner.onIdle();
@@ -244,7 +283,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
           failed.push({ site: config.site, channelId: '*', day: '*', error });
           log(`[${config.site}] site failed: ${errorMessage(error)}`);
         }
-      }),
+      }, queued).catch(() => {}),
     ),
   );
 

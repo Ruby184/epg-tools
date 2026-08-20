@@ -1,3 +1,5 @@
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
 import type { CacheEntryMeta, CacheStore, ChannelDayKey } from '../src/cache/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
@@ -321,6 +323,45 @@ describe('grab', () => {
     expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(25);
   });
 
+  it('bounds cache work and parsing at localConcurrency, across sites', async () => {
+    // A cache whose every operation takes a turn of the event loop, so the
+    // overlap is observable rather than instantaneous.
+    class SlowCache extends MemoryCache {
+      inFlight = 0;
+      max = 0;
+
+      private async slow<T>(work: () => T): Promise<T> {
+        this.inFlight++;
+        this.max = Math.max(this.max, this.inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        this.inFlight--;
+        return work();
+      }
+
+      override async getMeta(key: ChannelDayKey): Promise<CacheEntryMeta | undefined> {
+        return this.slow(() => this.get(key)?.meta);
+      }
+
+      override async write(key: ChannelDayKey, programmes: XmltvProgramme[]): Promise<void> {
+        return this.slow(() => super.write(key, programmes));
+      }
+    }
+
+    const cache = new SlowCache();
+    const sites = ['a.example', 'b.example'].map((site) => makeConfig({
+      site,
+      days: 4,
+      channels: [channel('one'), channel('two'), channel('three')],
+    }));
+
+    // 2 sites × 3 channels × 4 days = 24 sweep reads and 24 writes, all of
+    // which the old unbounded Promise.all would have started at once.
+    const summary = await grab(sites, { cache, now: NOW, localConcurrency: 3 });
+
+    expect(summary.fetched).toBe(24);
+    expect(cache.max).toBe(3);
+  });
+
   it('runs two sites in parallel under the outer queue', async () => {
     const cache = new MemoryCache();
     let inFlight = 0;
@@ -404,25 +445,86 @@ describe('grab', () => {
   });
 
   it('aborts a channels function\'s own requests through the client it was given', async () => {
+    // A server that accepts and never answers, so the request is still in
+    // flight when the run is cancelled — the case a queue cannot handle for
+    // you, and the reason the signal rides on the client.
+    const server = createServer(() => {});
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      const cache = new MemoryCache();
+      const controller = new AbortController();
+      const boom = new Error('run cancelled');
+
+      const config = makeConfig({
+        // Nothing here forwards the signal; the instance carries it.
+        channels: async ({ http }) => {
+          setTimeout(() => controller.abort(boom), 10);
+          await http.get(`http://127.0.0.1:${port}/channels`, { retry: 0 });
+          return [channel('fn.example')];
+        },
+      });
+
+      const summary = await grab([config], { cache, now: NOW, signal: controller.signal });
+
+      expect(summary.fetched).toBe(0);
+      expect(summary.failed).toEqual([
+        { site: 'example.com', channelId: '*', day: '*', error: boom },
+      ]);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('drops what is still queued when aborted, rather than failing it one by one', async () => {
     const cache = new MemoryCache();
     const controller = new AbortController();
     const boom = new Error('run cancelled');
-    controller.abort(boom);
+    let calls = 0;
 
     const config = makeConfig({
-      // Nothing here forwards the signal; the instance carries it.
-      channels: async ({ http }) => {
-        await http.get('http://127.0.0.1:9/channels');
-        return [channel('fn.example')];
+      days: 20,
+      async request() {
+        calls++;
+
+        if (calls === 2) {
+          controller.abort(boom);
+        }
+
+        return {};
       },
     });
 
     const summary = await grab([config], { cache, now: NOW, signal: controller.signal });
 
-    expect(summary.fetched).toBe(0);
+    // The 18 channel-days still waiting are removed from the queue, not
+    // dequeued only to notice and report themselves failed.
+    expect(calls).toBe(2);
+    expect(summary.fetched).toBe(1);
     expect(summary.failed).toEqual([
-      { site: 'example.com', channelId: '*', day: '*', error: boom },
+      { site: 'example.com', channelId: 'one.example', day: TOMORROW, error: boom },
     ]);
+  });
+
+  it('does nothing at all for a signal that is already aborted', async () => {
+    const cache = new MemoryCache();
+    const controller = new AbortController();
+    let calls = 0;
+    controller.abort(new Error('cancelled before it began'));
+
+    const config = makeConfig({
+      days: 20,
+      async request() {
+        calls++;
+        return {};
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW, signal: controller.signal });
+
+    expect(calls).toBe(0);
+    expect(summary).toEqual({ fetched: 0, fromCache: 0, failed: [] });
   });
 
   it('startDay moves the window', async () => {

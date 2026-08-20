@@ -63,6 +63,7 @@ export async function runGrab(source: ConfigSource, options: RunOptions = {}): P
     startDay,
     ...(config.days !== undefined ? { days: config.days } : {}),
     ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
+    ...(config.localConcurrency !== undefined ? { localConcurrency: config.localConcurrency } : {}),
     ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
     now,
     ...(options.logger ? { logger: options.logger } : {}),

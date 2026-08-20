@@ -324,11 +324,31 @@ export interface GrabOptions {
   startDay?: string;
   /** How many sites run in parallel. Defaults to all. */
   siteConcurrency?: number;
+  /**
+   * How much work that never leaves the machine runs at once, across every
+   * site: the staleness sweep, and parsing a channel-day out of a response and
+   * writing it to the cache. Defaults to 16.
+   *
+   * Separate from a site's `concurrency` on purpose — that one paces requests to
+   * be kind to the source, while this bounds open files and how many parsed
+   * programme lists are alive at once. Worth raising only alongside
+   * `UV_THREADPOOL_SIZE`, which is what actually runs Node's file operations.
+   */
+  localConcurrency?: number;
   staleness?: Partial<StalenessPolicy>;
   /** "Now" reference, for tests. Defaults to `new Date()`. */
   now?: Date;
   logger?: (message: string) => void;
-  /** Abort in-flight work. */
+  /**
+   * Cancel the run. Anything still queued — requests, staleness checks, cache
+   * writes — is dropped rather than started, and whatever is already in flight
+   * aborts on the same signal, which every site's HTTP client carries.
+   *
+   * The grab then resolves with the partial summary instead of rejecting: the
+   * channel-days that made it are in the cache and count as `fetched`, and only
+   * what was actually interrupted is in `failed`. A cancelled run is not a
+   * pile of one failure per channel-day it never got to.
+   */
   signal?: AbortSignal;
 }
 

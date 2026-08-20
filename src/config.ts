@@ -35,6 +35,11 @@ export interface EpgConfig {
   cache?: EpgCacheConfig;
   /** How many sites grab in parallel. Defaults to all. */
   siteConcurrency?: number;
+  /**
+   * How much cache work and parsing runs at once across every site, bounding
+   * open files rather than pacing any source. Defaults to 16.
+   */
+  localConcurrency?: number;
   merge?: MergeOptions;
   /** Attributes for the root `<tv>` element. */
   meta?: XmltvDocumentMeta;

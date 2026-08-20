@@ -716,6 +716,25 @@ Each `site + channel + day` is one cache entry (`<dir>/<site>/<channel>/<day>.nd
 
 Everything else is served from disk. Old days are pruned automatically after a grab (disable with `cache.prune: false`).
 
+Passing a `signal` cancels a run: what is still queued — requests, staleness
+checks, cache writes — is dropped rather than started, and what is in flight
+aborts through the client it was issued on. The grab resolves with the partial
+summary rather than rejecting, so the channel-days that landed are cached and
+counted, and `failed` holds only what was actually interrupted instead of one
+entry per channel-day the run never reached.
+
+Cache work is queued too, and separately from requests: the staleness sweep at
+the start of a run and each channel-day's `parseDay`-and-write go through one
+queue for the whole process, `localConcurrency` wide (default 16). A site's
+`concurrency` and `delayMs` are about being kind to *that source*, so cache work
+neither waits behind a rate limit nor takes a request's slot — what this bounds
+is open files and how many parsed programme lists are alive at once, which a
+14-day window over a few hundred channels would otherwise start all at once.
+Writes are queued ahead of sweep reads, since a response already fetched is held
+in memory until it is written while a staleness check only finds more to do.
+Raising it is worth pairing with `UV_THREADPOOL_SIZE`, which is what actually
+runs Node's file operations (four threads by default).
+
 ## Batching: how much one request covers
 
 A site has one `request`, and `batching` says how much of the channel × day grid a single call to it covers. There is always exactly one `parseDay` per channel-day, handed the shared response, so only `request` changes shape:
