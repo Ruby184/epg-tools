@@ -46,6 +46,7 @@ export type {
   RatingOptions,
   ReviewOptions,
   SubtitlesOptions,
+  TextOptions,
   UrlOptions,
   VideoOptions,
 } from './builder.js';

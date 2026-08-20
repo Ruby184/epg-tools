@@ -18,6 +18,7 @@ import type {
   XmltvEpisodeNum,
   XmltvExtraAttributes,
   XmltvExtraElement,
+  XmltvExtraElements,
   XmltvIcon,
   XmltvImage,
   XmltvLength,
@@ -56,6 +57,12 @@ export interface UrlOptions {
   extraAttributes?: ExtraAttributes;
 }
 
+/** A text child reached only by nesting, where there is no positional argument. */
+export interface TextOptions {
+  lang?: string;
+  extraAttributes?: ExtraAttributes;
+}
+
 export interface IconOptions {
   width?: number;
   height?: number;
@@ -66,6 +73,8 @@ export interface IconOptions {
 export interface PersonOptions {
   image?: Many<string | [string, ImageOptions]>;
   url?: Many<string | [string, UrlOptions]>;
+  /** Non-DTD child elements of this credit, kept verbatim. */
+  extra?: Many<XmltvExtraElement>;
 }
 
 export interface ActorOptions extends PersonOptions {
@@ -84,7 +93,8 @@ export interface ProgrammeBuilderBase {
   showview?: string;
   videoplus?: string;
   clumpidx?: string;
-  title: string;
+  /** The first `<title>`; the tuple form carries its own lang and attributes. */
+  title: string | [string, TextOptions];
   /** Default `lang` applied by every method below unless it's given its own. */
   lang?: string;
 }
@@ -94,7 +104,8 @@ export type ProgrammeOptions = Omit<ProgrammeBuilderBase, 'channel' | 'start' | 
 
 export interface ChannelBuilderBase {
   id: string;
-  displayName: string;
+  /** The first `<display-name>`; the tuple form carries its own lang and attributes. */
+  displayName: string | [string, TextOptions];
   /** Default `lang` applied to display names unless one is given its own. */
   lang?: string;
 }
@@ -104,11 +115,15 @@ export interface VideoOptions {
   colour?: YesNo;
   aspect?: string;
   quality?: string;
+  /** Non-DTD child elements of `<video>`, kept verbatim. Appended across calls. */
+  extra?: Many<XmltvExtraElement>;
 }
 
 export interface AudioOptions {
   present?: YesNo;
   stereo?: string;
+  /** Non-DTD child elements of `<audio>`, kept verbatim. Appended across calls. */
+  extra?: Many<XmltvExtraElement>;
 }
 
 export interface PreviouslyShownOptions {
@@ -118,13 +133,18 @@ export interface PreviouslyShownOptions {
 
 export interface SubtitlesOptions {
   type?: XmltvSubtitles['type'];
-  language?: string;
+  /** The `<language>` child; the tuple form carries its own attributes. */
+  language?: string | [string, TextOptions];
   lang?: string;
+  /** Non-DTD child elements of `<subtitles>`, kept verbatim. */
+  extra?: Many<XmltvExtraElement>;
 }
 
 export interface RatingOptions {
   system?: string;
   icon?: Many<string | [string, IconOptions]>;
+  /** Non-DTD child elements of the rating, kept verbatim. */
+  extra?: Many<XmltvExtraElement>;
 }
 
 export interface ReviewOptions {
@@ -155,10 +175,32 @@ abstract class ExtraAttributesBuilder {
   /** The node whose `extraAttributes` the methods below merge into. */
   protected abstract get extraAttributesTarget(): XmltvExtraAttributes;
 
+  /**
+   * Combine an element's two extra-attribute sources — a positional argument
+   * and its options' `extraAttributes` — with `primary` winning per key.
+   *
+   * An entry with no value is dropped, and a result with none left is
+   * `undefined`: `{}` is truthy, so storing one would keep a `<url>` or a
+   * credit name in its object form instead of collapsing to a plain string.
+   */
+  protected mergeExtra(primary?: ExtraAttributes, fallback?: ExtraAttributes): ExtraAttributes | undefined {
+    // Filtered before merging, so a valueless entry cannot overwrite the other
+    // source. `null` is off the type but reachable from JS and from JSON.
+    const present = (attrs: ExtraAttributes | undefined): [string, string][] =>
+      Object.entries(attrs ?? {}).filter(([, value]) => value !== undefined && value !== null);
+
+    const merged = [...present(fallback), ...present(primary)];
+
+    return merged.length > 0 ? Object.fromEntries(merged) : undefined;
+  }
+
   /** Merges non-standard attributes onto this builder's node (later calls win per key). */
   extraAttributes(attrs: ExtraAttributes): this {
     const target = this.extraAttributesTarget;
-    target.extraAttributes = { ...target.extraAttributes, ...attrs };
+    const merged = this.mergeExtra(attrs, target.extraAttributes);
+
+    if (merged) target.extraAttributes = merged;
+
     return this;
   }
 
@@ -184,19 +226,11 @@ abstract class XmltvElementBuilder extends ExtraAttributesBuilder {
 
   /** Copies non-standard attributes onto a freshly built element. */
   protected extraAttrs<T extends XmltvExtraAttributes>(target: T, extraAttributes?: ExtraAttributes): T {
-    if (extraAttributes) target.extraAttributes = extraAttributes;
-    return target;
-  }
+    const attrs = this.mergeExtra(extraAttributes);
 
-  /**
-   * Combine the two extra-attribute sources an element can receive — the
-   * trailing positional argument and its options' `extraAttributes` (used when
-   * nested). Merged rather than either overriding the other; on a key conflict
-   * the positional `primary` wins, being the dedicated argument.
-   */
-  protected mergeExtra(primary?: ExtraAttributes, fallback?: ExtraAttributes): ExtraAttributes | undefined {
-    if (primary && fallback) return { ...fallback, ...primary };
-    return primary ?? fallback;
+    if (attrs) target.extraAttributes = attrs;
+
+    return target;
   }
 
   /** A text value, applying the builder's default `lang` unless overridden. */
@@ -204,6 +238,17 @@ abstract class XmltvElementBuilder extends ExtraAttributesBuilder {
     const resolved = lang ?? this.lang;
     const text: XmltvTextValue = resolved ? { value, lang: resolved } : { value };
     return this.extraAttrs(text, extraAttributes);
+  }
+
+  /**
+   * A text value from either form a nested or constructor-supplied one can
+   * take. `defaultLang` is what to use when the tuple names no language of its
+   * own — falling back, as ever, to the builder's.
+   */
+  protected textValue(input: string | [string, TextOptions], defaultLang?: string): XmltvTextValue {
+    const [value, opts]: [string, TextOptions?] = Array.isArray(input) ? input : [input];
+
+    return this.text(value, opts?.lang ?? defaultLang, opts?.extraAttributes);
   }
 
   protected toIcon(value: string, opts: IconOptions = {}, extraAttributes?: ExtraAttributes): XmltvIcon {
@@ -257,7 +302,7 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     this.#programme = {
       channel: base.channel,
       start: xmltvDate(base.start),
-      title: [this.text(base.title)],
+      title: [this.textValue(base.title)],
     };
 
     if (base.stop !== undefined) this.stop(base.stop);
@@ -400,6 +445,8 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     if (opts.aspect) video.aspect = opts.aspect;
     if (opts.quality) video.quality = opts.quality;
 
+    this.#appendExtra(video, opts.extra);
+
     this.#programme.video = this.extraAttrs(video, extraAttributes);
     return this;
   }
@@ -411,6 +458,8 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
 
     if (present !== undefined) audio.present = present;
     if (opts.stereo) audio.stereo = opts.stereo;
+
+    this.#appendExtra(audio, opts.extra);
 
     this.#programme.audio = this.extraAttrs(audio, extraAttributes);
     return this;
@@ -446,7 +495,12 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     const subtitles: XmltvSubtitles = {};
 
     if (opts.type) subtitles.type = opts.type;
-    if (opts.language !== undefined) subtitles.language = this.text(opts.language, opts.lang);
+
+    if (opts.language !== undefined) {
+      subtitles.language = this.textValue(opts.language, opts.lang);
+    }
+
+    this.#appendExtra(subtitles, opts.extra);
 
     (this.#programme.subtitles ??= []).push(this.extraAttrs(subtitles, extraAttributes));
     return this;
@@ -536,6 +590,17 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     return this;
   }
 
+  /**
+   * A non-DTD element among the credits, rather than inside one — `<credits>`
+   * allows them between the people it lists.
+   */
+  creditsExtra(element: XmltvExtraElement): this {
+    const credits = (this.#programme.credits ??= {});
+
+    (credits.extra ??= []).push(element);
+    return this;
+  }
+
   build(): XmltvProgramme {
     return this.#programme;
   }
@@ -552,6 +617,15 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     }
 
     return Array.isArray(value) ? value : [value];
+  }
+
+  /** Append non-DTD children to an element that allows them. */
+  #appendExtra(target: XmltvExtraElements, extra: Many<XmltvExtraElement> | undefined): void {
+    const elements = this.#toArray(extra);
+
+    if (elements.length) {
+      (target.extra ??= []).push(...elements);
+    }
   }
 
   #toYesNo(value: YesNo | undefined): boolean | undefined {
@@ -573,35 +647,41 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     return this.extraAttrs(image, this.mergeExtra(extraAttributes, opts.extraAttributes));
   }
 
-  #toImageEntry(value: string | [string, ImageOptions]): XmltvImage {
-    return Array.isArray(value) ? this.#toImage(...value) : this.#toImage(value);
-  }
+  /**
+   * Build the children of a repeatable option — one or many, each either a
+   * bare value or a `[value, options]` pair.
+   */
+  #entries<O, R>(input: Many<string | [string, O]> | undefined, build: (value: string, opts?: O) => R): R[] {
+    return this.#toArray(input).map((entry) => {
+      const [value, opts]: [string, O?] = Array.isArray(entry) ? entry : [entry];
 
-  #toUrlEntry(value: string | [string, UrlOptions]): XmltvUrlValue {
-    return Array.isArray(value) ? this.toUrlValue(...value) : this.toUrlValue(value);
-  }
-
-  #toIconEntry(value: string | [string, IconOptions]): XmltvIcon {
-    return Array.isArray(value) ? this.toIcon(...value) : this.toIcon(value);
+      return build(value, opts);
+    });
   }
 
   /** The `<image>`/`<url>` children shared by every credit element (`(#PCDATA | image | url)*`). */
-  #imageUrl(opts: PersonOptions): { image?: XmltvImage[]; url?: XmltvUrlValue[] } {
-    const image = this.#toArray(opts.image).map((v) => this.#toImageEntry(v));
-    const url = this.#toArray(opts.url).map((v) => this.#toUrlEntry(v));
+  #imageUrl(opts: PersonOptions): Pick<XmltvPerson, 'image' | 'url' | 'extra'> {
+    const image = this.#entries(opts.image, (value, o) => this.#toImage(value, o));
+    const url = this.#entries(opts.url, (value, o) => this.toUrlValue(value, o));
+    const extra = this.#toArray(opts.extra);
 
-    return { ...(image.length ? { image } : {}), ...(url.length ? { url } : {}) };
+    return {
+      ...(image.length ? { image } : {}),
+      ...(url.length ? { url } : {}),
+      ...(extra.length ? { extra } : {}),
+    };
   }
 
   #toPersonValue(value: string, opts: PersonOptions, extraAttributes?: ExtraAttributes): XmltvPersonValue {
     const media = this.#imageUrl(opts);
+    const attrs = this.mergeExtra(extraAttributes);
 
     // Collapse to a bare name only when there are no children and no attributes.
-    if (!media.image && !media.url && !extraAttributes) {
+    if (!media.image && !media.url && !media.extra && !attrs) {
       return value;
     }
 
-    return this.extraAttrs<XmltvPerson>({ value, ...media }, extraAttributes);
+    return this.extraAttrs<XmltvPerson>({ value, ...media }, attrs);
   }
 
   #pushPerson(role: PersonRole, value: string, opts: PersonOptions, extraAttributes?: ExtraAttributes): this {
@@ -616,9 +696,11 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
 
     if (opts.system) rating.system = opts.system;
 
-    const icon = this.#toArray(opts.icon).map((v) => this.#toIconEntry(v));
+    const icon = this.#entries(opts.icon, (value, o) => this.toIcon(value, o));
 
     if (icon.length) rating.icon = icon;
+
+    this.#appendExtra(rating, opts.extra);
 
     return this.extraAttrs(rating, extraAttributes);
   }
@@ -670,7 +752,7 @@ export class ChannelBuilder extends XmltvElementBuilder {
 
     this.#channel = {
       id: base.id,
-      displayName: [this.text(base.displayName)],
+      displayName: [this.textValue(base.displayName)],
     };
   }
 

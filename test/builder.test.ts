@@ -563,3 +563,212 @@ describe('XmltvDocumentBuilder', () => {
     expect(parsed.programmes).toEqual(built.programmes);
   });
 });
+
+describe('the whole supported tree', () => {
+  /**
+   * Every place the model allows a non-DTD child element, in one document.
+   * The parser produces all of them and the serializer emits all of them, so
+   * the builder has to be able to say all of them too — otherwise a guide can
+   * be read and written but not constructed.
+   */
+  const XML = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE tv SYSTEM "xmltv.dtd">
+<tv>
+<programme start="20260807060000 +0000" channel="one.example.tv">
+<title lang="en">Show</title>
+<credits>
+<director>Ada<image type="person">https://example.tv/ada.png</image><url system="imdb">https://imdb.example/ada</url><person-id>nm1</person-id></director>
+<actor role="Lead">Bo<character-id>ch1</character-id></actor>
+<crid>credits-level</crid>
+</credits>
+<video><present>yes</present><colour>yes</colour><aspect>16:9</aspect><quality>HDTV</quality><hdr format="HLG"/></video>
+<audio><present>yes</present><stereo>stereo</stereo><codec>aac</codec></audio>
+<subtitles type="teletext"><language lang="en" origin="provider">English</language><page>888</page></subtitles>
+<rating system="MPAA"><value>PG</value><icon src="https://example.tv/pg.png" width="16"/><authority>x</authority></rating>
+<star-rating system="tv.com"><value>8/10</value><icon src="https://example.tv/star.png"/><votes>42</votes></star-rating>
+<live/>
+</programme>
+</tv>
+`;
+
+  it('parses into a programme the builder can reproduce exactly', () => {
+    const { programmes } = parseXmltvString(XML);
+    const parsed = programmes[0];
+
+    const built = new ProgrammeBuilder({
+      channel: 'one.example.tv',
+      start: parseXmltvDate('20260807060000 +0000'),
+      title: 'Show',
+      lang: 'en',
+    })
+      .director('Ada', {
+        image: [['https://example.tv/ada.png', { type: 'person' }]],
+        url: [['https://imdb.example/ada', { system: 'imdb' }]],
+        extra: { name: 'person-id', value: 'nm1' },
+      })
+      .actor('Bo', { role: 'Lead', extra: { name: 'character-id', value: 'ch1' } })
+      .creditsExtra({ name: 'crid', value: 'credits-level' })
+      .video({
+        present: true,
+        colour: true,
+        aspect: '16:9',
+        quality: 'HDTV',
+        extra: { name: 'hdr', attributes: { format: 'HLG' } },
+      })
+      .audio({ present: true, stereo: 'stereo', extra: { name: 'codec', value: 'aac' } })
+      .subtitles({
+        type: 'teletext',
+        language: ['English', { extraAttributes: { origin: 'provider' } }],
+        extra: { name: 'page', value: '888' },
+      })
+      .rating('PG', {
+        system: 'MPAA',
+        icon: [['https://example.tv/pg.png', { width: 16 }]],
+        extra: { name: 'authority', value: 'x' },
+      })
+      .starRating('8/10', {
+        system: 'tv.com',
+        icon: 'https://example.tv/star.png',
+        extra: { name: 'votes', value: '42' },
+      })
+      .extra({ name: 'live' })
+      .build();
+
+    expect(built).toEqual(parsed);
+  });
+
+  it('reproduces a channel with its extensions too', () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE tv SYSTEM "xmltv.dtd">
+<tv>
+<channel id="one.example.tv" source="provider">
+<display-name lang="en" origin="epg">One</display-name>
+<icon src="https://example.tv/one.png" width="32" height="32" role="logo"/>
+<url system="site">https://example.tv/one</url>
+<lcn>101</lcn>
+</channel>
+</tv>
+`;
+
+    const parsed = parseXmltvString(xml).channels[0];
+
+    const built = new ChannelBuilder({
+      id: 'one.example.tv',
+      // The tuple form: the constructor's display name carries its own
+      // attributes, which calling `.displayName()` again could not do — that
+      // would add a second one rather than amend the first.
+      displayName: ['One', { extraAttributes: { origin: 'epg' } }],
+      lang: 'en',
+    })
+      .extraAttribute('source', 'provider')
+      .icon('https://example.tv/one.png', { width: 32, height: 32 }, { role: 'logo' })
+      .url('https://example.tv/one', { system: 'site' })
+      .extra({ name: 'lcn', value: '101' })
+      .build();
+
+    expect(built).toEqual(parsed);
+  });
+
+  it('treats an empty extras map as having said nothing', () => {
+    const base = { channel: 'c', start: parseXmltvDate('20260807060000 +0000'), title: 'T' };
+
+    const withEmpties = new ProgrammeBuilder(base)
+      .url('https://example.tv/one', { extraAttributes: {} })
+      .director('Ada', {}, {})
+      .category('drama', undefined, {})
+      .icon('https://example.tv/i.png', { extraAttributes: {} })
+      .video({ aspect: '16:9', extra: [] })
+      .extraAttributes({})
+      .build();
+
+    const withNothing = new ProgrammeBuilder(base)
+      .url('https://example.tv/one')
+      .director('Ada')
+      .category('drama')
+      .icon('https://example.tv/i.png')
+      .video({ aspect: '16:9' })
+      .build();
+
+    // `{}` is truthy, so without care it becomes a real `extraAttributes: {}` —
+    // which the parser never produces, and which would keep `<url>` and a
+    // credit name in their object form instead of collapsing to a string.
+    expect(withEmpties).toEqual(withNothing);
+    expect(withEmpties.url).toEqual(['https://example.tv/one']);
+    expect(withEmpties.credits?.director).toEqual(['Ada']);
+    expect(withEmpties.extraAttributes).toBeUndefined();
+    expect(withEmpties.video?.extra).toBeUndefined();
+  });
+
+  it('treats an attribute with no value as one that was not mentioned', () => {
+    const base = { channel: 'c', start: parseXmltvDate('20260807060000 +0000'), title: 'T' };
+
+    // Extras built from optional data, as JavaScript or revived JSON can hold.
+    const p = new ProgrammeBuilder(base)
+      .extraAttributes({ uniqueID: 'u1', eit: undefined as unknown as string })
+      .category('drama', undefined, { code: null as unknown as string })
+      .url('https://example.tv/one', { extraAttributes: { system: undefined as unknown as string } })
+      .build();
+
+    expect(Object.keys(p.extraAttributes!)).toEqual(['uniqueID']);
+    // Not `{ code: null }`, which would serialize as code="null".
+    expect(p.category).toEqual([{ value: 'drama' }]);
+    // And nothing left to stop the url collapsing to a plain string.
+    expect(p.url).toEqual(['https://example.tv/one']);
+
+    expect(serializeProgramme(p).trim()).toBe(
+      '<programme start="20260807060000 +0000" channel="c" uniqueID="u1">'
+      + '<title>T</title><category>drama</category><url>https://example.tv/one</url></programme>',
+    );
+  });
+
+  it('lets a subtitles language name its own lang, over the subtitles-level one', () => {
+    const base = { channel: 'c', start: parseXmltvDate('20260807060000 +0000'), title: 'T', lang: 'en' };
+
+    const p = new ProgrammeBuilder(base)
+      .subtitles({ language: 'Deutsch', lang: 'de' })
+      .subtitles({ language: ['Français', { lang: 'fr' }], lang: 'de' })
+      .build();
+
+    expect(p.subtitles?.map((sub) => sub.language?.lang)).toEqual(['de', 'fr']);
+  });
+
+  it('does not let a missing value overwrite the other source', () => {
+    const base = { channel: 'c', start: parseXmltvDate('20260807060000 +0000'), title: 'T' };
+
+    // The positional argument wins where it says something, and stays out of
+    // the way where it has no value.
+    const p = new ProgrammeBuilder(base)
+      .icon('https://example.tv/i.png', { extraAttributes: { role: 'logo', size: 'sm' } }, {
+        role: undefined as unknown as string,
+        size: 'lg',
+      })
+      .build();
+
+    expect(p.icon?.[0]?.extraAttributes).toEqual({ role: 'logo', size: 'lg' });
+  });
+
+  it('never writes a null attribute out, however the model was built', () => {
+    // Bypassing the builder: the guard belongs in the serializer too.
+    const xml = serializeProgramme({
+      channel: 'c',
+      start: parseXmltvDate('20260807060000 +0000'),
+      title: [{ value: 'T' }],
+      extraAttributes: { uniqueID: 'u1', eit: null as unknown as string },
+    });
+
+    expect(xml).toContain('uniqueID="u1"');
+    expect(xml).not.toContain('null');
+  });
+
+  it('round-trips every one of them through serialize and parse', () => {
+    const { programmes } = parseXmltvString(XML);
+    const xml = `<?xml version="1.0" encoding="UTF-8"?><tv>`
+      + serializeProgramme(programmes[0]!)
+      + `</tv>`;
+
+    // Not a string comparison against the source: whitespace between elements
+    // is not content. What must survive is the tree, extensions included.
+    expect(parseXmltvString(xml).programmes[0]).toEqual(programmes[0]);
+    expect(parseXmltvString(xml).warnings).toEqual([]);
+  });
+});
