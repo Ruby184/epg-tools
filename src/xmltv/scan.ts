@@ -47,6 +47,9 @@ type NeedMore = typeof NEED_MORE;
 /** matchClose(): the close tag at this position belongs to another element. */
 const NO_MATCH = -1;
 
+/** `#skipSpecial`: `lt` does not start a comment, CDATA section or PI. */
+const NOT_SPECIAL = -1;
+
 const COMMENT_OPEN = '<!--';
 const COMMENT_CLOSE = '-->';
 const CDATA_OPEN = '<![CDATA[';
@@ -132,6 +135,9 @@ export class XmltvScanner {
   #tagName = '';
   /** Flat pairs: `[key0, value0, key1, value1, ...]`. */
   #tagAttrs: string[] | null = null;
+
+  /** The last CDATA section's contents, when `#skipSpecial` was asked to keep it. */
+  #cdata = '';
   /**
    * Buffer index of each attribute's name start, parallel to `#tagAttrs`:
    * `#tagAttrPositions[j]` is where the attribute at `#tagAttrs[2j]` began.
@@ -333,6 +339,59 @@ export class XmltvScanner {
     } else {
       this.#warnEmpty(buf, at, code, label);
     }
+  }
+
+  /**
+   * Skip the comment, CDATA section or processing instruction at `lt`.
+   *
+   * Returns the index just past it, {@link NEED_MORE} when the buffer ends
+   * before its close, or {@link NOT_SPECIAL} when `lt` starts none of the
+   * three — a `<!DOCTYPE`, say, which the caller consumes as a stray element.
+   *
+   * With `collect`, a CDATA section's contents are left in {@link #cdata} for
+   * the caller to append; without it nothing is sliced, since most callers
+   * throw the text away.
+   */
+  #skipSpecial(buf: string, lt: number, collect = false): number | NeedMore {
+    // `#cdata` is cleared per branch rather than up front, so the common
+    // answer — an ordinary tag, none of the three — writes nothing at all.
+    if (buf.startsWith(COMMENT_OPEN, lt)) {
+      const end = buf.indexOf(COMMENT_CLOSE, lt + COMMENT_OPEN.length);
+
+      if (end === NO_MATCH) {
+        return NEED_MORE;
+      }
+
+      this.#cdata = '';
+
+      return end + COMMENT_CLOSE.length;
+    }
+
+    if (buf.startsWith(CDATA_OPEN, lt)) {
+      const end = buf.indexOf(CDATA_CLOSE, lt + CDATA_OPEN.length);
+
+      if (end === NO_MATCH) {
+        return NEED_MORE;
+      }
+
+      this.#cdata = collect ? buf.slice(lt + CDATA_OPEN.length, end) : '';
+
+      return end + CDATA_CLOSE.length;
+    }
+
+    if (buf.startsWith(PI_OPEN, lt)) {
+      const end = buf.indexOf(PI_CLOSE, lt + PI_OPEN.length);
+
+      if (end === NO_MATCH) {
+        return NEED_MORE;
+      }
+
+      this.#cdata = '';
+
+      return end + PI_CLOSE.length;
+    }
+
+    return NOT_SPECIAL;
   }
 
   /**
@@ -573,40 +632,15 @@ export class XmltvScanner {
           return NEED_MORE;
         }
 
-        if (buf.startsWith(COMMENT_OPEN, lt)) {
-          const end = buf.indexOf(COMMENT_CLOSE, lt + COMMENT_OPEN.length);
+        const skipped = this.#skipSpecial(buf, lt, collect);
 
-          if (end === -1) {
-            return NEED_MORE;
-          }
-
-          i = end + 3;
-          continue;
+        if (skipped === NEED_MORE) {
+          return NEED_MORE;
         }
 
-        if (buf.startsWith(CDATA_OPEN, lt)) {
-          const end = buf.indexOf(CDATA_CLOSE, lt + CDATA_OPEN.length);
-
-          if (end === -1) {
-            return NEED_MORE;
-          }
-
-          if (collect) {
-            text += buf.slice(lt + CDATA_OPEN.length, end);
-          }
-
-          i = end + CDATA_CLOSE.length;
-          continue;
-        }
-
-        if (buf.startsWith(PI_OPEN, lt)) {
-          const end = buf.indexOf(PI_CLOSE, lt + PI_OPEN.length);
-
-          if (end === -1) {
-            return NEED_MORE;
-          }
-
-          i = end + PI_CLOSE.length;
+        if (skipped !== NOT_SPECIAL) {
+          text += this.#cdata;
+          i = skipped;
           continue;
         }
         // `<!` that is not a comment/CDATA (e.g. DOCTYPE): fall through and let
@@ -1439,37 +1473,15 @@ export class XmltvScanner {
           return NEED_MORE;
         }
 
-        if (buf.startsWith(COMMENT_OPEN, lt)) {
-          const end = buf.indexOf(COMMENT_CLOSE, lt + COMMENT_OPEN.length);
+        const skipped = this.#skipSpecial(buf, lt, true);
 
-          if (end === -1) {
-            return NEED_MORE;
-          }
-
-          i = end + 3;
-          continue;
+        if (skipped === NEED_MORE) {
+          return NEED_MORE;
         }
 
-        if (buf.startsWith(CDATA_OPEN, lt)) {
-          const end = buf.indexOf(CDATA_CLOSE, lt + CDATA_OPEN.length);
-
-          if (end === -1) {
-            return NEED_MORE;
-          }
-
-          text += buf.slice(lt + CDATA_OPEN.length, end);
-          i = end + CDATA_CLOSE.length;
-          continue;
-        }
-
-        if (buf.startsWith(PI_OPEN, lt)) {
-          const end = buf.indexOf(PI_CLOSE, lt + PI_OPEN.length);
-
-          if (end === -1) {
-            return NEED_MORE;
-          }
-
-          i = end + PI_CLOSE.length;
+        if (skipped !== NOT_SPECIAL) {
+          text += this.#cdata;
+          i = skipped;
           continue;
         }
 
@@ -1722,37 +1734,15 @@ export class XmltvScanner {
         return NEED_MORE;
       }
 
-      if (buf.startsWith(COMMENT_OPEN, lt)) {
-        const end = buf.indexOf(COMMENT_CLOSE, lt + COMMENT_OPEN.length);
+      const skipped = this.#skipSpecial(buf, lt, true);
 
-        if (end === -1) {
-          return NEED_MORE;
-        }
-
-        i = end + 3;
-        continue;
+      if (skipped === NEED_MORE) {
+        return NEED_MORE;
       }
 
-      if (buf.startsWith(CDATA_OPEN, lt)) {
-        const end = buf.indexOf(CDATA_CLOSE, lt + CDATA_OPEN.length);
-
-        if (end === -1) {
-          return NEED_MORE;
-        }
-
-        text += buf.slice(lt + CDATA_OPEN.length, end);
-        i = end + CDATA_CLOSE.length;
-        continue;
-      }
-
-      if (buf.startsWith(PI_OPEN, lt)) {
-        const end = buf.indexOf(PI_CLOSE, lt + PI_OPEN.length);
-
-        if (end === -1) {
-          return NEED_MORE;
-        }
-
-        i = end + PI_CLOSE.length;
+      if (skipped !== NOT_SPECIAL) {
+        text += this.#cdata;
+        i = skipped;
         continue;
       }
 
@@ -1840,36 +1830,14 @@ export class XmltvScanner {
         return NEED_MORE;
       }
 
-      if (buf.startsWith(COMMENT_OPEN, lt)) {
-        const end = buf.indexOf(COMMENT_CLOSE, lt + COMMENT_OPEN.length);
+      const skipped = this.#skipSpecial(buf, lt);
 
-        if (end === -1) {
-          return NEED_MORE;
-        }
-
-        i = end + 3;
-        continue;
+      if (skipped === NEED_MORE) {
+        return NEED_MORE;
       }
 
-      if (buf.startsWith(CDATA_OPEN, lt)) {
-        const end = buf.indexOf(CDATA_CLOSE, lt + CDATA_OPEN.length);
-
-        if (end === -1) {
-          return NEED_MORE;
-        }
-
-        i = end + 3;
-        continue;
-      }
-
-      if (buf.startsWith(PI_OPEN, lt)) {
-        const end = buf.indexOf(PI_CLOSE, lt + PI_OPEN.length);
-
-        if (end === -1) {
-          return NEED_MORE;
-        }
-
-        i = end + 2;
+      if (skipped !== NOT_SPECIAL) {
+        i = skipped;
         continue;
       }
 
