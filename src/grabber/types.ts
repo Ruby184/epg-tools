@@ -2,8 +2,12 @@ import type { KyInstance, Options as KyOptions } from 'ky';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheStore, StalenessPolicy } from '../cache/types.js';
 
-/** A channel to grab: maps an output XMLTV id to a site-specific id. */
-export interface GrabberChannel {
+/**
+ * A channel to grab: maps an output XMLTV id to a site-specific id.
+ *
+ * `TData` is whatever the site keeps alongside it — see {@link data}.
+ */
+export interface GrabberChannel<TData = unknown> {
   /** Channel id used in the generated XMLTV output. */
   xmltvId: string;
   /** Channel id understood by the source site. */
@@ -16,6 +20,14 @@ export interface GrabberChannel {
    * writes it as a lineup entry's `<preset>`; ignored by the guide.
    */
   preset?: string;
+  /**
+   * Anything else the site knows about this channel, kept as it came and
+   * handed back to `channelInfo` and `parseDay` — display names in three
+   * languages, icon dimensions, an LCN, a per-channel token. The grabber never
+   * looks inside it; its type is inferred from what `channels` returns, so both
+   * callbacks see the real shape rather than `unknown`.
+   */
+  data?: TData;
 }
 
 /**
@@ -34,15 +46,15 @@ export interface GrabberChannel {
 export type BatchMode = 'none' | 'channels' | 'days' | 'both';
 
 /** One channel-day a request is expected to come back with. */
-export interface ChannelDay {
-  channel: GrabberChannel;
+export interface ChannelDay<TData = unknown> {
+  channel: GrabberChannel<TData>;
   /** The day as `YYYY-MM-DD`. */
   day: string;
   /** The same day as UTC midnight. */
   date: Date;
 }
 
-interface BaseRequestContext {
+interface BaseRequestContext<TData> {
   /**
    * Exactly the channel-days this request is being made for — every one of
    * them stale, in channel order and then day order.
@@ -54,26 +66,52 @@ interface BaseRequestContext {
    * would over-fetch. A fresh channel-day in the response is neither parsed nor
    * rewritten either way.
    */
-  channelDays: ChannelDay[];
+  channelDays: ChannelDay<TData>[];
   /** ky instance created from the config's `ky` options. */
   http: KyInstance;
-  /** Abort signal from GrabOptions; forward it to your HTTP calls. */
+  /**
+   * Abort signal from GrabOptions, already applied to {@link http} — anything
+   * requested through it aborts on its own. Here for work that does not go
+   * through it: another client, or a check between two pages of your own.
+   */
   signal?: AbortSignal;
 }
 
+/**
+ * Context for the function form of {@link SiteConfig.channels} — a channel list
+ * that is fetched rather than written out.
+ */
+export interface ChannelsContext {
+  /**
+   * The site's ky instance, the very one its requests use: same prefix,
+   * headers, retry, proxy and abort signal.
+   */
+  http: KyInstance;
+  /** As on a request context: already applied to {@link http}. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Where a site's channels come from: a list, or a function fetching one with
+ * the site's own HTTP client.
+ */
+export type ChannelsSource<TData = unknown> =
+  | GrabberChannel<TData>[]
+  | ((ctx: ChannelsContext) => GrabberChannel<TData>[] | Promise<GrabberChannel<TData>[]>);
+
 /** The channel a request covers, under a mode of `none` or `days`. */
-interface OneChannel {
-  channel: GrabberChannel;
+interface OneChannel<TData> {
+  channel: GrabberChannel<TData>;
 }
 
 /** The channels a request covers, under a mode of `channels` or `both`. */
-interface ManyChannels {
+interface ManyChannels<TData> {
   /**
    * The channels to fetch in this request — only those with a stale cached
    * entry (the grabber filters fresh ones out first), capped at
    * `batching.channelsPerRequest`.
    */
-  channels: GrabberChannel[];
+  channels: GrabberChannel<TData>[];
 }
 
 /** The day a request covers, under a mode of `none` or `channels`. */
@@ -106,22 +144,26 @@ interface ManyDays {
 }
 
 /** Request context for the `none` mode — one channel, one day. */
-export interface RequestContext extends BaseRequestContext, OneChannel, OneDay {}
+export interface RequestContext<TData = unknown>
+  extends BaseRequestContext<TData>, OneChannel<TData>, OneDay {}
 /** Request context for the `channels` mode — one day, many channels. */
-export interface ChannelsRequestContext extends BaseRequestContext, ManyChannels, OneDay {}
+export interface ChannelsRequestContext<TData = unknown>
+  extends BaseRequestContext<TData>, ManyChannels<TData>, OneDay {}
 /** Request context for the `days` mode — one channel, many days. */
-export interface DaysRequestContext extends BaseRequestContext, OneChannel, ManyDays {}
+export interface DaysRequestContext<TData = unknown>
+  extends BaseRequestContext<TData>, OneChannel<TData>, ManyDays {}
 /** Request context for the `both` mode — many channels, many days. */
-export interface ChannelsDaysRequestContext extends BaseRequestContext, ManyChannels, ManyDays {}
+export interface ChannelsDaysRequestContext<TData = unknown>
+  extends BaseRequestContext<TData>, ManyChannels<TData>, ManyDays {}
 
 /** The request context a given {@link BatchMode} is called with. */
-export type RequestContextFor<TBatch extends BatchMode> = TBatch extends 'none'
-  ? RequestContext
+export type RequestContextFor<TBatch extends BatchMode, TData = unknown> = TBatch extends 'none'
+  ? RequestContext<TData>
   : TBatch extends 'channels'
-    ? ChannelsRequestContext
+    ? ChannelsRequestContext<TData>
     : TBatch extends 'days'
-      ? DaysRequestContext
-      : ChannelsDaysRequestContext;
+      ? DaysRequestContext<TData>
+      : ChannelsDaysRequestContext<TData>;
 
 /**
  * One channel-day per request — the default, and what `batching` means when
@@ -183,8 +225,8 @@ export type ModeOf<TBatching extends BatchingOption> = TBatching extends BatchMo
     ? TMode
     : never;
 
-export interface ParseContext<TRaw> {
-  channel: GrabberChannel;
+export interface ParseContext<TRaw, TData = unknown> {
+  channel: GrabberChannel<TData>;
   date: Date;
   day: string;
   data: TRaw;
@@ -194,10 +236,19 @@ export interface ParseContext<TRaw> {
  * A site: where to fetch from, how much of the grid one request covers, and how
  * to turn a response into programmes.
  */
-export interface SiteConfig<TRaw = unknown, TBatching extends BatchingOption = 'none'> {
+export interface SiteConfig<
+  TRaw = unknown,
+  TBatching extends BatchingOption = 'none',
+  TData = unknown,
+> {
   /** Unique site identifier, e.g. `webtv.sk`. Used as cache namespace. */
   site: string;
-  channels: GrabberChannel[] | (() => GrabberChannel[] | Promise<GrabberChannel[]>);
+  /**
+   * The channels to grab. A function is called with the site's HTTP client, so
+   * a list that has to be fetched costs no extra setup — and it is called only
+   * when channels are actually needed, never by `--capabilities` and friends.
+   */
+  channels: ChannelsSource<TData>;
   /** Override the number of days to grab for this site. */
   days?: number;
   /** Max concurrent requests for this site. Defaults to 1. */
@@ -230,31 +281,32 @@ export interface SiteConfig<TRaw = unknown, TBatching extends BatchingOption = '
    * A failed request fails every channel-day it covered; one channel-day's
    * `parseDay` error only drops that channel-day.
    */
-  request(ctx: RequestContextFor<ModeOf<TBatching>>): Promise<TRaw>;
+  request(ctx: RequestContextFor<ModeOf<TBatching>, TData>): Promise<TRaw>;
   /**
    * Parse one channel-day out of a response — called once per channel-day the
    * request covered, each with the same `data`. `programme.channel` is
    * normalized to `xmltvId` afterwards.
    */
-  parseDay(ctx: ParseContext<TRaw>): XmltvProgramme[] | Promise<XmltvProgramme[]>;
+  parseDay(ctx: ParseContext<TRaw, TData>): XmltvProgramme[] | Promise<XmltvProgramme[]>;
   /** Customize the `<channel>` element. Defaults to id + name + logo. */
-  channelInfo?(channel: GrabberChannel): XmltvChannel;
+  channelInfo?(channel: GrabberChannel<TData>): XmltvChannel;
 }
 
 /**
  * A site config whatever its batching — what a list of sites holds, since each
  * site picks its own and they need not agree.
  */
-export type AnySiteConfig = SiteConfig<any, BatchingOption>;
+export type AnySiteConfig = SiteConfig<any, BatchingOption, any>;
 
 /**
  * Identity helper for type inference in config files. The batching is inferred
- * from the `batching` property, which is what types `request`'s context and
- * which request-size caps are accepted.
+ * from the `batching` property — which types `request`'s context and which
+ * request-size caps are accepted — and a channel's `data` from what `channels`
+ * returns.
  */
-export function defineSiteConfig<TRaw, TBatching extends BatchingOption = 'none'>(
-  config: SiteConfig<TRaw, TBatching>,
-): SiteConfig<TRaw, TBatching> {
+export function defineSiteConfig<TRaw, TBatching extends BatchingOption = 'none', TData = unknown>(
+  config: SiteConfig<TRaw, TBatching, TData>,
+): SiteConfig<TRaw, TBatching, TData> {
   return config;
 }
 

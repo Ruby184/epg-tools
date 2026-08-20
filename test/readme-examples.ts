@@ -99,6 +99,56 @@ const byPairs = defineSiteConfig({
 
 export const batched = defineConfig({ sites: [byChannels, byDays, byPairs], output: 'guide.xml' });
 
+// --- A channel list that has to be fetched ---------------------------------
+const fetchedChannels = defineSiteConfig({
+  site: 'example.tv',
+  ky: { prefix: 'https://api.example.tv', headers: { 'x-api-key': 'k' } },
+  async channels({ http }) {
+    const { items } = await http.get('channels').json<{
+      items: { id: string; titles: { text: string; lang: string }[]; logo: string; number: number }[];
+    }>();
+
+    return items.map((item) => ({
+      xmltvId: `${item.id}.example.tv`,
+      siteId: item.id,
+      data: { names: item.titles, logo: item.logo, lcn: item.number },
+    }));
+  },
+  channelInfo({ xmltvId, data }) {
+    return {
+      id: xmltvId,
+      displayName: (data?.names ?? []).map((name) => ({ value: name.text, lang: name.lang })),
+      ...(data?.logo ? { icon: [{ src: data.logo }] } : {}),
+      ...(data?.lcn ? { extra: [{ name: 'lcn', text: String(data.lcn) }] } : {}),
+    };
+  },
+  async request({ channel, date, http }) {
+    return http.get('epg', { searchParams: { id: channel.siteId, date: date.toISOString() } })
+      .json<{ items: RawProgramme[] }>();
+  },
+  parseDay({ channel, data }) {
+    return data.items.map((p) => ({
+      channel: channel.xmltvId,
+      start: new Date(p.start),
+      title: [{ value: p.title }],
+    }));
+  },
+});
+
+export const fetched = defineConfig({ sites: [fetchedChannels], output: 'guide.xml' });
+
+// The mode decides which caps are accepted, and the shape of the context.
+export const wrongCap = defineSiteConfig({
+  site: 'example.tv',
+  channels: [],
+  // @ts-expect-error — 'channels' batches one day at a time; there is nothing to cap.
+  batching: { mode: 'channels', daysPerRequest: 7 },
+  async request() {
+    return {};
+  },
+  parseDay: () => [],
+});
+
 // --- Asking for more than channels ----------------------------------------
 export const stages = defineStages([{
   name: 'start',

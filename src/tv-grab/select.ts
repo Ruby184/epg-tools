@@ -1,4 +1,5 @@
 import type { EpgConfig } from '../config.js';
+import { resolveChannels } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 
 /**
@@ -18,8 +19,8 @@ export function applyChannelSelection(config: EpgConfig, selected: Set<string>):
 
       sites.push({
         ...site,
-        channels: async (): Promise<GrabberChannel[]> =>
-          (await resolve()).filter((channel) => selected.has(channel.xmltvId)),
+        channels: async (ctx): Promise<GrabberChannel[]> =>
+          (await resolve(ctx)).filter((channel) => selected.has(channel.xmltvId)),
       });
 
       continue;
@@ -41,7 +42,7 @@ export async function resolveChannelIds(config: EpgConfig): Promise<string[]> {
   const seen = new Set<string>();
 
   for (const site of config.sites) {
-    const channels = typeof site.channels === 'function' ? await site.channels() : site.channels;
+    const channels = await resolveChannels(site);
 
     for (const channel of channels) {
       if (!seen.has(channel.xmltvId)) {

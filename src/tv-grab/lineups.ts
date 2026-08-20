@@ -17,6 +17,7 @@
  */
 
 import type { EpgConfig } from '../config.js';
+import { resolveChannels } from '../grabber/channels.js';
 import type { GrabberChannel } from '../grabber/types.js';
 import { escapeXml } from '../xmltv/escape.js';
 
@@ -358,7 +359,7 @@ export async function lineupsFromSites(
   const lineups: LineupConfig[] = [];
 
   for (const site of config.sites) {
-    const channels = typeof site.channels === 'function' ? await site.channels() : site.channels;
+    const channels = await resolveChannels(site);
 
     lineups.push({
       id: site.site,

@@ -1,8 +1,8 @@
-import ky from 'ky';
 import PQueue from 'p-queue';
 import { DEFAULT_STALENESS, isStale } from '../cache/main.js';
 import type { StalenessPolicy } from '../cache/types.js';
 import { dayRange, dayToDate, toDayString } from '../core/days.js';
+import { resolveChannels, siteHttp } from './channels.js';
 import type {
   AnySiteConfig,
   BatchingOption,
@@ -103,8 +103,9 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       throw new Error(`Site "${config.site}" must define request`);
     }
 
-    const channels = typeof config.channels === 'function' ? await config.channels() : config.channels;
-    const http = ky.create(config.ky ?? {});
+    // The signal rides on the instance, so every call a site makes through it
+    // is abortable without the site having to pass it on.
+    const http = siteHttp(config, signal);
     const window = [...dayRange(startDay, config.days ?? options.days ?? 7)];
     const { manyChannels, manyDays, maxChannels, maxDays } = resolveBatching(config.batching);
     const policy: StalenessPolicy = { ...DEFAULT_STALENESS, ...options.staleness, ...config.staleness };
@@ -116,6 +117,11 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
         ? { interval: config.delayMs, intervalCap: 1 }
         : {}),
     });
+
+    // Fetching the channel list is a request to the same source as the rest, so
+    // it goes through the same queue: a site's `delayMs` spaces the first EPG
+    // request after it, rather than the two landing back to back.
+    const channels = await inner.add(() => resolveChannels(config, { http, ...(signal ? { signal } : {}) }));
 
     // Parse one channel-day out of `data` and cache it.
     const store = async (channel: GrabberChannel, day: string, data: unknown): Promise<void> => {

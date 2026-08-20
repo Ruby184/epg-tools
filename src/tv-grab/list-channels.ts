@@ -1,4 +1,5 @@
 import type { EpgConfig } from '../config.js';
+import { resolveChannels } from '../grabber/channels.js';
 import type { GrabberChannel } from '../grabber/types.js';
 import { defaultChannelInfo, mergeChannels } from '../merge/main.js';
 import {
@@ -17,8 +18,7 @@ async function collectChannels(config: EpgConfig): Promise<XmltvChannel[]> {
   const byId = new Map<string, XmltvChannel>();
 
   for (const site of config.sites) {
-    const channels: GrabberChannel[] =
-      typeof site.channels === 'function' ? await site.channels() : site.channels;
+    const channels: GrabberChannel[] = await resolveChannels(site);
 
     for (const channel of channels) {
       const info = site.channelInfo?.(channel) ?? defaultChannelInfo(channel);

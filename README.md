@@ -603,6 +603,104 @@ environment variables are just code:
 ky: { prefix: 'https://api.a.example.tv', headers: { 'x-api-key': process.env.A_KEY! } },
 ```
 
+That instance is what `request` receives as `http`, and the run's abort signal
+is baked into it — anything asked for through it is abortable whether or not a
+site remembered to pass the signal on.
+
+### A channel list that has to be fetched
+
+`channels` takes the same client, so a site whose channels come from the source
+rather than from your config sets up nothing of its own — no repeated prefix, no
+second copy of the credentials. Whatever else the source said about a channel
+goes in `data`, and comes back in `channelInfo` and `parseDay` with its type
+intact:
+
+```ts
+const example = defineSiteConfig({
+  site: 'example.tv',
+  ky: { prefix: 'https://api.example.tv', headers: { 'x-api-key': process.env.EXAMPLE_KEY! } },
+  async channels({ http }) {
+    const { items } = await http.get('channels').json<{
+      items: { id: string; titles: { text: string; lang: string }[]; logo: string; number: number }[];
+    }>();
+
+    return items.map((item) => ({
+      xmltvId: `${item.id}.example.tv`,
+      siteId: item.id,
+      data: { names: item.titles, logo: item.logo, lcn: item.number },
+    }));
+  },
+  // The whole <channel> element, built from what the source gave you: display
+  // names in every language it had, and its channel number as an extension
+  // tvheadend can pick up.
+  channelInfo({ xmltvId, data }) {
+    return {
+      id: xmltvId,
+      displayName: (data?.names ?? []).map((name) => ({ value: name.text, lang: name.lang })),
+      ...(data?.logo ? { icon: [{ src: data.logo }] } : {}),
+      ...(data?.lcn ? { extra: [{ name: 'lcn', text: String(data.lcn) }] } : {}),
+    };
+  },
+  async request({ channel, date, http }) {
+    return http.get('epg', { searchParams: { id: channel.siteId, date: date.toISOString() } }).json();
+  },
+  parseDay({ channel, data }) {
+    // channel.data is here too — a per-channel token, a region, whatever the
+    // parse needs beyond siteId.
+    return [/* … */];
+  },
+});
+```
+
+`data` is per channel and so optional; read it as `data?.x` unless you know
+every channel in your list carries one. The grabber never looks inside it.
+
+The function is called only when channels are actually wanted, so
+`--capabilities`, `--description` and `--version` still answer without touching
+the network, and `--configure` resolves the list *after* asking for the
+password — which is what lets the account decide what is on offer. Fetching the
+list is a request to the same source as the rest, so it goes through the site's
+own queue: `delayMs` spaces the first day fetched after it instead of the two
+landing together.
+
+`epg build`, `--list-channels`, the lineups capability and the merge all resolve
+it the same way; `resolveChannels(site)` is exported for code of your own that
+wants a site's channels without caring which form they came in.
+
+A proxy for one site is the same idea: ky passes options it does not recognize
+down to `fetch`, and Node's `fetch` honours a `dispatcher`.
+
+```ts
+import { ProxyAgent } from 'undici';
+
+const behindProxy = defineSiteConfig({
+  site: 'a.example.tv',
+  ky: {
+    prefix: 'https://api.a.example.tv',
+    dispatcher: new ProxyAgent('http://user:pass@proxy.local:3128'),
+  },
+  // …
+});
+```
+
+Only that site is tunnelled; the others go out directly. Three things to know:
+
+- **Pin `undici` to the major Node bundles** — `node -p process.versions.undici`.
+  A mismatched major fails every request with
+  `InvalidArgumentError: invalid onRequestStart method`, because the dispatcher
+  handler API differs between the standalone package and the copy inside Node.
+- **Keep the global `fetch`.** Pairing ky with undici's *own* `fetch` export
+  does not work: ky hands it a global `Request`, which it rejects with
+  `Failed to parse URL from [object Request]`.
+- `dispatcher` typechecks wherever `RequestInit` comes from Node's types
+  (`lib` without `DOM`, as in this package). With the DOM lib in scope, DOM's
+  `RequestInit` shadows it and has no `dispatcher`; then pass it through a
+  custom fetch instead:
+  `ky: { fetch: (input, init) => fetch(input, { ...init, dispatcher } as RequestInit) }`.
+
+Node 24 also understands `NODE_USE_ENV_PROXY=1` with `HTTP_PROXY`/`HTTPS_PROXY`
+/`NO_PROXY`, but that applies to the whole process — every site or none.
+
 ## How caching works
 
 Each `site + channel + day` is one cache entry (`<dir>/<site>/<channel>/<day>.ndjson` + a small meta sidecar recording when it was grabbed). On every run a channel-day is refetched only when:
@@ -759,7 +857,7 @@ Lower-level pieces are exposed as subpath exports:
 ```ts
 import { parseXmltvFile, writeXmltvStream } from 'epg-tools/xmltv';
 import { FsCacheStore, isStale } from 'epg-tools/cache';
-import { grab, defineSiteConfig } from 'epg-tools/grabber';
+import { grab, defineSiteConfig, resolveChannels, siteHttp } from 'epg-tools/grabber';
 import { generateGuide, writeGuide, mergeProgrammes } from 'epg-tools/merge';
 ```
 

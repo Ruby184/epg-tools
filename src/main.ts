@@ -55,7 +55,7 @@ export type * from './xmltv/types.js';
 export { FsCacheStore, isStale, DEFAULT_STALENESS } from './cache/main.js';
 export type * from './cache/types.js';
 
-export { grab, defineSiteConfig } from './grabber/main.js';
+export { grab, defineSiteConfig, resolveChannels, siteHttp } from './grabber/main.js';
 export type * from './grabber/types.js';
 
 export {

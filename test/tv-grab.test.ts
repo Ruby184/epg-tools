@@ -9,6 +9,7 @@ import { Readable, Writable } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import { defineConfig, type EpgConfig } from '../src/config.js';
 import { envReader, type ConfigContext } from '../src/core/answers.js';
+import { resolveChannels } from '../src/grabber/channels.js';
 import type { SiteConfig } from '../src/grabber/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 import {
@@ -191,8 +192,7 @@ describe('applyChannelSelection', () => {
 
     expect(calls).toBe(0);
 
-    const channels = selected.sites[0]?.channels;
-    const resolved = typeof channels === 'function' ? await channels() : channels;
+    const resolved = await resolveChannels(selected.sites[0]!);
 
     expect(resolved).toEqual([{ xmltvId: 'two.example.tv', siteId: '2' }]);
     expect(calls).toBe(1);

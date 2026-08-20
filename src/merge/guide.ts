@@ -1,5 +1,6 @@
 import { dayRange, toDayString } from '../core/days.js';
 import { writeOutput, type OutputTarget } from '../core/output.js';
+import { resolveChannels } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { writeXmltvStream } from '../xmltv/main.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
@@ -16,10 +17,6 @@ interface ChannelSource {
 interface RegistryEntry {
   xmltvId: string;
   sources: ChannelSource[];
-}
-
-async function resolveChannels(config: AnySiteConfig): Promise<GrabberChannel[]> {
-  return typeof config.channels === 'function' ? await config.channels() : config.channels;
 }
 
 /**

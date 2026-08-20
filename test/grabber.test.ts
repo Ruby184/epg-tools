@@ -297,6 +297,30 @@ describe('grab', () => {
     expect(maxInFlight).toBe(1);
   });
 
+  it('paces a fetched channel list in the site queue, like any other request', async () => {
+    const cache = new MemoryCache();
+    const at: number[] = [];
+
+    const config = makeConfig({
+      delayMs: 30,
+      channels: () => {
+        at.push(Date.now());
+        return [channel('one')];
+      },
+      async request() {
+        at.push(Date.now());
+        return {};
+      },
+    });
+
+    await grab([config], { cache, now: NOW });
+
+    // Asking the source for its channels is a request to it too, so the site's
+    // own spacing applies between that and the first day fetched.
+    expect(at).toHaveLength(2);
+    expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(25);
+  });
+
   it('runs two sites in parallel under the outer queue', async () => {
     const cache = new MemoryCache();
     let inFlight = 0;
@@ -330,6 +354,75 @@ describe('grab', () => {
 
     expect(summary.fetched).toBe(1);
     expect(cache.get({ site: 'example.com', channelId: 'fn.example', day: TODAY })).toBeDefined();
+  });
+
+  it('hands a channels function the site\'s own client, and the same one requests use', async () => {
+    const cache = new MemoryCache();
+    let listClient: unknown;
+    let requestClient: unknown;
+
+    const config = makeConfig({
+      ky: { prefix: 'https://api.example.tv' },
+      channels: (ctx) => {
+        listClient = ctx.http;
+        return [channel('fn.example')];
+      },
+      async request({ http }) {
+        requestClient = http;
+        return {};
+      },
+    });
+
+    await grab([config], { cache, now: NOW });
+
+    expect(typeof (listClient as { get?: unknown })?.get).toBe('function');
+    expect(listClient).toBe(requestClient); // built once for the site, not per call
+  });
+
+  it('carries a channel\'s data through to the request and to parseDay', async () => {
+    const cache = new MemoryCache();
+    const seen: unknown[] = [];
+
+    const config: SiteConfig<unknown, 'none', { token: string }> = {
+      site: 'example.com',
+      days: 1,
+      channels: () => [{ xmltvId: 'one.example', siteId: 'site-one', data: { token: 't-1' } }],
+      async request({ channel }) {
+        seen.push(channel.data?.token);
+        return {};
+      },
+      parseDay({ channel, day }) {
+        seen.push(channel.data?.token);
+        return [programme(`${day}T06:00:00.000Z`, channel.xmltvId)];
+      },
+    };
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    expect(summary.fetched).toBe(1);
+    expect(seen).toEqual(['t-1', 't-1']);
+  });
+
+  it('aborts a channels function\'s own requests through the client it was given', async () => {
+    const cache = new MemoryCache();
+    const controller = new AbortController();
+    const boom = new Error('run cancelled');
+    controller.abort(boom);
+
+    const config = makeConfig({
+      // Nothing here forwards the signal; the instance carries it.
+      channels: async ({ http }) => {
+        await http.get('http://127.0.0.1:9/channels');
+        return [channel('fn.example')];
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW, signal: controller.signal });
+
+    expect(summary.fetched).toBe(0);
+    expect(summary.failed).toEqual([
+      { site: 'example.com', channelId: '*', day: '*', error: boom },
+    ]);
   });
 
   it('startDay moves the window', async () => {
