@@ -1,7 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { defineConfig } from 'tsup';
 
-const { version } = JSON.parse(readFileSync('./package.json', 'utf8')) as { version: string };
+const { name, version } = JSON.parse(readFileSync('./package.json', 'utf8')) as {
+  name: string;
+  version: string;
+};
 
 export default defineConfig({
   entry: {
@@ -14,6 +17,7 @@ export default defineConfig({
     'cli/main': 'src/cli/main.ts',
   },
   define: {
+    __PKG_NAME__: JSON.stringify(name),
     __PKG_VERSION__: JSON.stringify(version),
   },
   format: ['esm'],

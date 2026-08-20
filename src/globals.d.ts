@@ -5,3 +5,10 @@
  * unreliable.
  */
 declare const __PKG_VERSION__: string;
+
+/**
+ * This package's name, substituted the same way — so a generated file imports
+ * whatever this package is actually called rather than a name written down
+ * somewhere that can go stale.
+ */
+declare const __PKG_NAME__: string;

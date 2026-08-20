@@ -16,15 +16,18 @@ import { build, createCacheStore, runGrab, runMerge } from '../build.js';
 import { GrabberError } from '../core/error.js';
 import { OptionError, parseOptions } from '../core/options.js';
 import { dayToDate, toDayString } from '../core/days.js';
+import { drain, queueLine, writeFlushed, writeLines } from '../core/streams.js';
+import { initGrabber } from './scaffold.js';
 import type { GrabSummary } from '../grabber/types.js';
 
 export const USAGE = `Usage: epg <command> [options]
 
 Commands:
-  build   Grab all sites into the cache, then generate the merged guide (default)
-  grab    Grab all sites into the cache only
-  merge   Generate the merged guide from the cache only
-  prune   Remove cached days older than a given day
+  build         Grab all sites into the cache, then generate the merged guide (default)
+  grab          Grab all sites into the cache only
+  merge         Generate the merged guide from the cache only
+  prune         Remove cached days older than a given day
+  init-grabber  Write a tv_grab_* executable for the config, next to it
 
 Options:
   -c, --config <path>   Config file (default: epg.config.ts|js|mjs in cwd)
@@ -34,7 +37,15 @@ Options:
       --cache-dir <dir> Override the cache directory
       --before <day>    prune only: remove days before YYYY-MM-DD (default: today)
   -q, --quiet           Suppress progress output
+  -v, --version         Print this package's version
   -h, --help            Show this help
+
+init-grabber options:
+      --description <s> What --description prints (default: the country and name)
+      --grabber-version <v>  The grabber's own version, as its --version
+                        reports it (default: the project's package.json
+                        version, else 0.1.0)
+      --force           Replace an existing file
 `;
 
 /** Something the user typed: the usage goes with it, as the grabber does. */
@@ -44,6 +55,8 @@ const EXIT_USAGE = 2;
 const EXIT_FAILED = 1;
 
 const CONFIG_CANDIDATES = ['epg.config.ts', 'epg.config.js', 'epg.config.mjs'];
+
+const COMMANDS = ['build', 'grab', 'merge', 'prune', 'init-grabber'];
 
 export interface CliOptions {
   /** Defaults to `process.stdout` — progress, and the help. */
@@ -104,26 +117,51 @@ function isRealDay(day: string): boolean {
   }
 }
 
-/** One line, terminated. */
-function line(stream: Writable, message: string): void {
-  stream.write(`${message}\n`);
-}
-
 /**
  * Report a grab, and say whether it counts as a failure: a channel-day that
  * could not be fetched leaves the guide short, which is news even though the
  * rest of it was written.
  */
-function report(summary: GrabSummary, log: ((message: string) => void) | undefined, stderr: Writable): number {
+async function report(
+  summary: GrabSummary,
+  log: ((message: string) => void) | undefined,
+  stderr: Writable,
+): Promise<number> {
   log?.(`Grab done: ${summary.fetched} fetched, ${summary.fromCache} from cache, ${summary.failed.length} failed`);
 
-  for (const failure of summary.failed) {
+  // Failures, so they are reported even under --quiet.
+  await writeLines(stderr, ...summary.failed.map((failure) => {
     const message = failure.error instanceof Error ? failure.error.message : String(failure.error);
-    // A failure, so it is reported even under --quiet.
-    line(stderr, `  FAILED [${failure.site}] ${failure.channelId} ${failure.day}: ${message}`);
-  }
+    return `  FAILED [${failure.site}] ${failure.channelId} ${failure.day}: ${message}`;
+  }));
 
   return summary.failed.length > 0 ? EXIT_FAILED : 0;
+}
+
+/** `epg init-grabber <name>` — write the executable and say what to do with it. */
+async function writeGrabber(
+  values: { description?: string; 'grabber-version'?: string; force?: boolean },
+  name: string | undefined,
+  configFile: string,
+  stdout: Writable,
+  stderr: Writable,
+): Promise<number> {
+  if (name === undefined) {
+    throw new UsageError('init-grabber needs a name, e.g. epg init-grabber tv_grab_sk_example');
+  }
+
+  const result = await initGrabber({
+    name,
+    configFile,
+    ...(values.description === undefined ? {} : { description: values.description }),
+    ...(values['grabber-version'] === undefined ? {} : { version: values['grabber-version'] }),
+    ...(values.force === undefined ? {} : { force: values.force }),
+  });
+
+  await writeLines(stderr, ...result.warnings);
+  await writeLines(stdout, `Wrote ${result.file}`, ...result.hints);
+
+  return 0;
 }
 
 /**
@@ -139,22 +177,29 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
   } catch (error) {
     if (error instanceof OptionError || error instanceof UsageError) {
       // What was typed was wrong, so the usage goes with the message.
-      stderr.write(`${error.message}\n\n${USAGE}`);
+      await writeFlushed(stderr, `${error.message}\n\n${USAGE}`);
       return EXIT_USAGE;
     }
 
     if (error instanceof GrabberError) {
       // Includes anything a configuration threw while answering itself.
-      line(stderr, error.message);
+      await writeLines(stderr, error.message);
       return error.code;
     }
 
     // Including whatever a config file threw on its way to being loaded, and
     // the odd `throw 'string'` — a bin reports and exits rather than letting
     // one become an unhandled rejection with a stack.
-    line(stderr, error instanceof Error ? error.message : String(error));
+    await writeLines(stderr, error instanceof Error ? error.message : String(error));
 
     return EXIT_FAILED;
+  } finally {
+    // Everything this writes itself is awaited; the progress lines are not,
+    // because `RunOptions.logger` is synchronous and a grab must not wait on
+    // one. So the run ends by draining, which is what lets a caller exit the
+    // moment it resolves — `process.exit()` discards whatever is still
+    // buffered, and a run logging every channel-day outgrows a pipe's 64 KB.
+    await Promise.all([drain(stdout), drain(stderr)]);
   }
 }
 
@@ -168,20 +213,36 @@ async function execute(argv: string[], stdout: Writable, stderr: Writable): Prom
     before: { type: 'string' },
     quiet: { type: 'boolean', short: 'q' },
     help: { type: 'boolean', short: 'h' },
+    version: { type: 'boolean', short: 'v' },
+    description: { type: 'string' },
+    'grabber-version': { type: 'string' },
+    force: { type: 'boolean' },
   }, { allowPositionals: true });
 
   if (values.help) {
-    stdout.write(USAGE);
+    await writeFlushed(stdout, USAGE);
+    return 0;
+  }
+
+  if (values.version) {
+    await writeLines(stdout, `${__PKG_NAME__} ${__PKG_VERSION__}`);
     return 0;
   }
 
   const command = positionals[0] ?? 'build';
 
-  if (!['build', 'grab', 'merge', 'prune'].includes(command)) {
+  if (!COMMANDS.includes(command)) {
     throw new UsageError(`Unknown command: ${command}`);
   }
 
   const configFile = await findConfig(values.config);
+
+  // Before the config is *loaded*: scaffolding only needs to know where it is,
+  // and asking for a site's password to write a file next to it would be absurd.
+  if (command === 'init-grabber') {
+    return writeGrabber(values, positionals[1], configFile, stdout, stderr);
+  }
+
   let config = await loadConfig(configFile);
 
   if (values.days !== undefined) {
@@ -196,7 +257,7 @@ async function execute(argv: string[], stdout: Writable, stderr: Writable): Prom
     config = { ...config, cache: { ...config.cache, dir: path.resolve(values['cache-dir']) } };
   }
 
-  const log = values.quiet ? undefined : (message: string) => line(stdout, message);
+  const log = values.quiet ? undefined : (message: string) => queueLine(stdout, message);
   const runOptions = {
     ...(log ? { logger: log } : {}),
     ...(values.offset !== undefined ? { offset: values.offset } : {}),
@@ -204,12 +265,12 @@ async function execute(argv: string[], stdout: Writable, stderr: Writable): Prom
 
   switch (command) {
     case 'build': {
-      const code = report(await build(config, runOptions), log, stderr);
+      const code = await report(await build(config, runOptions), log, stderr);
       log?.(`Guide written to ${config.output}`);
       return code;
     }
     case 'grab':
-      return report(await runGrab(config, runOptions), log, stderr);
+      return await report(await runGrab(config, runOptions), log, stderr);
     case 'merge': {
       await runMerge(config, runOptions);
       log?.(`Guide written to ${config.output}`);
