@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "promise"],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    // `...(cond ? { x } : {})` is how exactOptionalPropertyTypes lets a
+    // possibly-undefined value be omitted rather than set to undefined.
+    "unicorn/no-useless-spread": "off"
+  },
+  "ignorePatterns": ["dist", "test/fixtures"],
+  "env": {
+    "builtin": true
+  },
+  "overrides": [
+    {
+      "files": ["test/**/*.ts", "bench/**/*.ts"],
+      "rules": {
+        "typescript/no-explicit-any": "off"
+      }
+    }
+  ]
+}

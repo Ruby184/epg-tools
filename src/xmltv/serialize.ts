@@ -59,7 +59,7 @@ interface Fmt {
 
 function makeFmt(options: SerializeOptions | undefined): Fmt {
   const indent = options?.indent;
-  const unit = typeof indent === 'number' ? ' '.repeat(Math.max(0, indent)) : indent ?? '';
+  const unit = typeof indent === 'number' ? ' '.repeat(Math.max(0, indent)) : (indent ?? '');
 
   return { unit, nl: unit === '' ? '' : '\n' };
 }
@@ -81,12 +81,20 @@ function attrs(pairs: [string, AttrValue][]): string {
 }
 
 /** One element; self-closing when `text` is undefined. */
-function element(f: Fmt, pad: string, name: string, attrPairs: [string, AttrValue][], text?: string): string {
+function element(
+  f: Fmt,
+  pad: string,
+  name: string,
+  attrPairs: [string, AttrValue][],
+  text?: string,
+): string {
   const open = `${pad}<${name}${attrs(attrPairs)}`;
   return text === undefined ? `${open}/>${f.nl}` : `${open}>${escapeXml(text)}</${name}>${f.nl}`;
 }
 
-function extraAttrPairs(extraAttributes: Record<string, string> | undefined): [string, AttrValue][] {
+function extraAttrPairs(
+  extraAttributes: Record<string, string> | undefined,
+): [string, AttrValue][] {
   return extraAttributes ? Object.entries(extraAttributes) : [];
 }
 
@@ -94,7 +102,12 @@ function textAttrPairs(value: XmltvTextValue): [string, AttrValue][] {
   return [['lang', value.lang], ...extraAttrPairs(value.extraAttributes)];
 }
 
-function langElements(f: Fmt, pad: string, name: string, values: XmltvTextValue[] | undefined): string {
+function langElements(
+  f: Fmt,
+  pad: string,
+  name: string,
+  values: XmltvTextValue[] | undefined,
+): string {
   let out = '';
 
   for (const value of values ?? []) {
@@ -145,9 +158,16 @@ function urlElements(f: Fmt, pad: string, urls: XmltvUrlValue[] | undefined): st
   let out = '';
 
   for (const url of urls ?? []) {
-    out += typeof url === 'string'
-      ? element(f, pad, 'url', [], url)
-      : element(f, pad, 'url', [['system', url.system], ...extraAttrPairs(url.extraAttributes)], url.value);
+    out +=
+      typeof url === 'string'
+        ? element(f, pad, 'url', [], url)
+        : element(
+            f,
+            pad,
+            'url',
+            [['system', url.system], ...extraAttrPairs(url.extraAttributes)],
+            url.value,
+          );
   }
 
   return out;
@@ -171,8 +191,16 @@ function inlineUrl(url: XmltvUrlValue): string {
 }
 
 const CREDIT_ORDER = [
-  'director', 'actor', 'writer', 'adapter', 'producer',
-  'composer', 'editor', 'presenter', 'commentator', 'guest',
+  'director',
+  'actor',
+  'writer',
+  'adapter',
+  'producer',
+  'composer',
+  'editor',
+  'presenter',
+  'commentator',
+  'guest',
 ] as const;
 
 /**
@@ -180,7 +208,12 @@ const CREDIT_ORDER = [
  * `(#PCDATA | image | url)*`, so image/url children are emitted inline
  * after the name text.
  */
-function personElement(f: Fmt, pad: string, role: string, person: XmltvPersonValue | XmltvActor): string {
+function personElement(
+  f: Fmt,
+  pad: string,
+  role: string,
+  person: XmltvPersonValue | XmltvActor,
+): string {
   const attrPairs: [string, AttrValue][] = [];
 
   if (role === 'actor' && typeof person !== 'string') {
@@ -263,7 +296,12 @@ function audioElement(f: Fmt, pad: string, audio: XmltvAudio | undefined): strin
   return inner ? `${pad}${open}>${f.nl}${inner}${pad}</audio>${f.nl}` : `${pad}${open}/>${f.nl}`;
 }
 
-function flagElement(f: Fmt, pad: string, name: string, value: XmltvTextValue | true | undefined): string {
+function flagElement(
+  f: Fmt,
+  pad: string,
+  name: string,
+  value: XmltvTextValue | true | undefined,
+): string {
   if (value === undefined) {
     return '';
   }
@@ -275,7 +313,12 @@ function flagElement(f: Fmt, pad: string, name: string, value: XmltvTextValue | 
   return element(f, pad, name, textAttrPairs(value), value.value);
 }
 
-function ratingElements(f: Fmt, pad: string, name: string, ratings: (XmltvRating | XmltvStarRating)[] | undefined): string {
+function ratingElements(
+  f: Fmt,
+  pad: string,
+  name: string,
+  ratings: (XmltvRating | XmltvStarRating)[] | undefined,
+): string {
   const childPad = pad + f.unit;
   let out = '';
 
@@ -339,7 +382,13 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
   }
 
   if (programme.origLanguage) {
-    out += element(f, I, 'orig-language', textAttrPairs(programme.origLanguage), programme.origLanguage.value);
+    out += element(
+      f,
+      I,
+      'orig-language',
+      textAttrPairs(programme.origLanguage),
+      programme.origLanguage.value,
+    );
   }
 
   if (programme.length) {
@@ -357,7 +406,13 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
   out += langElements(f, I, 'country', programme.country);
 
   for (const episode of programme.episodeNum ?? []) {
-    out += element(f, I, 'episode-num', [['system', episode.system], ...extraAttrPairs(episode.extraAttributes)], episode.value);
+    out += element(
+      f,
+      I,
+      'episode-num',
+      [['system', episode.system], ...extraAttrPairs(episode.extraAttributes)],
+      episode.value,
+    );
   }
 
   out += videoElement(f, I, programme.video);
@@ -365,7 +420,12 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
 
   if (programme.previouslyShown) {
     out += element(f, I, 'previously-shown', [
-      ['start', programme.previouslyShown.start ? formatXmltvDate(programme.previouslyShown.start) : undefined],
+      [
+        'start',
+        programme.previouslyShown.start
+          ? formatXmltvDate(programme.previouslyShown.start)
+          : undefined,
+      ],
       ['channel', programme.previouslyShown.channel],
       ...extraAttrPairs(programme.previouslyShown.extraAttributes),
     ]);
@@ -386,8 +446,15 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
 
     const childPad = I + f.unit;
     const inner =
-      (subtitles.language ? element(f, childPad, 'language', textAttrPairs(subtitles.language), subtitles.language.value) : '') +
-      extraElements(f, childPad, subtitles.extra);
+      (subtitles.language
+        ? element(
+            f,
+            childPad,
+            'language',
+            textAttrPairs(subtitles.language),
+            subtitles.language.value,
+          )
+        : '') + extraElements(f, childPad, subtitles.extra);
 
     if (inner) {
       out += `${I}<subtitles${attrs(subtitlesAttrs)}>${f.nl}${inner}${I}</subtitles>${f.nl}`;
@@ -400,23 +467,35 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
   out += ratingElements(f, I, 'star-rating', programme.starRating);
 
   for (const review of programme.review ?? []) {
-    out += element(f, I, 'review', [
-      ['type', review.type],
-      ['source', review.source],
-      ['reviewer', review.reviewer],
-      ['lang', review.lang],
-      ...extraAttrPairs(review.extraAttributes),
-    ], review.value);
+    out += element(
+      f,
+      I,
+      'review',
+      [
+        ['type', review.type],
+        ['source', review.source],
+        ['reviewer', review.reviewer],
+        ['lang', review.lang],
+        ...extraAttrPairs(review.extraAttributes),
+      ],
+      review.value,
+    );
   }
 
   for (const image of programme.image ?? []) {
-    out += element(f, I, 'image', [
-      ['type', image.type],
-      ['size', image.size],
-      ['orient', image.orient],
-      ['system', image.system],
-      ...extraAttrPairs(image.extraAttributes),
-    ], image.value);
+    out += element(
+      f,
+      I,
+      'image',
+      [
+        ['type', image.type],
+        ['size', image.size],
+        ['orient', image.orient],
+        ['system', image.system],
+        ...extraAttrPairs(image.extraAttributes),
+      ],
+      image.value,
+    );
   }
 
   out += extraElements(f, I, programme.extra);
@@ -445,10 +524,14 @@ const DEFAULT_HIGH_WATER_MARK = getDefaultHighWaterMark(false);
  * {@link serializeChannel} / {@link serializeProgramme}; pair it with
  * {@link serializeDocumentFooter} to assemble a document by hand.
  */
-export function serializeDocumentHeader(meta?: XmltvDocumentMeta, options?: SerializeOptions): string {
+export function serializeDocumentHeader(
+  meta?: XmltvDocumentMeta,
+  options?: SerializeOptions,
+): string {
   const f = makeFmt(options);
 
-  return `<?xml version="1.0" encoding="UTF-8"?>${f.nl}` +
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?>${f.nl}` +
     `<!DOCTYPE tv SYSTEM "xmltv.dtd">${f.nl}` +
     `<tv${attrs([
       ['date', meta?.date ? formatXmltvDate(meta.date) : undefined],
@@ -458,7 +541,8 @@ export function serializeDocumentHeader(meta?: XmltvDocumentMeta, options?: Seri
       ['generator-info-name', meta?.generatorInfoName],
       ['generator-info-url', meta?.generatorInfoUrl],
       ...extraAttrPairs(meta?.extraAttributes),
-    ])}>${f.nl}`;
+    ])}>${f.nl}`
+  );
 }
 
 /** Serialize the document epilogue — the closing `</tv>` tag. */
@@ -472,7 +556,10 @@ export function serializeDocumentFooter(options?: SerializeOptions): string {
  * programmes, `</tv>`. Never accumulates the document. Compact by default;
  * pass `{ indent }` to pretty-print.
  */
-export async function* writeXmltvStream(input: XmltvStreamInput, options?: SerializeOptions): AsyncGenerator<string> {
+export async function* writeXmltvStream(
+  input: XmltvStreamInput,
+  options?: SerializeOptions,
+): AsyncGenerator<string> {
   const highWaterMark = options?.highWaterMark ?? DEFAULT_HIGH_WATER_MARK;
 
   async function* parts(): AsyncGenerator<string> {
@@ -497,7 +584,11 @@ export async function* writeXmltvStream(input: XmltvStreamInput, options?: Seria
 }
 
 /** Stream an XMLTV document to a file (parent directories are created). */
-export async function writeXmltvToFile(filePath: string, input: XmltvStreamInput, options?: SerializeOptions): Promise<void> {
+export async function writeXmltvToFile(
+  filePath: string,
+  input: XmltvStreamInput,
+  options?: SerializeOptions,
+): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
   await pipeline(Readable.from(writeXmltvStream(input, options)), createWriteStream(filePath));
 }
@@ -534,6 +625,9 @@ export interface SerializeStreamOptions extends SerializeOptions {
  * errors the stream.
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+// Merged into the class below on purpose: it is how a stream's `on`/`once`
+// overloads get typed for the 'warning' event without redeclaring the class.
+// oxlint-disable-next-line typescript/no-unsafe-declaration-merging
 export interface XmltvSerializeStream {
   /** A non-fatal problem forwarded from a piped parse stream. */
   on(event: 'warning', listener: (warning: XmltvWarning) => void): this;
@@ -579,12 +673,18 @@ export class XmltvSerializeStream extends Transform {
     return serializeDocumentHeader({ ...this.#eventMeta, ...this.#options?.meta }, this.#options);
   }
 
-  override _transform(event: XmltvParseEvent, _encoding: BufferEncoding, callback: TransformCallback): void {
+  override _transform(
+    event: XmltvParseEvent,
+    _encoding: BufferEncoding,
+    callback: TransformCallback,
+  ): void {
     try {
       switch (event.type) {
         case 'meta':
           if (this.#started) {
-            throw new Error('XmltvSerializeStream: a <tv> meta event must precede the first channel or programme');
+            throw new Error(
+              'XmltvSerializeStream: a <tv> meta event must precede the first channel or programme',
+            );
           }
 
           this.#eventMeta = { ...this.#eventMeta, ...event.value };
@@ -597,7 +697,9 @@ export class XmltvSerializeStream extends Transform {
           this.emit('warning', event.value);
           return callback();
         default:
-          throw new Error(`XmltvSerializeStream: unexpected event type ${JSON.stringify((event as { type?: unknown }).type)}`);
+          throw new Error(
+            `XmltvSerializeStream: unexpected event type ${JSON.stringify((event as { type?: unknown }).type)}`,
+          );
       }
     } catch (error) {
       callback(error as Error);

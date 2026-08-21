@@ -1,0 +1,2 @@
+# Format and lint only what is staged, so a commit cannot land unformatted.
+npx lint-staged

@@ -19,12 +19,28 @@ files directly via native type stripping. CI runs the suite on 20, 22 and 24.
 | `npm test` | the whole suite, once (`vitest run`) |
 | `npm run test:watch` | the suite in watch mode |
 | `npm run typecheck` | `tsc --noEmit` — also what checks the documentation, see below |
+| `npm run format` | format everything with [oxfmt](https://oxc.rs) |
+| `npm run format:check` | fail instead of writing — what CI runs |
+| `npm run lint` | [oxlint](https://oxc.rs) over the whole tree |
+| `npm run lint:fix` | …and apply what it can fix |
 | `npm run build` | bundle to `dist/` with tsup |
 | `npm run bench` | speed benchmarks (`vitest bench`) |
 | `npm run bench:memory` | memory benchmarks — builds first, then runs isolated processes |
 
-`npm run typecheck && npm test && npm run build` is what CI does, and what
-`prepublishOnly` runs before a release.
+Formatting and linting are the Oxc tools, so both finish in well under a
+second over the whole tree. Their configuration is `.oxfmtrc.json` (100
+columns, single quotes, trailing commas) and `.oxlintrc.json` (the
+`correctness` category, plus the `typescript`, `unicorn`, `oxc` and `promise`
+plugins).
+
+Two rules are deliberately off or suppressed, both explained where they are
+set: `unicorn/no-useless-spread`, because `...(cond ? { x } : {})` is how
+`exactOptionalPropertyTypes` lets a possibly-undefined value be omitted rather
+than set to `undefined`; and `typescript/no-unsafe-declaration-merging` at one
+site in `src/xmltv/serialize.ts`, where merging an interface into the class is
+how a stream's `on('warning', …)` overload gets typed.
+
+`prepublishOnly` runs format:check, lint, typecheck, test and build.
 
 Tests live in `test/**/*.test.ts` and benchmarks in `bench/**/*.bench.ts` —
 `vitest.config.ts` keeps the two apart, so a benchmark never runs as part of
@@ -77,6 +93,21 @@ Where the documentation lives:
 When you add or rename a public export, `docs/api.md`'s export map is the place
 that has to keep up.
 
+## Git hooks
+
+`npm ci` installs [husky](https://typicode.github.io/husky/), which wires three
+hooks:
+
+| hook | runs | why |
+|---|---|---|
+| `pre-commit` | `lint-staged` — oxfmt and `oxlint --fix` over staged files | nothing unformatted lands, and it only touches what you staged |
+| `commit-msg` | `commitlint` | the changelog is generated from these messages, so a malformed one is a problem later |
+| `pre-push` | `npm run typecheck && npm test` | the suite is ~2s; better here than in CI |
+
+All three are bypassable with `--no-verify`, so CI checks the same things
+independently — formatting, lint and commit messages in one `check` job,
+typecheck/test/build across Node 20, 22 and 24.
+
 ## Commits
 
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/),
@@ -88,14 +119,43 @@ fix(xmltv): never write out a null attribute value
 refactor(cli): share the stream-writing helpers between entry points
 ```
 
-Scopes in use: `xmltv`, `grabber`, `cache`, `merge`, `tv-grab`, `cli`, `build`.
-Mark a breaking change with a `!` after the scope (`feat(grabber)!:`) and
-explain the migration in the body — the changelog is written from these.
+Scopes are enforced by [`commitlint.config.js`](./commitlint.config.js): one
+per module — `xmltv`, `grabber`, `cache`, `merge`, `tv-grab`, `cli`, `core` —
+plus `build` and `deps` for the toolchain. A scope is optional, since a `docs:`
+or `test:` change is rarely one module's.
+
+The type decides what the release does: `feat` bumps the minor, `fix` the
+patch, and a `!` after the scope (`feat(grabber)!:`) or a `BREAKING CHANGE:`
+footer bumps the minor too while the version is below 1.0.0. `docs`, `perf`,
+`refactor` and `revert` appear in the changelog; `chore`, `style`, `test`,
+`ci` and `build` are hidden from it.
+
+Write the body for whoever reads the changelog: what changed and why, not how.
 
 ## Releasing
 
-Releases are automated: pushing a `v*` tag triggers
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which
-publishes to npm via OIDC trusted publishing (no token in the repo, provenance
-attached automatically). Update `CHANGELOG.md` and the version in
-`package.json` before tagging.
+Releases are driven by [release-please](https://github.com/googleapis/release-please).
+Nothing is tagged by hand:
+
+1. Conventional commits land on `main`.
+2. release-please keeps a **release PR** open — titled `chore(main): release
+   x.y.z` — that bumps `package.json` and writes the new `CHANGELOG.md`
+   section. It rewrites that PR as more commits arrive.
+3. Merging it creates the tag **and** the GitHub Release with those notes.
+4. That same workflow then publishes to npm via OIDC trusted publishing — no
+   token in the repo, and provenance attached automatically.
+
+So releasing is one action: merge the release PR when the accumulated changes
+are worth shipping.
+
+The publish is a job in
+[`.github/workflows/release.yml`](.github/workflows/release.yml) rather than a
+separate workflow keyed on the tag, because a tag pushed by `GITHUB_TOKEN` does
+not trigger another workflow — a `on: push: tags` publish would silently never
+run.
+
+Version state lives in [`.release-please-manifest.json`](./.release-please-manifest.json);
+the changelog sections and bump behaviour are in
+[`release-please-config.json`](./release-please-config.json). `0.1.0` in the
+changelog is hand-written, describing where the package started; everything
+after it is generated.

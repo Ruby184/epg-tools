@@ -2,25 +2,33 @@
   "name": "epg-tools",
   "version": "0.1.0",
   "description": "Memory-efficient EPG toolkit: parallel grabbing with day-level caching and streaming XMLTV parsing, merging and serialization",
+  "keywords": [
+    "epg",
+    "grabber",
+    "guide",
+    "iptv",
+    "streaming",
+    "xmltv"
+  ],
+  "homepage": "https://github.com/Ruby184/epg-tools#readme",
+  "bugs": {
+    "url": "https://github.com/Ruby184/epg-tools/issues"
+  },
   "license": "MIT",
   "author": "ruby184",
-  "homepage": "https://github.com/Ruby184/epg-tools#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Ruby184/epg-tools.git"
   },
-  "bugs": {
-    "url": "https://github.com/Ruby184/epg-tools/issues"
-  },
-  "type": "module",
-  "sideEffects": [
-    "./dist/cli/main.js"
-  ],
-  "engines": {
-    "node": ">=20"
+  "bin": {
+    "epg": "./dist/cli/main.js"
   },
   "files": [
     "dist"
+  ],
+  "type": "module",
+  "sideEffects": [
+    "./dist/cli/main.js"
   ],
   "exports": {
     ".": {
@@ -48,8 +56,8 @@
       "import": "./dist/tv-grab/main.js"
     }
   },
-  "bin": {
-    "epg": "./dist/cli/main.js"
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsup",
@@ -59,30 +67,39 @@
     "bench": "vitest bench --run",
     "bench:memory": "npm run build && node bench/memory.mjs",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "prepublishOnly": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build",
+    "prepare": "husky"
   },
-  "keywords": [
-    "epg",
-    "xmltv",
-    "iptv",
-    "grabber",
-    "guide",
-    "streaming"
-  ],
   "dependencies": {
     "ky": "^2.0.2",
     "p-queue": "^9.3.0"
   },
   "devDependencies": {
+    "@commitlint/cli": "^20.5.3",
+    "@commitlint/config-conventional": "^20.5.3",
     "@iptv/xmltv": "^1.0.1",
     "@types/node": "^24.0.0",
     "epg-parser": "^0.5.0",
     "fast-xml-parser": "^5.10.1",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "oxfmt": "0.64.0",
+    "oxlint": "^1.79.0",
     "tsup": "^8.5.0",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
   },
-  "publishConfig": {
-    "access": "public"
+  "lint-staged": {
+    "*.{ts,mts,cts,js,mjs,cjs,json}": [
+      "oxfmt",
+      "oxlint --fix"
+    ]
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

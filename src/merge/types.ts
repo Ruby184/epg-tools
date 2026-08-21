@@ -1,5 +1,5 @@
 import type { XmltvDocumentMeta } from '../xmltv/types.js';
-import type { CacheStore, StalenessPolicy } from '../cache/types.js';
+import type { CacheStore } from '../cache/types.js';
 import type { AnySiteConfig } from '../grabber/types.js';
 
 /**

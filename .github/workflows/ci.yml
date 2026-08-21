@@ -6,6 +6,34 @@ on:
   pull_request:
 
 jobs:
+  # Formatting, lint and commit messages are the same on every Node version, so
+  # they run once rather than three times in the matrix below.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # commitlint needs the history the PR adds, not just its tip.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      # The hooks are bypassable with --no-verify, so the messages are checked
+      # here too. On a PR that is every commit it contributes; on a push to
+      # main, the one that arrived.
+      - name: Lint commit messages
+        run: |
+          if [ -n "${{ github.event.pull_request.number }}" ]; then
+            npx commitlint --from "${{ github.event.pull_request.base.sha }}" \
+                           --to "${{ github.event.pull_request.head.sha }}" --verbose
+          else
+            npx commitlint --last --verbose
+          fi
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -18,6 +46,10 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      # The DTD and XSD conformance suites skip silently without xmllint, so CI
+      # installs it — a green run here means they actually ran.
+      - name: Install xmllint
+        run: sudo apt-get update && sudo apt-get install -y libxml2-utils
       - run: npm ci
       - run: npm run typecheck
       - run: npm test

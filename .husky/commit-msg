@@ -1,0 +1,2 @@
+# Conventional Commits — the changelog is generated from these.
+npx --no-install commitlint --edit "$1"

@@ -1,0 +1,3 @@
+# The suite is ~2s; catching a broken push here beats finding out in CI.
+npm run typecheck
+npm test
