@@ -1,21 +1,26 @@
 /**
- * The README's examples, compiled.
+ * The documentation's examples, compiled.
  *
  * Not a test — nothing here runs. It is typechecked with everything else, so a
  * change to the API that would make the documentation wrong fails the build
  * instead of being found by whoever copies it out.
  *
- * Keep it in step with the code blocks in README.md.
+ * Keep it in step with the code blocks in README.md and docs/*.md. The banners
+ * below name the page each group of examples comes from.
  */
 
-import { defineConfig, defineSiteConfig } from '../src/main.js';
+import { build, defineConfig, defineSiteConfig, guideStream } from '../src/main.js';
 import { envReader } from '../src/core/answers.js';
+import {
+  parseXmltvFile, parseXmltvString, writeXmltvStream, formatXmltvDate, parseXmltvDate, xmltvDate,
+  ProgrammeBuilder, XmltvDocumentBuilder,
+} from '../src/xmltv/main.js';
 import {
   defineCapability, defineStages, DEFAULT_CAPABILITIES, GrabberError, runXmltvGrabber,
   lineupsCapability, lineupsFromSites,
 } from '../src/tv-grab/main.js';
 
-// --- Quick start -----------------------------------------------------------
+// --- README: Quick start ---------------------------------------------------
 const example = defineSiteConfig({
   site: 'example.tv',
   channels: [{ xmltvId: 'one.example.tv', siteId: '101', name: 'Example One' }],
@@ -26,19 +31,15 @@ const example = defineSiteConfig({
     return http.post('epg', { json: { channel_id: channel.siteId, date: date.toISOString() } })
       .json<{ items: { start: string; end: string; title: string }[] }>();
   },
-  parseDay({ data, channel }) {
-    return data.items.map((item) => ({
-      channel: channel.xmltvId,
-      start: new Date(item.start),
-      stop: new Date(item.end),
-      title: [{ value: item.title, lang: 'sk' }],
-    }));
+  parseDay({ data, programme }) {
+    return data.items.map((item) =>
+      programme(new Date(item.start), item.title).stop(new Date(item.end)));
   },
 });
 
 export const quickStart = defineConfig({ sites: [example], days: 14, output: 'public/epg.xml' });
 
-// --- Batching: how much one request covers --------------------------------
+// --- docs/site-config.md: Batching ----------------------------------------
 interface RawProgramme { start: string; title: string }
 
 const byChannels = defineSiteConfig({
@@ -101,7 +102,36 @@ const byPairs = defineSiteConfig({
 
 export const batched = defineConfig({ sites: [byChannels, byDays, byPairs], output: 'guide.xml' });
 
-// --- Rate limits, and being told to slow down -----------------------------
+// --- docs/site-config.md: Building programmes -----------------------------
+interface RawItem {
+  start: string;
+  end: string;
+  title: string;
+  summary: string;
+  genre: string;
+  episode: number;
+  season: number;
+  rating: string;
+}
+
+export const built = defineSiteConfig({
+  site: 'example.tv',
+  channels: [{ xmltvId: 'one.example.tv', siteId: '101', lang: 'sk' }],
+  async request({ http }) {
+    return http.get('epg').json<{ items: RawItem[] }>();
+  },
+  parseDay({ data, programme }) {
+    return data.items.map((item) => programme(new Date(item.start), item.title)
+      .stop(new Date(item.end))
+      .desc(item.summary)
+      .category(item.genre)
+      .episode(item.episode, item.season)
+      .video({ quality: 'HDTV' })
+      .rating(item.rating, { system: 'SK' }));
+  },
+});
+
+// --- docs/site-config.md: Rate limits and backoff --------------------------
 export const paced = defineSiteConfig({
   site: 'example.tv',
   channels: [{ xmltvId: 'one.example.tv', siteId: '101' }],
@@ -113,7 +143,7 @@ export const paced = defineSiteConfig({
   parseDay: () => [],
 });
 
-// --- A channel list that has to be fetched ---------------------------------
+// --- docs/site-config.md: A channel list that has to be fetched ------------
 const fetchedChannels = defineSiteConfig({
   site: 'example.tv',
   ky: { prefix: 'https://api.example.tv', headers: { 'x-api-key': 'k' } },
@@ -133,7 +163,7 @@ const fetchedChannels = defineSiteConfig({
       id: xmltvId,
       displayName: (data?.names ?? []).map((name) => ({ value: name.text, lang: name.lang })),
       ...(data?.logo ? { icon: [{ src: data.logo }] } : {}),
-      ...(data?.lcn ? { extra: [{ name: 'lcn', text: String(data.lcn) }] } : {}),
+      ...(data?.lcn ? { extra: [{ name: 'lcn', value: String(data.lcn) }] } : {}),
     };
   },
   async request({ channel, date, http }) {
@@ -163,7 +193,7 @@ export const wrongCap = defineSiteConfig({
   parseDay: () => [],
 });
 
-// --- Asking for more than channels ----------------------------------------
+// --- docs/tv-grab.md: Asking for more than channels -----------------------
 export const stages = defineStages([{
   name: 'start',
   next: 'select-channels',
@@ -188,7 +218,7 @@ export const envFirst = defineConfig(
   { readers: (supplied) => [envReader('TV_GRAB_SK_EXAMPLE_'), ...supplied] },
 );
 
-// --- Capabilities of your own ---------------------------------------------
+// --- docs/tv-grab.md: Capabilities of your own ----------------------------
 declare function myLineupsXml(): string;
 declare function myLineupXml(id: string | undefined): string;
 
@@ -220,7 +250,7 @@ export const withCapability = (): Promise<number> => runXmltvGrabber(shared, {
   capabilities: [...DEFAULT_CAPABILITIES, myLineups],
 });
 
-// --- Channel lineups -------------------------------------------------------
+// --- docs/tv-grab.md: Channel lineups -------------------------------------
 export const withLineups = (): Promise<number> => runXmltvGrabber(shared, {
   description: 'Slovakia (tv_grab_sk_example)',
   version: '0.1.0',
@@ -247,3 +277,109 @@ export const typo = defineStages([{
   // @ts-expect-error — caught here, rather than at the first --configure.
   fields: [{ type: 'strng', id: 'username', title: 'U', description: 'D' }],
 }]);
+
+// --- docs/configuration.md: EpgConfig reference -----------------------------
+export const configured = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  days: 14,
+  siteConcurrency: 2,
+  localConcurrency: 16,
+  indent: 2,
+  cache: {
+    dir: '.epg-cache',
+    format: 'ndjson',
+    staleness: { alwaysRefetchDays: 1, maxAgeDays: 7 },
+    prune: true,
+  },
+  merge: { channelStrategy: 'merge-programmes', programmeStrategy: 'merge' },
+  meta: {
+    generatorInfoName: 'epg-tools',
+    generatorInfoUrl: 'https://github.com/Ruby184/epg-tools',
+    sourceInfoName: 'Example TV',
+    sourceInfoUrl: 'https://example.tv',
+    sourceDataUrl: 'https://api.example.tv/epg',
+  },
+});
+
+// --- docs/api.md: Running a build ------------------------------------------
+export const run = async (): Promise<number> => {
+  const summary = await build(configured, { logger: console.log });
+  return summary.fetched + summary.fromCache + summary.failed.length;
+};
+
+export const streamed = async (): Promise<string> => {
+  let out = '';
+
+  for await (const chunk of guideStream(configured, { offset: 1 })) {
+    out += chunk;
+  }
+
+  return out;
+};
+
+// --- docs/xmltv.md: Parsing -------------------------------------------------
+export const parseEvents = async (): Promise<number> => {
+  let programmes = 0;
+
+  for await (const event of parseXmltvFile('guide.xml')) {
+    if (event.type === 'programme') {
+      programmes += 1;
+    } else if (event.type === 'warning') {
+      console.warn(`${event.value.code} at line ${event.value.line}: ${event.value.message}`);
+    }
+  }
+
+  return programmes;
+};
+
+// Every parse entry point takes the same options.
+export const tolerant = (xml: string): number => parseXmltvString(xml, {
+  tolerateMissingId: true,
+  rootScanLimit: 2 * 1024 * 1024,
+  timezones: { BST: 60, CET: 60, CEST: 120 },
+}).warnings.length;
+
+// --- docs/xmltv.md: Serializing ---------------------------------------------
+export const pretty = writeXmltvStream({ meta: {}, channels: [], programmes: [] }, { indent: 2 });
+
+// --- docs/xmltv.md: Builders ------------------------------------------------
+export const programme = new ProgrammeBuilder({
+  channel: 'one.example.tv',
+  start: '20260717200000 +0200',
+  title: 'The Nine O\'Clock News',
+  lang: 'en',
+})
+  .stop('20260717203000 +0200')
+  .desc('The day in review.')
+  .category('News')
+  .episode(3, 2)
+  .actor('Jane Doe', { role: 'Presenter' })
+  .build();
+
+export const document = new XmltvDocumentBuilder()
+  .generatorInfo('epg-tools', 'https://github.com/Ruby184/epg-tools')
+  .sourceInfo('Example TV', 'https://example.tv')
+  .channel({ id: 'one.example.tv', displayName: 'One', lang: 'en' }, (c) =>
+    c.displayName('Jeden', 'sk').icon('https://example.tv/one.png'))
+  .programme({ channel: 'one.example.tv', start: '20260717200000 +0200', title: 'News' }, (p) =>
+    p.desc('Evening news').episode(3));
+
+export const bound = new XmltvDocumentBuilder()
+  .addProgramme({ channel: 'one.example.tv', start: '20260717200000 +0200', title: 'News' })
+    .desc('Evening news')
+    .episode(3)
+    .end()
+  .addChannel({ id: 'one.example.tv', displayName: 'One' })
+    .icon('https://example.tv/one.png')
+    .end();
+
+export const asXml = document.toXml({ indent: 2 });
+export const asEvents = document.toEvents();
+export const asStream = document.toStream();
+
+// --- docs/xmltv.md: Dates ---------------------------------------------------
+export const roundTripped = (): string => {
+  const d = parseXmltvDate('20260717 +0200'); // day precision, +02:00 preserved
+  return `${formatXmltvDate(d)} ${formatXmltvDate(xmltvDate(d, { precision: 14 }))}`;
+};

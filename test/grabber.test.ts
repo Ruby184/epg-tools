@@ -251,6 +251,63 @@ describe('grab', () => {
     expect(written!.meta.grabbedAt).toBe(NOW.toISOString());
   });
 
+  it('parses with a builder bound to the channel and its language', async () => {
+    const cache = new MemoryCache();
+
+    const config = makeConfig({
+      channels: [{ xmltvId: 'one.example', siteId: '1', lang: 'sk' }],
+      parseDay({ programme, day }) {
+        // No channel id anywhere, and no `lang` repeated per element.
+        return [
+          programme(new Date(`${day}T06:00:00.000Z`), 'Ranné správy')
+            .stop(new Date(`${day}T07:00:00.000Z`))
+            .desc('Prehľad dňa')
+            .category('news')
+            .episode(3, 2),
+          programme(new Date(`${day}T20:00:00.000Z`), 'Film', { lang: 'en' }).new(),
+        ];
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    expect(summary.fetched).toBe(1);
+    const written = cache.get({ site: 'example.com', channelId: 'one.example', day: TODAY })!.programmes;
+
+    expect(written.map((p) => p.channel)).toEqual(['one.example', 'one.example']);
+    expect(written[0]!.title).toEqual([{ value: 'Ranné správy', lang: 'sk' }]);
+    expect(written[0]!.desc).toEqual([{ value: 'Prehľad dňa', lang: 'sk' }]);
+    expect(written[0]!.category).toEqual([{ value: 'news', lang: 'sk' }]);
+    expect(written[0]!.stop?.toISOString()).toBe(`${TODAY}T07:00:00.000Z`);
+    // `.episode(3, 2)` is episode 3 of season 2, in both systems the builder emits.
+    expect(written[0]!.episodeNum).toEqual([
+      { system: 'xmltv_ns', value: '1.2.0/1' },
+      { system: 'onscreen', value: 'S02E03' },
+    ]);
+    // A programme may say its own language over the channel's.
+    expect(written[1]!.title).toEqual([{ value: 'Film', lang: 'en' }]);
+    expect(written[1]!.new).toBe(true);
+  });
+
+  it('takes builders and plain programmes in the same parse', async () => {
+    const cache = new MemoryCache();
+
+    const config = makeConfig({
+      parseDay({ programme, channel: ch, day }) {
+        return [
+          programme(new Date(`${day}T06:00:00.000Z`), 'Built'),
+          { channel: ch.xmltvId, start: new Date(`${day}T08:00:00.000Z`), title: [{ value: 'Plain' }] },
+        ];
+      },
+    });
+
+    await grab([config], { cache, now: NOW });
+
+    const written = cache.get({ site: 'example.com', channelId: 'one.example', day: TODAY })!.programmes;
+    expect(written.map((p) => p.title[0]?.value)).toEqual(['Built', 'Plain']);
+    expect(written.every((p) => p.channel === 'one.example')).toBe(true);
+  });
+
   it('records a failed task without aborting the other tasks', async () => {
     const cache = new MemoryCache();
     const boom = new Error('network down');

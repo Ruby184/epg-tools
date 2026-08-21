@@ -1,4 +1,6 @@
 import type { KyInstance, Options as KyOptions } from 'ky';
+import type { ProgrammeBuilder, ProgrammeOptions } from '../xmltv/builder.js';
+import type { DateInput } from '../xmltv/date.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheStore, StalenessPolicy } from '../cache/types.js';
 
@@ -13,6 +15,11 @@ export interface GrabberChannel<TData = unknown> {
   /** Channel id understood by the source site. */
   siteId: string;
   name?: string;
+  /**
+   * The language this channel broadcasts in. Used as the default `lang` for
+   * every text element the scoped {@link ParseContext.programme} builds, so a
+   * site says it once here instead of on every title and description.
+   */
   lang?: string;
   logo?: string;
   /**
@@ -254,7 +261,38 @@ export interface ParseContext<TRaw, TData = unknown> {
   date: Date;
   day: string;
   data: TRaw;
+  /**
+   * A programme builder for this channel-day, with the parts a parse should not
+   * have to repeat already filled in: the channel is this context's channel,
+   * and text elements default to its `lang`.
+   *
+   * ```ts
+   * parseDay({ data, programme }) {
+   *   return data.items.map((item) => programme(item.start, item.title)
+   *     .stop(item.end)
+   *     .desc(item.summary)
+   *     .category(item.genre));
+   * }
+   * ```
+   *
+   * Return the builders as they are — `parseDay` takes either those or plain
+   * {@link XmltvProgramme} objects, in any mix — or call `.build()` yourself if
+   * you would rather hand back the object.
+   *
+   * `start` is a {@link DateInput}: a `Date`, unix **seconds**, or an XMLTV
+   * datetime string. An ISO timestamp out of a JSON API is none of those, so
+   * it goes in as `new Date(item.start)` — the same as it would in a plain
+   * programme object.
+   */
+  programme(start: DateInput, title: string, options?: ProgrammeOptions): ProgrammeBuilder;
 }
+
+/**
+ * What a parse may hand back per programme: the object, or a builder for it
+ * that the grabber will build.
+ */
+export type ParsedProgramme = XmltvProgramme | ProgrammeBuilder;
+
 
 /**
  * A site: where to fetch from, how much of the grid one request covers, and how
@@ -327,7 +365,7 @@ export interface SiteConfig<
    * request covered, each with the same `data`. `programme.channel` is
    * normalized to `xmltvId` afterwards.
    */
-  parseDay(ctx: ParseContext<TRaw, TData>): XmltvProgramme[] | Promise<XmltvProgramme[]>;
+  parseDay(ctx: ParseContext<TRaw, TData>): ParsedProgramme[] | Promise<ParsedProgramme[]>;
   /** Customize the `<channel>` element. Defaults to id + name + logo. */
   channelInfo?(channel: GrabberChannel<TData>): XmltvChannel;
 }

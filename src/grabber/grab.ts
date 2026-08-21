@@ -2,12 +2,15 @@ import PQueue from 'p-queue';
 import { DEFAULT_STALENESS, isStale } from '../cache/main.js';
 import type { StalenessPolicy } from '../cache/types.js';
 import { dayRange, dayToDate, toDayString } from '../core/days.js';
+import { ProgrammeBuilder } from '../xmltv/builder.js';
+import type { XmltvProgramme } from '../xmltv/types.js';
 import { resolveChannels } from './channels.js';
 import { sitePacing } from './pacing.js';
 import type {
   AnySiteConfig,
   BatchingOption,
   BatchMode,
+  ParsedProgramme,
   RequestContextFor,
   GrabberChannel,
   GrabOptions,
@@ -22,6 +25,11 @@ import type {
  * buys nothing but open files and live programme lists.
  */
 const DEFAULT_LOCAL_CONCURRENCY = 16;
+
+/** A parse may hand back either form; the cache only knows the object. */
+function built(entry: ParsedProgramme): XmltvProgramme {
+  return entry instanceof ProgrammeBuilder ? entry.build() : entry;
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -162,9 +170,23 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // discovers more work to do.
     const store = (channel: GrabberChannel, day: string, data: unknown): Promise<void> =>
       local.add(async () => {
-        const parsed = await config.parseDay({ channel, date: dayToDate(day), day, data });
+        const parsed = await config.parseDay({
+          channel,
+          date: dayToDate(day),
+          day,
+          data,
+          // Bound to the channel-day being parsed, so a parse repeats neither
+          // the id nor the language on every programme it builds.
+          programme: (start, title, options) => new ProgrammeBuilder({
+            channel: channel.xmltvId,
+            start,
+            title,
+            ...(channel.lang === undefined ? {} : { lang: channel.lang }),
+            ...options,
+          }),
+        });
         const programmes = parsed
-          .map((programme) => ({ ...programme, channel: channel.xmltvId }))
+          .map((entry) => ({ ...built(entry), channel: channel.xmltvId }))
           .sort((a, b) => a.start.getTime() - b.start.getTime());
 
         await cache.write({ site: config.site, channelId: channel.xmltvId, day }, programmes, { grabbedAt });
