@@ -1,6 +1,6 @@
 {
   "name": "epg-tools",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Memory-efficient EPG toolkit: parallel grabbing with day-level caching and streaming XMLTV parsing, merging and serialization",
   "keywords": [
     "epg",
