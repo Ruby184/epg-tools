@@ -95,10 +95,8 @@
     "vitest": "^4.1.11"
   },
   "lint-staged": {
-    "*.{ts,mts,cts,js,mjs,cjs,json}": [
-      "oxfmt",
-      "oxlint --fix"
-    ]
+    "*.{ts,mts,cts,js,mjs,cjs,json}": "oxfmt",
+    "*.{ts,mts,cts,js,mjs,cjs}": "oxlint --fix"
   },
   "engines": {
     "node": ">=20"
