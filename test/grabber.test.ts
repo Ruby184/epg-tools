@@ -1153,6 +1153,81 @@ describe('grab with batching: both', () => {
   });
 });
 
+describe('grab over a grid too big to plan by scanning', () => {
+  const CHANNELS = 120;
+  const DAYS = 14;
+  const all = Array.from({ length: CHANNELS }, (_, index) =>
+    channel(`c${String(index).padStart(3, '0')}`),
+  );
+  const window = Array.from({ length: DAYS }, (_, index) => {
+    const date = new Date(NOW);
+    date.setUTCDate(date.getUTCDate() + index);
+    return date.toISOString().slice(0, 10);
+  });
+
+  it("asks once per channel-day, a day at a time in the site's channel order", async () => {
+    const cache = new MemoryCache();
+    const asked: string[] = [];
+
+    const config = makeConfig({
+      channels: all,
+      days: DAYS,
+      async request({ channel: ch, day }) {
+        asked.push(`${ch.xmltvId} ${day}`);
+        return {};
+      },
+      parseDay: () => [],
+    });
+
+    await grab([config], { cache, now: NOW, siteConcurrency: 1 });
+
+    expect(asked).toHaveLength(CHANNELS * DAYS);
+    // Requests are grouped by day first — a day group is what gets cut into
+    // channel groups, whether or not the mode batches either axis.
+    expect(asked).toEqual(window.flatMap((day) => all.map((ch) => `${ch.xmltvId} ${day}`)));
+  });
+
+  it('cuts the same grid into batches without losing a channel-day', async () => {
+    const cache = new MemoryCache();
+    // Half the channels are fresh on the first day, so the plan has to trim
+    // that day out of the groups that no longer need it.
+    for (const ch of all.slice(0, CHANNELS / 2)) {
+      cache.seed(
+        { site: 'grid.example', channelId: ch.xmltvId, day: window[0]! },
+        { grabbedAt: NOW.toISOString(), programmeCount: 1 },
+      );
+    }
+
+    const covered: string[] = [];
+
+    const config: SiteConfig<unknown, ChannelsDaysBatching> = {
+      site: 'grid.example',
+      channels: all,
+      days: DAYS,
+      batching: { mode: 'both', channelsPerRequest: 25, daysPerRequest: 5 },
+      staleness: { alwaysRefetchDays: 0 },
+      async request({ channelDays }) {
+        covered.push(...channelDays.map(({ channel: ch, day }) => `${ch.xmltvId} ${day}`));
+        return {};
+      },
+      parseDay: () => [],
+    };
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    const expected = all.flatMap((ch) =>
+      window
+        .filter((day) => !(day === window[0] && all.indexOf(ch) < CHANNELS / 2))
+        .map((day) => `${ch.xmltvId} ${day}`),
+    );
+
+    expect(covered.slice().sort()).toEqual(expected.slice().sort());
+    expect(summary.fetched).toBe(expected.length);
+    expect(summary.fromCache).toBe(CHANNELS / 2);
+    expect(summary.failed).toEqual([]);
+  });
+});
+
 describe('grab with a site that is missing a mandatory member', () => {
   /** What the site failed with, for a config the types would have caught. */
   async function failure(config: Partial<SiteConfig<unknown>>): Promise<string> {

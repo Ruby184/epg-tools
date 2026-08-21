@@ -356,23 +356,59 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // `maxChannels`. Both axes are trimmed to what the group actually needs, so
     // a fresh channel-day is never what a request is made for. Channel order
     // follows `channels`, day order the window.
-    const plan = (stale: Pair[]): Request[] =>
-      chunk(window, maxDays).flatMap((dayGroup) => {
-        const pending = stale.filter((pair) => dayGroup.includes(pair.day));
+    //
+    // The stale pairs are indexed by day first, because every question the
+    // grouping asks is "is this channel stale on this day" — asked once per
+    // channel per day either way, but a lookup rather than a scan of every
+    // stale pair. Scanning is what made planning cost with the square of the
+    // channel count: a few hundred channels over a fortnight is millions of
+    // comparisons before the first request goes out.
+    const plan = (stale: Pair[]): Request[] => {
+      const staleByDay = new Map<string, Set<GrabberChannel>>();
+
+      for (const { channel, day } of stale) {
+        let channelsOfDay = staleByDay.get(day);
+
+        if (!channelsOfDay) {
+          channelsOfDay = new Set();
+          staleByDay.set(day, channelsOfDay);
+        }
+
+        channelsOfDay.add(channel);
+      }
+
+      // Day groups are cut from the whole window rather than from the stale
+      // days, so which days share a request does not shift with what happens
+      // to be cached.
+      return chunk(window, maxDays).flatMap((dayGroup) => {
+        const staleOn = dayGroup.map((day) => staleByDay.get(day));
         const staleChannels = channels.filter((channel) =>
-          pending.some((pair) => pair.channel === channel),
+          staleOn.some((channelsOfDay) => channelsOfDay?.has(channel)),
         );
 
         return chunk(staleChannels, maxChannels).map((group) => {
-          const pairs = pending.filter((pair) => group.includes(pair.channel));
+          // Channel-major, then day-ascending: the order `channelDays`
+          // promises.
+          const pairs: Pair[] = [];
+          const days = new Set<string>();
+
+          for (const channel of group) {
+            for (const [index, day] of dayGroup.entries()) {
+              if (staleOn[index]?.has(channel)) {
+                pairs.push({ channel, day });
+                days.add(day);
+              }
+            }
+          }
 
           return {
             channels: group,
-            days: dayGroup.filter((day) => pairs.some((pair) => pair.day === day)),
+            days: dayGroup.filter((day) => days.has(day)),
             pairs,
           };
         });
       });
+    };
 
     // The context for one request, in the shape this site's mode declares —
     // plus the channel-days it is for, which the plan already worked out.
