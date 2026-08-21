@@ -2,7 +2,8 @@ import PQueue from 'p-queue';
 import { DEFAULT_STALENESS, isStale } from '../cache/main.js';
 import type { StalenessPolicy } from '../cache/types.js';
 import { dayRange, dayToDate, toDayString } from '../core/days.js';
-import { resolveChannels, siteHttp } from './channels.js';
+import { resolveChannels } from './channels.js';
+import { sitePacing } from './pacing.js';
 import type {
   AnySiteConfig,
   BatchingOption,
@@ -113,7 +114,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
    * One queue for the whole run rather than one per site, because what it
    * bounds — open files, and how many parsed programme lists are alive at once
    * — is a property of the process, not of a site. A site's own `concurrency`
-   * and `delayMs` are about being polite to that site, so cache work must not
+   * and `rateLimit` are about being polite to that site, so cache work must not
    * be throttled by them, nor take a request's slot.
    */
   const local = new PQueue({ concurrency: Math.max(1, options.localConcurrency ?? DEFAULT_LOCAL_CONCURRENCY) });
@@ -132,23 +133,17 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       throw new Error(`Site "${config.site}" must define request`);
     }
 
-    // The signal rides on the instance, so every call a site makes through it
-    // is abortable without the site having to pass it on.
-    const http = siteHttp(config, signal);
+    // The queue and the client together: the signal rides on the instance, so
+    // every call a site makes through it is abortable without the site having
+    // to pass it on, and a slow-down the client meets stops the queue.
+    const { queue: inner, http, dispose } = sitePacing(config, { ...(signal ? { signal } : {}), log });
     const window = [...dayRange(startDay, config.days ?? options.days ?? 7)];
     const { manyChannels, manyDays, maxChannels, maxDays } = resolveBatching(config.batching);
     const policy: StalenessPolicy = { ...DEFAULT_STALENESS, ...options.staleness, ...config.staleness };
     const grabbedAt = now.toISOString();
 
-    const inner = new PQueue({
-      concurrency: config.concurrency ?? 1,
-      ...(config.delayMs !== undefined && config.delayMs > 0
-        ? { interval: config.delayMs, intervalCap: 1 }
-        : {}),
-    });
-
     // Fetching the channel list is a request to the same source as the rest, so
-    // it goes through the same queue: a site's `delayMs` spaces the first EPG
+    // it goes through the same queue: a site's `rateLimit` spaces the first EPG
     // request after it, rather than the two landing back to back.
     const channels = await inner.add(
       () => resolveChannels(config, { http, ...(signal ? { signal } : {}) }),
@@ -190,7 +185,6 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
 
           fromCache++;
           log(`[${config.site}] ${channel.xmltvId} ${day}: fresh in cache, skipping`);
-          return undefined;
         }, queued))),
       );
 
@@ -269,7 +263,11 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       }, queued).catch(() => {});
     }
 
-    await inner.onIdle();
+    try {
+      await inner.onIdle();
+    } finally {
+      dispose();
+    }
   };
 
   const outer = new PQueue({ concurrency: Math.max(1, options.siteConcurrency ?? configs.length) });

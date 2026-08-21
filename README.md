@@ -65,7 +65,7 @@ const example = defineSiteConfig({
     { xmltvId: 'one.example.tv', siteId: '101', name: 'Example One', logo: 'https://example.tv/one.png' },
   ],
   concurrency: 2,
-  delayMs: 250,
+  rateLimit: { requests: 8, perMs: 1_000 },
   ky: {
     prefix: 'https://api.example.tv',
     headers: { 'x-api-key': process.env.EXAMPLE_KEY! },
@@ -593,7 +593,7 @@ them" would be advice that does not include them.
 
 Everything that shapes a request belongs to the site, not the run: each site
 gets its **own** `ky` instance built from its `ky` options, its own request
-queue (`concurrency`, `delayMs`), and its own `days`, `staleness` and
+queue (`concurrency`, `rateLimit`), and its own `days`, `staleness` and
 `batching`. Nothing is shared, so sites with different rate limits,
 credentials or hosts coexist in one process — you do not need a process per
 site to keep their settings apart, and since the config is TypeScript, per-site
@@ -606,6 +606,46 @@ ky: { prefix: 'https://api.a.example.tv', headers: { 'x-api-key': process.env.A_
 That instance is what `request` receives as `http`, and the run's abort signal
 is baked into it — anything asked for through it is abortable whether or not a
 site remembered to pass the signal on.
+
+### Rate limits, and being told to slow down
+
+`concurrency` says how many requests a site may have in flight; `rateLimit` says
+how often it may send them, in the terms the source itself states:
+
+```ts
+rateLimit: { requests: 20, perMs: 60_000 },   // 20 a minute
+rateLimit: { requests: 1, perMs: 250 },       // or plain spacing: one a quarter second
+```
+
+The window **slides** (`strict: false` for the cheaper fixed one). That matters
+more than it sounds: a fixed window lets the full allowance go out at the end of
+one window and again at the start of the next — up to twice the rate over the
+interval the source is actually counting, which is how a config that looks
+compliant still earns a `429`. At one request per window the two are the same
+thing, so it costs nothing to leave on.
+
+And when one arrives anyway, the whole site stops:
+
+```ts
+backoff: { statuses: [429, 503], fallbackMs: 5_000, maxMs: 60_000, adapt: true },  // the defaults
+```
+
+A `429` is news about the site, not about the one request that got it — every
+other request queued behind it is just as unwelcome. So the site's request queue
+is **paused** for as long as `Retry-After` asks (delta-seconds or an HTTP date,
+capped by `maxMs`, `fallbackMs` when the header says nothing), and then resumes
+**with its tasks intact**: nothing is dropped, nothing is refetched, the channel
+days waiting their turn simply wait a little longer. Requests already in flight
+are left alone, and `ky`'s own per-request retry then does its usual job on top.
+
+`adapt` also halves the site's `concurrency` on a slow-down and gives it back
+one clean response at a time, ten in a row per step — a retreat that is quicker
+than the recovery. At the default concurrency of 1 there is nothing to halve, so
+it only does anything for a site configured to run several requests at once.
+Pass `backoff: false` to leave the whole business to `ky`.
+
+Both are per site, like everything else here: one source's rate limit never
+paces another's, and one source's `429` never stops another's queue.
 
 ### A channel list that has to be fetched
 
@@ -660,8 +700,8 @@ The function is called only when channels are actually wanted, so
 the network, and `--configure` resolves the list *after* asking for the
 password — which is what lets the account decide what is on offer. Fetching the
 list is a request to the same source as the rest, so it goes through the site's
-own queue: `delayMs` spaces the first day fetched after it instead of the two
-landing together.
+own queue: a `rateLimit` spaces the first day fetched after it instead of the
+two landing together.
 
 A build resolves it **once** and hands the same list to both halves, for the
 reason it resolves a `defineConfig` factory once — the merge reads what the grab
@@ -726,7 +766,7 @@ entry per channel-day the run never reached.
 Cache work is queued too, and separately from requests: the staleness sweep at
 the start of a run and each channel-day's `parseDay`-and-write go through one
 queue for the whole process, `localConcurrency` wide (default 16). A site's
-`concurrency` and `delayMs` are about being kind to *that source*, so cache work
+`concurrency` and `rateLimit` are about being kind to *that source*, so cache work
 neither waits behind a rate limit nor takes a request's slot — what this bounds
 is open files and how many parsed programme lists are alive at once, which a
 14-day window over a few hundred channels would otherwise start all at once.
@@ -800,7 +840,7 @@ const example = defineSiteConfig({
 
 The bare string form (`batching: 'days'`) is the same thing with no caps. Each mode accepts only the caps it can use — `daysPerRequest` under `'channels'` is a type error rather than a number that is silently ignored — and the context is typed from the mode, so a `'days'` site destructuring `day` does not compile.
 
-Caching stays per channel-day whatever the mode, so a run only ever asks for the channel-days that are missing or stale: fresh ones are dropped before the grid is cut into requests, which is why a `'days'` request's `days` can have gaps in it (`from`/`to` still span them). `concurrency` and `delayMs` throttle whole requests. A failed request fails every channel-day it covered; one channel-day's `parseDay` error only drops that channel-day. Batching both axes at once is the one case where a request can span a channel-day that was already fresh — narrow the query with `channelDays`, or answer the whole rectangle and let the extra be ignored: a fresh channel-day is neither parsed nor rewritten either way.
+Caching stays per channel-day whatever the mode, so a run only ever asks for the channel-days that are missing or stale: fresh ones are dropped before the grid is cut into requests, which is why a `'days'` request's `days` can have gaps in it (`from`/`to` still span them). `concurrency` and `rateLimit` throttle whole requests. A failed request fails every channel-day it covered; one channel-day's `parseDay` error only drops that channel-day. Batching both axes at once is the one case where a request can span a channel-day that was already fresh — narrow the query with `channelDays`, or answer the whole rectangle and let the extra be ignored: a fresh channel-day is neither parsed nor rewritten either way.
 
 ## Merge strategies
 

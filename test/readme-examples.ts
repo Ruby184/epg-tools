@@ -19,6 +19,8 @@ import {
 const example = defineSiteConfig({
   site: 'example.tv',
   channels: [{ xmltvId: 'one.example.tv', siteId: '101', name: 'Example One' }],
+  concurrency: 2,
+  rateLimit: { requests: 8, perMs: 1_000 },
   ky: { prefix: 'https://api.example.tv', headers: { 'x-api-key': 'k' }, retry: 2 },
   async request({ channel, date, http }) {
     return http.post('epg', { json: { channel_id: channel.siteId, date: date.toISOString() } })
@@ -98,6 +100,18 @@ const byPairs = defineSiteConfig({
 });
 
 export const batched = defineConfig({ sites: [byChannels, byDays, byPairs], output: 'guide.xml' });
+
+// --- Rate limits, and being told to slow down -----------------------------
+export const paced = defineSiteConfig({
+  site: 'example.tv',
+  channels: [{ xmltvId: 'one.example.tv', siteId: '101' }],
+  rateLimit: { requests: 20, perMs: 60_000 },
+  backoff: { statuses: [429, 503], fallbackMs: 5_000, maxMs: 60_000, adapt: true },
+  async request() {
+    return {};
+  },
+  parseDay: () => [],
+});
 
 // --- A channel list that has to be fetched ---------------------------------
 const fetchedChannels = defineSiteConfig({

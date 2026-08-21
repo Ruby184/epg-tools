@@ -225,6 +225,30 @@ export type ModeOf<TBatching extends BatchingOption> = TBatching extends BatchMo
     ? TMode
     : never;
 
+/**
+ * How a site retreats when the source tells it to.
+ *
+ * A `429` is news about the site, not about one request: every other request
+ * in flight or waiting is just as unwelcome. So the site's whole request queue
+ * stops for as long as `Retry-After` asks — nothing is dropped, the queue keeps
+ * its tasks and hands them out again afterwards — and only then does the usual
+ * per-request retry get its turn.
+ */
+export interface SiteBackoff {
+  /** Statuses that mean stop. Defaults to 429 and 503, the two that carry `Retry-After`. */
+  statuses?: number[];
+  /** How long to hold when there is no `Retry-After` to go by. Defaults to 5000. */
+  fallbackMs?: number;
+  /** Cap on a single hold, however long `Retry-After` asks for. Defaults to 60000. */
+  maxMs?: number;
+  /**
+   * Halve the site's concurrency on a slow-down and give it back one clean
+   * response at a time. Defaults to true, and does nothing at the default
+   * concurrency of 1 — there is nothing to halve.
+   */
+  adapt?: boolean;
+}
+
 export interface ParseContext<TRaw, TData = unknown> {
   channel: GrabberChannel<TData>;
   date: Date;
@@ -253,8 +277,24 @@ export interface SiteConfig<
   days?: number;
   /** Max concurrent requests for this site. Defaults to 1. */
   concurrency?: number;
-  /** Delay in ms between requests within this site's queue. Defaults to 0. */
-  delayMs?: number;
+  /**
+   * How often this site may be asked — what the source says it allows. "20
+   * requests a minute" is `{ requests: 20, perMs: 60_000 }`, and plain spacing
+   * between single requests is `{ requests: 1, perMs: 250 }`. Unset, requests
+   * go out as fast as `concurrency` allows.
+   *
+   * The window slides unless you set `strict: false`. A fixed window is
+   * cheaper, but with more than one request per window it lets a burst straddle
+   * the boundary — the full allowance at the end of one window and again at the
+   * start of the next, which is twice the rate over the interval the source is
+   * actually counting.
+   */
+  rateLimit?: { requests: number; perMs: number; strict?: boolean };
+  /**
+   * What to do when the source says slow down — see {@link SiteBackoff}. On by
+   * default; `false` turns it off and leaves the reaction to `ky`'s own retry.
+   */
+  backoff?: false | SiteBackoff;
   /**
    * How much of the channel × day grid one {@link request} call covers: a bare
    * {@link BatchMode}, or that mode with a cap on the request's size

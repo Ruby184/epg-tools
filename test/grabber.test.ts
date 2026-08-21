@@ -299,12 +299,59 @@ describe('grab', () => {
     expect(maxInFlight).toBe(1);
   });
 
+  it('stops sending for a site that answers 429, and finishes the run after', async () => {
+    // One 429 with a short Retry-After, then normal service.
+    let hits = 0;
+    const server = createServer((_request, response) => {
+      hits++;
+
+      if (hits === 1) {
+        response.writeHead(429, { 'retry-after': '0' });
+      } else {
+        response.writeHead(200, { 'content-type': 'application/json' });
+      }
+
+      response.end('{}');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      const cache = new MemoryCache();
+      const logs: string[] = [];
+      const asked: number[] = [];
+
+      const config = makeConfig({
+        days: 3,
+        backoff: { fallbackMs: 40, maxMs: 40 },
+        async request({ http }) {
+          asked.push(Date.now());
+          // retry: 0, so the 429 reaches the grabber as a failure rather than
+          // being resent inside the request — the hold is the queue's doing,
+          // not ky's.
+          return http.get(`http://127.0.0.1:${port}/epg`, { retry: 0 }).json();
+        },
+      });
+
+      const summary = await grab([config], { cache, now: NOW, logger: (m) => logs.push(m) });
+
+      // All three days were attempted — the two behind the 429 were held, not
+      // dropped — and only the first failed.
+      expect(asked).toHaveLength(3);
+      expect(summary.fetched).toBe(2);
+      expect(summary.failed).toHaveLength(1);
+      expect(logs.some((m) => m.includes('HTTP 429: holding requests'))).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
   it('paces a fetched channel list in the site queue, like any other request', async () => {
     const cache = new MemoryCache();
     const at: number[] = [];
 
     const config = makeConfig({
-      delayMs: 30,
+      rateLimit: { requests: 1, perMs: 30 },
       channels: () => {
         at.push(Date.now());
         return [channel('one')];
