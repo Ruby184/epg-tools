@@ -363,6 +363,219 @@ describe('mergeProgrammeLists', () => {
       '2026-01-15T12:00:00.000Z',
     ]);
   });
+
+  it('collapses two programmes of one list that describe the same broadcast', () => {
+    const doubled = [
+      prog('X', '2026-01-15T10:00:00Z', 'Film', 'sk'),
+      prog('X', '2026-01-15T10:00:00Z', 'Film', 'en'),
+    ];
+
+    expect(mergeProgrammeLists([doubled], 'merge')).toHaveLength(1);
+  });
+});
+
+describe('mergeProgrammeLists start tolerance', () => {
+  it('merges a shifted start when the titles agree', () => {
+    const merged = mergeProgrammeLists(
+      [
+        [
+          prog('X', '2026-01-15T20:00:00Z', 'Film', 'sk', {
+            stop: new Date('2026-01-15T21:50:00Z'),
+          }),
+        ],
+        [
+          prog('X', '2026-01-15T20:02:00Z', 'film ', 'en', {
+            stop: new Date('2026-01-15T21:50:00Z'),
+          }),
+        ],
+      ],
+      'merge',
+    );
+
+    expect(merged).toHaveLength(1);
+    // The higher-priority side's instant is the one that survives.
+    expect(merged[0]?.start.toISOString()).toBe('2026-01-15T20:00:00.000Z');
+    // Normalization is for comparing only — what each source called it is kept
+    // exactly as it came, trailing space and all.
+    expect(merged[0]?.title).toEqual([
+      { value: 'Film', lang: 'sk' },
+      { value: 'film ', lang: 'en' },
+    ]);
+  });
+
+  it('ignores accents and case when comparing titles', () => {
+    const merged = mergeProgrammeLists(
+      [
+        [prog('X', '2026-01-15T20:00:00Z', 'Správy', 'sk')],
+        [prog('X', '2026-01-15T20:01:00Z', 'SPRAVY', 'en')],
+      ],
+      'merge',
+    );
+
+    expect(merged).toHaveLength(1);
+  });
+
+  it('keeps a shifted pair apart when the titles disagree', () => {
+    const merged = mergeProgrammeLists(
+      [
+        [prog('X', '2026-01-15T20:00:00Z', 'Správy', 'sk')],
+        [prog('X', '2026-01-15T20:02:00Z', 'Šport', 'sk')],
+      ],
+      'merge',
+    );
+
+    expect(merged).toHaveLength(2);
+  });
+
+  it('merges an identical start whatever the two sources call it', () => {
+    const merged = mergeProgrammeLists(
+      [
+        [prog('X', '2026-01-15T20:00:00Z', 'Film', 'sk')],
+        [prog('X', '2026-01-15T20:00:00Z', 'Movie', 'en')],
+      ],
+      'merge',
+    );
+
+    expect(merged).toHaveLength(1);
+  });
+
+  it("requires the title on an identical start under titles: 'always'", () => {
+    const lists = [
+      [prog('X', '2026-01-15T20:00:00Z', 'Film', 'sk')],
+      [prog('X', '2026-01-15T20:00:00Z', 'Movie', 'en')],
+    ];
+
+    expect(mergeProgrammeLists(lists, 'merge', { titles: 'always' })).toHaveLength(2);
+  });
+
+  it("matches on the instant alone under titles: 'never'", () => {
+    const merged = mergeProgrammeLists(
+      [
+        [prog('X', '2026-01-15T20:00:00Z', 'Film', 'sk')],
+        [prog('X', '2026-01-15T20:02:00Z', 'Movie', 'en')],
+      ],
+      'merge',
+      { titles: 'never' },
+    );
+
+    expect(merged).toHaveLength(1);
+  });
+
+  it('takes the nearest candidate when two are inside the window', () => {
+    const merged = mergeProgrammeLists(
+      [
+        [
+          prog('X', '2026-01-15T20:00:00Z', 'Klip', 'sk'),
+          prog('X', '2026-01-15T20:04:00Z', 'Klip', 'sk'),
+        ],
+        [prog('X', '2026-01-15T20:03:00Z', 'Klip', 'en')],
+      ],
+      'merge',
+      // No durations to go on here, so only the tolerance and title apply.
+      { startToleranceMs: 300_000 },
+    );
+
+    expect(merged).toHaveLength(2);
+    // Joined the 20:04 one, a minute away, not the 20:00 one three minutes off.
+    expect(merged[1]?.title).toEqual([
+      { value: 'Klip', lang: 'sk' },
+      { value: 'Klip', lang: 'en' },
+    ]);
+  });
+
+  it('respects an explicit tolerance of zero', () => {
+    const merged = mergeProgrammeLists(
+      [
+        [prog('X', '2026-01-15T20:00:00Z', 'Film', 'sk')],
+        [prog('X', '2026-01-15T20:00:30Z', 'Film', 'en')],
+      ],
+      'merge',
+      { startToleranceMs: 0 },
+    );
+
+    expect(merged).toHaveLength(2);
+  });
+
+  it("defers to a matcher of the caller's own", () => {
+    const merged = mergeProgrammeLists(
+      [
+        [prog('X', '2026-01-15T20:00:00Z', 'Film', 'sk')],
+        // An hour out and differently titled: nothing the options describe
+        // would pair these up.
+        [prog('X', '2026-01-15T21:00:00Z', 'Movie', 'en')],
+      ],
+      'merge',
+      () => true,
+    );
+
+    expect(merged).toHaveLength(1);
+  });
+
+  describe('the duration guard', () => {
+    it('keeps consecutive same-titled clips apart', () => {
+      const merged = mergeProgrammeLists(
+        [
+          [
+            prog('X', '2026-01-15T20:00:00Z', 'Klip', 'sk', {
+              stop: new Date('2026-01-15T20:03:00Z'),
+            }),
+          ],
+          [
+            prog('X', '2026-01-15T20:03:00Z', 'Klip', 'sk', {
+              stop: new Date('2026-01-15T20:06:00Z'),
+            }),
+          ],
+        ],
+        'merge',
+      );
+
+      expect(merged).toHaveLength(2);
+    });
+
+    it('lets a long programme drift by minutes', () => {
+      expect(
+        mergeProgrammeLists(
+          [
+            [
+              prog('X', '2026-01-15T20:00:00Z', 'Film', 'sk', {
+                stop: new Date('2026-01-15T21:50:00Z'),
+              }),
+            ],
+            [
+              prog('X', '2026-01-15T20:04:00Z', 'Film', 'en', {
+                stop: new Date('2026-01-15T21:50:00Z'),
+              }),
+            ],
+          ],
+          'merge',
+        ),
+      ).toHaveLength(1);
+    });
+
+    it('falls back to the tolerance when neither side says where it ends', () => {
+      expect(
+        mergeProgrammeLists(
+          [
+            [prog('X', '2026-01-15T20:00:00Z', 'Klip', 'sk')],
+            [prog('X', '2026-01-15T20:03:00Z', 'Klip', 'sk')],
+          ],
+          'merge',
+        ),
+      ).toHaveLength(1);
+    });
+  });
+
+  it('is unused by concat, which keeps every programme', () => {
+    const merged = mergeProgrammeLists(
+      [
+        [prog('X', '2026-01-15T20:00:00Z', 'Film', 'sk')],
+        [prog('X', '2026-01-15T20:02:00Z', 'Film', 'en')],
+      ],
+      'concat',
+    );
+
+    expect(merged).toHaveLength(2);
+  });
 });
 
 describe.skipIf(!xmltvReady)('generateGuide', () => {

@@ -68,10 +68,16 @@ export {
 export type * from './grabber/types.js';
 
 export {
+  DEFAULT_MATCH,
+  mergeInto,
   mergeProgrammes,
   mergeProgrammeLists,
+  normalizeTitle,
+  resolveMatch,
+  titlesMatch,
   generateGuide,
   writeGuide,
   defaultChannelInfo,
 } from './merge/main.js';
+export type { ResolvedMatch } from './merge/main.js';
 export type * from './merge/types.js';

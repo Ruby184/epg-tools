@@ -5,7 +5,17 @@ import type {
   XmltvTextValue,
   XmltvUrlValue,
 } from '../xmltv/types.js';
-import type { ProgrammeStrategy } from './types.js';
+import type { ProgrammeMatch, ProgrammeMatcher, ProgrammeStrategy } from './types.js';
+
+/**
+ * How two programmes are paired up when nothing says otherwise: five minutes
+ * apart at most, agreeing on their title if they are apart at all, and — where
+ * both say when they end — closer together than the shorter of the two.
+ */
+export const DEFAULT_MATCH: Required<ProgrammeMatch> = {
+  startToleranceMs: 300_000,
+  titles: 'when-shifted',
+};
 
 /** Union two optional arrays, keeping first occurrence per dedup key. */
 export function unionBy<T>(
@@ -229,31 +239,252 @@ export function mergeProgrammes(base: XmltvProgramme, extra: XmltvProgramme): Xm
 }
 
 /**
+ * A title as it is compared: case folded, accents dropped and whitespace
+ * collapsed, so `Správy  ` and `spravy` are one title.
+ *
+ * Accents go because the two sources being merged are very often one local
+ * feed and one international one, and the international one is the one that
+ * spells `Vecernicek` — while a source that drops accents rarely reinstates
+ * them for a different programme. It is a comparison only: what a programme
+ * carries is never rewritten.
+ */
+export function normalizeTitle(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/\p{M}+/gu, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Do these two programmes share a title, in any language either offers? */
+export function titlesMatch(a: XmltvProgramme, b: XmltvProgramme): boolean {
+  const titles = new Set(a.title.map((title) => normalizeTitle(title.value)));
+
+  return b.title.some((title) => titles.has(normalizeTitle(title.value)));
+}
+
+/** How long a programme runs, when it says where it ends. */
+function duration(programme: XmltvProgramme): number | undefined {
+  if (programme.stop === undefined) {
+    return undefined;
+  }
+
+  const length = programme.stop.getTime() - programme.start.getTime();
+
+  return length > 0 ? length : undefined;
+}
+
+/**
+ * A matcher with the reach it needs: two programmes further apart than
+ * `windowMs` can never be one broadcast, which is what lets a merge stop
+ * looking instead of comparing against a whole day.
+ */
+export interface ResolvedMatch {
+  windowMs: number;
+  matches: ProgrammeMatcher;
+}
+
+/**
+ * Settle {@link ProgrammeMatch} into something to match with. A matcher of
+ * one's own passes through with no reach to speak of — only it knows what it
+ * pairs up, so every candidate is offered to it.
+ */
+export function resolveMatch(match?: ProgrammeMatch | ProgrammeMatcher): ResolvedMatch {
+  if (typeof match === 'function') {
+    return { windowMs: Number.POSITIVE_INFINITY, matches: match };
+  }
+
+  const { startToleranceMs, titles } = { ...DEFAULT_MATCH, ...match };
+
+  return {
+    windowMs: startToleranceMs,
+    matches: (a, b) => {
+      const shift = Math.abs(a.start.getTime() - b.start.getTime());
+
+      if (shift > startToleranceMs) {
+        return false;
+      }
+
+      // The same instant: two sources describing one broadcast, unless a
+      // config says even that has to be corroborated by the title.
+      if (shift === 0) {
+        return titles === 'always' ? titlesMatch(a, b) : true;
+      }
+
+      if (titles !== 'never' && !titlesMatch(a, b)) {
+        return false;
+      }
+
+      // What keeps a wide tolerance from swallowing the programme next door:
+      // consecutive programmes sit exactly one duration apart, so anything
+      // that far out is the neighbour rather than the same broadcast told
+      // twice. Only decidable when both sides say where they end.
+      const shorter = Math.min(duration(a) ?? Infinity, duration(b) ?? Infinity);
+
+      return shift < shorter;
+    },
+  };
+}
+
+/** First index whose start is at or after `time`, in a list sorted by start. */
+function lowerBound(programmes: XmltvProgramme[], time: number): number {
+  let low = 0;
+  let high = programmes.length;
+
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+
+    if (programmes[mid]!.start.getTime() < time) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
+}
+
+/**
+ * Where in `target` `programme` belongs, and what it belongs with: the index of
+ * the programme it should be merged into, or `-1` to insert it.
+ *
+ * The nearest acceptable candidate wins. A source shifted by a minute against
+ * two of another's programmes must join the one it is a minute from, not
+ * whichever the scan reached first.
+ */
+function findMatch(
+  target: XmltvProgramme[],
+  programme: XmltvProgramme,
+  match: ResolvedMatch,
+  taken: ReadonlySet<number>,
+): number {
+  const start = programme.start.getTime();
+  let best = -1;
+  let bestShift = Number.POSITIVE_INFINITY;
+
+  for (let index = lowerBound(target, start - match.windowMs); index < target.length; index++) {
+    const candidate = target[index]!;
+    const shift = candidate.start.getTime() - start;
+
+    if (shift > match.windowMs) {
+      break;
+    }
+
+    const distance = Math.abs(shift);
+
+    if (distance < bestShift && !taken.has(index) && match.matches(candidate, programme)) {
+      best = index;
+      bestShift = distance;
+    }
+  }
+
+  return best;
+}
+
+/**
+ * One source's list with its own duplicate rows pooled — programmes naming the
+ * *identical* instant, and only those.
+ *
+ * A source's list is a schedule: two entries in it are two broadcasts, however
+ * alike, and a tolerance let loose inside one would merge a clip with the clip
+ * that follows it. Between two sources the same tolerance is the whole point.
+ * So the boundary is the list, which is why it is what {@link mergeInto} takes.
+ */
+function pool(incoming: readonly XmltvProgramme[]): XmltvProgramme[] {
+  const pooled: XmltvProgramme[] = [];
+
+  for (const programme of incoming) {
+    const time = programme.start.getTime();
+    const index = lowerBound(pooled, time);
+    const existing = pooled[index];
+
+    if (existing && existing.start.getTime() === time) {
+      pooled[index] = mergeProgrammes(existing, programme);
+    } else {
+      pooled.splice(index, 0, programme);
+    }
+  }
+
+  return pooled;
+}
+
+/**
+ * Fold one source's `incoming` list into `target`, which is kept sorted by
+ * start and returned.
+ *
+ * The one place two programmes are ever recognized as one: a lower-priority
+ * site's list joining a higher-priority one, and the next day's entry joining
+ * what is still held from this one. `target` is what a match is merged *into*,
+ * so it must be the higher-priority side — {@link mergeProgrammes} takes its
+ * scalars from there.
+ */
+export function mergeInto(
+  target: XmltvProgramme[],
+  incoming: readonly XmltvProgramme[],
+  match: ResolvedMatch,
+): XmltvProgramme[] {
+  // Every candidate is decided against `target` as it stands, and only then is
+  // anything added to it. Otherwise a list's second programme could be paired
+  // with its own first one the moment that landed in `target` — the tolerance
+  // turned loose inside one schedule, which `pool` is careful not to do.
+  const merges: [index: number, programme: XmltvProgramme][] = [];
+  const inserts: XmltvProgramme[] = [];
+  const taken = new Set<number>();
+
+  for (const programme of pool(incoming)) {
+    // Taken entries are passed over: one programme of `target` stands for one
+    // broadcast, so it absorbs one programme of `incoming` and no more.
+    const index = findMatch(target, programme, match, taken);
+
+    if (index === -1) {
+      inserts.push(programme);
+    } else {
+      taken.add(index);
+      merges.push([index, programme]);
+    }
+  }
+
+  // Merging first, while the indices above still mean what they meant. A merge
+  // keeps the base's start, so it moves nothing.
+  for (const [index, programme] of merges) {
+    target[index] = mergeProgrammes(target[index]!, programme);
+  }
+
+  for (const programme of inserts) {
+    // After anything starting at the same instant, so what could not be merged
+    // still follows what it arrived behind.
+    target.splice(lowerBound(target, programme.start.getTime() + 1), 0, programme);
+  }
+
+  return target;
+}
+
+/**
  * Combine per-site programme lists (in priority order, index 0 = highest)
  * into one list sorted by start time.
  *
  * - `concat`: flatten everything, keep duplicates.
- * - `merge`: programmes sharing the same start time are merged into one via
- *   {@link mergeProgrammes}; the first occurrence (highest priority) is base.
+ * - `merge`: programmes describing the same broadcast are merged into one via
+ *   {@link mergeProgrammes}, the higher-priority one as base. Which those are
+ *   is {@link ProgrammeMatch}'s to say — by default a start within five
+ *   minutes, corroborated by the title once the two differ at all.
  */
 export function mergeProgrammeLists(
   lists: XmltvProgramme[][],
   strategy: ProgrammeStrategy,
+  match?: ProgrammeMatch | ProgrammeMatcher,
 ): XmltvProgramme[] {
   if (strategy === 'concat') {
     return lists.flat().sort((a, b) => a.start.getTime() - b.start.getTime());
   }
 
-  const byStart = new Map<number, XmltvProgramme>();
+  const resolved = resolveMatch(match);
+  const merged: XmltvProgramme[] = [];
 
   for (const list of lists) {
-    for (const programme of list) {
-      const key = programme.start.getTime();
-      const existing = byStart.get(key);
-
-      byStart.set(key, existing ? mergeProgrammes(existing, programme) : programme);
-    }
+    mergeInto(merged, list, resolved);
   }
 
-  return [...byStart.values()].sort((a, b) => a.start.getTime() - b.start.getTime());
+  return merged;
 }

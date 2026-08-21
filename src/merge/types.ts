@@ -1,4 +1,4 @@
-import type { XmltvDocumentMeta } from '../xmltv/types.js';
+import type { XmltvDocumentMeta, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheStore } from '../cache/types.js';
 import type { AnySiteConfig } from '../grabber/types.js';
 
@@ -27,9 +27,62 @@ export type ChannelStrategy = 'merge-programmes' | 'first-wins' | 'keep-all';
  */
 export type ProgrammeStrategy = 'merge' | 'concat';
 
+/**
+ * Whether two programmes describe the same broadcast — the whole of what
+ * `merge` decides, for a source pair no rule quite fits.
+ *
+ * Called with the higher-priority programme first. It must agree with itself:
+ * a pair it accepts in one order it has to accept in the other, or which
+ * element wins depends on which site was read first.
+ */
+export type ProgrammeMatcher = (a: XmltvProgramme, b: XmltvProgramme) => boolean;
+
+/**
+ * When two programmes from different sources count as the same broadcast.
+ *
+ * Sources rarely agree to the second — one publishes the schedule on a
+ * five-minute grid while another carries the real start — so matching on the
+ * instant alone leaves a guide with two elements per programme, which is the
+ * one thing merging exists to prevent.
+ */
+export interface ProgrammeMatch {
+  /**
+   * How far apart two starts may be and still be one broadcast, in
+   * milliseconds. Defaults to `300_000` (five minutes); `0` matches the
+   * instant exactly.
+   *
+   * A window this wide is safe because of what it is paired with: a shifted
+   * pair must also agree on its title, and — when both sides say when they end
+   * — be closer together than the shorter of the two runs. Programmes that
+   * follow one another are separated by exactly the earlier one's duration, so
+   * that last rule is what keeps two same-titled three-minute clips apart no
+   * matter how wide this is.
+   */
+  startToleranceMs?: number;
+  /**
+   * When titles have to agree for a match:
+   *
+   * - `when-shifted` (the default) — only for starts that differ. Two sources
+   *   naming the same instant are describing the same broadcast whatever they
+   *   call it, which is how a Slovak title and an English one end up on one
+   *   element.
+   * - `always` — even on an identical start, for a channel where two sources
+   *   disagree about what is on rather than about what it is called.
+   * - `never` — the instant and the duration decide alone.
+   */
+  titles?: 'when-shifted' | 'always' | 'never';
+}
+
 export interface MergeOptions {
   channelStrategy?: ChannelStrategy;
   programmeStrategy?: ProgrammeStrategy;
+  /**
+   * How two programmes are recognized as the same broadcast under
+   * `programmeStrategy: 'merge'` — see {@link ProgrammeMatch}, or a
+   * {@link ProgrammeMatcher} of your own for a source pair the options cannot
+   * describe.
+   */
+  match?: ProgrammeMatch | ProgrammeMatcher;
 }
 
 export interface BuildGuideOptions {
