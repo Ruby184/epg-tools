@@ -1,11 +1,11 @@
-import { dayRange, toDayString } from '../core/days.js';
+import { dayRange, dayToDate, toDayString } from '../core/days.js';
 import { writeOutput, type OutputTarget } from '../core/output.js';
 import { channelElement, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { writeXmltvStream } from '../xmltv/main.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import { mergeChannels } from './channel.js';
-import { mergeProgrammeLists } from './programme.js';
+import { mergeInto, resolveMatch } from './programme.js';
 import type { BuildGuideOptions } from './types.js';
 
 interface ChannelSource {
@@ -25,9 +25,12 @@ export { defaultChannelInfo };
 /**
  * Build the XMLTV guide as a stream of XML string chunks.
  *
- * Programmes are read from the cache one channel-day at a time (across the
- * channel's covering sites), merged and passed lazily into the XMLTV writer,
- * so the whole guide is never materialized in memory.
+ * Programmes are read from the cache a channel-day at a time (across the
+ * channel's covering sites), merged and passed lazily into the XMLTV writer, so
+ * the whole guide is never materialized in memory. One day of one channel is
+ * held back as it goes, which is what lets a programme two adjacent days both
+ * reported be emitted once — so the working set is two days of one channel,
+ * flat in the size of the guide either way.
  */
 export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator<string> {
   const now = options.now ?? new Date();
@@ -93,12 +96,20 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   }
 
   const listStrategy = channelStrategy === 'merge-programmes' ? programmeStrategy : 'concat';
+  const match = resolveMatch(options.merge?.match);
 
   async function* programmes(): AsyncGenerator<XmltvProgramme> {
     for (const entry of registry) {
+      // What a day contributed but the next day may still have something to say
+      // about. A source's "day" is its own idea — plenty run 06:00 to 06:00, and
+      // plenty repeat the programme that spans midnight in both days' payloads —
+      // so a day is folded in and then held, and only what the following day can
+      // no longer reach is emitted. Two adjacent days of one channel is what is
+      // ever alive, whatever the guide's size.
+      let pending: XmltvProgramme[] = [];
+
       for (const day of days) {
-        // Memory stays bounded to one channel-day across covering sites;
-        // the covering sites' entries are read in parallel.
+        // The covering sites' entries for this day are read in parallel.
         const cached = await Promise.all(
           entry.sources.map((source) =>
             cache.read({ site: source.config.site, channelId: entry.xmltvId, day }),
@@ -106,8 +117,32 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
         );
         const lists = cached.filter((list): list is XmltvProgramme[] => list !== undefined);
 
-        yield* mergeProgrammeLists(lists, listStrategy);
+        if (listStrategy === 'merge') {
+          for (const list of lists) {
+            mergeInto(pending, list, match);
+          }
+        } else {
+          // Nothing is deduplicated under `concat`, but the hold still buys the
+          // ordering: a programme a later day reported for an earlier one lands
+          // where it belongs rather than after everything already emitted.
+          pending = [...pending, ...lists.flat()].sort(
+            (a, b) => a.start.getTime() - b.start.getTime(),
+          );
+        }
+
+        // Anything starting before the day just folded in: no later day can
+        // reasonably claim it, so it is done.
+        const horizon = dayToDate(day).getTime();
+        let held = 0;
+
+        while (held < pending.length && pending[held]!.start.getTime() < horizon) {
+          held++;
+        }
+
+        yield* pending.splice(0, held);
       }
+
+      yield* pending;
 
       logger?.(`merge: channel ${entry.xmltvId} done`);
     }

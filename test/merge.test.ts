@@ -706,6 +706,103 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     expect(output.match(/<programme/g)).toHaveLength(1);
   });
 
+  describe('a programme two adjacent days both report', () => {
+    const NEXT_DAY = '2026-01-16';
+    // What a source whose day runs to 06:00 hands back: the programme spanning
+    // midnight turns up in both days' entries, the second time as the day's
+    // opening item.
+    const midnight = () =>
+      prog('X', '2026-01-15T23:30:00Z', 'Nočný film', 'sk', {
+        stop: new Date('2026-01-16T01:10:00Z'),
+      });
+
+    function cacheAcrossMidnight(): CacheStore {
+      return createFakeCache({
+        [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T22:00:00Z', 'Správy', 'sk'), midnight()],
+        [`site-a.sk|X|${NEXT_DAY}`]: [midnight(), prog('X', '2026-01-16T06:00:00Z', 'Ráno', 'sk')],
+      });
+    }
+
+    it('is emitted once', async () => {
+      const output = await generate({
+        sites: [siteA],
+        cache: cacheAcrossMidnight(),
+        days: 2,
+        startDay: DAY,
+        now: NOW,
+      });
+
+      expect(output.match(/Nočný film/g)).toHaveLength(1);
+      expect(output.match(/<programme/g)).toHaveLength(3);
+    });
+
+    it('is emitted in start order across the boundary', async () => {
+      const output = await generate({
+        sites: [siteA],
+        cache: cacheAcrossMidnight(),
+        days: 2,
+        startDay: DAY,
+        now: NOW,
+      });
+      const starts = [...output.matchAll(/start=["'](\d+)/g)].map(([, start]) => start);
+
+      expect(starts).toEqual([...starts].sort());
+    });
+
+    it("is kept twice under 'concat', but still in order", async () => {
+      const output = await generate({
+        sites: [siteA],
+        cache: cacheAcrossMidnight(),
+        days: 2,
+        startDay: DAY,
+        now: NOW,
+        merge: { programmeStrategy: 'concat' },
+      });
+      const starts = [...output.matchAll(/start=["'](\d+)/g)].map(([, start]) => start);
+
+      expect(output.match(/Nočný film/g)).toHaveLength(2);
+      expect(starts).toEqual([...starts].sort());
+    });
+
+    it('still emits a programme only the later day knew about', async () => {
+      const output = await generate({
+        sites: [siteA],
+        cache: cacheAcrossMidnight(),
+        days: 2,
+        startDay: DAY,
+        now: NOW,
+      });
+
+      expect(output).toContain('Ráno');
+      expect(output).toContain('Správy');
+    });
+
+    it('merges what the two days each knew about it', async () => {
+      const cache = createFakeCache({
+        [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T23:30:00Z', 'Nočný film', 'sk')],
+        [`site-a.sk|X|${NEXT_DAY}`]: [
+          prog('X', '2026-01-15T23:30:00Z', 'Night Film', 'en', {
+            stop: new Date('2026-01-16T01:10:00Z'),
+          }),
+        ],
+      });
+
+      const output = await generate({
+        sites: [siteA],
+        cache,
+        days: 2,
+        startDay: DAY,
+        now: NOW,
+      });
+
+      expect(output.match(/<programme/g)).toHaveLength(1);
+      // The day that had a stop time contributed it; both titles survive.
+      expect(output).toContain('stop=');
+      expect(output).toContain('Nočný film');
+      expect(output).toContain('Night Film');
+    });
+  });
+
   it('logs progress per channel', async () => {
     const messages: string[] = [];
 
