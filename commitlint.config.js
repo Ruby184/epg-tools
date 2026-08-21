@@ -89,6 +89,15 @@ function breakingNoteComplete(parsed) {
 export default {
   extends: ['@commitlint/config-conventional'],
   plugins: [{ rules: { 'breaking-note-complete': breakingNoteComplete } }],
+  /**
+   * release-please writes one commit of its own — `chore(main): release 0.2.0`,
+   * where the scope is the release branch's component rather than anything in
+   * this repo — and CI lints every commit a pull request contributes, the
+   * release PR included. The rules below describe what a person may write, so
+   * the bot's commit is exempt rather than the scope list widened to admit a
+   * scope nobody should use.
+   */
+  ignores: [(message) => /^chore\(main\): release \d+\.\d+\.\d+/.test(message)],
   rules: {
     'scope-enum': [
       2,
