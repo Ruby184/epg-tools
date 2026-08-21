@@ -1,0 +1,11 @@
+# Revisions to skip when running `git blame`, because they only moved
+# whitespace around and would otherwise sit on top of every line they touched.
+#
+# Enable it once per clone:
+#
+#     git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# GitHub honours this file automatically.
+
+# style: format the tree with oxfmt
+2214cc525d6cdb1d92141b881ce66f4fb3e42613

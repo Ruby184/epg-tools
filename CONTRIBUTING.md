@@ -108,6 +108,19 @@ All three are bypassable with `--no-verify`, so CI checks the same things
 independently — formatting, lint and commit messages in one `check` job,
 typecheck/test/build across Node 20, 22 and 24.
 
+Markdown is deliberately outside oxfmt's reach (see `.oxfmtrc.json`): it
+formats fenced code blocks, and the documentation's examples are fragments
+rather than whole programs, so a bare `cache: { dir: … }` picks up a semicolon
+and stops being valid.
+
+The tree was formatted in one commit, which `.git-blame-ignore-revs` lists so
+it does not sit on top of every line in `git blame`. GitHub honours that file
+on its own; locally it is one command per clone:
+
+```sh
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
 ## Commits
 
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/),
