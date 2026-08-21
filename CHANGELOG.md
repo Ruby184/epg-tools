@@ -17,7 +17,7 @@ over; it describes what `0.1.0` actually shipped, not the surface since.
 ### ⚠ BREAKING CHANGES
 
 * **grabber:** `parseDay`'s context calls the response `payload` rather than `data`, so a site reads `parseDay({ payload })` where it read `parseDay({ data })`. A channel's own `data` is untouched.
-* **grabber:** `delayMs` is replaced by `rateLimit`; `delayMs: 250` is now
+* **grabber:** `delayMs` is replaced by `rateLimit`; `delayMs: 250` is now `rateLimit: { requests: 1, perMs: 250 }`.
 * **grabber:** `fetchDay` and `fetchDayBatch` are replaced by `request` plus `batching`; `batchSize` becomes `batching.channelsPerRequest`.
 
 ### Features
