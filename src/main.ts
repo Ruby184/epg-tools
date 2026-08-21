@@ -57,6 +57,7 @@ export type * from './cache/types.js';
 
 export {
   grab,
+  channelElement,
   defineSiteConfig,
   resolveChannels,
   resolveSites,

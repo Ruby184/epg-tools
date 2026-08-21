@@ -158,13 +158,14 @@ const fetchedChannels = defineSiteConfig({
       data: { names: item.titles, logo: item.logo, lcn: item.number },
     }));
   },
-  channelInfo({ xmltvId, data }) {
-    return {
-      id: xmltvId,
-      displayName: (data?.names ?? []).map((name) => ({ value: name.text, lang: name.lang })),
-      ...(data?.logo ? { icon: [{ src: data.logo }] } : {}),
-      ...(data?.lcn ? { extra: [{ name: 'lcn', value: String(data.lcn) }] } : {}),
-    };
+  channelInfo({ data }, element) {
+    const channel = element();
+
+    for (const name of data?.names ?? []) {
+      channel.displayName(name.text, name.lang);
+    }
+
+    return data?.lcn ? channel.extra({ name: 'lcn', value: String(data.lcn) }) : channel;
   },
   async request({ channel, date, http }) {
     return http.get('epg', { searchParams: { id: channel.siteId, date: date.toISOString() } })

@@ -377,6 +377,42 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     return collect(generateGuide(options));
   }
 
+  it('describes a channel with the builder its channelInfo was handed', async () => {
+    const site: SiteConfig<unknown> = {
+      ...makeSite('site-a.sk', [{
+        xmltvId: 'X',
+        siteId: 'a-x',
+        name: 'Channel X',
+        lang: 'sk',
+        logo: 'https://logo.example/x.png',
+        data: { callSign: 'CHX', page: 'https://x.example/', lcn: 5 },
+      }]),
+      // No id, no display name, no logo restated: `element()` starts where the
+      // default element would, and this adds to it.
+      channelInfo({ data }, element) {
+        const extra = data as { callSign: string; page: string; lcn: number };
+
+        return element()
+          .displayName(extra.callSign, 'en')
+          .url(extra.page)
+          .extra({ name: 'lcn', value: String(extra.lcn) });
+      },
+    };
+
+    const output = await generate({
+      sites: [site],
+      cache: cacheForBothSites(),
+      days: 1,
+      now: NOW,
+    });
+
+    expect(output).toContain('<display-name lang="sk">Channel X</display-name>');
+    expect(output).toContain('<display-name lang="en">CHX</display-name>');
+    expect(output).toContain('<icon src="https://logo.example/x.png"');
+    expect(output).toContain('<url>https://x.example/</url>');
+    expect(output).toContain('<lcn>5</lcn>');
+  });
+
   it('emits a single <channel> and merged multi-language programmes for two covering sites', async () => {
     const output = await generate({
       sites: [siteA, siteB],

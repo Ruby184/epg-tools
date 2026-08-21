@@ -1,7 +1,7 @@
 import type { EpgConfig } from '../config.js';
-import { resolveChannels } from '../grabber/channels.js';
+import { channelElement, resolveChannels } from '../grabber/channels.js';
 import type { GrabberChannel } from '../grabber/types.js';
-import { defaultChannelInfo, mergeChannels } from '../merge/main.js';
+import { mergeChannels } from '../merge/main.js';
 import {
   serializeChannel,
   serializeDocumentFooter,
@@ -21,7 +21,7 @@ async function collectChannels(config: EpgConfig): Promise<XmltvChannel[]> {
     const channels: GrabberChannel[] = await resolveChannels(site);
 
     for (const channel of channels) {
-      const info = site.channelInfo?.(channel) ?? defaultChannelInfo(channel);
+      const info = channelElement(site, channel);
       const existing = byId.get(channel.xmltvId);
 
       // The same merge the guide does, so a channel covered by several sites

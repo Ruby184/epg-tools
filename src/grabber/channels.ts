@@ -1,5 +1,7 @@
 import ky, { type KyInstance } from 'ky';
 import PQueue from 'p-queue';
+import { ChannelBuilder } from '../xmltv/builder.js';
+import type { XmltvChannel } from '../xmltv/types.js';
 import type { AnySiteConfig, GrabberChannel } from './types.js';
 
 /**
@@ -75,4 +77,48 @@ export async function resolveSites(
     ...site,
     channels: await resolveChannels(site, { ...(options.signal ? { signal: options.signal } : {}) }),
   }))));
+}
+
+/**
+ * The `<channel>` element a site gets when it defines no `channelInfo`:
+ * id + display name + icon. Exported because the same mapping is what an
+ * XMLTV grabber's `--list-channels` has to emit.
+ */
+export function defaultChannelInfo(channel: GrabberChannel): XmltvChannel {
+  return {
+    id: channel.xmltvId,
+    displayName: [{ value: channel.name ?? channel.xmltvId }],
+    ...(channel.logo ? { icon: [{ src: channel.logo }] } : {}),
+  };
+}
+
+/**
+ * How a site describes one of its channels, whichever way it says it: the
+ * default element, or what its `channelInfo` builds — as a builder or as a
+ * plain object.
+ *
+ * Everything that emits a `<channel>` goes through this — the merge and
+ * `--list-channels` — so a channel is described identically wherever it turns
+ * up.
+ */
+export function channelElement(config: AnySiteConfig, channel: GrabberChannel): XmltvChannel {
+  if (!config.channelInfo) {
+    return defaultChannelInfo(channel);
+  }
+
+  const element = (displayName?: string): ChannelBuilder => {
+    const builder = new ChannelBuilder({
+      id: channel.xmltvId,
+      displayName: displayName ?? channel.name ?? channel.xmltvId,
+      ...(channel.lang === undefined ? {} : { lang: channel.lang }),
+    });
+
+    // Where the default element leaves off, so a site adds to it rather than
+    // restating it.
+    return channel.logo ? builder.icon(channel.logo) : builder;
+  };
+
+  const info = config.channelInfo(channel, element);
+
+  return info instanceof ChannelBuilder ? info.build() : info;
 }

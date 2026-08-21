@@ -1,6 +1,6 @@
 import { dayRange, toDayString } from '../core/days.js';
 import { writeOutput, type OutputTarget } from '../core/output.js';
-import { resolveChannels } from '../grabber/channels.js';
+import { channelElement, defaultChannelInfo, resolveChannels } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { writeXmltvStream } from '../xmltv/main.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
@@ -19,18 +19,8 @@ interface RegistryEntry {
   sources: ChannelSource[];
 }
 
-/**
- * The `<channel>` element a site gets when it defines no `channelInfo`:
- * id + display name + icon. Exported because the same mapping is what an
- * XMLTV grabber's `--list-channels` has to emit.
- */
-export function defaultChannelInfo(channel: GrabberChannel): XmltvChannel {
-  return {
-    id: channel.xmltvId,
-    displayName: [{ value: channel.name ?? channel.xmltvId }],
-    ...(channel.logo ? { icon: [{ src: channel.logo }] } : {}),
-  };
-}
+// Where it lives now, re-exported for the entry points that published it.
+export { defaultChannelInfo };
 
 /**
  * Build the XMLTV guide as a stream of XML string chunks.
@@ -90,7 +80,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     // Under 'first-wins' and 'keep-all' an entry has a single source, so
     // this reduces to that site's info unchanged.
     const infos = entry.sources.map(
-      (source) => source.config.channelInfo?.(source.channel) ?? defaultChannelInfo(source.channel),
+      (source) => channelElement(source.config, source.channel),
     );
     const first = infos[0];
 

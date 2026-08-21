@@ -1,5 +1,5 @@
 import type { KyInstance, Options as KyOptions } from 'ky';
-import type { ProgrammeBuilder, ProgrammeOptions } from '../xmltv/builder.js';
+import type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from '../xmltv/builder.js';
 import type { DateInput } from '../xmltv/date.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheStore, StalenessPolicy } from '../cache/types.js';
@@ -293,6 +293,16 @@ export interface ParseContext<TRaw, TData = unknown> {
  */
 export type ParsedProgramme = XmltvProgramme | ProgrammeBuilder;
 
+/**
+ * A `<channel>` builder for the channel being described, starting where the
+ * default element would: the id, a display name (the channel's `name`, or its
+ * id) and its `logo` as an icon, with text elements defaulting to its `lang`.
+ *
+ * Pass a display name to use instead of the default one; further calls to
+ * `.displayName()` add to it rather than replacing it, which is how a channel
+ * carries a second language or a call sign.
+ */
+export type ChannelElement = (displayName?: string) => ChannelBuilder;
 
 /**
  * A site: where to fetch from, how much of the grid one request covers, and how
@@ -366,8 +376,24 @@ export interface SiteConfig<
    * normalized to `xmltvId` afterwards.
    */
   parseDay(ctx: ParseContext<TRaw, TData>): ParsedProgramme[] | Promise<ParsedProgramme[]>;
-  /** Customize the `<channel>` element. Defaults to id + name + logo. */
-  channelInfo?(channel: GrabberChannel<TData>): XmltvChannel;
+  /**
+   * Customize the `<channel>` element. Defaults to id + name + logo.
+   *
+   * `element` is that default as a builder — see {@link ChannelElement} — so
+   * describing a channel more fully is a matter of adding to it:
+   *
+   * ```ts
+   * channelInfo({ data }, element) {
+   *   return element()
+   *     .displayName(data.callSign)
+   *     .url(data.page)
+   *     .extra({ name: 'lcn', value: String(data.lcn) });
+   * }
+   * ```
+   *
+   * Hand back the builder or a plain {@link XmltvChannel}, whichever suits.
+   */
+  channelInfo?(channel: GrabberChannel<TData>, element: ChannelElement): XmltvChannel | ChannelBuilder;
 }
 
 /**
