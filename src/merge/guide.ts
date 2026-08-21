@@ -79,9 +79,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     // unioned by (lang, value), icons by src), highest priority first.
     // Under 'first-wins' and 'keep-all' an entry has a single source, so
     // this reduces to that site's info unchanged.
-    const infos = entry.sources.map(
-      (source) => channelElement(source.config, source.channel),
-    );
+    const infos = entry.sources.map((source) => channelElement(source.config, source.channel));
     const first = infos[0];
 
     if (!first) {

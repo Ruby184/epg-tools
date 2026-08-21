@@ -65,10 +65,7 @@ export interface AdjustContext {
 }
 
 /** Work that shapes the grab instead of claiming the run. */
-export type AdjustTask = (
-  config: EpgConfig,
-  ctx: AdjustContext,
-) => EpgConfig | Promise<EpgConfig>;
+export type AdjustTask = (config: EpgConfig, ctx: AdjustContext) => EpgConfig | Promise<EpgConfig>;
 
 export interface CapabilityContext<V = unknown> {
   /** The parsed command line, including this capability's own options. */

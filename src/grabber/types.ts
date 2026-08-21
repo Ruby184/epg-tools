@@ -393,7 +393,10 @@ export interface SiteConfig<
    *
    * Hand back the builder or a plain {@link XmltvChannel}, whichever suits.
    */
-  channelInfo?(channel: GrabberChannel<TData>, element: ChannelElement): XmltvChannel | ChannelBuilder;
+  channelInfo?(
+    channel: GrabberChannel<TData>,
+    element: ChannelElement,
+  ): XmltvChannel | ChannelBuilder;
 }
 
 /**

@@ -23,7 +23,12 @@ import {
   XmltvParseStream,
   XmltvSerializeStream,
 } from '../src/xmltv/main.js';
-import type { XmltvChannel, XmltvParseEvent, XmltvProgramme, XmltvWarning } from '../src/xmltv/main.js';
+import type {
+  XmltvChannel,
+  XmltvParseEvent,
+  XmltvProgramme,
+  XmltvWarning,
+} from '../src/xmltv/main.js';
 
 async function collect(source: Iterable<string> | AsyncIterable<string>): Promise<string> {
   let out = '';
@@ -135,7 +140,9 @@ describe('xmltv dates', () => {
       expect.unreachable();
     } catch (error) {
       expect(error).toBeInstanceOf(XmltvDateError);
-      expect((error as XmltvDateError).reason).toBe('unknown timezone "PST" — add it to the timezone offset map');
+      expect((error as XmltvDateError).reason).toBe(
+        'unknown timezone "PST" — add it to the timezone offset map',
+      );
       expect((error as XmltvDateError).index).toBe(13);
     }
 
@@ -214,7 +221,9 @@ describe('xmltv dates', () => {
 
     // Flags on a Date input are carried over, options override.
     expect(getXmltvOffset(xmltvDate(parseXmltvDate('20260717203000 +0200')))).toBe(120);
-    expect(getXmltvOffset(xmltvDate(parseXmltvDate('20260717203000 +0200'), { offset: 0 }))).toBe(0);
+    expect(getXmltvOffset(xmltvDate(parseXmltvDate('20260717203000 +0200'), { offset: 0 }))).toBe(
+      0,
+    );
   });
 });
 
@@ -227,24 +236,36 @@ const maximalProgramme: XmltvProgramme = {
   showview: '123-456',
   videoplus: '987654',
   clumpidx: '0/2',
-  title: [{ value: 'Večerné správy & šport', lang: 'sk' }, { value: 'Evening News', lang: 'en' }],
+  title: [
+    { value: 'Večerné správy & šport', lang: 'sk' },
+    { value: 'Evening News', lang: 'en' },
+  ],
   subTitle: [{ value: 'Denný prehľad', lang: 'sk' }],
   desc: [{ value: 'Správy <dňa>', lang: 'sk' }],
   credits: {
     director: ['Jana Novak'],
     actor: [
       { value: 'Peter Herec', role: 'moderátor' },
-      { value: 'Eva Hostka', guest: true, image: [{ value: 'https://example.tv/eva.jpg', type: 'person' }] },
+      {
+        value: 'Eva Hostka',
+        guest: true,
+        image: [{ value: 'https://example.tv/eva.jpg', type: 'person' }],
+      },
     ],
-    producer: [{
-      value: 'Prod Ucent',
-      image: [{ value: 'https://example.tv/prod.jpg' }],
-      url: [{ value: 'https://imdb.example/prod', system: 'imdb' }],
-    }],
+    producer: [
+      {
+        value: 'Prod Ucent',
+        image: [{ value: 'https://example.tv/prod.jpg' }],
+        url: [{ value: 'https://imdb.example/prod', system: 'imdb' }],
+      },
+    ],
     presenter: ['Milan Moderátor'],
   },
   date: parseXmltvDate('2026'),
-  category: [{ value: 'News', lang: 'en' }, { value: 'Správy', lang: 'sk' }],
+  category: [
+    { value: 'News', lang: 'en' },
+    { value: 'Správy', lang: 'sk' },
+  ],
   keyword: [{ value: 'live' }],
   language: { value: 'Slovak', lang: 'en' },
   origLanguage: { value: 'Slovak' },
@@ -263,7 +284,9 @@ const maximalProgramme: XmltvProgramme = {
   rating: [{ system: 'VCHIP', value: 'TV-PG', icon: [{ src: 'https://example.tv/r.png' }] }],
   starRating: [{ system: 'imdb', value: '8/10' }],
   review: [{ type: 'text', source: 'Denník', reviewer: 'rk', lang: 'sk', value: 'Výborné' }],
-  image: [{ type: 'poster', size: '3', orient: 'P', system: 'tmdb', value: 'https://example.tv/p.jpg' }],
+  image: [
+    { type: 'poster', size: '3', orient: 'P', system: 'tmdb', value: 'https://example.tv/p.jpg' },
+  ],
 };
 
 const channels: XmltvChannel[] = [
@@ -309,15 +332,19 @@ describe('serialize', () => {
   it('serializes a maximal programme in DTD order', () => {
     const xml = serializeProgramme(maximalProgramme);
     expect(xml).toContain(
-      '<programme start="20260717203000 +0000" stop="20260717220000 +0000"'
-      + ' pdc-start="20260717202900 +0000" vps-start="20260717203000 +0000"'
-      + ' showview="123-456" videoplus="987654" channel="one.example.tv" clumpidx="0/2">',
+      '<programme start="20260717203000 +0000" stop="20260717220000 +0000"' +
+        ' pdc-start="20260717202900 +0000" vps-start="20260717203000 +0000"' +
+        ' showview="123-456" videoplus="987654" channel="one.example.tv" clumpidx="0/2">',
     );
     expect(xml).toContain('<title lang="sk">Večerné správy &amp; šport</title>');
     expect(xml).toContain('<desc lang="sk">Správy &lt;dňa&gt;</desc>');
     expect(xml).toContain('<actor role="moderátor">Peter Herec</actor>');
-    expect(xml).toContain('<actor guest="yes">Eva Hostka<image type="person">https://example.tv/eva.jpg</image></actor>');
-    expect(xml).toContain('<producer>Prod Ucent<image>https://example.tv/prod.jpg</image><url system="imdb">https://imdb.example/prod</url></producer>');
+    expect(xml).toContain(
+      '<actor guest="yes">Eva Hostka<image type="person">https://example.tv/eva.jpg</image></actor>',
+    );
+    expect(xml).toContain(
+      '<producer>Prod Ucent<image>https://example.tv/prod.jpg</image><url system="imdb">https://imdb.example/prod</url></producer>',
+    );
     expect(xml).toContain('<length units="minutes">90</length>');
     expect(xml).toContain('<url system="thetvdb">https://tvdb.example/1</url>');
     expect(xml).toContain('<episode-num system="xmltv_ns">0.5.</episode-num>');
@@ -328,16 +355,33 @@ describe('serialize', () => {
     expect(xml).toContain('<quality>HDTV</quality>');
     expect(xml).toContain('<audio>');
     expect(xml).toContain('<stereo>dolby digital</stereo>');
-    expect(xml).toContain('<previously-shown start="20260710203000 +0000" channel="one.example.tv"/>');
+    expect(xml).toContain(
+      '<previously-shown start="20260710203000 +0000" channel="one.example.tv"/>',
+    );
     expect(xml).toContain('<premiere lang="sk">Premiéra</premiere>');
     expect(xml).toContain('<last-chance/>');
     expect(xml).toContain('<new/>');
     expect(xml).toContain('<subtitles type="onscreen"/>');
     expect(xml).toContain('<star-rating system="imdb">');
-    expect(xml).toContain('<image type="poster" size="3" orient="P" system="tmdb">https://example.tv/p.jpg</image>');
+    expect(xml).toContain(
+      '<image type="poster" size="3" orient="P" system="tmdb">https://example.tv/p.jpg</image>',
+    );
 
     // DTD ordering: title before credits before category before rating
-    const order = ['<title', '<credits>', '<date>', '<category', '<icon', '<episode-num', '<video>', '<audio>', '<previously-shown', '<premiere', '<rating', '<review'];
+    const order = [
+      '<title',
+      '<credits>',
+      '<date>',
+      '<category',
+      '<icon',
+      '<episode-num',
+      '<video>',
+      '<audio>',
+      '<previously-shown',
+      '<premiere',
+      '<rating',
+      '<review',
+    ];
     const positions = order.map((tag) => xml.indexOf(tag));
     expect(positions.every((p) => p >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
@@ -374,10 +418,11 @@ describe('serialize', () => {
 
   it('assembles a whole document by hand from header/footer + element serializers', () => {
     const meta = { generatorInfoName: 'epg-tools' };
-    const xml = serializeDocumentHeader(meta)
-      + channels.map((channel) => serializeChannel(channel)).join('')
-      + serializeProgramme(maximalProgramme)
-      + serializeDocumentFooter();
+    const xml =
+      serializeDocumentHeader(meta) +
+      channels.map((channel) => serializeChannel(channel)).join('') +
+      serializeProgramme(maximalProgramme) +
+      serializeDocumentFooter();
 
     const doc = parseXmltvString(xml);
     expect(doc.meta).toEqual(meta);
@@ -395,18 +440,22 @@ describe('serialize', () => {
 
 describe('writeXmltvStream', () => {
   it('produces a full document with meta attributes', async () => {
-    const xml = await collect(writeXmltvStream({
-      meta: {
-        date: new Date('2026-07-17T00:00:00Z'),
-        generatorInfoName: 'epg-tools',
-        sourceInfoName: 'Test & Source',
-      },
-      channels,
-      programmes: [maximalProgramme],
-    }));
+    const xml = await collect(
+      writeXmltvStream({
+        meta: {
+          date: new Date('2026-07-17T00:00:00Z'),
+          generatorInfoName: 'epg-tools',
+          sourceInfoName: 'Test & Source',
+        },
+        channels,
+        programmes: [maximalProgramme],
+      }),
+    );
 
     // Compact by default: header, doctype and root run together, no newlines.
-    expect(xml.startsWith('<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE tv SYSTEM "xmltv.dtd"><tv')).toBe(true);
+    expect(
+      xml.startsWith('<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE tv SYSTEM "xmltv.dtd"><tv'),
+    ).toBe(true);
     expect(xml).not.toContain('\n');
     expect(xml).toContain('generator-info-name="epg-tools"');
     expect(xml).toContain('source-info-name="Test &amp; Source"');
@@ -416,9 +465,15 @@ describe('writeXmltvStream', () => {
   });
 
   it('pretty-prints the whole document with the indent option', async () => {
-    const xml = await collect(writeXmltvStream({ channels, programmes: [maximalProgramme] }, { indent: 2 }));
+    const xml = await collect(
+      writeXmltvStream({ channels, programmes: [maximalProgramme] }, { indent: 2 }),
+    );
 
-    expect(xml.startsWith('<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE tv SYSTEM "xmltv.dtd">\n<tv')).toBe(true);
+    expect(
+      xml.startsWith(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE tv SYSTEM "xmltv.dtd">\n<tv',
+      ),
+    ).toBe(true);
     expect(xml).toContain('\n  <channel ');
     expect(xml).toContain('\n  <programme ');
     expect(xml).toContain('\n    <title ');
@@ -436,7 +491,9 @@ describe('writeXmltvStream', () => {
       yield maximalProgramme;
     }
 
-    const xml = await collect(writeXmltvStream({ channels: channelGen(), programmes: programmeGen() }));
+    const xml = await collect(
+      writeXmltvStream({ channels: channelGen(), programmes: programmeGen() }),
+    );
     expect(xml).toContain('<channel id="one.example.tv">');
     expect(xml).toContain('<programme ');
   });
@@ -453,22 +510,27 @@ const xmllintAvailable = (() => {
 
 describe.skipIf(!xmllintAvailable)('DTD validity (xmllint against official xmltv.dtd)', () => {
   it('a maximal document validates against the official DTD', async () => {
-    const xml = await collect(writeXmltvStream({
-      meta: {
-        date: new Date('2026-07-17T00:00:00Z'),
-        sourceInfoName: 'Test Source',
-        sourceInfoUrl: 'https://example.tv',
-        sourceDataUrl: 'https://example.tv/data',
-        generatorInfoName: 'epg-tools',
-        generatorInfoUrl: 'https://example.tv/generator',
-      },
-      channels,
-      programmes: [maximalProgramme, {
-        channel: 'two.example.tv',
-        start: new Date('2026-07-18T06:00:00Z'),
-        title: [{ value: 'Minimal' }],
-      }],
-    }));
+    const xml = await collect(
+      writeXmltvStream({
+        meta: {
+          date: new Date('2026-07-17T00:00:00Z'),
+          sourceInfoName: 'Test Source',
+          sourceInfoUrl: 'https://example.tv',
+          sourceDataUrl: 'https://example.tv/data',
+          generatorInfoName: 'epg-tools',
+          generatorInfoUrl: 'https://example.tv/generator',
+        },
+        channels,
+        programmes: [
+          maximalProgramme,
+          {
+            channel: 'two.example.tv',
+            start: new Date('2026-07-18T06:00:00Z'),
+            title: [{ value: 'Minimal' }],
+          },
+        ],
+      }),
+    );
 
     // The document references SYSTEM "xmltv.dtd", so validate it from a
     // directory containing the official DTD.
@@ -480,7 +542,9 @@ describe.skipIf(!xmllintAvailable)('DTD validity (xmllint against official xmltv
       await writeFile(file, xml, 'utf8');
 
       // Throws (non-zero exit) on any validity error.
-      expect(() => execFileSync('xmllint', ['--noout', '--valid', file], { encoding: 'utf8' })).not.toThrow();
+      expect(() =>
+        execFileSync('xmllint', ['--noout', '--valid', file], { encoding: 'utf8' }),
+      ).not.toThrow();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -489,10 +553,11 @@ describe.skipIf(!xmllintAvailable)('DTD validity (xmllint against official xmltv
 
 describe('warnings', () => {
   it('skips a programme with an invalid start, warns with line/col, and continues', async () => {
-    const xml = '<tv>\n'
-      + '  <programme start="garbage" channel="c"><title>Bad</title></programme>\n'
-      + '  <programme start="20260717210000 +0000" channel="c"><title>Good</title></programme>\n'
-      + '</tv>';
+    const xml =
+      '<tv>\n' +
+      '  <programme start="garbage" channel="c"><title>Bad</title></programme>\n' +
+      '  <programme start="20260717210000 +0000" channel="c"><title>Good</title></programme>\n' +
+      '</tv>';
 
     for (const chunkSize of [1, 16, xml.length]) {
       const events = await parseAll(xml, chunkSize);
@@ -501,12 +566,15 @@ describe('warnings', () => {
 
       expect(programmes).toHaveLength(1);
       expect((programmes[0] as XmltvProgramme).title).toEqual([{ value: 'Good' }]);
-      expect(warnings).toEqual([{
-        code: 'invalid-programme',
-        message: 'skipped <programme> with invalid start="garbage": expected a datetime, found no digits at index 0',
-        line: 2,
-        col: 3,
-      }]);
+      expect(warnings).toEqual([
+        {
+          code: 'invalid-programme',
+          message:
+            'skipped <programme> with invalid start="garbage": expected a datetime, found no digits at index 0',
+          line: 2,
+          col: 3,
+        },
+      ]);
     }
   });
 
@@ -515,11 +583,14 @@ describe('warnings', () => {
     const events = await parseAll(xml);
 
     expect(events.filter((e) => e.type === 'programme')).toEqual([]);
-    expect(events.filter((e) => e.type === 'warning').map((e) => e.value.code)).toEqual(['invalid-programme']);
+    expect(events.filter((e) => e.type === 'warning').map((e) => e.value.code)).toEqual([
+      'invalid-programme',
+    ]);
   });
 
   it('warns when a recognized attribute is present but empty', async () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c" stop=""><title>T</title></programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c" stop=""><title>T</title></programme></tv>';
     const events = await parseAll(xml);
     const warnings = events.filter((e) => e.type === 'warning').map((e) => e.value);
 
@@ -530,8 +601,9 @@ describe('warnings', () => {
   });
 
   it('warns on an empty recognized attribute on the root <tv> element', async () => {
-    const xml = '<tv date="" source-info-name=""><programme start="20260717200000 +0000" channel="c">'
-      + '<title>T</title></programme></tv>';
+    const xml =
+      '<tv date="" source-info-name=""><programme start="20260717200000 +0000" channel="c">' +
+      '<title>T</title></programme></tv>';
     const events = await parseAll(xml);
     const messages = events.filter((e) => e.type === 'warning').map((e) => e.value.message);
 
@@ -540,7 +612,8 @@ describe('warnings', () => {
   });
 
   it('resolves named timezones via the timezones parse option, and warns on unmapped ones', () => {
-    const xml = '<tv><programme start="20260717203000 BST" channel="c"><title>T</title></programme></tv>';
+    const xml =
+      '<tv><programme start="20260717203000 BST" channel="c"><title>T</title></programme></tv>';
 
     // With a mapping the programme parses and the offset is preserved.
     const mapped = parseXmltvString(xml, { timezones: { BST: 60 } });
@@ -570,19 +643,23 @@ describe('warnings', () => {
   });
 
   it('skips a duplicate structured element without parsing its subtree', () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c"><title>T</title>'
-      + '<video><aspect>16:9</aspect></video><video><aspect>4:3</aspect></video></programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c"><title>T</title>' +
+      '<video><aspect>16:9</aspect></video><video><aspect>4:3</aspect></video></programme></tv>';
     const doc = parseXmltvString(xml);
 
     expect(doc.programmes[0]!.video).toEqual({ aspect: '16:9' });
-    expect(doc.warnings.map((w) => w.message)).toContain('duplicate <video> element ignored, keeping the first');
+    expect(doc.warnings.map((w) => w.message)).toContain(
+      'duplicate <video> element ignored, keeping the first',
+    );
   });
 
   it('warns on and skips a duplicate nested single-occurrence child', () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c"><title>T</title>'
-      + '<video><aspect>16:9</aspect><aspect>4:3</aspect></video>'
-      + '<rating><value>PG</value><value>R</value></rating>'
-      + '</programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c"><title>T</title>' +
+      '<video><aspect>16:9</aspect><aspect>4:3</aspect></video>' +
+      '<rating><value>PG</value><value>R</value></rating>' +
+      '</programme></tv>';
     const doc = parseXmltvString(xml);
     const p = doc.programmes[0]!;
 
@@ -596,8 +673,9 @@ describe('warnings', () => {
   });
 
   it('uses the same "empty value for" phrasing for an empty yes/no attribute', async () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c"><title>T</title>'
-      + '<credits><actor guest="">Ann</actor></credits></programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c"><title>T</title>' +
+      '<credits><actor guest="">Ann</actor></credits></programme></tv>';
     const events = await parseAll(xml);
     const warnings = events.filter((e) => e.type === 'warning').map((e) => e.value);
 
@@ -605,19 +683,22 @@ describe('warnings', () => {
   });
 
   it('warns once and skips a nested element found inside a text element', async () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c">'
-      + '<title>Hello <b>World</b></title></programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c">' +
+      '<title>Hello <b>World</b></title></programme></tv>';
     const events = await parseAll(xml);
     const programme = events.find((e) => e.type === 'programme')!.value as XmltvProgramme;
     const warnings = events.filter((e) => e.type === 'warning').map((e) => e.value);
 
     expect(programme.title).toEqual([{ value: 'Hello' }]);
-    expect(warnings).toEqual([{
-      code: 'unknown-element',
-      message: 'nested <b> inside text element <title> ignored',
-      line: 1,
-      col: expect.any(Number),
-    }]);
+    expect(warnings).toEqual([
+      {
+        code: 'unknown-element',
+        message: 'nested <b> inside text element <title> ignored',
+        line: 1,
+        col: expect.any(Number),
+      },
+    ]);
   });
 
   it('skips a programme without the required channel attribute', async () => {
@@ -632,8 +713,9 @@ describe('warnings', () => {
   });
 
   it('keeps the programme but warns when stop is invalid', async () => {
-    const xml = '<tv><programme start="20260717200000 +0000" stop="nope" channel="c">'
-      + '<title>T</title></programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" stop="nope" channel="c">' +
+      '<title>T</title></programme></tv>';
     const events = await parseAll(xml);
     const programme = events.find((e) => e.type === 'programme')?.value as XmltvProgramme;
     const warnings = events.filter((e) => e.type === 'warning').map((e) => e.value);
@@ -646,26 +728,33 @@ describe('warnings', () => {
   });
 
   it('anchors an invalid programme attribute at the attribute, not the tag', async () => {
-    const line2 = '<programme start="20260717200000 +0000" stop="nope" channel="c"><title>T</title></programme>';
+    const line2 =
+      '<programme start="20260717200000 +0000" stop="nope" channel="c"><title>T</title></programme>';
     const xml = `<tv>\n${line2}\n</tv>`;
     // 1-based column of the "stop" attribute name on line 2.
     const expectedCol = line2.indexOf('stop=') + 1;
 
     for (const chunkSize of [1, 16, xml.length]) {
-      const warnings = (await parseAll(xml, chunkSize)).filter((e) => e.type === 'warning').map((e) => e.value);
+      const warnings = (await parseAll(xml, chunkSize))
+        .filter((e) => e.type === 'warning')
+        .map((e) => e.value);
 
-      expect(warnings).toEqual([{
-        code: 'invalid-attribute',
-        message: 'invalid value "nope" for stop on <programme> dropped: expected a datetime, found no digits at index 0',
-        line: 2,
-        col: expectedCol,
-      }]);
+      expect(warnings).toEqual([
+        {
+          code: 'invalid-attribute',
+          message:
+            'invalid value "nope" for stop on <programme> dropped: expected a datetime, found no digits at index 0',
+          line: 2,
+          col: expectedCol,
+        },
+      ]);
     }
   });
 
   it('anchors an invalid child-element attribute at the attribute, not the element', async () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c">'
-      + '<title>T</title><image size="9">https://x.tv/f.jpg</image></programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c">' +
+      '<title>T</title><image size="9">https://x.tv/f.jpg</image></programme></tv>';
     // Single line: 1-based column equals the 0-based index + 1.
     const expectedCol = xml.indexOf('size=') + 1;
 
@@ -675,20 +764,23 @@ describe('warnings', () => {
         .map((e) => e.value)
         .filter((w) => w.message.includes('size='));
 
-      expect(warnings).toEqual([{
-        code: 'invalid-attribute',
-        message: 'invalid size="9" on <image> dropped',
-        line: 1,
-        col: expectedCol,
-      }]);
+      expect(warnings).toEqual([
+        {
+          code: 'invalid-attribute',
+          message: 'invalid size="9" on <image> dropped',
+          line: 1,
+          col: expectedCol,
+        },
+      ]);
     }
   });
 
   it('does not duplicate warnings across chunk-boundary retries', async () => {
     // 1-byte chunks force the programme to be re-parsed once per byte;
     // buffered warnings must still be emitted exactly once.
-    const xml = '<tv><programme start="20260717200000 +0000" stop="bad" channel="c">'
-      + '<title>T</title></programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" stop="bad" channel="c">' +
+      '<title>T</title></programme></tv>';
     const events = await parseAll(xml, 1);
 
     expect(events.filter((e) => e.type === 'warning')).toHaveLength(1);
@@ -696,8 +788,9 @@ describe('warnings', () => {
   });
 
   it('drops an invalid <tv> date (anchored at the attribute) but keeps other meta and extras', async () => {
-    const xml = '<tv date="notadate" generator-info-name="grabber" data-provider="acme">'
-      + '<programme start="20260717200000 +0000" channel="c"><title>T</title></programme></tv>';
+    const xml =
+      '<tv date="notadate" generator-info-name="grabber" data-provider="acme">' +
+      '<programme start="20260717200000 +0000" channel="c"><title>T</title></programme></tv>';
     const events = await parseAll(xml);
     const meta = events.find((e) => e.type === 'meta')?.value;
     const warnings = events.filter((e) => e.type === 'warning').map((e) => e.value);
@@ -706,22 +799,26 @@ describe('warnings', () => {
       generatorInfoName: 'grabber',
       extraAttributes: { 'data-provider': 'acme' },
     });
-    expect(warnings).toEqual([{
-      code: 'invalid-attribute',
-      message: 'invalid value "notadate" for date on <tv> dropped: expected a datetime, found no digits at index 0',
-      line: 1,
-      col: xml.indexOf('date=') + 1,
-    }]);
+    expect(warnings).toEqual([
+      {
+        code: 'invalid-attribute',
+        message:
+          'invalid value "notadate" for date on <tv> dropped: expected a datetime, found no digits at index 0',
+        line: 1,
+        col: xml.indexOf('date=') + 1,
+      },
+    ]);
   });
 
   it('drops a <channel> without the required id, warns, and keeps parsing', async () => {
     // <channel id> is #REQUIRED by the DTD; a channel missing it is dropped
     // (body discarded) with a warning, and the following valid channel must
     // still parse — proving the discard leaves the scanner correctly placed.
-    const xml = '<tv>'
-      + '<channel><display-name>Orphan</display-name><icon src="https://x.tv/o.png"/></channel>'
-      + '<channel id="good.tv"><display-name>Good</display-name></channel>'
-      + '</tv>';
+    const xml =
+      '<tv>' +
+      '<channel><display-name>Orphan</display-name><icon src="https://x.tv/o.png"/></channel>' +
+      '<channel id="good.tv"><display-name>Good</display-name></channel>' +
+      '</tv>';
 
     for (const chunkSize of [1, 16, xml.length]) {
       const events = await parseAll(xml, chunkSize);
@@ -729,17 +826,20 @@ describe('warnings', () => {
       const warnings = events.filter((e) => e.type === 'warning').map((e) => e.value);
 
       expect(channels).toEqual([{ id: 'good.tv', displayName: [{ value: 'Good' }] }]);
-      expect(warnings).toEqual([{
-        code: 'invalid-element',
-        message: '<channel> without an id attribute dropped',
-        line: 1,
-        col: '<tv>'.length + 1,
-      }]);
+      expect(warnings).toEqual([
+        {
+          code: 'invalid-element',
+          message: '<channel> without an id attribute dropped',
+          line: 1,
+          col: '<tv>'.length + 1,
+        },
+      ]);
     }
   });
 
   it('drops a self-closing <channel> without an id', async () => {
-    const xml = '<tv><channel/><channel id="good.tv"><display-name>Good</display-name></channel></tv>';
+    const xml =
+      '<tv><channel/><channel id="good.tv"><display-name>Good</display-name></channel></tv>';
     const events = await parseAll(xml);
     const channels = events.filter((e) => e.type === 'channel').map((e) => e.value);
     const warnings = events.filter((e) => e.type === 'warning').map((e) => e.value);
@@ -749,8 +849,9 @@ describe('warnings', () => {
   });
 
   it('warns about truncated input at end of stream', async () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c"><title>Full</title></programme>'
-      + '<programme start="20260717210000 +0000" channel="c"><title>Cut';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c"><title>Full</title></programme>' +
+      '<programme start="20260717210000 +0000" channel="c"><title>Cut';
     const events = await parseAll(xml);
     const programmes = events.filter((e) => e.type === 'programme');
     const warnings = events.filter((e) => e.type === 'warning').map((e) => e.value);
@@ -761,7 +862,8 @@ describe('warnings', () => {
   });
 
   it('keeps the first of a duplicated attribute and warns at the dropped later one', async () => {
-    const line = '<programme start="20260717200000 +0000" channel="first" channel="second"><title>T</title></programme>';
+    const line =
+      '<programme start="20260717200000 +0000" channel="first" channel="second"><title>T</title></programme>';
     const xml = `<tv>${line}</tv>`;
     const events = await parseAll(xml);
     const programme = events.find((e) => e.type === 'programme')?.value as XmltvProgramme;
@@ -770,17 +872,20 @@ describe('warnings', () => {
     // First value wins, matching the first-wins rule for duplicate elements.
     expect(programme.channel).toBe('first');
     // Warning names the ignored later value, anchored at that later attribute.
-    expect(warnings).toEqual([{
-      code: 'invalid-attribute',
-      message: 'duplicate attribute channel="second" ignored, keeping the first',
-      line: 1,
-      col: '<tv>'.length + line.indexOf('channel=', line.indexOf('channel=') + 1) + 1,
-    }]);
+    expect(warnings).toEqual([
+      {
+        code: 'invalid-attribute',
+        message: 'duplicate attribute channel="second" ignored, keeping the first',
+        line: 1,
+        col: '<tv>'.length + line.indexOf('channel=', line.indexOf('channel=') + 1) + 1,
+      },
+    ]);
   });
 
   it('warns about unknown top-level elements', async () => {
-    const xml = '<tv><junk attr="1">x</junk>'
-      + '<programme start="20260717200000 +0000" channel="c"><title>T</title></programme></tv>';
+    const xml =
+      '<tv><junk attr="1">x</junk>' +
+      '<programme start="20260717200000 +0000" channel="c"><title>T</title></programme></tv>';
     const events = await parseAll(xml);
     const warnings = events.filter((e) => e.type === 'warning').map((e) => e.value);
 
@@ -791,30 +896,38 @@ describe('warnings', () => {
   });
 
   it('warns about dropped invalid enum and element values', async () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c">'
-      + '<title>T</title>'
-      + '<length units="parsecs">12</length>'
-      + '<rating system="x"><icon src="https://x.tv/r.png"/></rating>'
-      + '<image type="fanart" size="9" orient="landscape">https://x.tv/f.jpg</image>'
-      + '</programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c">' +
+      '<title>T</title>' +
+      '<length units="parsecs">12</length>' +
+      '<rating system="x"><icon src="https://x.tv/r.png"/></rating>' +
+      '<image type="fanart" size="9" orient="landscape">https://x.tv/f.jpg</image>' +
+      '</programme></tv>';
     const events = await parseAll(xml);
     const programme = events.find((e) => e.type === 'programme')?.value as XmltvProgramme;
-    const codes = events.filter((e) => e.type === 'warning').map((e) => e.value.code).sort();
+    const codes = events
+      .filter((e) => e.type === 'warning')
+      .map((e) => e.value.code)
+      .sort();
 
     expect(programme.length).toBeUndefined();
     expect(programme.rating).toBeUndefined();
     expect(programme.image).toEqual([{ value: 'https://x.tv/f.jpg' }]);
     expect(codes).toEqual([
-      'invalid-attribute', 'invalid-attribute', 'invalid-attribute',
-      'invalid-element', 'invalid-element',
+      'invalid-attribute',
+      'invalid-attribute',
+      'invalid-attribute',
+      'invalid-element',
+      'invalid-element',
     ]);
   });
 
   it('keeps valid image size/orient enum values', async () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c">'
-      + '<title>T</title>'
-      + '<image size="3" orient="P">https://x.tv/p.jpg</image>'
-      + '</programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c">' +
+      '<title>T</title>' +
+      '<image size="3" orient="P">https://x.tv/p.jpg</image>' +
+      '</programme></tv>';
     const events = await parseAll(xml);
     const programme = events.find((e) => e.type === 'programme')?.value as XmltvProgramme;
 
@@ -823,12 +936,13 @@ describe('warnings', () => {
   });
 
   it('resolves yes/no fields to true, false, or undefined-with-warning, never a false negative', async () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c">'
-      + '<title>T</title>'
-      + '<credits><actor guest="no">Bit Player</actor></credits>'
-      + '<video><present>maybe</present><colour>no</colour></video>'
-      + '<audio><present>yes</present></audio>'
-      + '</programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c">' +
+      '<title>T</title>' +
+      '<credits><actor guest="no">Bit Player</actor></credits>' +
+      '<video><present>maybe</present><colour>no</colour></video>' +
+      '<audio><present>yes</present></audio>' +
+      '</programme></tv>';
     const events = await parseAll(xml);
     const programme = events.find((e) => e.type === 'programme')?.value as XmltvProgramme;
     const warnings = events.filter((e) => e.type === 'warning').map((e) => e.value);
@@ -849,27 +963,31 @@ describe('warnings', () => {
   });
 
   it('anchors an invalid actor guest attribute at the attribute, not the <actor>', async () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c"><title>T</title>'
-      + '<credits><actor guest="maybe">Someone</actor></credits></programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c"><title>T</title>' +
+      '<credits><actor guest="maybe">Someone</actor></credits></programme></tv>';
     const events = await parseAll(xml);
     const programme = events.find((e) => e.type === 'programme')?.value as XmltvProgramme;
     const warnings = events.filter((e) => e.type === 'warning').map((e) => e.value);
 
     // Invalid yes/no -> left unset, never coerced.
     expect(programme.credits?.actor).toEqual([{ value: 'Someone' }]);
-    expect(warnings).toEqual([{
-      code: 'invalid-attribute',
-      message: 'invalid value "maybe" for guest on <actor> dropped (expected yes|no)',
-      line: 1,
-      col: xml.indexOf('guest=') + 1,
-    }]);
+    expect(warnings).toEqual([
+      {
+        code: 'invalid-attribute',
+        message: 'invalid value "maybe" for guest on <actor> dropped (expected yes|no)',
+        line: 1,
+        col: xml.indexOf('guest=') + 1,
+      },
+    ]);
   });
 });
 
 describe('parseXmltvStream', () => {
   it('throws when the root element is not <tv>', async () => {
-    const xml = '<guide><programme start="20260717200000 +0000" channel="c">'
-      + '<title>T</title></programme></guide>';
+    const xml =
+      '<guide><programme start="20260717200000 +0000" channel="c">' +
+      '<title>T</title></programme></guide>';
 
     for (const chunkSize of [3, xml.length]) {
       await expect(async () => {
@@ -899,8 +1017,9 @@ describe('parseXmltvStream', () => {
     expect(doc.programmes).toEqual([]);
 
     // Above it: give up with a message reporting the configured limit.
-    expect(() => parseXmltvString(headless, { rootScanLimit: 100 }))
-      .toThrow(/No root element found within the first 100 characters/);
+    expect(() => parseXmltvString(headless, { rootScanLimit: 100 })).toThrow(
+      /No root element found within the first 100 characters/,
+    );
   });
 
   it('round-trips a rich document across awkward chunk boundaries', async () => {
@@ -910,11 +1029,13 @@ describe('parseXmltvStream', () => {
       title: [{ value: 'Ráno' }],
     };
 
-    const xml = await collect(writeXmltvStream({
-      meta: { generatorInfoName: 'epg-tools', date: new Date('2026-07-17T00:00:00Z') },
-      channels,
-      programmes: [maximalProgramme, simple],
-    }));
+    const xml = await collect(
+      writeXmltvStream({
+        meta: { generatorInfoName: 'epg-tools', date: new Date('2026-07-17T00:00:00Z') },
+        channels,
+        programmes: [maximalProgramme, simple],
+      }),
+    );
 
     for (const chunkSize of [1, 7, 64, xml.length]) {
       const events = await parseAll(xml, chunkSize);
@@ -933,10 +1054,12 @@ describe('parseXmltvStream', () => {
   });
 
   it('accepts byte chunks split inside multi-byte characters', async () => {
-    const xml = await collect(writeXmltvStream({
-      channels: [channels[0]!],
-      programmes: [maximalProgramme],
-    }));
+    const xml = await collect(
+      writeXmltvStream({
+        channels: [channels[0]!],
+        programmes: [maximalProgramme],
+      }),
+    );
     const bytes = new TextEncoder().encode(xml);
 
     function* byteChunks(): Generator<Uint8Array> {
@@ -957,30 +1080,33 @@ describe('parseXmltvStream', () => {
   });
 
   it('decodes entities and numeric references', async () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c">'
-      + '<title>Caf&#233; &amp; Bar &#x1F37A;</title></programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c">' +
+      '<title>Caf&#233; &amp; Bar &#x1F37A;</title></programme></tv>';
     const events = await parseAll(xml, 3);
     const programme = events.find((e) => e.type === 'programme')?.value as XmltvProgramme;
     expect(programme.title[0]!.value).toBe('Café & Bar 🍺');
   });
 
   it('handles CDATA sections', async () => {
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c">'
-      + '<title><![CDATA[5 < 6 & 7 > 2]]></title></programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c">' +
+      '<title><![CDATA[5 < 6 & 7 > 2]]></title></programme></tv>';
     const events = await parseAll(xml);
     const programme = events.find((e) => e.type === 'programme')?.value as XmltvProgramme;
     expect(programme.title[0]!.value).toBe('5 < 6 & 7 > 2');
   });
 
   it('skips comments; unknown elements are preserved as extras', async () => {
-    const xml = '<?xml version="1.0"?><!DOCTYPE tv SYSTEM "xmltv.dtd">'
-      + '<tv><!-- a <comment> with tags -->'
-      + '<channel id="c"><display-name>C</display-name></channel>'
-      + '<programme start="20260717200000 +0000" channel="c">'
-      + '<title>T</title>'
-      + '<video><present>yes</present><aspect>16:9</aspect></video>'
-      + '<mystery-element attr="1"><nested/></mystery-element>'
-      + '</programme></tv>';
+    const xml =
+      '<?xml version="1.0"?><!DOCTYPE tv SYSTEM "xmltv.dtd">' +
+      '<tv><!-- a <comment> with tags -->' +
+      '<channel id="c"><display-name>C</display-name></channel>' +
+      '<programme start="20260717200000 +0000" channel="c">' +
+      '<title>T</title>' +
+      '<video><present>yes</present><aspect>16:9</aspect></video>' +
+      '<mystery-element attr="1"><nested/></mystery-element>' +
+      '</programme></tv>';
     const events = await parseAll(xml);
     const programme = events.find((e) => e.type === 'programme')?.value as XmltvProgramme;
     expect(programme).toEqual({
@@ -988,7 +1114,9 @@ describe('parseXmltvStream', () => {
       start: new Date('2026-07-17T20:00:00Z'),
       title: [{ value: 'T' }],
       video: { present: true, aspect: '16:9' },
-      extra: [{ name: 'mystery-element', attributes: { attr: '1' }, children: [{ name: 'nested' }] }],
+      extra: [
+        { name: 'mystery-element', attributes: { attr: '1' }, children: [{ name: 'nested' }] },
+      ],
     });
   });
 
@@ -1033,17 +1161,25 @@ describe('parseXmltvStream', () => {
     });
 
     it('captures unknown children inside <video>/<audio> as extra and round-trips them', () => {
-      const xml = '<tv><programme start="20260717200000 +0000" channel="c">'
-        + '<title>T</title>'
-        + '<video><present>yes</present><aspect>16:9</aspect><hdr>dolby-vision</hdr></video>'
-        + '<audio><stereo>surround</stereo><codec system="x">eac3</codec></audio>'
-        + '</programme></tv>';
+      const xml =
+        '<tv><programme start="20260717200000 +0000" channel="c">' +
+        '<title>T</title>' +
+        '<video><present>yes</present><aspect>16:9</aspect><hdr>dolby-vision</hdr></video>' +
+        '<audio><stereo>surround</stereo><codec system="x">eac3</codec></audio>' +
+        '</programme></tv>';
       const doc = parseXmltvString(xml);
       const programme = doc.programmes[0]!;
 
       expect(doc.warnings).toEqual([]);
-      expect(programme.video).toEqual({ present: true, aspect: '16:9', extra: [{ name: 'hdr', value: 'dolby-vision' }] });
-      expect(programme.audio).toEqual({ stereo: 'surround', extra: [{ name: 'codec', attributes: { system: 'x' }, value: 'eac3' }] });
+      expect(programme.video).toEqual({
+        present: true,
+        aspect: '16:9',
+        extra: [{ name: 'hdr', value: 'dolby-vision' }],
+      });
+      expect(programme.audio).toEqual({
+        stereo: 'surround',
+        extra: [{ name: 'codec', attributes: { system: 'x' }, value: 'eac3' }],
+      });
 
       // The captured extras survive a serialize + parse round-trip.
       const reparsed = parseXmltvString(`<tv>${serializeProgramme(programme)}</tv>`);
@@ -1052,14 +1188,15 @@ describe('parseXmltvStream', () => {
     });
 
     it('captures unknown children in rating/subtitles/credits/person as extra and round-trips', () => {
-      const xml = '<tv><programme start="20260717200000 +0000" channel="c">'
-        + '<title>T</title>'
+      const xml =
+        '<tv><programme start="20260717200000 +0000" channel="c">' +
+        '<title>T</title>' +
         // <director> is mixed content, so a provider extension child is preserved;
         // <award> is not a credit role, so it is kept on credits.extra.
-        + '<credits><director>Jane<medal>gold</medal></director><award>Emmy</award></credits>'
-        + '<rating system="MPAA"><value>PG</value><note>mild</note></rating>'
-        + '<subtitles type="teletext"><page>888</page></subtitles>'
-        + '</programme></tv>';
+        '<credits><director>Jane<medal>gold</medal></director><award>Emmy</award></credits>' +
+        '<rating system="MPAA"><value>PG</value><note>mild</note></rating>' +
+        '<subtitles type="teletext"><page>888</page></subtitles>' +
+        '</programme></tv>';
       const doc = parseXmltvString(xml);
       const programme = doc.programmes[0]!;
 
@@ -1068,8 +1205,12 @@ describe('parseXmltvStream', () => {
         director: [{ value: 'Jane', extra: [{ name: 'medal', value: 'gold' }] }],
         extra: [{ name: 'award', value: 'Emmy' }],
       });
-      expect(programme.rating).toEqual([{ system: 'MPAA', value: 'PG', extra: [{ name: 'note', value: 'mild' }] }]);
-      expect(programme.subtitles).toEqual([{ type: 'teletext', extra: [{ name: 'page', value: '888' }] }]);
+      expect(programme.rating).toEqual([
+        { system: 'MPAA', value: 'PG', extra: [{ name: 'note', value: 'mild' }] },
+      ]);
+      expect(programme.subtitles).toEqual([
+        { type: 'teletext', extra: [{ name: 'page', value: '888' }] },
+      ]);
 
       const reparsed = parseXmltvString(`<tv>${serializeProgramme(programme)}</tv>`);
       expect(reparsed.warnings).toEqual([]);
@@ -1077,11 +1218,12 @@ describe('parseXmltvStream', () => {
     });
 
     it('tolerates processing instructions inside extension and credit elements', async () => {
-      const xml = '<tv><programme start="20260717200000 +0000" channel="c">'
-        + '<title>T</title>'
-        + '<credits><director><?pi ignore?>Jana Novak</director></credits>'
-        + '<mystery><?php echo "x"; ?>value</mystery>'
-        + '</programme></tv>';
+      const xml =
+        '<tv><programme start="20260717200000 +0000" channel="c">' +
+        '<title>T</title>' +
+        '<credits><director><?pi ignore?>Jana Novak</director></credits>' +
+        '<mystery><?php echo "x"; ?>value</mystery>' +
+        '</programme></tv>';
       const events = await parseAll(xml);
       const programme = events.find((e) => e.type === 'programme')?.value as XmltvProgramme;
 
@@ -1095,20 +1237,23 @@ describe('parseXmltvStream', () => {
       // prototype accessor rather than creating a normal data property —
       // so it's rejected outright rather than special-cased through every
       // consumer of extraAttributes.
-      const xml = '<tv><programme start="20260717200000 +0000" channel="c" __proto__="evil">'
-        + '<title>T</title></programme></tv>';
+      const xml =
+        '<tv><programme start="20260717200000 +0000" channel="c" __proto__="evil">' +
+        '<title>T</title></programme></tv>';
       const events = await parseAll(xml);
       const programme = events.find((e) => e.type === 'programme')?.value as XmltvProgramme;
       const warnings = events.filter((e) => e.type === 'warning').map((e) => e.value);
 
       expect(programme.extraAttributes).toBeUndefined();
-      expect(warnings).toEqual([{
-        code: 'invalid-attribute',
-        message: 'attribute name "__proto__" is not supported and was dropped',
-        line: 1,
-        // anchored at the offending attribute, not the enclosing tag's '<'.
-        col: xml.indexOf('__proto__') + 1,
-      }]);
+      expect(warnings).toEqual([
+        {
+          code: 'invalid-attribute',
+          message: 'attribute name "__proto__" is not supported and was dropped',
+          line: 1,
+          // anchored at the offending attribute, not the enclosing tag's '<'.
+          col: xml.indexOf('__proto__') + 1,
+        },
+      ]);
       // Object.prototype must be untouched.
       expect(({} as Record<string, unknown>).evil).toBeUndefined();
 
@@ -1119,12 +1264,13 @@ describe('parseXmltvStream', () => {
     it('parses extension elements named like HTML void tags (link, meta, img)', async () => {
       // txml's default selfClosingTags treats these names as childless (HTML
       // behavior) and then throws on their close tags — must be disabled.
-      const xml = '<tv><programme start="20260717200000 +0000" channel="c">'
-        + '<title>T</title>'
-        + '<link>https://example.tv/more</link>'
-        + '<meta name="provider">antik</meta>'
-        + '<img>https://example.tv/x.jpg</img>'
-        + '</programme></tv>';
+      const xml =
+        '<tv><programme start="20260717200000 +0000" channel="c">' +
+        '<title>T</title>' +
+        '<link>https://example.tv/more</link>' +
+        '<meta name="provider">antik</meta>' +
+        '<img>https://example.tv/x.jpg</img>' +
+        '</programme></tv>';
       const events = await parseAll(xml);
       const programme = events.find((e) => e.type === 'programme')?.value as XmltvProgramme;
 
@@ -1158,11 +1304,13 @@ describe('parseXmltvStream', () => {
         image: [{ value: 'https://x.tv/p.jpg', type: 'poster', extraAttributes: { dpi: '300' } }],
       };
 
-      const xml = await collect(writeXmltvStream({
-        meta: { generatorInfoName: 'g', extraAttributes: { 'provider-id': 'antik' } },
-        channels: [{ id: 'one.example.tv', displayName: [{ value: 'One' }] }],
-        programmes: [deep],
-      }));
+      const xml = await collect(
+        writeXmltvStream({
+          meta: { generatorInfoName: 'g', extraAttributes: { 'provider-id': 'antik' } },
+          channels: [{ id: 'one.example.tv', displayName: [{ value: 'One' }] }],
+          programmes: [deep],
+        }),
+      );
 
       expect(xml).toContain('provider-id="antik"');
       expect(xml).toContain('<icon src="https://x.tv/i.png" shape="wide"/>');
@@ -1171,17 +1319,22 @@ describe('parseXmltvStream', () => {
       for (const chunkSize of [7, xml.length]) {
         const events = await parseAll(xml, chunkSize);
         const meta = events.find((e) => e.type === 'meta')?.value;
-        expect(meta).toEqual({ generatorInfoName: 'g', extraAttributes: { 'provider-id': 'antik' } });
+        expect(meta).toEqual({
+          generatorInfoName: 'g',
+          extraAttributes: { 'provider-id': 'antik' },
+        });
         expect(events.find((e) => e.type === 'programme')?.value).toEqual(deep);
         expect(events.filter((e) => e.type === 'warning')).toEqual([]);
       }
     });
 
     it('round-trips extensions through serialize and chunked parse', async () => {
-      const xml = await collect(writeXmltvStream({
-        channels: [extendedChannel],
-        programmes: [extended],
-      }));
+      const xml = await collect(
+        writeXmltvStream({
+          channels: [extendedChannel],
+          programmes: [extended],
+        }),
+      );
 
       for (const chunkSize of [5, xml.length]) {
         const events = await parseAll(xml, chunkSize);
@@ -1203,8 +1356,9 @@ describe('parseXmltvStream', () => {
     // Tolerated malformed input: unquoted value immediately followed by `/>`.
     // The `/` must close the tag, not be swallowed into the URL — otherwise
     // <icon> stays "open" and eats the rest of the document.
-    const xml = '<tv><programme start="20260717200000 +0000" channel="c"><title>T</title>'
-      + '<icon src=http://foo.com/a/b.jpg/></programme></tv>';
+    const xml =
+      '<tv><programme start="20260717200000 +0000" channel="c"><title>T</title>' +
+      '<icon src=http://foo.com/a/b.jpg/></programme></tv>';
 
     for (const chunkSize of [1, 8, 16, xml.length]) {
       const events = await parseAll(xml, chunkSize);
@@ -1221,11 +1375,13 @@ describe('parseXmltvStream', () => {
 
 describe('parseXmltvString', () => {
   it('collects meta/channels/programmes/warnings into one document', async () => {
-    const xml = await collect(writeXmltvStream({
-      meta: { generatorInfoName: 'epg-tools' },
-      channels,
-      programmes: [maximalProgramme],
-    }));
+    const xml = await collect(
+      writeXmltvStream({
+        meta: { generatorInfoName: 'epg-tools' },
+        channels,
+        programmes: [maximalProgramme],
+      }),
+    );
 
     const doc = parseXmltvString(xml);
 
@@ -1236,8 +1392,9 @@ describe('parseXmltvString', () => {
   });
 
   it('surfaces warnings instead of silently dropping them', () => {
-    const xml = '<tv><programme start="garbage" channel="c"><title>Bad</title></programme>'
-      + '<programme start="20260717200000 +0000" channel="c"><title>Good</title></programme></tv>';
+    const xml =
+      '<tv><programme start="garbage" channel="c"><title>Bad</title></programme>' +
+      '<programme start="20260717200000 +0000" channel="c"><title>Good</title></programme></tv>';
 
     const doc = parseXmltvString(xml);
 
@@ -1256,8 +1413,9 @@ describe('parseXmltvString', () => {
   });
 
   it('drops channels/programmes missing their required id by default', () => {
-    const xml = '<tv><channel><display-name>Only</display-name></channel>'
-      + '<programme start="20260717200000 +0000"><title>A</title></programme></tv>';
+    const xml =
+      '<tv><channel><display-name>Only</display-name></channel>' +
+      '<programme start="20260717200000 +0000"><title>A</title></programme></tv>';
 
     const doc = parseXmltvString(xml);
 
@@ -1269,9 +1427,10 @@ describe('parseXmltvString', () => {
   it('keeps them with empty id/channel when tolerateMissingId is set', () => {
     // A single-channel feed that omits the id/channel reference everywhere;
     // the merge layer can later attach everything to the one known channel.
-    const xml = '<tv><channel><display-name>Only Channel</display-name></channel>'
-      + '<programme start="20260717200000 +0000"><title>A</title></programme>'
-      + '<programme start="20260717210000 +0000"><title>B</title></programme></tv>';
+    const xml =
+      '<tv><channel><display-name>Only Channel</display-name></channel>' +
+      '<programme start="20260717200000 +0000"><title>A</title></programme>' +
+      '<programme start="20260717210000 +0000"><title>B</title></programme></tv>';
 
     const doc = parseXmltvString(xml, { tolerateMissingId: true });
 
@@ -1361,10 +1520,13 @@ describe('real-world fixture (epg-parser basic.xml)', () => {
       stop: parseXmltvDate('20080715010000 -0600'),
       title: [{ value: 'NOW on PBS', lang: 'en' }],
       subTitle: [{ value: 'Pilot', lang: 'en' }],
-      desc: [{
-        value: "Jordan's Queen Rania has made job creation a priority to help curb the staggering unemployment rates among youths in the Middle East.",
-        lang: 'en',
-      }],
+      desc: [
+        {
+          value:
+            "Jordan's Queen Rania has made job creation a priority to help curb the staggering unemployment rates among youths in the Middle East.",
+          lang: 'en',
+        },
+      ],
       date: parseXmltvDate('20080711'),
       category: [
         { value: 'Newsmagazine', lang: 'en' },
@@ -1405,15 +1567,57 @@ describe('real-world fixture (epg-parser basic.xml)', () => {
         { system: 'IMDB', value: '8/10' },
       ],
       review: [
-        { type: 'text', source: 'Rotten Tomatoes', reviewer: 'Joe Bloggs', lang: 'en', value: 'This is a fantastic show!' },
-        { type: 'text', source: 'IDMB', reviewer: 'Jane Doe', lang: 'en', value: 'I love this show!' },
-        { type: 'url', source: 'Rotten Tomatoes', reviewer: 'Joe Bloggs', lang: 'en', value: 'https://example.com/programme_one_review' },
+        {
+          type: 'text',
+          source: 'Rotten Tomatoes',
+          reviewer: 'Joe Bloggs',
+          lang: 'en',
+          value: 'This is a fantastic show!',
+        },
+        {
+          type: 'text',
+          source: 'IDMB',
+          reviewer: 'Jane Doe',
+          lang: 'en',
+          value: 'I love this show!',
+        },
+        {
+          type: 'url',
+          source: 'Rotten Tomatoes',
+          reviewer: 'Joe Bloggs',
+          lang: 'en',
+          value: 'https://example.com/programme_one_review',
+        },
       ],
       image: [
-        { type: 'poster', size: '1', orient: 'P', system: 'tvdb', value: 'https://tvdb.com/programme_one_poster_1.jpg' },
-        { type: 'poster', size: '2', orient: 'P', system: 'tmdb', value: 'https://tmdb.com/programme_one_poster_2.jpg' },
-        { type: 'backdrop', size: '3', orient: 'L', system: 'tvdb', value: 'https://tvdb.com/programme_one_backdrop_3.jpg' },
-        { type: 'backdrop', size: '3', orient: 'L', system: 'tmdb', value: 'https://tmdb.com/programme_one_backdrop_3.jpg' },
+        {
+          type: 'poster',
+          size: '1',
+          orient: 'P',
+          system: 'tvdb',
+          value: 'https://tvdb.com/programme_one_poster_1.jpg',
+        },
+        {
+          type: 'poster',
+          size: '2',
+          orient: 'P',
+          system: 'tmdb',
+          value: 'https://tmdb.com/programme_one_poster_2.jpg',
+        },
+        {
+          type: 'backdrop',
+          size: '3',
+          orient: 'L',
+          system: 'tvdb',
+          value: 'https://tvdb.com/programme_one_backdrop_3.jpg',
+        },
+        {
+          type: 'backdrop',
+          size: '3',
+          orient: 'L',
+          system: 'tmdb',
+          value: 'https://tmdb.com/programme_one_backdrop_3.jpg',
+        },
       ],
       credits: {
         actor: [
@@ -1431,11 +1635,13 @@ describe('real-world fixture (epg-parser basic.xml)', () => {
         producer: ['Roger Dobkowitz'],
         presenter: ['Drew Carey'],
       },
-      icon: [{
-        src: 'http://imageswoapi.whatsonindia.com/WhatsOnTV/images/ProgramImages/xlarge/38B4DE4E9A7132257749051B6C8B4F699DB264F4V.jpg',
-        width: 100,
-        height: 100,
-      }],
+      icon: [
+        {
+          src: 'http://imageswoapi.whatsonindia.com/WhatsOnTV/images/ProgramImages/xlarge/38B4DE4E9A7132257749051B6C8B4F699DB264F4V.jpg',
+          width: 100,
+          height: 100,
+        },
+      ],
     });
   });
 
@@ -1477,7 +1683,9 @@ describe('degenerate and empty inputs', () => {
 
     // Present but wrong → throws.
     await expect(async () => {
-      for await (const _e of parseXmltvStream(['<guide></guide>'])) { /* drain */ }
+      for await (const _e of parseXmltvStream(['<guide></guide>'])) {
+        /* drain */
+      }
     }).rejects.toThrow(/expected root element <tv>/);
   });
 });
@@ -1500,8 +1708,12 @@ describe('node stream transforms', () => {
 
     const expected = parseXmltvString(xml.toString('utf8'));
     // Object-mode readable emits meta/channel/programme (and warning) as data.
-    expect(events.filter((e) => e.type === 'channel').map((e) => e.value)).toEqual(expected.channels);
-    expect(events.filter((e) => e.type === 'programme').map((e) => e.value)).toEqual(expected.programmes);
+    expect(events.filter((e) => e.type === 'channel').map((e) => e.value)).toEqual(
+      expected.channels,
+    );
+    expect(events.filter((e) => e.type === 'programme').map((e) => e.value)).toEqual(
+      expected.programmes,
+    );
     expect(events.filter((e) => e.type === 'warning')).toEqual([]);
   });
 
@@ -1596,7 +1808,12 @@ describe('node stream transforms', () => {
   });
 
   it('XmltvSerializeStream re-emits a warning event (typed) instead of writing it to the output', async () => {
-    const warning: XmltvWarning = { code: 'invalid-programme', message: 'dropped', line: 3, col: 5 };
+    const warning: XmltvWarning = {
+      code: 'invalid-programme',
+      message: 'dropped',
+      line: 3,
+      col: 5,
+    };
     // The listener parameter is typed as XmltvWarning, so `.code` is checked at compile time.
     const seen: XmltvWarning[] = [];
 

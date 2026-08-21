@@ -3,5 +3,13 @@
   "singleQuote": true,
   "trailingComma": "all",
   "arrowParens": "always",
-  "ignorePatterns": ["dist", "test/fixtures"]
+  "ignorePatterns": [
+    "dist",
+    "test/fixtures",
+    // Markdown is left alone on purpose. oxfmt reformats fenced code blocks,
+    // and the documentation's examples are deliberately fragments — a bare
+    // `cache: { dir: … }` is not a statement, and formatting it as one appends
+    // a semicolon and makes the example wrong. The prose is hand-wrapped too.
+    "**/*.md"
+  ]
 }

@@ -12,12 +12,23 @@
 import { build, defineConfig, defineSiteConfig, guideStream } from '../src/main.js';
 import { envReader } from '../src/core/answers.js';
 import {
-  parseXmltvFile, parseXmltvString, writeXmltvStream, formatXmltvDate, parseXmltvDate, xmltvDate,
-  ProgrammeBuilder, XmltvDocumentBuilder,
+  parseXmltvFile,
+  parseXmltvString,
+  writeXmltvStream,
+  formatXmltvDate,
+  parseXmltvDate,
+  xmltvDate,
+  ProgrammeBuilder,
+  XmltvDocumentBuilder,
 } from '../src/xmltv/main.js';
 import {
-  defineCapability, defineStages, DEFAULT_CAPABILITIES, GrabberError, runXmltvGrabber,
-  lineupsCapability, lineupsFromSites,
+  defineCapability,
+  defineStages,
+  DEFAULT_CAPABILITIES,
+  GrabberError,
+  runXmltvGrabber,
+  lineupsCapability,
+  lineupsFromSites,
 } from '../src/tv-grab/main.js';
 
 // --- README: Quick start ---------------------------------------------------
@@ -28,28 +39,35 @@ const example = defineSiteConfig({
   rateLimit: { requests: 8, perMs: 1_000 },
   ky: { prefix: 'https://api.example.tv', headers: { 'x-api-key': 'k' }, retry: 2 },
   async request({ channel, date, http }) {
-    return http.post('epg', { json: { channel_id: channel.siteId, date: date.toISOString() } })
+    return http
+      .post('epg', { json: { channel_id: channel.siteId, date: date.toISOString() } })
       .json<{ items: { start: string; end: string; title: string }[] }>();
   },
   parseDay({ data, programme }) {
     return data.items.map((item) =>
-      programme(new Date(item.start), item.title).stop(new Date(item.end)));
+      programme(new Date(item.start), item.title).stop(new Date(item.end)),
+    );
   },
 });
 
 export const quickStart = defineConfig({ sites: [example], days: 14, output: 'public/epg.xml' });
 
 // --- docs/site-config.md: Batching ----------------------------------------
-interface RawProgramme { start: string; title: string }
+interface RawProgramme {
+  start: string;
+  title: string;
+}
 
 const byChannels = defineSiteConfig({
   site: 'example.tv',
   channels: [{ xmltvId: 'one.example.tv', siteId: '101' }],
   batching: { mode: 'channels', channelsPerRequest: 50 },
   async request({ channels, date, http }) {
-    return http.get('epg', {
-      searchParams: { ids: channels.map((c) => c.siteId).join(','), date: date.toISOString() },
-    }).json<{ items: { channelId: string; programmes: RawProgramme[] }[] }>();
+    return http
+      .get('epg', {
+        searchParams: { ids: channels.map((c) => c.siteId).join(','), date: date.toISOString() },
+      })
+      .json<{ items: { channelId: string; programmes: RawProgramme[] }[] }>();
   },
   parseDay({ data, channel }) {
     const item = data.items.find((i) => i.channelId === channel.siteId);
@@ -66,9 +84,11 @@ const byDays = defineSiteConfig({
   channels: [{ xmltvId: 'one.example.tv', siteId: '101' }],
   batching: { mode: 'days', daysPerRequest: 7 },
   async request({ channel, from, to, http }) {
-    return http.get('epg', {
-      searchParams: { id: channel.siteId, from: from.toISOString(), to: to.toISOString() },
-    }).json<{ items: { day: string; programmes: RawProgramme[] }[] }>();
+    return http
+      .get('epg', {
+        searchParams: { id: channel.siteId, from: from.toISOString(), to: to.toISOString() },
+      })
+      .json<{ items: { day: string; programmes: RawProgramme[] }[] }>();
   },
   parseDay({ data, day, channel }) {
     const item = data.items.find((i) => i.day === day);
@@ -86,9 +106,11 @@ const byPairs = defineSiteConfig({
   channels: [{ xmltvId: 'one.example.tv', siteId: '101' }],
   batching: { mode: 'both', channelsPerRequest: 50, daysPerRequest: 7 },
   async request({ channelDays, http }) {
-    return http.post('epg', {
-      json: { queries: channelDays.map(({ channel, day }) => ({ id: channel.siteId, day })) },
-    }).json<{ items: { channelId: string; day: string; programmes: RawProgramme[] }[] }>();
+    return http
+      .post('epg', {
+        json: { queries: channelDays.map(({ channel, day }) => ({ id: channel.siteId, day })) },
+      })
+      .json<{ items: { channelId: string; day: string; programmes: RawProgramme[] }[] }>();
   },
   parseDay({ data, channel, day }) {
     const item = data.items.find((i) => i.channelId === channel.siteId && i.day === day);
@@ -121,13 +143,15 @@ export const built = defineSiteConfig({
     return http.get('epg').json<{ items: RawItem[] }>();
   },
   parseDay({ data, programme }) {
-    return data.items.map((item) => programme(new Date(item.start), item.title)
-      .stop(new Date(item.end))
-      .desc(item.summary)
-      .category(item.genre)
-      .episode(item.episode, item.season)
-      .video({ quality: 'HDTV' })
-      .rating(item.rating, { system: 'SK' }));
+    return data.items.map((item) =>
+      programme(new Date(item.start), item.title)
+        .stop(new Date(item.end))
+        .desc(item.summary)
+        .category(item.genre)
+        .episode(item.episode, item.season)
+        .video({ quality: 'HDTV' })
+        .rating(item.rating, { system: 'SK' }),
+    );
   },
 });
 
@@ -149,7 +173,12 @@ const fetchedChannels = defineSiteConfig({
   ky: { prefix: 'https://api.example.tv', headers: { 'x-api-key': 'k' } },
   async channels({ http }) {
     const { items } = await http.get('channels').json<{
-      items: { id: string; titles: { text: string; lang: string }[]; logo: string; number: number }[];
+      items: {
+        id: string;
+        titles: { text: string; lang: string }[];
+        logo: string;
+        number: number;
+      }[];
     }>();
 
     return items.map((item) => ({
@@ -168,7 +197,8 @@ const fetchedChannels = defineSiteConfig({
     return data?.lcn ? channel.extra({ name: 'lcn', value: String(data.lcn) }) : channel;
   },
   async request({ channel, date, http }) {
-    return http.get('epg', { searchParams: { id: channel.siteId, date: date.toISOString() } })
+    return http
+      .get('epg', { searchParams: { id: channel.siteId, date: date.toISOString() } })
       .json<{ items: RawProgramme[] }>();
   },
   parseDay({ channel, data }) {
@@ -195,14 +225,16 @@ export const wrongCap = defineSiteConfig({
 });
 
 // --- docs/tv-grab.md: Asking for more than channels -----------------------
-export const stages = defineStages([{
-  name: 'start',
-  next: 'select-channels',
-  fields: [
-    { type: 'string', id: 'username', title: 'Username', description: 'Your account name.' },
-    { type: 'secretstring', id: 'password', title: 'Password', description: 'Not echoed.' },
-  ],
-}]);
+export const stages = defineStages([
+  {
+    name: 'start',
+    next: 'select-channels',
+    fields: [
+      { type: 'string', id: 'username', title: 'Username', description: 'Your account name.' },
+      { type: 'secretstring', id: 'password', title: 'Password', description: 'Not echoed.' },
+    ],
+  },
+]);
 
 export const shared = defineConfig(
   (ctx) => ({
@@ -226,7 +258,12 @@ declare function myLineupXml(id: string | undefined): string;
 const myLineups = defineCapability({
   name: 'my-lineups',
   options: { 'list-lineups': { type: 'boolean' }, 'get-lineup': { type: 'boolean' } },
-  usage: { modes: [['list-lineups', 'output'], ['get-lineup', 'config-file', 'output']] },
+  usage: {
+    modes: [
+      ['list-lineups', 'output'],
+      ['get-lineup', 'config-file', 'output'],
+    ],
+  },
   async run(ctx) {
     if (ctx.values['list-lineups']) {
       await ctx.emit(myLineupsXml());
@@ -246,38 +283,47 @@ const myLineups = defineCapability({
   },
 });
 
-export const withCapability = (): Promise<number> => runXmltvGrabber(shared, {
-  description: '…', version: '0.1.0',
-  capabilities: [...DEFAULT_CAPABILITIES, myLineups],
-});
+export const withCapability = (): Promise<number> =>
+  runXmltvGrabber(shared, {
+    description: '…',
+    version: '0.1.0',
+    capabilities: [...DEFAULT_CAPABILITIES, myLineups],
+  });
 
 // --- docs/tv-grab.md: Channel lineups -------------------------------------
-export const withLineups = (): Promise<number> => runXmltvGrabber(shared, {
-  description: 'Slovakia (tv_grab_sk_example)',
-  version: '0.1.0',
-  capabilities: [...DEFAULT_CAPABILITIES, lineupsCapability(lineupsFromSites)],
-});
+export const withLineups = (): Promise<number> =>
+  runXmltvGrabber(shared, {
+    description: 'Slovakia (tv_grab_sk_example)',
+    version: '0.1.0',
+    capabilities: [...DEFAULT_CAPABILITIES, lineupsCapability(lineupsFromSites)],
+  });
 
-export const handWritten = lineupsCapability([{
-  id: 'dvbt-west',
-  type: 'DTV',
-  displayName: [{ value: 'DVB-T West', lang: 'en' }],
-  availability: [{ value: 'SK', area: 'country' }],
-  entries: [{
-    preset: '1',
-    station: { xmltvId: 'one.example.tv', name: 'One', type: 'TV' },
-    dvb: [{ originalNetworkId: 8442, transportId: 2049, serviceId: 4351, lcn: '1' }],
-  }],
-}]);
+export const handWritten = lineupsCapability([
+  {
+    id: 'dvbt-west',
+    type: 'DTV',
+    displayName: [{ value: 'DVB-T West', lang: 'en' }],
+    availability: [{ value: 'SK', area: 'country' }],
+    entries: [
+      {
+        preset: '1',
+        station: { xmltvId: 'one.example.tv', name: 'One', type: 'TV' },
+        dvb: [{ originalNetworkId: 8442, transportId: 2049, serviceId: 4351, lcn: '1' }],
+      },
+    ],
+  },
+]);
 
 // What `defineStages` is for: a bare array literal widens `type` to `string`,
 // so a misspelt one compiles and becomes a question no renderer ever asks.
-export const typo = defineStages([{
-  name: 'start',
-  next: 'select-channels',
-  // @ts-expect-error — caught here, rather than at the first --configure.
-  fields: [{ type: 'strng', id: 'username', title: 'U', description: 'D' }],
-}]);
+export const typo = defineStages([
+  {
+    name: 'start',
+    next: 'select-channels',
+    // @ts-expect-error — caught here, rather than at the first --configure.
+    fields: [{ type: 'strng', id: 'username', title: 'U', description: 'D' }],
+  },
+]);
 
 // --- docs/configuration.md: EpgConfig reference -----------------------------
 export const configured = defineConfig({
@@ -335,11 +381,12 @@ export const parseEvents = async (): Promise<number> => {
 };
 
 // Every parse entry point takes the same options.
-export const tolerant = (xml: string): number => parseXmltvString(xml, {
-  tolerateMissingId: true,
-  rootScanLimit: 2 * 1024 * 1024,
-  timezones: { BST: 60, CET: 60, CEST: 120 },
-}).warnings.length;
+export const tolerant = (xml: string): number =>
+  parseXmltvString(xml, {
+    tolerateMissingId: true,
+    rootScanLimit: 2 * 1024 * 1024,
+    timezones: { BST: 60, CET: 60, CEST: 120 },
+  }).warnings.length;
 
 // --- docs/xmltv.md: Serializing ---------------------------------------------
 export const pretty = writeXmltvStream({ meta: {}, channels: [], programmes: [] }, { indent: 2 });
@@ -348,7 +395,7 @@ export const pretty = writeXmltvStream({ meta: {}, channels: [], programmes: [] 
 export const programme = new ProgrammeBuilder({
   channel: 'one.example.tv',
   start: '20260717200000 +0200',
-  title: 'The Nine O\'Clock News',
+  title: "The Nine O'Clock News",
   lang: 'en',
 })
   .stop('20260717203000 +0200')
@@ -362,18 +409,20 @@ export const document = new XmltvDocumentBuilder()
   .generatorInfo('epg-tools', 'https://github.com/Ruby184/epg-tools')
   .sourceInfo('Example TV', 'https://example.tv')
   .channel({ id: 'one.example.tv', displayName: 'One', lang: 'en' }, (c) =>
-    c.displayName('Jeden', 'sk').icon('https://example.tv/one.png'))
+    c.displayName('Jeden', 'sk').icon('https://example.tv/one.png'),
+  )
   .programme({ channel: 'one.example.tv', start: '20260717200000 +0200', title: 'News' }, (p) =>
-    p.desc('Evening news').episode(3));
+    p.desc('Evening news').episode(3),
+  );
 
 export const bound = new XmltvDocumentBuilder()
   .addProgramme({ channel: 'one.example.tv', start: '20260717200000 +0200', title: 'News' })
-    .desc('Evening news')
-    .episode(3)
-    .end()
+  .desc('Evening news')
+  .episode(3)
+  .end()
   .addChannel({ id: 'one.example.tv', displayName: 'One' })
-    .icon('https://example.tv/one.png')
-    .end();
+  .icon('https://example.tv/one.png')
+  .end();
 
 export const asXml = document.toXml({ indent: 2 });
 export const asEvents = document.toEvents();

@@ -111,7 +111,9 @@ function atomicFile(file: string): fs.WriteStream {
           // goes away instead of taking the real file's place, and so does
           // any directory that was made only to hold it.
           if (!stream.writableFinished) {
-            discard().catch(() => {}).finally(() => callback(null));
+            discard()
+              .catch(() => {})
+              .finally(() => callback(null));
             return;
           }
 
@@ -180,7 +182,7 @@ export async function openOutput(target: OutputTarget): Promise<OutputSink> {
 
   const resolved = path.resolve(target);
 
-  if (!await isSocket(resolved)) {
+  if (!(await isSocket(resolved))) {
     return { stream: atomicFile(resolved), end: true };
   }
 

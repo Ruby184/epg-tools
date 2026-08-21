@@ -59,9 +59,7 @@ function isTerminal(name: string): boolean {
 }
 
 /** With nothing else to ask, configuration is channel selection alone. */
-export const DEFAULT_STAGES: ConfigStage[] = [
-  { name: 'start', fields: [], next: SELECT_CHANNELS },
-];
+export const DEFAULT_STAGES: ConfigStage[] = [{ name: 'start', fields: [], next: SELECT_CHANNELS }];
 
 /**
  * Identity helper for type inference, as `defineConfig` is for a config.
@@ -90,7 +88,8 @@ export function defineStages<S extends readonly ConfigStage[]>(stages: S): S {
 export function appendStage(stages: readonly ConfigStage[], stage: ConfigStage): ConfigStage[] {
   return [
     ...stages.map((existing) =>
-      isTerminal(existing.next) ? { ...existing, next: stage.name } : existing),
+      isTerminal(existing.next) ? { ...existing, next: stage.name } : existing,
+    ),
     stage,
   ];
 }
@@ -107,9 +106,12 @@ function langTag(tag: string, text: string, indent: string): string {
 }
 
 function renderField(field: ConfigField): string {
-  const common = attr('id', field.id)
-    + attr('default', field.default)
-    + (field.type === 'string' || field.type === 'secretstring' ? attr('constant', field.constant) : '');
+  const common =
+    attr('id', field.id) +
+    attr('default', field.default) +
+    (field.type === 'string' || field.type === 'secretstring'
+      ? attr('constant', field.constant)
+      : '');
 
   let out = `  <${field.type}${common}>\n`;
 
@@ -158,17 +160,25 @@ export function renderSelectChannelsStage(
   channels: { id: string; name?: string }[],
   grabberName: string,
 ): string {
-  return renderStageXml({
-    name: SELECT_CHANNELS,
-    next: END,
-    fields: [{
-      type: 'selectmany',
-      id: 'channel',
-      title: 'Channels',
-      description: 'Select the channels that you want to receive data for.',
-      options: channels.map((channel) => ({ value: channel.id, text: channel.name ?? channel.id })),
-    }],
-  }, grabberName);
+  return renderStageXml(
+    {
+      name: SELECT_CHANNELS,
+      next: END,
+      fields: [
+        {
+          type: 'selectmany',
+          id: 'channel',
+          title: 'Channels',
+          description: 'Select the channels that you want to receive data for.',
+          options: channels.map((channel) => ({
+            value: channel.id,
+            text: channel.name ?? channel.id,
+          })),
+        },
+      ],
+    },
+    grabberName,
+  );
 }
 
 /** Look a stage up by name. */
@@ -238,7 +248,10 @@ export function resolveStages(declared: ConfigStage[] | undefined): ConfigStage[
 
       ids.add(field.id);
 
-      if ((field.type === 'selectone' || field.type === 'selectmany') && field.options.length === 0) {
+      if (
+        (field.type === 'selectone' || field.type === 'selectmany') &&
+        field.options.length === 0
+      ) {
         throw new TypeError(`${where} offers nothing to choose from`);
       }
     }
@@ -266,9 +279,9 @@ export function resolveStages(declared: ConfigStage[] | undefined): ConfigStage[
       throw new TypeError(
         name === 'start'
           ? 'Configuration needs a stage called "start", where it begins'
-          : `No configuration stage is called "${name}"; the stage naming it as next must name`
-            + ` a declared stage, "${SELECT_CHANNELS}" to finish by choosing channels,`
-            + ` or "${END}" to finish without`,
+          : `No configuration stage is called "${name}"; the stage naming it as next must name` +
+              ` a declared stage, "${SELECT_CHANNELS}" to finish by choosing channels,` +
+              ` or "${END}" to finish without`,
       );
     }
 

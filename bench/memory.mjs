@@ -52,12 +52,14 @@ if (mode === 'stream') {
 
   global.gc();
   peak = Math.max(peak, process.memoryUsage().heapUsed);
-  console.log(JSON.stringify({
-    label: 'epg-tools parseXmltvFile (stream)',
-    programmes,
-    peakHeap: peak - baseline,
-    rss: process.memoryUsage.rss(),
-  }));
+  console.log(
+    JSON.stringify({
+      label: 'epg-tools parseXmltvFile (stream)',
+      programmes,
+      peakHeap: peak - baseline,
+      rss: process.memoryUsage.rss(),
+    }),
+  );
   process.exit(0);
 }
 
@@ -74,12 +76,14 @@ if (mode === 'iptv') {
   global.gc(); // measure the live retained guide, matching the streaming child
   const peak = process.memoryUsage().heapUsed;
 
-  console.log(JSON.stringify({
-    label: '@iptv/xmltv parseXmltv (whole document)',
-    programmes: parsed.programmes?.length ?? 0,
-    peakHeap: peak - baseline,
-    rss: process.memoryUsage.rss(),
-  }));
+  console.log(
+    JSON.stringify({
+      label: '@iptv/xmltv parseXmltv (whole document)',
+      programmes: parsed.programmes?.length ?? 0,
+      peakHeap: peak - baseline,
+      rss: process.memoryUsage.rss(),
+    }),
+  );
   process.exit(0);
 }
 
@@ -126,10 +130,12 @@ function* generateProgrammes() {
             { value: `Programme ${c}-${d}-${p}`, lang: 'en' },
             { value: `Relácia ${c}-${d}-${p}`, lang: 'sk' },
           ],
-          desc: [{
-            value: `Description of programme ${p} on channel ${c}, day ${d}. Contains some & special <characters> that need escaping.`,
-            lang: 'en',
-          }],
+          desc: [
+            {
+              value: `Description of programme ${p} on channel ${c}, day ${d}. Contains some & special <characters> that need escaping.`,
+              lang: 'en',
+            },
+          ],
           category: [
             { value: 'News', lang: 'en' },
             { value: 'Správy', lang: 'sk' },
@@ -142,7 +148,9 @@ function* generateProgrammes() {
   }
 }
 
-console.log(`Generating fixture: ${channels} channels × ${days} days × ${perDay} programmes/day ...`);
+console.log(
+  `Generating fixture: ${channels} channels × ${days} days × ${perDay} programmes/day ...`,
+);
 await writeXmltvToFile(file, {
   meta: { generatorInfoName: 'epg-tools-bench' },
   channels: generateChannels(),
@@ -150,7 +158,9 @@ await writeXmltvToFile(file, {
 });
 
 const size = statSync(file).size;
-console.log(`Fixture: ${MiB(size)} (${(channels * days * perDay).toLocaleString('en-US')} programmes)\n`);
+console.log(
+  `Fixture: ${MiB(size)} (${(channels * days * perDay).toLocaleString('en-US')} programmes)\n`,
+);
 
 try {
   const results = ['stream', 'iptv'].map((childMode) => {
@@ -166,11 +176,15 @@ try {
   console.log(`${'library'.padEnd(48)}${pad('peak heap', 12)}${pad('RSS', 12)}`);
 
   for (const result of results) {
-    console.log(`${result.label.padEnd(48)}${pad(MiB(result.peakHeap), 12)}${pad(MiB(result.rss), 12)}`);
+    console.log(
+      `${result.label.padEnd(48)}${pad(MiB(result.peakHeap), 12)}${pad(MiB(result.rss), 12)}`,
+    );
   }
 
   const [stream, iptv] = results;
-  console.log(`\nStreaming parser peak heap is ${(iptv.peakHeap / stream.peakHeap).toFixed(1)}× smaller for this file.`);
+  console.log(
+    `\nStreaming parser peak heap is ${(iptv.peakHeap / stream.peakHeap).toFixed(1)}× smaller for this file.`,
+  );
 } finally {
   rmSync(file, { force: true });
 }

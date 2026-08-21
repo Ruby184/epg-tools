@@ -17,7 +17,9 @@ import type { AnySiteConfig, GrabberChannel } from './types.js';
  * `ky.signal` keeps it — both are honoured, either one aborts.
  */
 export function siteHttp(config: AnySiteConfig, signal?: AbortSignal): KyInstance {
-  const signals = [config.ky?.signal, signal].filter((candidate): candidate is AbortSignal => candidate != null);
+  const signals = [config.ky?.signal, signal].filter(
+    (candidate): candidate is AbortSignal => candidate != null,
+  );
 
   return ky.create({
     ...config.ky,
@@ -73,10 +75,16 @@ export async function resolveSites(
 ): Promise<AnySiteConfig[]> {
   const queue = new PQueue({ concurrency: Math.max(1, options.concurrency ?? sites.length) });
 
-  return Promise.all(sites.map((site) => queue.add(async (): Promise<AnySiteConfig> => ({
-    ...site,
-    channels: await resolveChannels(site, { ...(options.signal ? { signal: options.signal } : {}) }),
-  }))));
+  return Promise.all(
+    sites.map((site) =>
+      queue.add(async (): Promise<AnySiteConfig> => ({
+        ...site,
+        channels: await resolveChannels(site, {
+          ...(options.signal ? { signal: options.signal } : {}),
+        }),
+      })),
+    ),
+  );
 }
 
 /**

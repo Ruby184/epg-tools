@@ -52,7 +52,10 @@ function guideOptions(config: EpgConfig, options: RunOptions, now: Date): BuildG
 }
 
 /** Grab all sites into the cache (only stale/missing channel-days are fetched). */
-export async function runGrab(source: ConfigSource, options: RunOptions = {}): Promise<GrabSummary> {
+export async function runGrab(
+  source: ConfigSource,
+  options: RunOptions = {},
+): Promise<GrabSummary> {
   const config = await resolveConfigSource(source);
   const cache = createCacheStore(config);
   const now = options.now ?? new Date();

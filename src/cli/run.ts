@@ -127,13 +127,19 @@ async function report(
   log: ((message: string) => void) | undefined,
   stderr: Writable,
 ): Promise<number> {
-  log?.(`Grab done: ${summary.fetched} fetched, ${summary.fromCache} from cache, ${summary.failed.length} failed`);
+  log?.(
+    `Grab done: ${summary.fetched} fetched, ${summary.fromCache} from cache, ${summary.failed.length} failed`,
+  );
 
   // Failures, so they are reported even under --quiet.
-  await writeLines(stderr, ...summary.failed.map((failure) => {
-    const message = failure.error instanceof Error ? failure.error.message : String(failure.error);
-    return `  FAILED [${failure.site}] ${failure.channelId} ${failure.day}: ${message}`;
-  }));
+  await writeLines(
+    stderr,
+    ...summary.failed.map((failure) => {
+      const message =
+        failure.error instanceof Error ? failure.error.message : String(failure.error);
+      return `  FAILED [${failure.site}] ${failure.channelId} ${failure.day}: ${message}`;
+    }),
+  );
 
   return summary.failed.length > 0 ? EXIT_FAILED : 0;
 }
@@ -204,20 +210,24 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
 }
 
 async function execute(argv: string[], stdout: Writable, stderr: Writable): Promise<number> {
-  const { values, positionals } = parseOptions(argv, {
-    config: { type: 'string', short: 'c' },
-    days: { type: 'number', short: 'd', min: 1 },
-    offset: { type: 'number' },
-    output: { type: 'string', short: 'o' },
-    'cache-dir': { type: 'string' },
-    before: { type: 'string' },
-    quiet: { type: 'boolean', short: 'q' },
-    help: { type: 'boolean', short: 'h' },
-    version: { type: 'boolean', short: 'v' },
-    description: { type: 'string' },
-    'grabber-version': { type: 'string' },
-    force: { type: 'boolean' },
-  }, { allowPositionals: true });
+  const { values, positionals } = parseOptions(
+    argv,
+    {
+      config: { type: 'string', short: 'c' },
+      days: { type: 'number', short: 'd', min: 1 },
+      offset: { type: 'number' },
+      output: { type: 'string', short: 'o' },
+      'cache-dir': { type: 'string' },
+      before: { type: 'string' },
+      quiet: { type: 'boolean', short: 'q' },
+      help: { type: 'boolean', short: 'h' },
+      version: { type: 'boolean', short: 'v' },
+      description: { type: 'string' },
+      'grabber-version': { type: 'string' },
+      force: { type: 'boolean' },
+    },
+    { allowPositionals: true },
+  );
 
   if (values.help) {
     await writeFlushed(stdout, USAGE);

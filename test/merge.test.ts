@@ -207,7 +207,10 @@ describe('mergeProgrammes', () => {
       url: ['https://a.example', 'https://b.example'],
       icon: [{ src: 'https://img.example/1.png', width: 100 }],
       episodeNum: [{ system: 'xmltv_ns', value: '0.1.' }, { value: '2' }],
-      rating: [{ system: 'MPAA', value: 'PG' }, { system: 'VCHIP', value: 'TV-PG' }],
+      rating: [
+        { system: 'MPAA', value: 'PG' },
+        { system: 'VCHIP', value: 'TV-PG' },
+      ],
     });
 
     const merged = mergeProgrammes(base, extra);
@@ -227,7 +230,10 @@ describe('mergeProgrammes', () => {
       extraAttributes: { uniqueID: 'base-id', shared: 'from-base' },
     });
     const extra = prog('X', '2026-01-15T10:00:00Z', 'A', 'en', {
-      extra: [{ name: 'crid', value: 'crid://a/1' }, { name: 'crid', value: 'crid://a/2' }],
+      extra: [
+        { name: 'crid', value: 'crid://a/1' },
+        { name: 'crid', value: 'crid://a/2' },
+      ],
       extraAttributes: { shared: 'from-extra', onlyExtra: 'x' },
     });
 
@@ -275,10 +281,7 @@ describe('mergeChannels', () => {
         { value: 'Channel X', lang: 'sk' },
         { value: 'Channel X Intl', lang: 'en' },
       ],
-      icon: [
-        { src: 'https://logo.example/x.png' },
-        { src: 'https://logo.example/x-alt.png' },
-      ],
+      icon: [{ src: 'https://logo.example/x.png' }, { src: 'https://logo.example/x-alt.png' }],
       url: ['https://a.example/x', 'https://b.example/x'],
     });
   });
@@ -305,12 +308,18 @@ describe('mergeChannels', () => {
       {
         id: 'X',
         displayName: [{ value: 'B' }],
-        extra: [{ name: 'lcn', value: '36' }, { name: 'lcn', value: '99' }],
+        extra: [
+          { name: 'lcn', value: '36' },
+          { name: 'lcn', value: '99' },
+        ],
         extraAttributes: { rank: '2', region: 'sk' },
       },
     );
 
-    expect(merged.extra).toEqual([{ name: 'lcn', value: '36' }, { name: 'lcn', value: '99' }]);
+    expect(merged.extra).toEqual([
+      { name: 'lcn', value: '36' },
+      { name: 'lcn', value: '99' },
+    ]);
     expect(merged.extraAttributes).toEqual({ rank: '1', region: 'sk' });
   });
 });
@@ -379,14 +388,16 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
 
   it('describes a channel with the builder its channelInfo was handed', async () => {
     const site: SiteConfig<unknown> = {
-      ...makeSite('site-a.sk', [{
-        xmltvId: 'X',
-        siteId: 'a-x',
-        name: 'Channel X',
-        lang: 'sk',
-        logo: 'https://logo.example/x.png',
-        data: { callSign: 'CHX', page: 'https://x.example/', lcn: 5 },
-      }]),
+      ...makeSite('site-a.sk', [
+        {
+          xmltvId: 'X',
+          siteId: 'a-x',
+          name: 'Channel X',
+          lang: 'sk',
+          logo: 'https://logo.example/x.png',
+          data: { callSign: 'CHX', page: 'https://x.example/', lcn: 5 },
+        },
+      ]),
       // No id, no display name, no logo restated: `element()` starts where the
       // default element would, and this adds to it.
       channelInfo({ data }, element) {
@@ -439,7 +450,11 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     const base = { sites: [siteA], cache: cacheForBothSites(), days: 1, now: NOW };
 
     const compact = await generate(base);
-    expect(compact.startsWith('<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE tv SYSTEM "xmltv.dtd"><tv')).toBe(true);
+    expect(
+      compact.startsWith(
+        '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE tv SYSTEM "xmltv.dtd"><tv',
+      ),
+    ).toBe(true);
     expect(compact).not.toContain('\n');
 
     const indented = await generate({ ...base, indent: 2 });

@@ -84,18 +84,25 @@ export interface NumberSpec extends SpecBase {
 
 export type OptionSpec = BooleanSpec | StringSpec<any> | NumberSpec;
 
-type BaseValue<S> =
-  S extends { type: 'boolean' } ? boolean
-    : S extends { type: 'number' } ? number
-      : S extends { type: 'string'; transform: (raw: string, flag: string) => infer R }
-        ? S extends { multiple: true } ? R[] : R
-        : S extends { type: 'string' }
-          ? S extends { multiple: true } ? string[] : string
-          : never;
+type BaseValue<S> = S extends { type: 'boolean' }
+  ? boolean
+  : S extends { type: 'number' }
+    ? number
+    : S extends { type: 'string'; transform: (raw: string, flag: string) => infer R }
+      ? S extends { multiple: true }
+        ? R[]
+        : R
+      : S extends { type: 'string' }
+        ? S extends { multiple: true }
+          ? string[]
+          : string
+        : never;
 
 /** `--no-x` yields `false` for a flag, and `null` for anything with a value. */
 type SpecValue<S> = S extends { negatable: true }
-  ? S extends { type: 'boolean' } ? boolean : BaseValue<S> | null
+  ? S extends { type: 'boolean' }
+    ? boolean
+    : BaseValue<S> | null
   : BaseValue<S>;
 
 type Flatten<T> = { [K in keyof T]: T[K] } & {};
@@ -106,8 +113,9 @@ type Flatten<T> = { [K in keyof T]: T[K] } & {};
  * and so cannot make the key always present).
  */
 export type ParsedValues<S extends Record<string, OptionSpec>> = Flatten<
-  { [K in keyof S as S[K] extends { default: unknown } ? K : never]: SpecValue<S[K]> } &
-  { [K in keyof S as S[K] extends { default: unknown } ? never : K]?: SpecValue<S[K]> }
+  { [K in keyof S as S[K] extends { default: unknown } ? K : never]: SpecValue<S[K]> } & {
+    [K in keyof S as S[K] extends { default: unknown } ? never : K]?: SpecValue<S[K]>;
+  }
 >;
 
 export interface ParseOptionsResult<S extends Record<string, OptionSpec>> {
@@ -174,12 +182,15 @@ export function parseOptions<S extends Record<string, OptionSpec>>(
   options: { allowPositionals?: boolean } = {},
 ): ParseOptionsResult<S> {
   const entries = Object.entries(specs) as [string, OptionSpec][];
-  const parseArgsOptions: Record<string, {
-    type: 'string' | 'boolean';
-    short?: string;
-    multiple?: boolean;
-    default?: boolean | string | string[];
-  }> = {};
+  const parseArgsOptions: Record<
+    string,
+    {
+      type: 'string' | 'boolean';
+      short?: string;
+      multiple?: boolean;
+      default?: boolean | string | string[];
+    }
+  > = {};
 
   for (const [name, spec] of entries) {
     const optionalValue = hasOptionalValue(spec);

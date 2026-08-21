@@ -32,7 +32,10 @@ const RECOVER_AFTER = 10;
  * `Retry-After` in milliseconds: the header is either delta-seconds or an HTTP
  * date, and a source that sends something else has said nothing useful.
  */
-export function retryAfterMs(header: string | null | undefined, now = Date.now()): number | undefined {
+export function retryAfterMs(
+  header: string | null | undefined,
+  now = Date.now(),
+): number | undefined {
   // Trimmed first: `Number('   ')` is 0, which would read a header that says
   // nothing as "retry immediately" and skip the fallback wait entirely.
   const value = header?.trim();
@@ -155,14 +158,22 @@ export function sitePacing(
             }
 
             hold(
-              Math.min(retryAfterMs(response.headers.get('retry-after')) ?? backoff.fallbackMs, backoff.maxMs),
+              Math.min(
+                retryAfterMs(response.headers.get('retry-after')) ?? backoff.fallbackMs,
+                backoff.maxMs,
+              ),
               response.status,
             );
 
             return;
           }
 
-          if (backoff.adapt && response.ok && queue.concurrency < ceiling && ++clean >= RECOVER_AFTER) {
+          if (
+            backoff.adapt &&
+            response.ok &&
+            queue.concurrency < ceiling &&
+            ++clean >= RECOVER_AFTER
+          ) {
             clean = 0;
             queue.concurrency += 1;
             log(`[${config.site}] concurrency back up to ${queue.concurrency}`);
@@ -180,10 +191,14 @@ export function sitePacing(
   // A cancelled run must not sit out the rest of a hold: the queue's tasks are
   // dropped by their own signals, and a paused queue with nothing left in it
   // still has to reach idle.
-  options.signal?.addEventListener('abort', () => {
-    clearTimeout(timer);
-    release();
-  }, { once: true });
+  options.signal?.addEventListener(
+    'abort',
+    () => {
+      clearTimeout(timer);
+      release();
+    },
+    { once: true },
+  );
 
   return {
     queue,

@@ -177,19 +177,28 @@ function metaAttrs(meta: LineupsMeta | undefined): string {
  * and why `false` has to be told apart from "not given" rather than skipped.
  */
 function el(indent: string, name: string, value: AttrValue, tagAttrs = ''): string {
-  return value === undefined ? '' : `${indent}<${name}${tagAttrs}>${escapeXml(String(value))}</${name}>\n`;
+  return value === undefined
+    ? ''
+    : `${indent}<${name}${tagAttrs}>${escapeXml(String(value))}</${name}>\n`;
 }
 
 function logos(indent: string, all: LineupLogo[] | undefined): string {
-  return (all ?? []).map((logo) =>
-    `${indent}<logo${attrs([['url', logo.url], ['height', logo.height], ['width', logo.width]])} />\n`,
-  ).join('');
+  return (all ?? [])
+    .map(
+      (logo) =>
+        `${indent}<logo${attrs([
+          ['url', logo.url],
+          ['height', logo.height],
+          ['width', logo.width],
+        ])} />\n`,
+    )
+    .join('');
 }
 
 function availability(indent: string, all: LineupAvailability[] | undefined): string {
-  return (all ?? []).map((entry) =>
-    el(indent, 'availability', entry.value, attr('area', entry.area)),
-  ).join('');
+  return (all ?? [])
+    .map((entry) => el(indent, 'availability', entry.value, attr('area', entry.area)))
+    .join('');
 }
 
 /** `<station>` — a strict sequence, so the order here is the schema's. */
@@ -224,31 +233,35 @@ function serializeStation(station: LineupStation, indent: string): string {
 function serializeDvb(channel: DvbChannel, indent: string): string {
   const inner = `${indent}  `;
 
-  return `${indent}<dvb-channel>\n`
-    + el(inner, 'original-network-id', channel.originalNetworkId)
-    + el(inner, 'transport-id', channel.transportId)
-    + el(inner, 'service-id', channel.serviceId)
-    + el(inner, 'lcn', channel.lcn)
-    + el(inner, 'service-name', channel.serviceName)
-    + el(inner, 'provider-name', channel.providerName)
-    + el(inner, 'encrypted', channel.encrypted)
-    + `${indent}</dvb-channel>\n`;
+  return (
+    `${indent}<dvb-channel>\n` +
+    el(inner, 'original-network-id', channel.originalNetworkId) +
+    el(inner, 'transport-id', channel.transportId) +
+    el(inner, 'service-id', channel.serviceId) +
+    el(inner, 'lcn', channel.lcn) +
+    el(inner, 'service-name', channel.serviceName) +
+    el(inner, 'provider-name', channel.providerName) +
+    el(inner, 'encrypted', channel.encrypted) +
+    `${indent}</dvb-channel>\n`
+  );
 }
 
 function serializeAnalog(channel: AnalogChannel, indent: string): string {
   const inner = `${indent}  `;
 
-  return `${indent}<analog-channel>\n`
-    + el(inner, 'system', channel.system)
-    + el(inner, 'number', channel.number)
-    + el(inner, 'frequency', channel.frequency)
-    + el(inner, 'fcc-callsign', channel.fccCallsign)
+  return (
+    `${indent}<analog-channel>\n` +
+    el(inner, 'system', channel.system) +
+    el(inner, 'number', channel.number) +
+    el(inner, 'frequency', channel.frequency) +
+    el(inner, 'fcc-callsign', channel.fccCallsign) +
     // Alone among the optional-looking elements this one is not: the schema
     // leaves `minOccurs` off it, so an analog channel without a `<cni>` does
     // not validate. It is an empty element carrying an attribute, so an
     // unknown identifier is written as the empty tag rather than omitted.
-    + `${inner}<cni${attr('tt-8-30-1', channel.cni)} />\n`
-    + `${indent}</analog-channel>\n`;
+    `${inner}<cni${attr('tt-8-30-1', channel.cni)} />\n` +
+    `${indent}</analog-channel>\n`
+  );
 }
 
 /** The delivery branch, and the check that there is only one of them. */
@@ -266,35 +279,47 @@ function serializeDelivery(entry: LineupEntry, indent: string): string {
     // An xs:choice: a station is reached one way per lineup, and a document
     // saying otherwise would be rejected by anything that validates it.
     throw new TypeError(
-      `Lineup entry for "${entry.station.xmltvId}" describes ${used.map(([name]) => name).join(' and ')}`
-      + ` delivery; an entry may describe only one kind`,
+      `Lineup entry for "${entry.station.xmltvId}" describes ${used.map(([name]) => name).join(' and ')}` +
+        ` delivery; an entry may describe only one kind`,
     );
   }
 
-  return (entry.dvb ?? []).map((channel) => serializeDvb(channel, indent)).join('')
-    + (entry.stb ?? []).map((channel) =>
-      `${indent}<stb-channel>\n${el(`${indent}  `, 'stb-preset', channel.preset)}${indent}</stb-channel>\n`,
-    ).join('')
-    + (entry.iptv ?? []).map((channel) =>
-      `${indent}<iptv-channel>\n`
-      + el(`${indent}  `, 'iptv-url', channel.url)
-      + el(`${indent}  `, 'port', channel.port)
-      + `${indent}</iptv-channel>\n`,
-    ).join('')
-    + (entry.analog ?? []).map((channel) => serializeAnalog(channel, indent)).join('');
+  return (
+    (entry.dvb ?? []).map((channel) => serializeDvb(channel, indent)).join('') +
+    (entry.stb ?? [])
+      .map(
+        (channel) =>
+          `${indent}<stb-channel>\n${el(`${indent}  `, 'stb-preset', channel.preset)}${indent}</stb-channel>\n`,
+      )
+      .join('') +
+    (entry.iptv ?? [])
+      .map(
+        (channel) =>
+          `${indent}<iptv-channel>\n` +
+          el(`${indent}  `, 'iptv-url', channel.url) +
+          el(`${indent}  `, 'port', channel.port) +
+          `${indent}</iptv-channel>\n`,
+      )
+      .join('') +
+    (entry.analog ?? []).map((channel) => serializeAnalog(channel, indent)).join('')
+  );
 }
 
 function serializeEntry(entry: LineupEntry, indent: string): string {
   const inner = `${indent}  `;
 
-  return `${indent}<lineup-entry>\n`
-    + el(inner, 'preset', entry.preset)
-    + el(inner, 'section', entry.section)
-    + (entry.packages ?? []).map((pkg) => el(inner, 'package', pkg.value, attr('type', pkg.type))).join('')
-    + availability(inner, entry.availability)
-    + serializeStation(entry.station, inner)
-    + serializeDelivery(entry, inner)
-    + `${indent}</lineup-entry>\n`;
+  return (
+    `${indent}<lineup-entry>\n` +
+    el(inner, 'preset', entry.preset) +
+    el(inner, 'section', entry.section) +
+    (entry.packages ?? [])
+      .map((pkg) => el(inner, 'package', pkg.value, attr('type', pkg.type)))
+      .join('') +
+    availability(inner, entry.availability) +
+    serializeStation(entry.station, inner) +
+    serializeDelivery(entry, inner) +
+    `${indent}</lineup-entry>\n`
+  );
 }
 
 /** One `<xmltv-lineup>` element, indented for placing in a document. */
@@ -304,8 +329,9 @@ export function serializeLineup(lineup: LineupConfig, indent = '  '): string {
   let out = `${indent}<xmltv-lineup${attr('id', lineup.id)}>\n`;
 
   out += el(inner, 'type', lineup.type);
-  out += lineup.displayName.map((name) =>
-    el(inner, 'display-name', name.value, attr('lang', name.lang))).join('');
+  out += lineup.displayName
+    .map((name) => el(inner, 'display-name', name.value, attr('lang', name.lang)))
+    .join('');
   out += logos(inner, lineup.logo);
   out += availability(inner, lineup.availability);
   out += lineup.entries.map((entry) => serializeEntry(entry, inner)).join('');
@@ -314,14 +340,13 @@ export function serializeLineup(lineup: LineupConfig, indent = '  '): string {
 }
 
 /** The whole `xmltv-lineups` document — what `--list-lineups` prints. */
-export function serializeLineups(
-  lineups: readonly LineupConfig[],
-  meta?: LineupsMeta,
-): string {
-  return `<?xml version="1.0" encoding="UTF-8"?>\n`
-    + `<xmltv-lineups${metaAttrs(meta)}>\n`
-    + lineups.map((lineup) => serializeLineup(lineup)).join('')
-    + `</xmltv-lineups>\n`;
+export function serializeLineups(lineups: readonly LineupConfig[], meta?: LineupsMeta): string {
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<xmltv-lineups${metaAttrs(meta)}>\n` +
+    lineups.map((lineup) => serializeLineup(lineup)).join('') +
+    `</xmltv-lineups>\n`
+  );
 }
 
 export interface LineupsFromSitesOptions {
@@ -364,10 +389,12 @@ export async function lineupsFromSites(
     lineups.push({
       id: site.site,
       type: options.type ?? 'List',
-      displayName: [{
-        value: site.site,
-        ...(options.lang === undefined ? {} : { lang: options.lang }),
-      }],
+      displayName: [
+        {
+          value: site.site,
+          ...(options.lang === undefined ? {} : { lang: options.lang }),
+        },
+      ],
       entries: channels.map((channel) => ({
         station: stationOf(channel, options.lang),
         ...(channel.preset === undefined ? {} : { preset: channel.preset }),

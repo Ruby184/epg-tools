@@ -211,9 +211,19 @@ export class XmltvScanner {
    * names the enclosing element for a nested child (e.g. `<present>` in
    * `<video>`). Returns NEED_MORE if the subtree is incomplete.
    */
-  #skipDuplicateElement(buf: string, at: number, name: string, container?: string): true | NeedMore {
+  #skipDuplicateElement(
+    buf: string,
+    at: number,
+    name: string,
+    container?: string,
+  ): true | NeedMore {
     const where = container ? ` in <${container}>` : ' element';
-    this.#warn(buf, at, 'invalid-element', `duplicate <${name}>${where} ignored, keeping the first`);
+    this.#warn(
+      buf,
+      at,
+      'invalid-element',
+      `duplicate <${name}>${where} ignored, keeping the first`,
+    );
     return this.#discardContent(buf);
   }
 
@@ -240,7 +250,8 @@ export class XmltvScanner {
     try {
       setter(parseXmltvDate(value, this.#timezones));
     } catch (error) {
-      const detail = error instanceof XmltvDateError ? `: ${error.reason} at index ${error.index}` : '';
+      const detail =
+        error instanceof XmltvDateError ? `: ${error.reason} at index ${error.index}` : '';
       this.#warn(buf, at, code, `invalid value "${value}" for ${label} dropped${detail}`);
     }
   }
@@ -280,7 +291,9 @@ export class XmltvScanner {
    */
   #advance(buf: string, consumed: number, checkRootLimit = false): string {
     if (checkRootLimit && !this.#rootFound && buf.length - consumed > this.#rootScanLimit) {
-      throw new TypeError(`No root element found within the first ${this.#rootScanLimit} characters of input`);
+      throw new TypeError(
+        `No root element found within the first ${this.#rootScanLimit} characters of input`,
+      );
     }
 
     let count = 0;
@@ -558,7 +571,12 @@ export class XmltvScanner {
    */
   #pushAttr(buf: string, at: number, name: string, value: string): void {
     if (name === '__proto__') {
-      return this.#warn(buf, at, 'invalid-attribute', 'attribute name "__proto__" is not supported and was dropped');
+      return this.#warn(
+        buf,
+        at,
+        'invalid-attribute',
+        'attribute name "__proto__" is not supported and was dropped',
+      );
     }
 
     const attrs = this.#tagAttrs;
@@ -566,7 +584,12 @@ export class XmltvScanner {
     if (attrs) {
       for (let j = 0; j < attrs.length; j += 2) {
         if (attrs[j] === name) {
-          return this.#warn(buf, at, 'invalid-attribute', `duplicate attribute ${name}="${value}" ignored, keeping the first`);
+          return this.#warn(
+            buf,
+            at,
+            'invalid-attribute',
+            `duplicate attribute ${name}="${value}" ignored, keeping the first`,
+          );
         }
       }
     }
@@ -669,14 +692,21 @@ export class XmltvScanner {
     }
 
     if (warn && this.#tagName !== '') {
-      this.#warn(buf, lt, 'unknown-element', `nested <${this.#tagName}> inside text element <${container}> ignored`);
+      this.#warn(
+        buf,
+        lt,
+        'unknown-element',
+        `nested <${this.#tagName}> inside text element <${container}> ignored`,
+      );
     }
 
     if (this.#tagSelfClosing || this.#tagName === '') {
       return true;
     }
 
-    return this.#readTextContent(buf, this.#pos, this.#tagName, false) === NEED_MORE ? NEED_MORE : true;
+    return this.#readTextContent(buf, this.#pos, this.#tagName, false) === NEED_MORE
+      ? NEED_MORE
+      : true;
   }
 
   /**
@@ -768,7 +798,9 @@ export class XmltvScanner {
       return true;
     }
 
-    return this.#readTextContent(buf, this.#pos, this.#tagName, false) === NEED_MORE ? NEED_MORE : true;
+    return this.#readTextContent(buf, this.#pos, this.#tagName, false) === NEED_MORE
+      ? NEED_MORE
+      : true;
   }
 
   #iconChild(buf: string): XmltvIcon | null | NeedMore {
@@ -798,7 +830,12 @@ export class XmltvScanner {
             if (Number.isFinite(width)) {
               icon.width = width;
             } else {
-              this.#warn(buf, pos, 'invalid-attribute', `invalid width="${value}" on <icon> dropped`);
+              this.#warn(
+                buf,
+                pos,
+                'invalid-attribute',
+                `invalid width="${value}" on <icon> dropped`,
+              );
             }
           } else {
             this.#warnEmptyAttr(buf, pos, 'width', 'icon');
@@ -812,7 +849,12 @@ export class XmltvScanner {
             if (Number.isFinite(height)) {
               icon.height = height;
             } else {
-              this.#warn(buf, pos, 'invalid-attribute', `invalid height="${value}" on <icon> dropped`);
+              this.#warn(
+                buf,
+                pos,
+                'invalid-attribute',
+                `invalid height="${value}" on <icon> dropped`,
+              );
             }
           } else {
             this.#warnEmptyAttr(buf, pos, 'height', 'icon');
@@ -922,7 +964,12 @@ export class XmltvScanner {
           if (value === 'P' || value === 'L') {
             image.orient = value;
           } else if (value) {
-            this.#warn(buf, pos, 'invalid-attribute', `invalid orient="${value}" on <image> dropped`);
+            this.#warn(
+              buf,
+              pos,
+              'invalid-attribute',
+              `invalid orient="${value}" on <image> dropped`,
+            );
           } else {
             this.#warnEmptyAttr(buf, pos, 'orient', 'image');
           }
@@ -966,7 +1013,12 @@ export class XmltvScanner {
           if (value === 'url') {
             review.type = 'url';
           } else if (value && value !== 'text') {
-            this.#warn(buf, pos, 'invalid-attribute', `invalid type="${value}" on <review>, using "text"`);
+            this.#warn(
+              buf,
+              pos,
+              'invalid-attribute',
+              `invalid type="${value}" on <review>, using "text"`,
+            );
           } else if (!value) {
             this.#warnEmptyAttr(buf, pos, 'type', 'review');
           }
@@ -1043,7 +1095,10 @@ export class XmltvScanner {
     // positive check narrows `units` to its literal type, so the length is
     // built fully typed with no cast; anything else is dropped, the raw units
     // echoed in the warning.
-    if ((units === 'seconds' || units === 'minutes' || units === 'hours') && Number.isFinite(value)) {
+    if (
+      (units === 'seconds' || units === 'minutes' || units === 'hours') &&
+      Number.isFinite(value)
+    ) {
       const length: XmltvLength = { units, value };
 
       if (extraAttributes) {
@@ -1053,7 +1108,12 @@ export class XmltvScanner {
       return length;
     }
 
-    this.#warn(buf, at, 'invalid-element', `<length units="${units ?? ''}">${text}</length> dropped`);
+    this.#warn(
+      buf,
+      at,
+      'invalid-element',
+      `<length units="${units ?? ''}">${text}</length> dropped`,
+    );
     return null;
   }
 
@@ -1103,7 +1163,16 @@ export class XmltvScanner {
 
       switch (key) {
         case 'start':
-          this.#applyDate(buf, pos, 'invalid-attribute', 'start on <previously-shown>', value, (d) => { shown.start = d; });
+          this.#applyDate(
+            buf,
+            pos,
+            'invalid-attribute',
+            'start on <previously-shown>',
+            value,
+            (d) => {
+              shown.start = d;
+            },
+          );
 
           break;
         case 'channel':
@@ -1236,7 +1305,12 @@ export class XmltvScanner {
         if (value === 'teletext' || value === 'onscreen' || value === 'deaf-signed') {
           subtitles.type = value;
         } else if (value) {
-          this.#warn(buf, pos, 'invalid-attribute', `invalid type="${value}" on <subtitles> dropped`);
+          this.#warn(
+            buf,
+            pos,
+            'invalid-attribute',
+            `invalid type="${value}" on <subtitles> dropped`,
+          );
         } else {
           this.#warnEmptyAttr(buf, pos, 'type', 'subtitles');
         }
@@ -1316,7 +1390,12 @@ export class XmltvScanner {
         const child = this.#tagName;
         const childAt = this.#tagStart;
 
-        if (child === 'present' || child === 'colour' || child === 'aspect' || child === 'quality') {
+        if (
+          child === 'present' ||
+          child === 'colour' ||
+          child === 'aspect' ||
+          child === 'quality'
+        ) {
           if (video[child] !== undefined) {
             if (this.#skipDuplicateElement(buf, childAt, child, name) === NEED_MORE) {
               return NEED_MORE;
@@ -1329,9 +1408,27 @@ export class XmltvScanner {
             }
 
             if (child === 'present') {
-              this.#applyYesNo(buf, childAt, 'invalid-element', '<present> on <video>', text, (v) => { video.present = v; });
+              this.#applyYesNo(
+                buf,
+                childAt,
+                'invalid-element',
+                '<present> on <video>',
+                text,
+                (v) => {
+                  video.present = v;
+                },
+              );
             } else if (child === 'colour') {
-              this.#applyYesNo(buf, childAt, 'invalid-element', '<colour> on <video>', text, (v) => { video.colour = v; });
+              this.#applyYesNo(
+                buf,
+                childAt,
+                'invalid-element',
+                '<colour> on <video>',
+                text,
+                (v) => {
+                  video.colour = v;
+                },
+              );
             } else if (child === 'aspect') {
               video.aspect = text;
             } else {
@@ -1394,7 +1491,16 @@ export class XmltvScanner {
             }
 
             if (child === 'present') {
-              this.#applyYesNo(buf, childAt, 'invalid-element', '<present> on <audio>', text, (v) => { audio.present = v; });
+              this.#applyYesNo(
+                buf,
+                childAt,
+                'invalid-element',
+                '<present> on <audio>',
+                text,
+                (v) => {
+                  audio.present = v;
+                },
+              );
             } else {
               audio.stereo = text;
             }
@@ -1417,9 +1523,16 @@ export class XmltvScanner {
   }
 
   /** A credits person: mixed content `(#PCDATA | image | url)*`. */
-  #personChild(
-    buf: string,
-  ): { value: string; image?: XmltvImage[]; url?: XmltvUrlValue[]; extra?: XmltvExtraElement[]; attrs: string[] | null; positions: number[] | null } | NeedMore {
+  #personChild(buf: string):
+    | {
+        value: string;
+        image?: XmltvImage[];
+        url?: XmltvUrlValue[];
+        extra?: XmltvExtraElement[];
+        attrs: string[] | null;
+        positions: number[] | null;
+      }
+    | NeedMore {
     const name = this.#tagName;
     // Snapshot both, before parsing <image>/<url> children reassigns the
     // scratch, so the caller can anchor a `guest` warning at that attribute.
@@ -1607,7 +1720,9 @@ export class XmltvScanner {
 
                 break;
               case 'guest':
-                this.#applyYesNo(buf, pos, 'invalid-attribute', 'guest on <actor>', val, (v) => { actor.guest = v; });
+                this.#applyYesNo(buf, pos, 'invalid-attribute', 'guest on <actor>', val, (v) => {
+                  actor.guest = v;
+                });
                 break;
               default:
                 (actor.extraAttributes ??= {})[key] = val;
@@ -1990,13 +2105,19 @@ export class XmltvScanner {
           programme.channel = value;
           break;
         case 'stop':
-          this.#applyDate(buf, pos, 'invalid-attribute', 'stop on <programme>', value, (d) => { programme.stop = d; });
+          this.#applyDate(buf, pos, 'invalid-attribute', 'stop on <programme>', value, (d) => {
+            programme.stop = d;
+          });
           break;
         case 'pdc-start':
-          this.#applyDate(buf, pos, 'invalid-attribute', 'pdc-start on <programme>', value, (d) => { programme.pdcStart = d; });
+          this.#applyDate(buf, pos, 'invalid-attribute', 'pdc-start on <programme>', value, (d) => {
+            programme.pdcStart = d;
+          });
           break;
         case 'vps-start':
-          this.#applyDate(buf, pos, 'invalid-attribute', 'vps-start on <programme>', value, (d) => { programme.vpsStart = d; });
+          this.#applyDate(buf, pos, 'invalid-attribute', 'vps-start on <programme>', value, (d) => {
+            programme.vpsStart = d;
+          });
           break;
         case 'showview':
           if (value) {
@@ -2035,7 +2156,10 @@ export class XmltvScanner {
     let dropReason: string | undefined;
 
     if (programme.start === undefined) {
-      const detail = startError instanceof XmltvDateError ? `: ${startError.reason} at index ${startError.index}` : '';
+      const detail =
+        startError instanceof XmltvDateError
+          ? `: ${startError.reason} at index ${startError.index}`
+          : '';
       dropReason = startRaw
         ? `skipped <programme> with invalid start="${startRaw}"${detail}`
         : 'skipped <programme> without a start attribute';
@@ -2143,7 +2267,9 @@ export class XmltvScanner {
             return NEED_MORE;
           }
 
-          this.#applyDate(buf, at, 'invalid-element', '<date>', text, (d) => { programme.date = d; });
+          this.#applyDate(buf, at, 'invalid-element', '<date>', text, (d) => {
+            programme.date = d;
+          });
           break;
         }
         case 'category': {
@@ -2183,7 +2309,8 @@ export class XmltvScanner {
         }
         case 'orig-language': {
           if (programme.origLanguage !== undefined) {
-            if (this.#skipDuplicateElement(buf, at, 'orig-language') === NEED_MORE) return NEED_MORE;
+            if (this.#skipDuplicateElement(buf, at, 'orig-language') === NEED_MORE)
+              return NEED_MORE;
             break;
           }
 
@@ -2289,7 +2416,8 @@ export class XmltvScanner {
         }
         case 'previously-shown': {
           if (programme.previouslyShown !== undefined) {
-            if (this.#skipDuplicateElement(buf, at, 'previously-shown') === NEED_MORE) return NEED_MORE;
+            if (this.#skipDuplicateElement(buf, at, 'previously-shown') === NEED_MORE)
+              return NEED_MORE;
             break;
           }
 
@@ -2484,7 +2612,9 @@ export class XmltvScanner {
       const pos = positions![i >> 1]!;
 
       if (key === 'date') {
-        this.#applyDate(buf, pos, 'invalid-attribute', 'date on <tv>', value, (d) => { meta.date = d; });
+        this.#applyDate(buf, pos, 'invalid-attribute', 'date on <tv>', value, (d) => {
+          meta.date = d;
+        });
         continue;
       }
 
@@ -2528,7 +2658,9 @@ export class XmltvScanner {
         // forward here (consumed === buf.length), so `checkRootLimit` on
         // #advance doesn't apply — check the whole scanned buffer directly.
         if (!this.#rootFound && buf.length > this.#rootScanLimit) {
-          throw new TypeError(`No root element found within the first ${this.#rootScanLimit} characters of input`);
+          throw new TypeError(
+            `No root element found within the first ${this.#rootScanLimit} characters of input`,
+          );
         }
 
         return this.#advance(buf, buf.length);

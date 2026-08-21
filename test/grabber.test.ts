@@ -39,7 +39,11 @@ class MemoryCache implements CacheStore {
     return this.entries.get(this.keyOf(key))?.programmes;
   }
 
-  async write(key: ChannelDayKey, programmes: XmltvProgramme[], meta?: Partial<CacheEntryMeta>): Promise<void> {
+  async write(
+    key: ChannelDayKey,
+    programmes: XmltvProgramme[],
+    meta?: Partial<CacheEntryMeta>,
+  ): Promise<void> {
     this.entries.set(this.keyOf(key), {
       programmes,
       meta: {
@@ -201,9 +205,9 @@ describe('grab', () => {
 
     expect(summary.fetched).toBe(1);
     expect(summary.fromCache).toBe(1);
-    expect(cache.get({ site: 'example.com', channelId: 'old.example', day: TODAY })?.meta.grabbedAt).toBe(
-      NOW.toISOString(),
-    );
+    expect(
+      cache.get({ site: 'example.com', channelId: 'old.example', day: TODAY })?.meta.grabbedAt,
+    ).toBe(NOW.toISOString());
   });
 
   it('per-site days override wins over the global option', async () => {
@@ -272,7 +276,11 @@ describe('grab', () => {
     const summary = await grab([config], { cache, now: NOW });
 
     expect(summary.fetched).toBe(1);
-    const written = cache.get({ site: 'example.com', channelId: 'one.example', day: TODAY })!.programmes;
+    const written = cache.get({
+      site: 'example.com',
+      channelId: 'one.example',
+      day: TODAY,
+    })!.programmes;
 
     expect(written.map((p) => p.channel)).toEqual(['one.example', 'one.example']);
     expect(written[0]!.title).toEqual([{ value: 'Ranné správy', lang: 'sk' }]);
@@ -296,14 +304,22 @@ describe('grab', () => {
       parseDay({ programme, channel: ch, day }) {
         return [
           programme(new Date(`${day}T06:00:00.000Z`), 'Built'),
-          { channel: ch.xmltvId, start: new Date(`${day}T08:00:00.000Z`), title: [{ value: 'Plain' }] },
+          {
+            channel: ch.xmltvId,
+            start: new Date(`${day}T08:00:00.000Z`),
+            title: [{ value: 'Plain' }],
+          },
         ];
       },
     });
 
     await grab([config], { cache, now: NOW });
 
-    const written = cache.get({ site: 'example.com', channelId: 'one.example', day: TODAY })!.programmes;
+    const written = cache.get({
+      site: 'example.com',
+      channelId: 'one.example',
+      day: TODAY,
+    })!.programmes;
     expect(written.map((p) => p.title[0]?.value)).toEqual(['Built', 'Plain']);
     expect(written.every((p) => p.channel === 'one.example')).toBe(true);
   });
@@ -452,11 +468,13 @@ describe('grab', () => {
     }
 
     const cache = new SlowCache();
-    const sites = ['a.example', 'b.example'].map((site) => makeConfig({
-      site,
-      days: 4,
-      channels: [channel('one'), channel('two'), channel('three')],
-    }));
+    const sites = ['a.example', 'b.example'].map((site) =>
+      makeConfig({
+        site,
+        days: 4,
+        channels: [channel('one'), channel('two'), channel('three')],
+      }),
+    );
 
     // 2 sites × 3 channels × 4 days = 24 sweep reads and 24 writes, all of
     // which the old unbounded Promise.all would have started at once.
@@ -501,7 +519,7 @@ describe('grab', () => {
     expect(cache.get({ site: 'example.com', channelId: 'fn.example', day: TODAY })).toBeDefined();
   });
 
-  it('hands a channels function the site\'s own client, and the same one requests use', async () => {
+  it("hands a channels function the site's own client, and the same one requests use", async () => {
     const cache = new MemoryCache();
     let listClient: unknown;
     let requestClient: unknown;
@@ -524,7 +542,7 @@ describe('grab', () => {
     expect(listClient).toBe(requestClient); // built once for the site, not per call
   });
 
-  it('carries a channel\'s data through to the request and to parseDay', async () => {
+  it("carries a channel's data through to the request and to parseDay", async () => {
     const cache = new MemoryCache();
     const seen: unknown[] = [];
 
@@ -548,7 +566,7 @@ describe('grab', () => {
     expect(seen).toEqual(['t-1', 't-1']);
   });
 
-  it('aborts a channels function\'s own requests through the client it was given', async () => {
+  it("aborts a channels function's own requests through the client it was given", async () => {
     // A server that accepts and never answers, so the request is still in
     // flight when the run is cancelled — the case a queue cannot handle for
     // you, and the reason the signal rides on the client.
@@ -683,9 +701,8 @@ describe('grab', () => {
   });
 });
 
-
 describe('grab with batching: channels', () => {
-  it('fetches a day\'s channels in one request and caches each channel-day', async () => {
+  it("fetches a day's channels in one request and caches each channel-day", async () => {
     const cache = new MemoryCache();
     const batchCalls: string[][] = [];
 
@@ -866,7 +883,7 @@ describe('grab with batching: channels', () => {
 });
 
 describe('grab with batching: days', () => {
-  it('fetches a channel\'s whole window in one request and caches each day', async () => {
+  it("fetches a channel's whole window in one request and caches each day", async () => {
     const cache = new MemoryCache();
     const calls: { channel: string; days: string[]; from: string; to: string }[] = [];
 
@@ -884,17 +901,21 @@ describe('grab with batching: days', () => {
 
     const summary = await grab([config], { cache, now: NOW });
 
-    expect(calls).toEqual([{
-      channel: 'a',
-      days: [TODAY, TOMORROW, '2026-07-19', '2026-07-20'],
-      from: `${TODAY}T00:00:00.000Z`,
-      to: '2026-07-20T00:00:00.000Z',
-    }]);
+    expect(calls).toEqual([
+      {
+        channel: 'a',
+        days: [TODAY, TOMORROW, '2026-07-19', '2026-07-20'],
+        from: `${TODAY}T00:00:00.000Z`,
+        to: '2026-07-20T00:00:00.000Z',
+      },
+    ]);
     expect(summary.fetched).toBe(4); // one request, four channel-days written
     expect(summary.failed).toEqual([]);
     for (const day of [TODAY, TOMORROW, '2026-07-19', '2026-07-20']) {
       const written = cache.get({ site: 'days.example', channelId: 'a', day });
-      expect(written?.programmes.map((p) => p.start.toISOString())).toEqual([`${day}T06:00:00.000Z`]);
+      expect(written?.programmes.map((p) => p.start.toISOString())).toEqual([
+        `${day}T06:00:00.000Z`,
+      ]);
     }
   });
 
@@ -1076,7 +1097,9 @@ describe('grab with batching: both', () => {
       staleness: { alwaysRefetchDays: 0 },
       async request({ channels, days, channelDays }) {
         covered = { channels: channels.map((c) => c.xmltvId), days };
-        wanted = channelDays.map(({ channel: ch, day, date }) => `${ch.xmltvId} ${day} ${date.toISOString()}`);
+        wanted = channelDays.map(
+          ({ channel: ch, day, date }) => `${ch.xmltvId} ${day} ${date.toISOString()}`,
+        );
         return {};
       },
       parseDay({ channel: ch, day }) {
@@ -1098,8 +1121,9 @@ describe('grab with batching: both', () => {
     expect(parsed.sort()).toEqual([`a ${TODAY}`, `a ${TOMORROW}`, `b ${TODAY}`]);
     expect(summary.fromCache).toBe(1);
     expect(summary.fetched).toBe(3);
-    expect(cache.get({ site: 'grid.example', channelId: 'b', day: TOMORROW })?.programmes)
-      .toEqual([programme(`${TOMORROW}T20:00:00.000Z`, 'b')]);
+    expect(cache.get({ site: 'grid.example', channelId: 'b', day: TOMORROW })?.programmes).toEqual([
+      programme(`${TOMORROW}T20:00:00.000Z`, 'b'),
+    ]);
   });
 });
 

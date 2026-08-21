@@ -64,9 +64,14 @@ export class XmltvParseStream extends Transform {
     this.#buf = step.value; // the unconsumed remainder
   }
 
-  override _transform(chunk: Buffer | Uint8Array | string, _encoding: BufferEncoding, callback: TransformCallback): void {
+  override _transform(
+    chunk: Buffer | Uint8Array | string,
+    _encoding: BufferEncoding,
+    callback: TransformCallback,
+  ): void {
     try {
-      this.#buf += typeof chunk === 'string' ? chunk : this.#decoder.decode(chunk, { stream: true });
+      this.#buf +=
+        typeof chunk === 'string' ? chunk : this.#decoder.decode(chunk, { stream: true });
       this.#pump(false);
       callback();
     } catch (error) {

@@ -26,7 +26,7 @@ export function queueLine(stream: Writable, line: string): void {
  */
 export function writeFlushed(stream: Writable, text: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    stream.write(text, (error) => error ? reject(error) : resolve());
+    stream.write(text, (error) => (error ? reject(error) : resolve()));
   });
 }
 

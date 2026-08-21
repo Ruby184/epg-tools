@@ -26,11 +26,13 @@ function site(fetchedDays: string[]): SiteConfig<unknown> {
       return { day };
     },
     parseDay({ day }): XmltvProgramme[] {
-      return [{
-        channel: 'one.example',
-        start: new Date(`${day}T06:00:00.000Z`),
-        title: [{ value: `p-${day}` }],
-      }];
+      return [
+        {
+          channel: 'one.example',
+          start: new Date(`${day}T06:00:00.000Z`),
+          title: [{ value: `p-${day}` }],
+        },
+      ];
     },
   };
 }
@@ -96,7 +98,9 @@ describe('offset', () => {
     const epgConfig = config(dir, { days: 1 });
 
     // Seed a stale day well behind the window, then grab.
-    await runGrab(config(dir, { sites: [site([])], days: 1 }), { now: new Date('2026-07-10T12:00:00.000Z') });
+    await runGrab(config(dir, { sites: [site([])], days: 1 }), {
+      now: new Date('2026-07-10T12:00:00.000Z'),
+    });
     await runGrab(epgConfig, { now: NOW });
 
     const xml = await collect(guideStream(config(dir, { days: 30 }), { now: NOW, offset: -10 }));
@@ -167,13 +171,15 @@ describe('a configuration that still needs its answers', () => {
       // called by hand before use — while the CLI called it for you.
       const summary = await build(source, { now: NOW });
       expect(summary.fetched).toBe(1);
-      expect(await readFile(join(dir, 'guide.xml'), 'utf8'))
-        .toContain('source-info-name="from-env"');
+      expect(await readFile(join(dir, 'guide.xml'), 'utf8')).toContain(
+        'source-info-name="from-env"',
+      );
 
       // Today is always refetched, so this is a grab and not a cache hit.
       expect((await runGrab(source, { now: NOW })).fetched).toBe(1);
-      expect(await collect(guideStream(source, { now: NOW })))
-        .toContain('source-info-name="from-env"');
+      expect(await collect(guideStream(source, { now: NOW }))).toContain(
+        'source-info-name="from-env"',
+      );
 
       await runMerge(source, { now: NOW });
     } finally {

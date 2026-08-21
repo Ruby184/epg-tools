@@ -78,17 +78,19 @@ function lineupStage(lineups: readonly LineupConfig[]): ConfigStage {
     // Not `select-channels`: a lineup *is* the channel selection, so asking
     // again would be asking the same question twice with different answers.
     next: END,
-    fields: [lineups.length === 1
-      // Nothing to choose between, but the answer still has to be recorded —
-      // which is what a constant is: written to the configuration, never asked.
-      ? { type: 'string', id: LINEUP, title: 'Lineup', description, constant: only.id }
-      : {
-        type: 'selectone',
-        id: LINEUP,
-        title: 'Lineup',
-        description,
-        options: lineups.map((lineup) => ({ value: lineup.id, text: titleOf(lineup) })),
-      }],
+    fields: [
+      lineups.length === 1
+        ? // Nothing to choose between, but the answer still has to be recorded —
+          // which is what a constant is: written to the configuration, never asked.
+          { type: 'string', id: LINEUP, title: 'Lineup', description, constant: only.id }
+        : {
+            type: 'selectone',
+            id: LINEUP,
+            title: 'Lineup',
+            description,
+            options: lineups.map((lineup) => ({ value: lineup.id, text: titleOf(lineup) })),
+          },
+    ],
   };
 }
 

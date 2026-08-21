@@ -36,12 +36,25 @@ describe('ProgrammeBuilder', () => {
   it('exposes a positional `of` factory equivalent to the base-object constructor', () => {
     const start = '20260717200000 +0000';
 
-    expect(ProgrammeBuilder.of('one.tv', start, 'News', { stop: '20260717210000 +0000', lang: 'en' }).build())
-      .toEqual(new ProgrammeBuilder({ channel: 'one.tv', start, stop: '20260717210000 +0000', title: 'News', lang: 'en' }).build());
+    expect(
+      ProgrammeBuilder.of('one.tv', start, 'News', {
+        stop: '20260717210000 +0000',
+        lang: 'en',
+      }).build(),
+    ).toEqual(
+      new ProgrammeBuilder({
+        channel: 'one.tv',
+        start,
+        stop: '20260717210000 +0000',
+        title: 'News',
+        lang: 'en',
+      }).build(),
+    );
 
     // Chains like any other builder; options default to empty.
-    expect(ProgrammeBuilder.of('one.tv', start, 'News').desc('Story').build())
-      .toEqual(new ProgrammeBuilder({ channel: 'one.tv', start, title: 'News' }).desc('Story').build());
+    expect(ProgrammeBuilder.of('one.tv', start, 'News').desc('Story').build()).toEqual(
+      new ProgrammeBuilder({ channel: 'one.tv', start, title: 'News' }).desc('Story').build(),
+    );
   });
 
   it('accepts a unix-seconds timestamp and offset/precision date options', () => {
@@ -125,7 +138,11 @@ describe('ProgrammeBuilder', () => {
   });
 
   it('generates both xmltv_ns and onscreen entries from season/episode', () => {
-    const programme = new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
+    const programme = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    })
       .episode(5, 2)
       .build();
 
@@ -136,7 +153,11 @@ describe('ProgrammeBuilder', () => {
   });
 
   it('defaults season to 1 when omitted', () => {
-    const programme = new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
+    const programme = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    })
       .episode(5)
       .build();
 
@@ -158,7 +179,10 @@ describe('ProgrammeBuilder', () => {
     // Total episodes in the season.
     expect(xmltvNs({ episodes: 13 })).toEqual({ system: 'xmltv_ns', value: '1.5/13.0/1' });
     // Total seasons too.
-    expect(xmltvNs({ episodes: 13, seasons: 3 })).toEqual({ system: 'xmltv_ns', value: '1/3.5/13.0/1' });
+    expect(xmltvNs({ episodes: 13, seasons: 3 })).toEqual({
+      system: 'xmltv_ns',
+      value: '1/3.5/13.0/1',
+    });
     // A multi-part episode: part 1 of 2.
     expect(xmltvNs({ parts: 2 })).toEqual({ system: 'xmltv_ns', value: '1.5.0/2' });
     // An explicit later part.
@@ -171,7 +195,11 @@ describe('ProgrammeBuilder', () => {
   });
 
   it('keeps episodeNum as an explicit escape hatch alongside the season/episode shortcut', () => {
-    const programme = new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
+    const programme = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    })
       .episodeNum('dd_progid', 'EP01006886.0028')
       .episode(5)
       .build();
@@ -184,7 +212,11 @@ describe('ProgrammeBuilder', () => {
   });
 
   it('accepts yes/no strings and booleans interchangeably for video/audio/actor.guest', () => {
-    const programme = new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
+    const programme = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    })
       .video({ present: 'yes', colour: false })
       .audio({ present: true })
       .actor('Ryan Lee', { guest: 'yes' })
@@ -196,7 +228,11 @@ describe('ProgrammeBuilder', () => {
   });
 
   it('merges video/audio across multiple calls instead of overwriting', () => {
-    const programme = new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
+    const programme = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    })
       .video({ present: true })
       .video({ aspect: '16:9' })
       .build();
@@ -205,7 +241,11 @@ describe('ProgrammeBuilder', () => {
   });
 
   it('sets the new flag as a boolean; false is stored but emits no tag', () => {
-    const builder = new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' }).new();
+    const builder = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    }).new();
 
     expect(builder.build().new).toBe(true);
 
@@ -217,7 +257,11 @@ describe('ProgrammeBuilder', () => {
   });
 
   it('defaults premiere/lastChance to a bare flag when no text is given', () => {
-    const programme = new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
+    const programme = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    })
       .premiere()
       .lastChance('Last time on this channel', 'en')
       .build();
@@ -227,7 +271,11 @@ describe('ProgrammeBuilder', () => {
   });
 
   it('collapses url/person entries to a plain string unless extra fields are set', () => {
-    const programme = new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
+    const programme = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    })
       .url('https://example.com/programme_one_2')
       .url('https://example.com/programme_one', { system: 'imdb' })
       .director('Bart Eskander')
@@ -254,7 +302,11 @@ describe('ProgrammeBuilder', () => {
   });
 
   it('attaches extraAttributes to every kind of element via the trailing argument', () => {
-    const programme = new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
+    const programme = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    })
       .desc('Plot', 'en', { src: 'tmdb' })
       .url('https://example.com', undefined, { role: 'main' })
       .director('Jane Doe', {}, { 'data-id': '42' })
@@ -266,45 +318,86 @@ describe('ProgrammeBuilder', () => {
       .build();
 
     // A text value keeps its lang and gains the attribute.
-    expect(programme.desc).toEqual([{ value: 'Plot', lang: 'en', extraAttributes: { src: 'tmdb' } }]);
+    expect(programme.desc).toEqual([
+      { value: 'Plot', lang: 'en', extraAttributes: { src: 'tmdb' } },
+    ]);
     // A url that would otherwise collapse to a string stays an object once it has attributes.
-    expect(programme.url).toEqual([{ value: 'https://example.com', extraAttributes: { role: 'main' } }]);
+    expect(programme.url).toEqual([
+      { value: 'https://example.com', extraAttributes: { role: 'main' } },
+    ]);
     // Likewise a credit person that would otherwise be a bare name.
-    expect(programme.credits?.director).toEqual([{ value: 'Jane Doe', extraAttributes: { 'data-id': '42' } }]);
-    expect(programme.icon).toEqual([{ src: 'https://example.com/i.png', width: 32, extraAttributes: { foo: 'bar' } }]);
-    expect(programme.episodeNum).toEqual([{ system: 'dd_progid', value: 'EP01', extraAttributes: { generator: 'x' } }]);
-    expect(programme.length).toEqual({ units: 'minutes', value: 90, extraAttributes: { source: 'guide' } });
-    expect(programme.rating).toEqual([{ value: 'PG', system: 'BBFC', extraAttributes: { locale: 'gb' } }]);
+    expect(programme.credits?.director).toEqual([
+      { value: 'Jane Doe', extraAttributes: { 'data-id': '42' } },
+    ]);
+    expect(programme.icon).toEqual([
+      { src: 'https://example.com/i.png', width: 32, extraAttributes: { foo: 'bar' } },
+    ]);
+    expect(programme.episodeNum).toEqual([
+      { system: 'dd_progid', value: 'EP01', extraAttributes: { generator: 'x' } },
+    ]);
+    expect(programme.length).toEqual({
+      units: 'minutes',
+      value: 90,
+      extraAttributes: { source: 'guide' },
+    });
+    expect(programme.rating).toEqual([
+      { value: 'PG', system: 'BBFC', extraAttributes: { locale: 'gb' } },
+    ]);
     expect(programme.video).toEqual({ present: true, extraAttributes: { codec: 'h264' } });
   });
 
   it('merges the positional extraAttributes with the options ones (positional wins on conflict)', () => {
-    const programme = new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
-      .icon('https://example.com/i.png', { width: 32, extraAttributes: { foo: 'opts', keep: 'opts' } }, { foo: 'arg', extra: 'arg' })
+    const programme = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    })
+      .icon(
+        'https://example.com/i.png',
+        { width: 32, extraAttributes: { foo: 'opts', keep: 'opts' } },
+        { foo: 'arg', extra: 'arg' },
+      )
       .build();
 
-    expect(programme.icon).toEqual([{
-      src: 'https://example.com/i.png',
-      width: 32,
-      extraAttributes: { keep: 'opts', foo: 'arg', extra: 'arg' },
-    }]);
+    expect(programme.icon).toEqual([
+      {
+        src: 'https://example.com/i.png',
+        width: 32,
+        extraAttributes: { keep: 'opts', foo: 'arg', extra: 'arg' },
+      },
+    ]);
   });
 
   it('carries extraAttributes on nested elements through their options object', () => {
-    const programme = new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
+    const programme = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    })
       .director('Jane Doe', {
-        image: [['https://example.com/j.jpg', { system: 'tmdb', extraAttributes: { crop: 'face' } }]],
+        image: [
+          ['https://example.com/j.jpg', { system: 'tmdb', extraAttributes: { crop: 'face' } }],
+        ],
         url: [['https://example.com/person/1', { extraAttributes: { lang: 'en' } }]],
       })
-      .rating('PG', { system: 'BBFC', icon: [['https://example.com/pg.png', { extraAttributes: { theme: 'dark' } }]] })
+      .rating('PG', {
+        system: 'BBFC',
+        icon: [['https://example.com/pg.png', { extraAttributes: { theme: 'dark' } }]],
+      })
       .build();
 
-    expect(programme.credits?.director).toEqual([{
-      value: 'Jane Doe',
-      image: [{ value: 'https://example.com/j.jpg', system: 'tmdb', extraAttributes: { crop: 'face' } }],
-      url: [{ value: 'https://example.com/person/1', extraAttributes: { lang: 'en' } }],
-    }]);
-    expect(programme.rating?.[0]?.icon).toEqual([{ src: 'https://example.com/pg.png', extraAttributes: { theme: 'dark' } }]);
+    expect(programme.credits?.director).toEqual([
+      {
+        value: 'Jane Doe',
+        image: [
+          { value: 'https://example.com/j.jpg', system: 'tmdb', extraAttributes: { crop: 'face' } },
+        ],
+        url: [{ value: 'https://example.com/person/1', extraAttributes: { lang: 'en' } }],
+      },
+    ]);
+    expect(programme.rating?.[0]?.icon).toEqual([
+      { src: 'https://example.com/pg.png', extraAttributes: { theme: 'dark' } },
+    ]);
   });
 
   it('round-trips element extraAttributes through serialize + parse', () => {
@@ -320,7 +413,11 @@ describe('ProgrammeBuilder', () => {
   });
 
   it('sets programme extraAttributes one at a time and merged', () => {
-    const programme = new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
+    const programme = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    })
       .extraAttribute('data-source', 'grabber')
       .extraAttribute('data-run', '7')
       .extraAttributes({ 'data-run': '8', 'data-locale': 'gb' })
@@ -367,12 +464,16 @@ describe('ChannelBuilder', () => {
   });
 
   it('exposes a positional `of` factory equivalent to the base-object constructor', () => {
-    expect(ChannelBuilder.of('one.tv', 'One', 'en').build())
-      .toEqual(new ChannelBuilder({ id: 'one.tv', displayName: 'One', lang: 'en' }).build());
+    expect(ChannelBuilder.of('one.tv', 'One', 'en').build()).toEqual(
+      new ChannelBuilder({ id: 'one.tv', displayName: 'One', lang: 'en' }).build(),
+    );
 
     // Chains like any other builder.
-    expect(ChannelBuilder.of('two.tv', 'Two').icon('two.png').build())
-      .toEqual({ id: 'two.tv', displayName: [{ value: 'Two' }], icon: [{ src: 'two.png' }] });
+    expect(ChannelBuilder.of('two.tv', 'Two').icon('two.png').build()).toEqual({
+      id: 'two.tv',
+      displayName: [{ value: 'Two' }],
+      icon: [{ src: 'two.png' }],
+    });
   });
 
   it('adds multi-language display names, icons and urls with the default lang', () => {
@@ -386,7 +487,11 @@ describe('ChannelBuilder', () => {
 
     expect(channel).toEqual({
       id: 'one.tv',
-      displayName: [{ value: 'One', lang: 'en' }, { value: 'Jeden', lang: 'sk' }, { value: '1', lang: 'en' }],
+      displayName: [
+        { value: 'One', lang: 'en' },
+        { value: 'Jeden', lang: 'sk' },
+        { value: '1', lang: 'en' },
+      ],
       icon: [{ src: 'https://example.com/one.png', width: 64, height: 64 }],
       url: [{ value: 'https://example.com', system: 'website' }],
       extraAttributes: { 'data-src': 'grabber' },
@@ -413,7 +518,9 @@ describe('XmltvDocumentBuilder', () => {
       .meta({ sourceInfoName: 'Example' }) // merges
       .channel(new ChannelBuilder({ id: 'one.tv', displayName: 'One' })) // standalone builder
       .channel({ id: 'two.tv', displayName: 'Two' }) // base fields
-      .programme(new ProgrammeBuilder({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' }))
+      .programme(
+        new ProgrammeBuilder({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' }),
+      )
       .build();
 
     expect(doc.meta).toEqual({ generatorInfoName: 'epg-tools', sourceInfoName: 'Example' });
@@ -459,39 +566,59 @@ describe('XmltvDocumentBuilder', () => {
 
   it('adds channels/programmes via the configure callback and stays on the document builder', () => {
     const doc = new XmltvDocumentBuilder()
-      .channel({ id: 'one.tv', displayName: 'One', lang: 'en' }, (c) => c.displayName('Jeden', 'sk').icon('one.png'))
-      .programme({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' }, (p) => p.desc('Evening news').episode(3))
+      .channel({ id: 'one.tv', displayName: 'One', lang: 'en' }, (c) =>
+        c.displayName('Jeden', 'sk').icon('one.png'),
+      )
+      .programme({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' }, (p) =>
+        p.desc('Evening news').episode(3),
+      )
       .build();
 
-    expect(doc.channels).toEqual([{
-      id: 'one.tv',
-      displayName: [{ value: 'One', lang: 'en' }, { value: 'Jeden', lang: 'sk' }],
-      icon: [{ src: 'one.png' }],
-    }]);
+    expect(doc.channels).toEqual([
+      {
+        id: 'one.tv',
+        displayName: [
+          { value: 'One', lang: 'en' },
+          { value: 'Jeden', lang: 'sk' },
+        ],
+        icon: [{ src: 'one.png' }],
+      },
+    ]);
     expect(doc.programmes).toEqual([
-      new ProgrammeBuilder({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' }).desc('Evening news').episode(3).build(),
+      new ProgrammeBuilder({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' })
+        .desc('Evening news')
+        .episode(3)
+        .build(),
     ]);
   });
 
   it('adds channels/programmes via addChannel/addProgramme and .end() back to the document', () => {
     const doc = new XmltvDocumentBuilder()
       .addChannel({ id: 'one.tv', displayName: 'One', lang: 'en' })
-        .displayName('Jeden', 'sk')
-        .icon('one.png')
-        .end()
+      .displayName('Jeden', 'sk')
+      .icon('one.png')
+      .end()
       .addProgramme({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' })
-        .desc('Evening news')
-        .episode(3)
-        .end()
+      .desc('Evening news')
+      .episode(3)
+      .end()
       .build();
 
-    expect(doc.channels).toEqual([{
-      id: 'one.tv',
-      displayName: [{ value: 'One', lang: 'en' }, { value: 'Jeden', lang: 'sk' }],
-      icon: [{ src: 'one.png' }],
-    }]);
+    expect(doc.channels).toEqual([
+      {
+        id: 'one.tv',
+        displayName: [
+          { value: 'One', lang: 'en' },
+          { value: 'Jeden', lang: 'sk' },
+        ],
+        icon: [{ src: 'one.png' }],
+      },
+    ]);
     expect(doc.programmes).toEqual([
-      new ProgrammeBuilder({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' }).desc('Evening news').episode(3).build(),
+      new ProgrammeBuilder({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' })
+        .desc('Evening news')
+        .episode(3)
+        .build(),
     ]);
   });
 
@@ -512,7 +639,9 @@ describe('XmltvDocumentBuilder', () => {
     const builder = new XmltvDocumentBuilder()
       .generatorInfo('epg-tools')
       .channel({ id: 'one.tv', displayName: 'One' }, (c) => c.icon('one.png'))
-      .programme({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' }, (p) => p.desc('Story'));
+      .programme({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' }, (p) =>
+        p.desc('Story'),
+      );
 
     const xml = builder.toXml();
 
@@ -546,10 +675,20 @@ describe('XmltvDocumentBuilder', () => {
   it('assembles a whole document that round-trips through writeXmltvStream + parse', async () => {
     const built = new XmltvDocumentBuilder()
       .meta({ generatorInfoName: 'epg-tools', date: parseXmltvDate('20260717000000 +0000') })
-      .channel(new ChannelBuilder({ id: 'one.tv', displayName: 'One', lang: 'en' }).icon('https://example.com/one.png'))
+      .channel(
+        new ChannelBuilder({ id: 'one.tv', displayName: 'One', lang: 'en' }).icon(
+          'https://example.com/one.png',
+        ),
+      )
       .programme(
         // pass a standalone builder
-        new ProgrammeBuilder({ channel: 'one.tv', start: '20260717200000 +0000', stop: '20260717210000 +0000', title: 'News', lang: 'en' })
+        new ProgrammeBuilder({
+          channel: 'one.tv',
+          start: '20260717200000 +0000',
+          stop: '20260717210000 +0000',
+          title: 'News',
+          lang: 'en',
+        })
           .desc('Evening news')
           .episode(3),
       )
@@ -706,7 +845,9 @@ describe('the whole supported tree', () => {
     const p = new ProgrammeBuilder(base)
       .extraAttributes({ uniqueID: 'u1', eit: undefined as unknown as string })
       .category('drama', undefined, { code: null as unknown as string })
-      .url('https://example.tv/one', { extraAttributes: { system: undefined as unknown as string } })
+      .url('https://example.tv/one', {
+        extraAttributes: { system: undefined as unknown as string },
+      })
       .build();
 
     expect(Object.keys(p.extraAttributes!)).toEqual(['uniqueID']);
@@ -716,13 +857,18 @@ describe('the whole supported tree', () => {
     expect(p.url).toEqual(['https://example.tv/one']);
 
     expect(serializeProgramme(p).trim()).toBe(
-      '<programme start="20260807060000 +0000" channel="c" uniqueID="u1">'
-      + '<title>T</title><category>drama</category><url>https://example.tv/one</url></programme>',
+      '<programme start="20260807060000 +0000" channel="c" uniqueID="u1">' +
+        '<title>T</title><category>drama</category><url>https://example.tv/one</url></programme>',
     );
   });
 
   it('lets a subtitles language name its own lang, over the subtitles-level one', () => {
-    const base = { channel: 'c', start: parseXmltvDate('20260807060000 +0000'), title: 'T', lang: 'en' };
+    const base = {
+      channel: 'c',
+      start: parseXmltvDate('20260807060000 +0000'),
+      title: 'T',
+      lang: 'en',
+    };
 
     const p = new ProgrammeBuilder(base)
       .subtitles({ language: 'Deutsch', lang: 'de' })
@@ -738,10 +884,14 @@ describe('the whole supported tree', () => {
     // The positional argument wins where it says something, and stays out of
     // the way where it has no value.
     const p = new ProgrammeBuilder(base)
-      .icon('https://example.tv/i.png', { extraAttributes: { role: 'logo', size: 'sm' } }, {
-        role: undefined as unknown as string,
-        size: 'lg',
-      })
+      .icon(
+        'https://example.tv/i.png',
+        { extraAttributes: { role: 'logo', size: 'sm' } },
+        {
+          role: undefined as unknown as string,
+          size: 'lg',
+        },
+      )
       .build();
 
     expect(p.icon?.[0]?.extraAttributes).toEqual({ role: 'logo', size: 'lg' });
@@ -762,9 +912,8 @@ describe('the whole supported tree', () => {
 
   it('round-trips every one of them through serialize and parse', () => {
     const { programmes } = parseXmltvString(XML);
-    const xml = `<?xml version="1.0" encoding="UTF-8"?><tv>`
-      + serializeProgramme(programmes[0]!)
-      + `</tv>`;
+    const xml =
+      `<?xml version="1.0" encoding="UTF-8"?><tv>` + serializeProgramme(programmes[0]!) + `</tv>`;
 
     // Not a string comparison against the source: whitespace between elements
     // is not content. What must survive is the tree, extensions included.

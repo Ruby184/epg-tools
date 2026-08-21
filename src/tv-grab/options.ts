@@ -183,11 +183,18 @@ function optionRow(name: string, spec: OptionSpec): string {
   }
 
   // A flag too long for its column takes a line of its own.
-  const first = flags.length < DESCRIPTION_COLUMN
-    ? `${flags.padEnd(DESCRIPTION_COLUMN)}${lines[0]}\n`
-    : `${flags}\n${indent}${lines[0]}\n`;
+  const first =
+    flags.length < DESCRIPTION_COLUMN
+      ? `${flags.padEnd(DESCRIPTION_COLUMN)}${lines[0]}\n`
+      : `${flags}\n${indent}${lines[0]}\n`;
 
-  return first + lines.slice(1).map((line) => `${indent}${line}\n`).join('');
+  return (
+    first +
+    lines
+      .slice(1)
+      .map((line) => `${indent}${line}\n`)
+      .join('')
+  );
 }
 
 /**
@@ -213,7 +220,8 @@ export function usage(grabberName: string, capabilities: readonly CapabilityEntr
   const form = (options: readonly string[], mode = false): string => {
     const pad = ' '.repeat(grabberName.length);
     const parts = options.map((name, index) =>
-      mode && index === 0 ? describe(name) : `[${describe(name)}]`);
+      mode && index === 0 ? describe(name) : `[${describe(name)}]`,
+    );
 
     const lines: string[] = [];
 
@@ -230,8 +238,7 @@ export function usage(grabberName: string, capabilities: readonly CapabilityEntr
     return lines.map((line, index) => `${index === 0 ? grabberName : pad} ${line}\n`).join('');
   };
 
-  let out = INFO_FORM
-    .concat(contributions.flatMap((entry) => entry.info ?? []))
+  let out = INFO_FORM.concat(contributions.flatMap((entry) => entry.info ?? []))
     .map((name) => form([name], true))
     .join('');
 

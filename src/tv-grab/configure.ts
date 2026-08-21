@@ -112,16 +112,16 @@ async function askField(
 
   out.write(`${field.description}\n`);
 
-  const label = field.default !== undefined && field.default !== ''
-    ? `${field.title}: [${field.default}] `
-    : `${field.title}: `;
+  const label =
+    field.default !== undefined && field.default !== ''
+      ? `${field.title}: [${field.default}] `
+      : `${field.title}: `;
 
   if (field.type === 'string' || field.type === 'secretstring') {
-    const answer = field.type === 'secretstring'
-      ? await prompter.askSecret(label)
-      : await prompter.ask(label);
+    const answer =
+      field.type === 'secretstring' ? await prompter.askSecret(label) : await prompter.ask(label);
 
-    record(conf, field.id, answer === '' ? field.default ?? '' : answer);
+    record(conf, field.id, answer === '' ? (field.default ?? '') : answer);
     return;
   }
 

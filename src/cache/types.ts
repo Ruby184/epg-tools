@@ -22,7 +22,11 @@ export interface CacheStore {
   getMeta(key: ChannelDayKey): Promise<CacheEntryMeta | undefined>;
   /** Cached programmes, or `undefined` when not cached. */
   read(key: ChannelDayKey): Promise<XmltvProgramme[] | undefined>;
-  write(key: ChannelDayKey, programmes: XmltvProgramme[], meta?: Partial<CacheEntryMeta>): Promise<void>;
+  write(
+    key: ChannelDayKey,
+    programmes: XmltvProgramme[],
+    meta?: Partial<CacheEntryMeta>,
+  ): Promise<void>;
   delete(key: ChannelDayKey): Promise<void>;
   /** Remove entries for days before `before` (`YYYY-MM-DD`). Returns removed count. */
   prune(options: { before: string }): Promise<number>;

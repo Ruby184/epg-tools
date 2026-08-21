@@ -70,11 +70,13 @@ function site(id: string, fetchedDays: string[] = []): SiteConfig<unknown> {
       return { day };
     },
     parseDay({ channel, day }): XmltvProgramme[] {
-      return [{
-        channel: channel.xmltvId,
-        start: new Date(`${day}T06:00:00.000Z`),
-        title: [{ value: `p-${day}` }],
-      }];
+      return [
+        {
+          channel: channel.xmltvId,
+          start: new Date(`${day}T06:00:00.000Z`),
+          title: [{ value: `p-${day}` }],
+        },
+      ];
     },
   };
 }
@@ -102,10 +104,7 @@ interface RunResult {
   stderr: string;
 }
 
-async function run(
-  source: ConfigSource,
-  argv: string[],
-): Promise<RunResult> {
+async function run(source: ConfigSource, argv: string[]): Promise<RunResult> {
   const stdout = new Sink();
   const stderr = new Sink();
   const code = await runXmltvGrabber(source, { ...META, argv, stdout, stderr });
@@ -122,14 +121,16 @@ async function configured(dir: string): Promise<string> {
 
 describe('config file format', () => {
   it('parses key=value and key!value into selected and deselected', () => {
-    const conf = parseGrabberConfig([
-      '# a comment',
-      '',
-      'username=mattias',
-      'channel=svt1.svt.se',
-      'channel=kanal5.se',
-      'channel!svt2.svt.se',
-    ].join('\n'));
+    const conf = parseGrabberConfig(
+      [
+        '# a comment',
+        '',
+        'username=mattias',
+        'channel=svt1.svt.se',
+        'channel=kanal5.se',
+        'channel!svt2.svt.se',
+      ].join('\n'),
+    );
 
     expect(conf).toEqual({
       username: ['mattias'],
@@ -175,16 +176,18 @@ describe('applyChannelSelection', () => {
   it('filters a lazy channel list without resolving it eagerly', async () => {
     let calls = 0;
     const epg: EpgConfig = {
-      sites: [{
-        ...site('one.example.tv'),
-        channels: async () => {
-          calls++;
-          return [
-            { xmltvId: 'one.example.tv', siteId: '1' },
-            { xmltvId: 'two.example.tv', siteId: '2' },
-          ];
+      sites: [
+        {
+          ...site('one.example.tv'),
+          channels: async () => {
+            calls++;
+            return [
+              { xmltvId: 'one.example.tv', siteId: '1' },
+              { xmltvId: 'two.example.tv', siteId: '2' },
+            ];
+          },
         },
-      }],
+      ],
       output: 'x',
     };
 
@@ -264,7 +267,9 @@ describe('capability options', () => {
       throw new Error('config must not be loaded');
     }, ['--version']);
 
-    expect(stdout).toBe(`XMLTV module version ${__PKG_VERSION__}\nThis is tv_grab_sk_example version 1.2\n`);
+    expect(stdout).toBe(
+      `XMLTV module version ${__PKG_VERSION__}\nThis is tv_grab_sk_example version 1.2\n`,
+    );
     expect(code).toBe(0);
   });
 
@@ -285,27 +290,31 @@ describe('capability options', () => {
 
     // Every flag, its value's name and its --no- form come from the spec that
     // declares it; a capability only says which options make up a form.
-    expect(stdout.startsWith([
-      'tv_grab_sk_example --help',
-      'tv_grab_sk_example --version',
-      'tv_grab_sk_example --capabilities',
-      'tv_grab_sk_example --description',
-      'tv_grab_sk_example --preferredmethod',
-      '',
-      'tv_grab_sk_example [--config-file FILE] [--days N] [--offset N]',
-      '                   [--output FILE] [--quiet] [--debug]',
-      '                   [--cache [DIR] | --no-cache]',
-      '                   [--channel-updates add|ignore|notify|signal]',
-      '',
-      'tv_grab_sk_example --configure [--config-file FILE]',
-      '',
-      'tv_grab_sk_example --configure-api [--stage NAME] [--config-file FILE]',
-      '                   [--output FILE]',
-      '',
-      'tv_grab_sk_example --list-channels [--config-file FILE] [--output FILE]',
-      '                   [--quiet]',
-      '',
-    ].join('\n'))).toBe(true);
+    expect(
+      stdout.startsWith(
+        [
+          'tv_grab_sk_example --help',
+          'tv_grab_sk_example --version',
+          'tv_grab_sk_example --capabilities',
+          'tv_grab_sk_example --description',
+          'tv_grab_sk_example --preferredmethod',
+          '',
+          'tv_grab_sk_example [--config-file FILE] [--days N] [--offset N]',
+          '                   [--output FILE] [--quiet] [--debug]',
+          '                   [--cache [DIR] | --no-cache]',
+          '                   [--channel-updates add|ignore|notify|signal]',
+          '',
+          'tv_grab_sk_example --configure [--config-file FILE]',
+          '',
+          'tv_grab_sk_example --configure-api [--stage NAME] [--config-file FILE]',
+          '                   [--output FILE]',
+          '',
+          'tv_grab_sk_example --list-channels [--config-file FILE] [--output FILE]',
+          '                   [--quiet]',
+          '',
+        ].join('\n'),
+      ),
+    ).toBe(true);
   });
 
   it('explains every option under the capability that declares it', async () => {
@@ -319,7 +328,9 @@ describe('capability options', () => {
     expect(stdout).toContain('\napiconfig:\n  --configure-api ');
     expect(stdout).toContain('\ncache:\n  --cache [DIR] | --no-cache    Keep the day cache');
     // A flag too wide for the column keeps its own line.
-    expect(stdout).toContain('\n  --channel-updates add|ignore|notify|signal\n                                What to do');
+    expect(stdout).toContain(
+      '\n  --channel-updates add|ignore|notify|signal\n                                What to do',
+    );
 
     // An option error stays terse: the caller mistyped one flag.
     const { stderr } = await run(() => {
@@ -333,18 +344,23 @@ describe('capability options', () => {
   it('refuses to start when a form names an option nobody declared', async () => {
     const dir = await tempDir();
 
-    await expect(runXmltvGrabber(config(dir), {
-      ...META,
-      capabilities: [...DEFAULT_CAPABILITIES, defineCapability({
-        name: 'typo',
-        options: { typo: { type: 'boolean' } },
-        usage: { modes: [['typo', 'confg-file']] },
-        run: () => undefined,
-      })],
-      argv: ['--help'],
-      stdout: new Sink(),
-      stderr: new Sink(),
-    })).rejects.toThrow(/names an unknown option --confg-file/);
+    await expect(
+      runXmltvGrabber(config(dir), {
+        ...META,
+        capabilities: [
+          ...DEFAULT_CAPABILITIES,
+          defineCapability({
+            name: 'typo',
+            options: { typo: { type: 'boolean' } },
+            usage: { modes: [['typo', 'confg-file']] },
+            run: () => undefined,
+          }),
+        ],
+        argv: ['--help'],
+        stdout: new Sink(),
+        stderr: new Sink(),
+      }),
+    ).rejects.toThrow(/names an unknown option --confg-file/);
   });
 
   it('rejects an unknown option with usage on stderr', async () => {
@@ -362,21 +378,25 @@ describe('capability options', () => {
   it('rejects an option outside the advertised capabilities', async () => {
     const stdout = new Sink();
     const stderr = new Sink();
-    const code = await runXmltvGrabber({ sites: [], output: 'x' }, {
-      ...META,
-      capabilities: ['baseline'],
-      argv: ['--configure'],
-      stdout,
-      stderr,
-    });
+    const code = await runXmltvGrabber(
+      { sites: [], output: 'x' },
+      {
+        ...META,
+        capabilities: ['baseline'],
+        argv: ['--configure'],
+        stdout,
+        stderr,
+      },
+    );
 
     expect(code).toBe(1);
     expect(stderr.text).toContain("Unknown option '--configure'");
   });
 
   it('rejects a grabber version the reference would croak on', async () => {
-    await expect(runXmltvGrabber({ sites: [], output: 'x' }, { ...META, version: 'v1.2', argv: [] }))
-      .rejects.toThrow(/Invalid grabber version/);
+    await expect(
+      runXmltvGrabber({ sites: [], output: 'x' }, { ...META, version: 'v1.2', argv: [] }),
+    ).rejects.toThrow(/Invalid grabber version/);
   });
 });
 
@@ -392,13 +412,16 @@ describe('--preferredmethod', () => {
 
   it('prints a value the capability was built with', async () => {
     const stdout = new Sink();
-    const code = await runXmltvGrabber({ sites: [], output: 'x' }, {
-      ...META,
-      capabilities: ['baseline', preferredMethodCapability('onechannelatatime')],
-      argv: ['--preferredmethod'],
-      stdout,
-      stderr: new Sink(),
-    });
+    const code = await runXmltvGrabber(
+      { sites: [], output: 'x' },
+      {
+        ...META,
+        capabilities: ['baseline', preferredMethodCapability('onechannelatatime')],
+        argv: ['--preferredmethod'],
+        stdout,
+        stderr: new Sink(),
+      },
+    );
 
     expect(stdout.text).toBe('onechannelatatime\n');
     expect(code).toBe(0);
@@ -435,7 +458,11 @@ describe('--channel-updates', () => {
     const dir = await tempDir();
     const configFile = await partlyConfigured(dir);
 
-    const { code, stderr, stdout } = await run(threeSites(dir), ['--config-file', configFile, '--quiet']);
+    const { code, stderr, stdout } = await run(threeSites(dir), [
+      '--config-file',
+      configFile,
+      '--quiet',
+    ]);
 
     // two.example.tv was declined, so it is not new; three.example.tv is.
     expect(stderr).toContain('New channel(s) available: three.example.tv');
@@ -452,10 +479,13 @@ describe('--channel-updates', () => {
     const dir = await tempDir();
     const configFile = await partlyConfigured(dir);
 
-    const { code, stderr, stdout } = await run(
-      threeSites(dir),
-      ['--config-file', configFile, '--quiet', '--channel-updates', 'signal'],
-    );
+    const { code, stderr, stdout } = await run(threeSites(dir), [
+      '--config-file',
+      configFile,
+      '--quiet',
+      '--channel-updates',
+      'signal',
+    ]);
 
     expect(stderr).toContain('New channel(s) available: three.example.tv');
     expect(code).toBe(2);
@@ -478,10 +508,13 @@ describe('--channel-updates', () => {
     const dir = await tempDir();
     const configFile = await partlyConfigured(dir);
 
-    const { code, stderr } = await run(
-      threeSites(dir),
-      ['--config-file', configFile, '--quiet', '--channel-updates', 'ignore'],
-    );
+    const { code, stderr } = await run(threeSites(dir), [
+      '--config-file',
+      configFile,
+      '--quiet',
+      '--channel-updates',
+      'ignore',
+    ]);
 
     expect(stderr).toBe('');
     expect(code).toBe(0);
@@ -491,10 +524,13 @@ describe('--channel-updates', () => {
     const dir = await tempDir();
     const configFile = await partlyConfigured(dir);
 
-    const { code, stdout } = await run(
-      threeSites(dir),
-      ['--config-file', configFile, '--quiet', '--channel-updates', 'add'],
-    );
+    const { code, stdout } = await run(threeSites(dir), [
+      '--config-file',
+      configFile,
+      '--quiet',
+      '--channel-updates',
+      'add',
+    ]);
 
     expect(code).toBe(0);
     expect(stdout).toContain('<channel id="three.example.tv">');
@@ -537,13 +573,16 @@ describe('--channel-updates', () => {
 
   it('is unavailable when the capability is not advertised', async () => {
     const stderr = new Sink();
-    const code = await runXmltvGrabber({ sites: [], output: 'x' }, {
-      ...META,
-      capabilities: ['baseline'],
-      argv: ['--channel-updates', 'add'],
-      stdout: new Sink(),
-      stderr,
-    });
+    const code = await runXmltvGrabber(
+      { sites: [], output: 'x' },
+      {
+        ...META,
+        capabilities: ['baseline'],
+        argv: ['--channel-updates', 'add'],
+        stdout: new Sink(),
+        stderr,
+      },
+    );
 
     expect(code).toBe(1);
     expect(stderr.text).toContain("Unknown option '--channel-updates'");
@@ -586,10 +625,13 @@ describe('custom capabilities', () => {
     // Runs in the same slot as the built-in information options: no config
     // file needed, and the grabber's own config never resolved.
     const out = new Sink();
-    const code = await runXmltvGrabber(() => {
-      resolvedConfig = true;
-      return config(dir);
-    }, { ...options, argv: ['--ping', '--ping-text', 'hello'], stdout: out });
+    const code = await runXmltvGrabber(
+      () => {
+        resolvedConfig = true;
+        return config(dir);
+      },
+      { ...options, argv: ['--ping', '--ping-text', 'hello'], stdout: out },
+    );
 
     expect(code).toBe(0);
     expect(out.text).toBe('hello\n');
@@ -627,13 +669,18 @@ describe('custom capabilities', () => {
       stderr: new Sink(),
     };
 
-    expect(await runXmltvGrabber(config(dir), {
-      ...options,
-      argv: ['--probe', '--config-file', join(dir, 'missing.conf')],
-    })).toBe(0);
+    expect(
+      await runXmltvGrabber(config(dir), {
+        ...options,
+        argv: ['--probe', '--config-file', join(dir, 'missing.conf')],
+      }),
+    ).toBe(0);
 
     const configFile = await configured(dir);
-    await runXmltvGrabber(config(dir), { ...options, argv: ['--probe', '--config-file', configFile] });
+    await runXmltvGrabber(config(dir), {
+      ...options,
+      argv: ['--probe', '--config-file', configFile],
+    });
 
     expect(seen).toEqual([undefined, 'one.example.tv']);
   });
@@ -675,10 +722,13 @@ describe('custom capabilities', () => {
 
     const missing = join(dir, 'missing.conf');
     const listed = new Sink();
-    const code = await runXmltvGrabber(() => {
-      resolvedConfig = true;
-      return config(dir);
-    }, { ...options, argv: ['--list-atlas', '--config-file', missing], stdout: listed });
+    const code = await runXmltvGrabber(
+      () => {
+        resolvedConfig = true;
+        return config(dir);
+      },
+      { ...options, argv: ['--list-atlas', '--config-file', missing], stdout: listed },
+    );
 
     // Answered before the config file is even read, let alone required.
     expect(code).toBe(0);
@@ -734,18 +784,22 @@ describe('custom capabilities', () => {
       stderr: new Sink(),
     };
 
-    expect(await runXmltvGrabber(config(dir), {
-      ...options,
-      argv: ['--config-file', configFile],
-    })).toBe(0);
+    expect(
+      await runXmltvGrabber(config(dir), {
+        ...options,
+        argv: ['--config-file', configFile],
+      }),
+    ).toBe(0);
 
     // Same configuration, so the file was left exactly as it was.
     expect(await readFile(configFile, 'utf8')).toBe('# hand written\nchannel=one.example.tv\n');
 
-    expect(await runXmltvGrabber(config(dir), {
-      ...options,
-      argv: ['--config-file', configFile, '--rename-to', 'two.example.tv'],
-    })).toBe(0);
+    expect(
+      await runXmltvGrabber(config(dir), {
+        ...options,
+        argv: ['--config-file', configFile, '--rename-to', 'two.example.tv'],
+      }),
+    ).toBe(0);
 
     expect(await readFile(configFile, 'utf8')).toBe('channel=two.example.tv\n');
   });
@@ -782,13 +836,16 @@ describe('custom capabilities', () => {
       },
     });
 
-    await runXmltvGrabber(config(dir, { sites: [site('one.example.tv'), site('two.example.tv')] }), {
-      ...META,
-      capabilities: [...DEFAULT_CAPABILITIES, first, second],
-      argv: ['--config-file', configFile, '--quiet'],
-      stdout: new Sink(),
-      stderr: new Sink(),
-    });
+    await runXmltvGrabber(
+      config(dir, { sites: [site('one.example.tv'), site('two.example.tv')] }),
+      {
+        ...META,
+        capabilities: [...DEFAULT_CAPABILITIES, first, second],
+        argv: ['--config-file', configFile, '--quiet'],
+        stdout: new Sink(),
+        stderr: new Sink(),
+      },
+    );
 
     // Not 'one.example.tv', which is what both tasks would see if the
     // configuration were handed out once instead of read per task.
@@ -938,25 +995,38 @@ describe('custom capabilities', () => {
   it('rejects a name or an option that collides with something built in', async () => {
     const dir = await tempDir();
 
-    await expect(runXmltvGrabber(config(dir), {
-      ...META,
-      capabilities: ['baseline', defineCapability({ name: 'baseline', run: () => undefined })],
-      argv: ['--capabilities'],
-    })).rejects.toThrow(/built in and cannot be redefined/);
+    await expect(
+      runXmltvGrabber(config(dir), {
+        ...META,
+        capabilities: ['baseline', defineCapability({ name: 'baseline', run: () => undefined })],
+        argv: ['--capabilities'],
+      }),
+    ).rejects.toThrow(/built in and cannot be redefined/);
 
-    await expect(runXmltvGrabber(config(dir), {
-      ...META,
-      capabilities: ['baseline', defineCapability({ name: 'x', options: { days: { type: 'string' } }, run: () => undefined })],
-      argv: ['--capabilities'],
-    })).rejects.toThrow(/redefines the option --days/);
+    await expect(
+      runXmltvGrabber(config(dir), {
+        ...META,
+        capabilities: [
+          'baseline',
+          defineCapability({
+            name: 'x',
+            options: { days: { type: 'string' } },
+            run: () => undefined,
+          }),
+        ],
+        argv: ['--capabilities'],
+      }),
+    ).rejects.toThrow(/redefines the option --days/);
 
     const twice = defineCapability({ name: 'dup', run: () => undefined });
 
-    await expect(runXmltvGrabber(config(dir), {
-      ...META,
-      capabilities: ['baseline', twice, defineCapability({ name: 'dup', run: () => undefined })],
-      argv: ['--capabilities'],
-    })).rejects.toThrow(/declared twice/);
+    await expect(
+      runXmltvGrabber(config(dir), {
+        ...META,
+        capabilities: ['baseline', twice, defineCapability({ name: 'dup', run: () => undefined })],
+        argv: ['--capabilities'],
+      }),
+    ).rejects.toThrow(/declared twice/);
   });
 
   it('leaves its options unknown when the capability is not advertised', async () => {
@@ -981,7 +1051,12 @@ describe('configuration', () => {
     const dir = await tempDir();
     const configFile = join(dir, 'grabber.conf');
 
-    const { code } = await run(config(dir), ['--configure', '--config-file', configFile, '--quiet']);
+    const { code } = await run(config(dir), [
+      '--configure',
+      '--config-file',
+      configFile,
+      '--quiet',
+    ]);
 
     expect(code).toBe(0);
     expect(await readFile(configFile, 'utf8')).toBe('channel=one.example.tv\n');
@@ -991,10 +1066,12 @@ describe('configuration', () => {
     const dir = await tempDir();
     const configFile = join(dir, 'grabber.conf');
 
-    const { stderr } = await run(
-      config(dir, { sites: [site('not dotted')] }),
-      ['--configure', '--config-file', configFile, '--quiet'],
-    );
+    const { stderr } = await run(config(dir, { sites: [site('not dotted')] }), [
+      '--configure',
+      '--config-file',
+      configFile,
+      '--quiet',
+    ]);
 
     expect(stderr).toContain('is not a valid XMLTV id');
   });
@@ -1081,23 +1158,32 @@ describe('configuration', () => {
     const configFile = join(dir, 'grabber.conf');
     await saveGrabberConfig(configFile, { channel: ['one.example.tv'], username: ['from-file'] });
 
-    const named = (ctx: ConfigContext): EpgConfig =>
-      ({ ...config(dir), meta: { sourceInfoName: ctx.require('username') } });
+    const named = (ctx: ConfigContext): EpgConfig => ({
+      ...config(dir),
+      meta: { sourceInfoName: ctx.require('username') },
+    });
 
     vi.stubEnv('TV_GRAB_TEST_USERNAME', 'from-env');
 
     try {
       // --configure was an explicit act on this machine, so it wins by default.
       const byDefault = await run(defineConfig(named, { env: 'TV_GRAB_TEST_' }), [
-        '--config-file', configFile, '--days', '1', '--quiet',
+        '--config-file',
+        configFile,
+        '--days',
+        '1',
+        '--quiet',
       ]);
       expect(byDefault.stdout).toContain('source-info-name="from-file"');
 
       // …and the order is the config's to state, for a deployment where the
       // environment is the truth and a stale .conf is a hazard.
-      const envFirst = await run(defineConfig(named, {
-        readers: (supplied) => [envReader('TV_GRAB_TEST_'), ...supplied],
-      }), ['--config-file', configFile, '--days', '1', '--quiet']);
+      const envFirst = await run(
+        defineConfig(named, {
+          readers: (supplied) => [envReader('TV_GRAB_TEST_'), ...supplied],
+        }),
+        ['--config-file', configFile, '--days', '1', '--quiet'],
+      );
       expect(envFirst.stdout).toContain('source-info-name="from-env"');
     } finally {
       vi.unstubAllEnvs();
@@ -1111,10 +1197,13 @@ describe('configuration', () => {
 
     // A site whose channel list needs a login: --configure is the one run
     // where the password exists only in the answers being collected.
-    const source = defineConfig((ctx) => {
-      credentials = ctx.require('username');
-      return config(dir);
-    }, { stages: CREDENTIAL_STAGES });
+    const source = defineConfig(
+      (ctx) => {
+        credentials = ctx.require('username');
+        return config(dir);
+      },
+      { stages: CREDENTIAL_STAGES },
+    );
 
     const code = await runXmltvGrabber(source, {
       ...META,
@@ -1132,17 +1221,23 @@ describe('configuration', () => {
 
   it('configures with the stages the configuration carries', async () => {
     const dir = await tempDir();
-    const source = defineConfig((ctx) => ({
-      ...config(dir),
-      meta: { sourceInfoName: ctx.require('username') },
-    }), { stages: CREDENTIAL_STAGES });
+    const source = defineConfig(
+      (ctx) => ({
+        ...config(dir),
+        meta: { sourceInfoName: ctx.require('username') },
+      }),
+      { stages: CREDENTIAL_STAGES },
+    );
 
     const stdout = new Sink();
 
     // No `stages` in the grabber options: they came with the configuration
     // that asks the questions, so the two cannot drift apart.
     await runXmltvGrabber(source, {
-      ...META, argv: ['--configure-api'], stdout, stderr: new Sink(),
+      ...META,
+      argv: ['--configure-api'],
+      stdout,
+      stderr: new Sink(),
     });
 
     expect(stdout.text).toContain('<secretstring id="password">');
@@ -1176,14 +1271,19 @@ const CREDENTIAL_STAGES: ConfigStage[] = [
   {
     name: 'region',
     next: 'select-channels',
-    fields: [{
-      type: 'selectone',
-      id: 'region',
-      title: 'Region',
-      description: 'Which lineup to grab.',
-      default: 'west',
-      options: [{ value: 'east', text: 'East' }, { value: 'west', text: 'West' }],
-    }],
+    fields: [
+      {
+        type: 'selectone',
+        id: 'region',
+        title: 'Region',
+        description: 'Which lineup to grab.',
+        default: 'west',
+        options: [
+          { value: 'east', text: 'East' },
+          { value: 'west', text: 'West' },
+        ],
+      },
+    ],
   },
 ];
 
@@ -1232,28 +1332,28 @@ describe('resolveStages', () => {
     // for a stage that has already settled them, as a chosen lineup does.
     expect(resolveStages([stage({ next: 'end' })])).toHaveLength(1);
 
-    expect(() => resolveStages([stage({ next: 'finish' })]))
-      .toThrow(/No configuration stage is called "finish".*or "end" to finish without/s);
+    expect(() => resolveStages([stage({ next: 'finish' })])).toThrow(
+      /No configuration stage is called "finish".*or "end" to finish without/s,
+    );
   });
 
   it('refuses a stage named after the end of the walk', () => {
     // Its predecessor would name it and stop there, so it could never be
     // entered — which looks exactly like a stage being skipped.
-    expect(() => resolveStages([stage({ next: 'end' }), stage({ name: 'end' })]))
-      .toThrow(/stage "end" is named after the end of the walk/);
+    expect(() => resolveStages([stage({ next: 'end' }), stage({ name: 'end' })])).toThrow(
+      /stage "end" is named after the end of the walk/,
+    );
   });
 
   it('refuses stages that lead in a circle', () => {
     // Left alone, --configure would ask these two forever.
-    expect(() => resolveStages([
-      stage({ next: 'region' }),
-      stage({ name: 'region', next: 'start' }),
-    ])).toThrow(/lead back to "start", so --configure would never finish/);
+    expect(() =>
+      resolveStages([stage({ next: 'region' }), stage({ name: 'region', next: 'start' })]),
+    ).toThrow(/lead back to "start", so --configure would never finish/);
   });
 
   it('refuses two stages with one name', () => {
-    expect(() => resolveStages([stage(), stage()]))
-      .toThrow(/stage "start" is declared twice/);
+    expect(() => resolveStages([stage(), stage()])).toThrow(/stage "start" is declared twice/);
   });
 
   it('refuses a field id the configuration file could not hold', () => {
@@ -1270,16 +1370,24 @@ describe('resolveStages', () => {
   });
 
   it('refuses a question asked twice, or one with no answer to give', () => {
-    expect(() => resolveStages([stage({
-      fields: [
-        { type: 'string', id: 'region', title: 'T', description: 'D' },
-        { type: 'string', id: 'region', title: 'T', description: 'D' },
-      ],
-    })])).toThrow(/asked twice in the same stage/);
+    expect(() =>
+      resolveStages([
+        stage({
+          fields: [
+            { type: 'string', id: 'region', title: 'T', description: 'D' },
+            { type: 'string', id: 'region', title: 'T', description: 'D' },
+          ],
+        }),
+      ]),
+    ).toThrow(/asked twice in the same stage/);
 
-    expect(() => resolveStages([stage({
-      fields: [{ type: 'selectone', id: 'region', title: 'T', description: 'D', options: [] }],
-    })])).toThrow(/offers nothing to choose from/);
+    expect(() =>
+      resolveStages([
+        stage({
+          fields: [{ type: 'selectone', id: 'region', title: 'T', description: 'D', options: [] }],
+        }),
+      ]),
+    ).toThrow(/offers nothing to choose from/);
   });
 
   it('is checked before the grabber does anything at all', async () => {
@@ -1287,31 +1395,33 @@ describe('resolveStages', () => {
 
     // Alongside the version check: a mistake in the grabber, not in the
     // command line, so it is a throw rather than an exit code.
-    await expect(runXmltvGrabber(config(dir), {
-      ...META,
-      stages: [stage({ next: 'nowhere' })],
-      argv: ['--capabilities'],
-      stdout: new Sink(),
-      stderr: new Sink(),
-    })).rejects.toThrow(/No configuration stage is called "nowhere"/);
+    await expect(
+      runXmltvGrabber(config(dir), {
+        ...META,
+        stages: [stage({ next: 'nowhere' })],
+        argv: ['--capabilities'],
+        stdout: new Sink(),
+        stderr: new Sink(),
+      }),
+    ).rejects.toThrow(/No configuration stage is called "nowhere"/);
   });
 });
 
 describe('stage documents', () => {
   it('renders a stage the way XMLTV::Configure::Writer does', () => {
     expect(renderStageXml(CREDENTIAL_STAGES[0] as ConfigStage, 'tv_grab_sk_example')).toBe(
-      `<?xml version="1.0" encoding="UTF-8"?>\n`
-      + `<xmltvconfiguration grabber="tv_grab_sk_example">\n`
-      + `  <string id="username">\n`
-      + `    <title lang="en">Username</title>\n`
-      + `    <description lang="en">Your account name.</description>\n`
-      + `  </string>\n`
-      + `  <secretstring id="password">\n`
-      + `    <title lang="en">Password</title>\n`
-      + `    <description lang="en">Your password.</description>\n`
-      + `  </secretstring>\n`
-      + `  <nextstage stage="region" />\n`
-      + `</xmltvconfiguration>\n`,
+      `<?xml version="1.0" encoding="UTF-8"?>\n` +
+        `<xmltvconfiguration grabber="tv_grab_sk_example">\n` +
+        `  <string id="username">\n` +
+        `    <title lang="en">Username</title>\n` +
+        `    <description lang="en">Your account name.</description>\n` +
+        `  </string>\n` +
+        `  <secretstring id="password">\n` +
+        `    <title lang="en">Password</title>\n` +
+        `    <description lang="en">Your password.</description>\n` +
+        `  </secretstring>\n` +
+        `  <nextstage stage="region" />\n` +
+        `</xmltvconfiguration>\n`,
     );
   });
 
@@ -1319,26 +1429,34 @@ describe('stage documents', () => {
     const xml = renderStageXml(CREDENTIAL_STAGES[1] as ConfigStage, 'tv_grab_sk_example');
 
     expect(xml).toContain('<selectone id="region" default="west">');
-    expect(xml).toContain('<option value="east">\n      <text lang="en">East</text>\n    </option>');
+    expect(xml).toContain(
+      '<option value="east">\n      <text lang="en">East</text>\n    </option>',
+    );
     expect(xml).toContain('<nextstage stage="select-channels" />');
   });
 
   it('renders a constant as an attribute', () => {
-    const xml = renderStageXml({
-      name: 'start',
-      next: 'select-channels',
-      fields: [{ type: 'string', id: 'v', title: 'V', description: 'D', constant: '123' }],
-    }, 'g');
+    const xml = renderStageXml(
+      {
+        name: 'start',
+        next: 'select-channels',
+        fields: [{ type: 'string', id: 'v', title: 'V', description: 'D', constant: '123' }],
+      },
+      'g',
+    );
 
     expect(xml).toContain('<string id="v" constant="123">');
   });
 
   it('escapes markup in labels and values', () => {
-    const xml = renderStageXml({
-      name: 'start',
-      next: 'select-channels',
-      fields: [{ type: 'string', id: 'x', title: 'A & B', description: '<b>' }],
-    }, 'tv_grab_&');
+    const xml = renderStageXml(
+      {
+        name: 'start',
+        next: 'select-channels',
+        fields: [{ type: 'string', id: 'x', title: 'A & B', description: '<b>' }],
+      },
+      'tv_grab_&',
+    );
 
     expect(xml).toContain('grabber="tv_grab_&amp;"');
     expect(xml).toContain('<title lang="en">A &amp; B</title>');
@@ -1355,7 +1473,9 @@ describe('stage documents', () => {
     expect(xml).toContain('<selectmany id="channel">');
     expect(xml).toContain('Select the channels that you want to receive data for.');
     expect(xml).toContain('<option value="one.example.tv">\n      <text lang="en">One</text>');
-    expect(xml).toContain('<option value="two.example.tv">\n      <text lang="en">two.example.tv</text>');
+    expect(xml).toContain(
+      '<option value="two.example.tv">\n      <text lang="en">two.example.tv</text>',
+    );
     expect(xml).toContain('<nextstage stage="end" />');
   });
 });
@@ -1459,11 +1579,13 @@ describe('runConfigure', () => {
     const out = new Sink();
 
     const conf = await runConfigure({
-      stages: [{
-        name: 'start',
-        next: 'select-channels',
-        fields: [{ type: 'string', id: 'api', title: 'API', description: 'D', constant: 'v3' }],
-      }],
+      stages: [
+        {
+          name: 'start',
+          next: 'select-channels',
+          fields: [{ type: 'string', id: 'api', title: 'API', description: 'D', constant: 'v3' }],
+        },
+      ],
       channels,
       prompter,
       out,
@@ -1477,7 +1599,12 @@ describe('runConfigure', () => {
     const prompter = { ...scriptedPrompter([]), interactive: false };
     const out = new Sink();
 
-    const conf = await runConfigure({ stages: [{ name: 'start', next: 'select-channels', fields: [] }], channels, prompter, out });
+    const conf = await runConfigure({
+      stages: [{ name: 'start', next: 'select-channels', fields: [] }],
+      channels,
+      prompter,
+      out,
+    });
 
     expect(conf?.channel).toEqual(['one.example.tv', 'two.example.tv']);
     expect(out.text).toContain('not a terminal');
@@ -1522,18 +1649,21 @@ describe('--configure-api', () => {
     expect(stdout.text).toContain('<selectone id="region" default="west">');
   });
 
-  it('builds the select-channels stage from the grabber\'s channels', async () => {
+  it("builds the select-channels stage from the grabber's channels", async () => {
     const dir = await tempDir();
     const configFile = join(dir, 'g.conf');
     await saveGrabberConfig(configFile, { username: ['m'] });
 
     const stdout = new Sink();
-    await runXmltvGrabber(config(dir, { sites: [site('one.example.tv'), site('two.example.tv')] }), {
-      ...META,
-      argv: ['--configure-api', '--stage', 'select-channels', '--config-file', configFile],
-      stdout,
-      stderr: new Sink(),
-    });
+    await runXmltvGrabber(
+      config(dir, { sites: [site('one.example.tv'), site('two.example.tv')] }),
+      {
+        ...META,
+        argv: ['--configure-api', '--stage', 'select-channels', '--config-file', configFile],
+        stdout,
+        stderr: new Sink(),
+      },
+    );
 
     expect(stdout.text).toContain('<selectmany id="channel">');
     expect(stdout.text).toContain('<option value="one.example.tv">');
@@ -1625,7 +1755,11 @@ describe('--list-channels', () => {
   it('refuses without a configuration', async () => {
     const dir = await tempDir();
 
-    const { code, stderr } = await run(config(dir), ['--list-channels', '--config-file', join(dir, 'missing.conf')]);
+    const { code, stderr } = await run(config(dir), [
+      '--list-channels',
+      '--config-file',
+      join(dir, 'missing.conf'),
+    ]);
 
     expect(code).toBe(1);
     expect(stderr).toBe('You need to configure the grabber before you can list the channels.\n');
@@ -1637,13 +1771,16 @@ describe('--list-channels', () => {
     const withLogo: SiteConfig<unknown> = {
       ...site('one.example.tv'),
       site: 'other.tv',
-      channels: [{ xmltvId: 'one.example.tv', siteId: '9', name: 'Alias', logo: 'https://x/l.png' }],
+      channels: [
+        { xmltvId: 'one.example.tv', siteId: '9', name: 'Alias', logo: 'https://x/l.png' },
+      ],
     };
 
-    const { stdout } = await run(
-      config(dir, { sites: [site('one.example.tv'), withLogo] }),
-      ['--list-channels', '--config-file', configFile],
-    );
+    const { stdout } = await run(config(dir, { sites: [site('one.example.tv'), withLogo] }), [
+      '--list-channels',
+      '--config-file',
+      configFile,
+    ]);
 
     expect([...stdout.matchAll(/<channel /g)]).toHaveLength(1);
     expect(stdout).toContain('Channel one.example.tv');
@@ -1679,7 +1816,13 @@ describe('grabbing', () => {
     await new Promise<void>((resolve) => server.listen(socketPath, resolve));
 
     try {
-      const { code } = await run(config(dir), ['--config-file', configFile, '--quiet', '--output', socketPath]);
+      const { code } = await run(config(dir), [
+        '--config-file',
+        configFile,
+        '--quiet',
+        '--output',
+        socketPath,
+      ]);
 
       expect(code).toBe(0);
       // The reader only gets to parse because the writer closed.
@@ -1717,7 +1860,11 @@ describe('grabbing', () => {
     expect((await stat(socketPath)).isSocket()).toBe(true);
 
     const { code, stderr } = await run(config(dir), [
-      '--config-file', configFile, '--quiet', '--output', socketPath,
+      '--config-file',
+      configFile,
+      '--quiet',
+      '--output',
+      socketPath,
     ]);
 
     expect(code).toBe(1);
@@ -1744,7 +1891,13 @@ describe('grabbing', () => {
     const file = join(dir, 'out.xml');
 
     const viaStdout = await run(config(dir), ['--config-file', configFile, '--quiet']);
-    const viaFile = await run(config(dir), ['--config-file', configFile, '--quiet', '--output', file]);
+    const viaFile = await run(config(dir), [
+      '--config-file',
+      configFile,
+      '--quiet',
+      '--output',
+      file,
+    ]);
 
     expect(viaFile.code).toBe(0);
     expect(viaFile.stdout).toBe('');
@@ -1767,10 +1920,15 @@ describe('grabbing', () => {
     const configFile = await configured(dir);
     const fetchedDays: string[] = [];
 
-    const { stdout } = await run(
-      config(dir, { sites: [site('one.example.tv', fetchedDays)] }),
-      ['--config-file', configFile, '--days', '2', '--offset', '1', '--quiet'],
-    );
+    const { stdout } = await run(config(dir, { sites: [site('one.example.tv', fetchedDays)] }), [
+      '--config-file',
+      configFile,
+      '--days',
+      '2',
+      '--offset',
+      '1',
+      '--quiet',
+    ]);
 
     expect(fetchedDays).toHaveLength(2);
     expect(stdout).toContain(`start="${fetchedDays[0]?.replace(/-/g, '')}060000`);
@@ -1782,10 +1940,13 @@ describe('grabbing', () => {
     const configFile = await configured(dir);
     const fetchedDays: string[] = [];
 
-    const { code } = await run(
-      config(dir, { sites: [site('one.example.tv', fetchedDays)] }),
-      ['--config-file', configFile, '--offset', '-1', '--quiet'],
-    );
+    const { code } = await run(config(dir, { sites: [site('one.example.tv', fetchedDays)] }), [
+      '--config-file',
+      configFile,
+      '--offset',
+      '-1',
+      '--quiet',
+    ]);
 
     expect(code).toBe(0);
     expect(fetchedDays).toHaveLength(1);
@@ -1802,10 +1963,13 @@ describe('grabbing', () => {
     const first = await run(epg, [...args, '--offset', '1', '--days', '1']);
     const second = await run(epg, [...args, '--offset', '2', '--days', '1']);
 
-    const starts = (xml: string): string[] => [...xml.matchAll(/<programme start="([^"]+)"/g)].map((m) => m[1] as string);
+    const starts = (xml: string): string[] =>
+      [...xml.matchAll(/<programme start="([^"]+)"/g)].map((m) => m[1] as string);
 
     expect(starts(both.stdout)).toHaveLength(2);
-    expect([...starts(first.stdout), ...starts(second.stdout)].sort()).toEqual(starts(both.stdout).sort());
+    expect([...starts(first.stdout), ...starts(second.stdout)].sort()).toEqual(
+      starts(both.stdout).sort(),
+    );
   });
 
   it('reports a failed channel-day on stderr and exits 1, even under --quiet', async () => {
@@ -1814,12 +1978,14 @@ describe('grabbing', () => {
 
     const { code, stderr } = await run(
       config(dir, {
-        sites: [{
-          ...site('one.example.tv'),
-          async request() {
-            throw new Error('upstream is down');
+        sites: [
+          {
+            ...site('one.example.tv'),
+            async request() {
+              throw new Error('upstream is down');
+            },
           },
-        }],
+        ],
       }),
       ['--config-file', configFile, '--quiet'],
     );
@@ -1835,7 +2001,10 @@ describe('grabbing', () => {
 
     await run(config(dir), ['--config-file', configFile, '--quiet', '--cache', elsewhere]);
 
-    const cached = await readFile(join(elsewhere, 'example.tv', 'one.example.tv', '2026-07-17.ndjson'), 'utf8');
+    const cached = await readFile(
+      join(elsewhere, 'example.tv', 'one.example.tv', '2026-07-17.ndjson'),
+      'utf8',
+    );
     expect(cached).toContain('p-2026-07-17');
 
     // Bare --cache is XMLTV's `cache:s` form: accepted, and means "as configured".
@@ -1848,12 +2017,18 @@ describe('grabbing', () => {
     const configFile = await configured(dir);
     const cacheDir = join(dir, 'cache');
 
-    const { code, stdout } = await run(config(dir), ['--config-file', configFile, '--quiet', '--no-cache']);
+    const { code, stdout } = await run(config(dir), [
+      '--config-file',
+      configFile,
+      '--quiet',
+      '--no-cache',
+    ]);
 
     expect(code).toBe(0);
     expect(stdout).toContain('<programme');
-    await expect(readFile(join(cacheDir, 'example.tv', 'one.example.tv', '2026-07-17.ndjson'), 'utf8'))
-      .rejects.toThrow();
+    await expect(
+      readFile(join(cacheDir, 'example.tv', 'one.example.tv', '2026-07-17.ndjson'), 'utf8'),
+    ).rejects.toThrow();
   });
 
   it('--no-cache refetches every day instead of serving a warm cache', async () => {
@@ -1890,13 +2065,15 @@ const LINEUPS: LineupConfig[] = [
 /** One site carrying both channels, so a lineup can pick between them. */
 function lineupConfig(dir: string): EpgConfig {
   return config(dir, {
-    sites: [{
-      ...site('one.example.tv'),
-      channels: [
-        { xmltvId: 'one.example.tv', siteId: '1', name: 'One', preset: '1' },
-        { xmltvId: 'two.example.tv', siteId: '2', name: 'Two', preset: '2' },
-      ],
-    }],
+    sites: [
+      {
+        ...site('one.example.tv'),
+        channels: [
+          { xmltvId: 'one.example.tv', siteId: '1', name: 'One', preset: '1' },
+          { xmltvId: 'two.example.tv', siteId: '2', name: 'Two', preset: '2' },
+        ],
+      },
+    ],
   });
 }
 
@@ -1917,7 +2094,10 @@ describe('lineups', () => {
 
     const advertised = new Sink();
     await runXmltvGrabber(epg, {
-      ...options, argv: ['--capabilities'], stdout: advertised, stderr: new Sink(),
+      ...options,
+      argv: ['--capabilities'],
+      stdout: advertised,
+      stderr: new Sink(),
     });
     expect(advertised.text.trimEnd().split('\n')).toContain('lineups');
 
@@ -1948,29 +2128,29 @@ describe('lineups', () => {
 
     expect(code).toBe(0);
     expect(stdout.text).toBe(
-      '<?xml version="1.0" encoding="UTF-8"?>\n'
-      + '<xmltv-lineups>\n'
-      + '  <xmltv-lineup id="cable">\n'
-      + '    <type>List</type>\n'
-      + '    <display-name lang="en">Cable</display-name>\n'
-      + '    <lineup-entry>\n'
-      + '      <preset>1</preset>\n'
-      + '      <station rfc2838="one.example.tv">\n'
-      + '        <name>One</name>\n'
-      + '      </station>\n'
-      + '    </lineup-entry>\n'
-      + '  </xmltv-lineup>\n'
-      + '  <xmltv-lineup id="terrestrial">\n'
-      + '    <type>DTV</type>\n'
-      + '    <display-name>Digital terrestrial</display-name>\n'
-      + '    <lineup-entry>\n'
-      + '      <preset>2</preset>\n'
-      + '      <station rfc2838="two.example.tv">\n'
-      + '        <name>Two</name>\n'
-      + '      </station>\n'
-      + '    </lineup-entry>\n'
-      + '  </xmltv-lineup>\n'
-      + '</xmltv-lineups>\n',
+      '<?xml version="1.0" encoding="UTF-8"?>\n' +
+        '<xmltv-lineups>\n' +
+        '  <xmltv-lineup id="cable">\n' +
+        '    <type>List</type>\n' +
+        '    <display-name lang="en">Cable</display-name>\n' +
+        '    <lineup-entry>\n' +
+        '      <preset>1</preset>\n' +
+        '      <station rfc2838="one.example.tv">\n' +
+        '        <name>One</name>\n' +
+        '      </station>\n' +
+        '    </lineup-entry>\n' +
+        '  </xmltv-lineup>\n' +
+        '  <xmltv-lineup id="terrestrial">\n' +
+        '    <type>DTV</type>\n' +
+        '    <display-name>Digital terrestrial</display-name>\n' +
+        '    <lineup-entry>\n' +
+        '      <preset>2</preset>\n' +
+        '      <station rfc2838="two.example.tv">\n' +
+        '        <name>Two</name>\n' +
+        '      </station>\n' +
+        '    </lineup-entry>\n' +
+        '  </xmltv-lineup>\n' +
+        '</xmltv-lineups>\n',
     );
   });
 
@@ -1981,7 +2161,10 @@ describe('lineups', () => {
     const stdout = new Sink();
 
     await runXmltvGrabber(epg, {
-      ...options, argv: ['--list-lineups', '--output', file], stdout, stderr: new Sink(),
+      ...options,
+      argv: ['--list-lineups', '--output', file],
+      stdout,
+      stderr: new Sink(),
     });
 
     expect(stdout.text).toBe('');
@@ -1994,12 +2177,14 @@ describe('lineups', () => {
     const configFile = join(dir, 'lineup.conf');
 
     const missing = new Sink();
-    expect(await runXmltvGrabber(epg, {
-      ...options,
-      argv: ['--get-lineup', '--config-file', join(dir, 'nothing.conf')],
-      stdout: new Sink(),
-      stderr: missing,
-    })).toBe(1);
+    expect(
+      await runXmltvGrabber(epg, {
+        ...options,
+        argv: ['--get-lineup', '--config-file', join(dir, 'nothing.conf')],
+        stdout: new Sink(),
+        stderr: missing,
+      }),
+    ).toBe(1);
     expect(missing.text).toBe(
       'You need to configure the grabber before you can output your chosen lineup.\n',
     );
@@ -2007,12 +2192,14 @@ describe('lineups', () => {
     await saveGrabberConfig(configFile, { lineup: ['terrestrial'] });
     const stdout = new Sink();
 
-    expect(await runXmltvGrabber(epg, {
-      ...options,
-      argv: ['--get-lineup', '--config-file', configFile],
-      stdout,
-      stderr: new Sink(),
-    })).toBe(0);
+    expect(
+      await runXmltvGrabber(epg, {
+        ...options,
+        argv: ['--get-lineup', '--config-file', configFile],
+        stdout,
+        stderr: new Sink(),
+      }),
+    ).toBe(0);
 
     expect(stdout.text).toContain('<xmltv-lineup id="terrestrial">');
     expect(stdout.text).not.toContain('id="cable"');
@@ -2021,12 +2208,14 @@ describe('lineups', () => {
     await saveGrabberConfig(configFile, { lineup: ['gone'] });
     const stale = new Sink();
 
-    expect(await runXmltvGrabber(epg, {
-      ...options,
-      argv: ['--get-lineup', '--config-file', configFile],
-      stdout: new Sink(),
-      stderr: stale,
-    })).toBe(1);
+    expect(
+      await runXmltvGrabber(epg, {
+        ...options,
+        argv: ['--get-lineup', '--config-file', configFile],
+        stdout: new Sink(),
+        stderr: stale,
+      }),
+    ).toBe(1);
     expect(stale.text).toBe('Configured lineup "gone" is not one this grabber offers\n');
   });
 
@@ -2037,7 +2226,10 @@ describe('lineups', () => {
     // The stage the capability added is now what `start` leads to.
     const start = new Sink();
     await runXmltvGrabber(epg, {
-      ...options, argv: ['--configure-api'], stdout: start, stderr: new Sink(),
+      ...options,
+      argv: ['--configure-api'],
+      stdout: start,
+      stderr: new Sink(),
     });
     expect(start.text).toContain('<nextstage stage="lineup" />');
 
@@ -2055,23 +2247,23 @@ describe('lineups', () => {
     });
 
     expect(stage.text).toBe(
-      '<?xml version="1.0" encoding="UTF-8"?>\n'
-      + '<xmltvconfiguration grabber="tv_grab_sk_example">\n'
-      + '  <selectone id="lineup">\n'
-      + '    <title lang="en">Lineup</title>\n'
-      + '    <description lang="en">Which lineup to grab. Its channels are then grabbed as a set.'
-      + '</description>\n'
-      + '    <option value="cable">\n'
-      + '      <text lang="en">Cable</text>\n'
-      + '    </option>\n'
-      + '    <option value="terrestrial">\n'
-      + '      <text lang="en">Digital terrestrial</text>\n'
-      + '    </option>\n'
-      + '  </selectone>\n'
-      // Not select-channels: the lineup is the channel selection, so this is
-      // where configuration ends.
-      + '  <nextstage stage="end" />\n'
-      + '</xmltvconfiguration>\n',
+      '<?xml version="1.0" encoding="UTF-8"?>\n' +
+        '<xmltvconfiguration grabber="tv_grab_sk_example">\n' +
+        '  <selectone id="lineup">\n' +
+        '    <title lang="en">Lineup</title>\n' +
+        '    <description lang="en">Which lineup to grab. Its channels are then grabbed as a set.' +
+        '</description>\n' +
+        '    <option value="cable">\n' +
+        '      <text lang="en">Cable</text>\n' +
+        '    </option>\n' +
+        '    <option value="terrestrial">\n' +
+        '      <text lang="en">Digital terrestrial</text>\n' +
+        '    </option>\n' +
+        '  </selectone>\n' +
+        // Not select-channels: the lineup is the channel selection, so this is
+        // where configuration ends.
+        '  <nextstage stage="end" />\n' +
+        '</xmltvconfiguration>\n',
     );
   });
 
@@ -2102,17 +2294,22 @@ describe('lineups', () => {
     const out = new Sink();
 
     const conf = await runConfigure({
-      stages: [{ name: 'start', fields: [], next: 'lineup' }, {
-        name: 'lineup',
-        next: 'end',
-        fields: [{
-          type: 'selectone',
-          id: 'lineup',
-          title: 'Lineup',
-          description: 'Which lineup to grab.',
-          options: LINEUPS.map((lineup) => ({ value: lineup.id, text: lineup.id })),
-        }],
-      }],
+      stages: [
+        { name: 'start', fields: [], next: 'lineup' },
+        {
+          name: 'lineup',
+          next: 'end',
+          fields: [
+            {
+              type: 'selectone',
+              id: 'lineup',
+              title: 'Lineup',
+              description: 'Which lineup to grab.',
+              options: LINEUPS.map((lineup) => ({ value: lineup.id, text: lineup.id })),
+            },
+          ],
+        },
+      ],
       channels: async () => {
         throw new Error('channel selection must not be reached');
       },
@@ -2125,21 +2322,23 @@ describe('lineups', () => {
 
     // End to end: the walk, the file it writes, and what it does not write.
     const stderr = new Sink();
-    expect(await runXmltvGrabber(epg, {
-      ...options,
-      argv: ['--configure', '--config-file', configFile],
-      stdout: new Sink(),
-      stderr,
-      // Nothing to answer with, so the question takes its first option — and
-      // the point of the case is what happens *after* it: no channel
-      // selection, and a file naming only the lineup.
-      stdin: Readable.from([]),
-    })).toBe(0);
+    expect(
+      await runXmltvGrabber(epg, {
+        ...options,
+        argv: ['--configure', '--config-file', configFile],
+        stdout: new Sink(),
+        stderr,
+        // Nothing to answer with, so the question takes its first option — and
+        // the point of the case is what happens *after* it: no channel
+        // selection, and a file naming only the lineup.
+        stdin: Readable.from([]),
+      }),
+    ).toBe(0);
 
     expect(await readFile(configFile, 'utf8')).toBe('lineup=cable\n');
   });
 
-  it('grabs the lineup\'s channels instead of a per-channel selection', async () => {
+  it("grabs the lineup's channels instead of a per-channel selection", async () => {
     const dir = await tempDir();
     const { config: epg, options } = withLineups(dir);
     const configFile = join(dir, 'lineup.conf');
@@ -2148,12 +2347,14 @@ describe('lineups', () => {
     const stdout = new Sink();
     const stderr = new Sink();
 
-    expect(await runXmltvGrabber(epg, {
-      ...options,
-      argv: ['--days', '1', '--config-file', configFile],
-      stdout,
-      stderr,
-    })).toBe(0);
+    expect(
+      await runXmltvGrabber(epg, {
+        ...options,
+        argv: ['--days', '1', '--config-file', configFile],
+        stdout,
+        stderr,
+      }),
+    ).toBe(0);
 
     expect(stdout.text).toContain('<channel id="two.example.tv">');
     expect(stdout.text).not.toContain('<channel id="one.example.tv">');
@@ -2171,12 +2372,14 @@ describe('lineups', () => {
     await saveGrabberConfig(configFile, { channel: ['one.example.tv'] });
     const stdout = new Sink();
 
-    expect(await runXmltvGrabber(epg, {
-      ...options,
-      argv: ['--days', '1', '--config-file', configFile],
-      stdout,
-      stderr: new Sink(),
-    })).toBe(0);
+    expect(
+      await runXmltvGrabber(epg, {
+        ...options,
+        argv: ['--days', '1', '--config-file', configFile],
+        stdout,
+        stderr: new Sink(),
+      }),
+    ).toBe(0);
 
     expect(stdout.text).toContain('<channel id="one.example.tv">');
     expect(stdout.text).not.toContain('<channel id="two.example.tv">');
@@ -2185,119 +2388,135 @@ describe('lineups', () => {
 
 describe('lineup documents', () => {
   it('writes every element in the order the schema demands', () => {
-    const xml = serializeLineups([{
-      id: 'full',
-      type: 'DTV',
-      displayName: [{ value: 'Everything', lang: 'en' }, { value: 'Všetko', lang: 'sk' }],
-      logo: [{ url: 'https://example.tv/l.png', width: 64, height: 32 }],
-      availability: [{ value: 'SK', area: 'country' }],
-      entries: [{
-        // Deliberately written in an order the schema does not allow, to show
-        // the output is the schema's order and not the object's.
-        analog: [{
-          system: 'PAL-B/G',
-          number: 'E7',
-          frequency: 189250,
-          fccCallsign: 'KTLA',
-          cni: '0x4101',
-        }],
-        station: {
-          xmltvId: 'one.example.tv',
-          name: 'One & Only',
-          shortName: 'One',
-          lang: 'en',
-          logo: [{ url: 'https://example.tv/one.png' }],
-          type: 'TV',
-          commercialFree: false,
-          video: { format: 'HDTV', aspectRatio: '16:9' },
-          audio: { format: 'stereo' },
+    const xml = serializeLineups(
+      [
+        {
+          id: 'full',
+          type: 'DTV',
+          displayName: [
+            { value: 'Everything', lang: 'en' },
+            { value: 'Všetko', lang: 'sk' },
+          ],
+          logo: [{ url: 'https://example.tv/l.png', width: 64, height: 32 }],
+          availability: [{ value: 'SK', area: 'country' }],
+          entries: [
+            {
+              // Deliberately written in an order the schema does not allow, to show
+              // the output is the schema's order and not the object's.
+              analog: [
+                {
+                  system: 'PAL-B/G',
+                  number: 'E7',
+                  frequency: 189250,
+                  fccCallsign: 'KTLA',
+                  cni: '0x4101',
+                },
+              ],
+              station: {
+                xmltvId: 'one.example.tv',
+                name: 'One & Only',
+                shortName: 'One',
+                lang: 'en',
+                logo: [{ url: 'https://example.tv/one.png' }],
+                type: 'TV',
+                commercialFree: false,
+                video: { format: 'HDTV', aspectRatio: '16:9' },
+                audio: { format: 'stereo' },
+              },
+              availability: [{ value: 'West', area: 'region' }],
+              packages: [{ value: 'Basic', type: 'subscription' }],
+              section: 'Entertainment',
+              preset: '1',
+            },
+          ],
         },
-        availability: [{ value: 'West', area: 'region' }],
-        packages: [{ value: 'Basic', type: 'subscription' }],
-        section: 'Entertainment',
-        preset: '1',
-      }],
-    }], { generatorInfoName: 'epg-tools', modified: '20260717120000 +0000' });
+      ],
+      { generatorInfoName: 'epg-tools', modified: '20260717120000 +0000' },
+    );
 
     expect(xml).toBe(
-      '<?xml version="1.0" encoding="UTF-8"?>\n'
-      + '<xmltv-lineups modified="20260717120000 +0000" generator-info-name="epg-tools">\n'
-      + '  <xmltv-lineup id="full">\n'
-      + '    <type>DTV</type>\n'
-      + '    <display-name lang="en">Everything</display-name>\n'
-      + '    <display-name lang="sk">Všetko</display-name>\n'
-      + '    <logo url="https://example.tv/l.png" height="32" width="64" />\n'
-      + '    <availability area="country">SK</availability>\n'
-      + '    <lineup-entry>\n'
-      + '      <preset>1</preset>\n'
-      + '      <section>Entertainment</section>\n'
-      + '      <package type="subscription">Basic</package>\n'
-      + '      <availability area="region">West</availability>\n'
-      + '      <station rfc2838="one.example.tv" type="TV">\n'
-      + '        <name lang="en">One &amp; Only</name>\n'
-      + '        <short-name lang="en">One</short-name>\n'
-      + '        <logo url="https://example.tv/one.png" />\n'
-      + '        <commercial-free>false</commercial-free>\n'
-      + '        <video>\n'
-      + '          <format>HDTV</format>\n'
-      + '          <aspect-ratio>16:9</aspect-ratio>\n'
-      + '        </video>\n'
-      + '        <audio>\n'
-      + '          <format>stereo</format>\n'
-      + '        </audio>\n'
-      + '      </station>\n'
-      + '      <analog-channel>\n'
-      + '        <system>PAL-B/G</system>\n'
-      + '        <number>E7</number>\n'
-      + '        <frequency>189250</frequency>\n'
-      + '        <fcc-callsign>KTLA</fcc-callsign>\n'
-      + '        <cni tt-8-30-1="0x4101" />\n'
-      + '      </analog-channel>\n'
-      + '    </lineup-entry>\n'
-      + '  </xmltv-lineup>\n'
-      + '</xmltv-lineups>\n',
+      '<?xml version="1.0" encoding="UTF-8"?>\n' +
+        '<xmltv-lineups modified="20260717120000 +0000" generator-info-name="epg-tools">\n' +
+        '  <xmltv-lineup id="full">\n' +
+        '    <type>DTV</type>\n' +
+        '    <display-name lang="en">Everything</display-name>\n' +
+        '    <display-name lang="sk">Všetko</display-name>\n' +
+        '    <logo url="https://example.tv/l.png" height="32" width="64" />\n' +
+        '    <availability area="country">SK</availability>\n' +
+        '    <lineup-entry>\n' +
+        '      <preset>1</preset>\n' +
+        '      <section>Entertainment</section>\n' +
+        '      <package type="subscription">Basic</package>\n' +
+        '      <availability area="region">West</availability>\n' +
+        '      <station rfc2838="one.example.tv" type="TV">\n' +
+        '        <name lang="en">One &amp; Only</name>\n' +
+        '        <short-name lang="en">One</short-name>\n' +
+        '        <logo url="https://example.tv/one.png" />\n' +
+        '        <commercial-free>false</commercial-free>\n' +
+        '        <video>\n' +
+        '          <format>HDTV</format>\n' +
+        '          <aspect-ratio>16:9</aspect-ratio>\n' +
+        '        </video>\n' +
+        '        <audio>\n' +
+        '          <format>stereo</format>\n' +
+        '        </audio>\n' +
+        '      </station>\n' +
+        '      <analog-channel>\n' +
+        '        <system>PAL-B/G</system>\n' +
+        '        <number>E7</number>\n' +
+        '        <frequency>189250</frequency>\n' +
+        '        <fcc-callsign>KTLA</fcc-callsign>\n' +
+        '        <cni tt-8-30-1="0x4101" />\n' +
+        '      </analog-channel>\n' +
+        '    </lineup-entry>\n' +
+        '  </xmltv-lineup>\n' +
+        '</xmltv-lineups>\n',
     );
   });
 
   it('writes each kind of delivery', () => {
-    const xml = serializeLineups([{
-      id: 'mixed',
-      type: 'DTV',
-      displayName: [{ value: 'Mixed' }],
-      entries: [
-        {
-          station: { xmltvId: 'dvb.example.tv' },
-          dvb: [{
-            originalNetworkId: 8442,
-            transportId: 2049,
-            serviceId: 4351,
-            lcn: '3',
-            serviceName: 'Three',
-            providerName: 'Example',
-            encrypted: true,
-          }],
-        },
-        { station: { xmltvId: 'stb.example.tv' }, stb: [{ preset: '101' }] },
-        {
-          station: { xmltvId: 'iptv.example.tv' },
-          iptv: [{ url: 'udp://239.0.0.1', port: 1234 }],
-        },
-      ],
-    }]);
+    const xml = serializeLineups([
+      {
+        id: 'mixed',
+        type: 'DTV',
+        displayName: [{ value: 'Mixed' }],
+        entries: [
+          {
+            station: { xmltvId: 'dvb.example.tv' },
+            dvb: [
+              {
+                originalNetworkId: 8442,
+                transportId: 2049,
+                serviceId: 4351,
+                lcn: '3',
+                serviceName: 'Three',
+                providerName: 'Example',
+                encrypted: true,
+              },
+            ],
+          },
+          { station: { xmltvId: 'stb.example.tv' }, stb: [{ preset: '101' }] },
+          {
+            station: { xmltvId: 'iptv.example.tv' },
+            iptv: [{ url: 'udp://239.0.0.1', port: 1234 }],
+          },
+        ],
+      },
+    ]);
 
     // A station with no name of its own is named by its id, which the schema
     // requires and is the only thing certain to be there.
     expect(xml).toContain('<name>dvb.example.tv</name>');
     expect(xml).toContain(
-      '      <dvb-channel>\n'
-      + '        <original-network-id>8442</original-network-id>\n'
-      + '        <transport-id>2049</transport-id>\n'
-      + '        <service-id>4351</service-id>\n'
-      + '        <lcn>3</lcn>\n'
-      + '        <service-name>Three</service-name>\n'
-      + '        <provider-name>Example</provider-name>\n'
-      + '        <encrypted>true</encrypted>\n'
-      + '      </dvb-channel>\n',
+      '      <dvb-channel>\n' +
+        '        <original-network-id>8442</original-network-id>\n' +
+        '        <transport-id>2049</transport-id>\n' +
+        '        <service-id>4351</service-id>\n' +
+        '        <lcn>3</lcn>\n' +
+        '        <service-name>Three</service-name>\n' +
+        '        <provider-name>Example</provider-name>\n' +
+        '        <encrypted>true</encrypted>\n' +
+        '      </dvb-channel>\n',
     );
     expect(xml).toContain('<stb-channel>\n        <stb-preset>101</stb-preset>\n');
     expect(xml).toContain('<iptv-url>udp://239.0.0.1</iptv-url>\n        <port>1234</port>\n');
@@ -2306,31 +2525,39 @@ describe('lineup documents', () => {
   it('refuses an entry delivered two ways at once', () => {
     // An xs:choice — a document with both would be rejected by anything that
     // validates it, so it is refused where it is written.
-    expect(() => serializeLineups([{
-      id: 'both',
-      type: 'DTV',
-      displayName: [{ value: 'Both' }],
-      entries: [{
-        station: { xmltvId: 'one.example.tv' },
-        dvb: [{ originalNetworkId: 1, serviceId: 2 }],
-        iptv: [{ url: 'udp://239.0.0.1', port: 1234 }],
-      }],
-    }])).toThrow(/entry for "one.example.tv" describes dvb and iptv delivery/);
+    expect(() =>
+      serializeLineups([
+        {
+          id: 'both',
+          type: 'DTV',
+          displayName: [{ value: 'Both' }],
+          entries: [
+            {
+              station: { xmltvId: 'one.example.tv' },
+              dvb: [{ originalNetworkId: 1, serviceId: 2 }],
+              iptv: [{ url: 'udp://239.0.0.1', port: 1234 }],
+            },
+          ],
+        },
+      ]),
+    ).toThrow(/entry for "one.example.tv" describes dvb and iptv delivery/);
   });
 
   it('builds one list lineup per site', async () => {
     const dir = await tempDir();
     const lineups = await lineupsFromSites(lineupConfig(dir), { lang: 'sk' });
 
-    expect(lineups).toEqual([{
-      id: 'example.tv',
-      type: 'List',
-      displayName: [{ value: 'example.tv', lang: 'sk' }],
-      entries: [
-        { station: { xmltvId: 'one.example.tv', name: 'One', lang: 'sk' }, preset: '1' },
-        { station: { xmltvId: 'two.example.tv', name: 'Two', lang: 'sk' }, preset: '2' },
-      ],
-    }]);
+    expect(lineups).toEqual([
+      {
+        id: 'example.tv',
+        type: 'List',
+        displayName: [{ value: 'example.tv', lang: 'sk' }],
+        entries: [
+          { station: { xmltvId: 'one.example.tv', name: 'One', lang: 'sk' }, preset: '1' },
+          { station: { xmltvId: 'two.example.tv', name: 'Two', lang: 'sk' }, preset: '2' },
+        ],
+      },
+    ]);
   });
 });
 
@@ -2343,68 +2570,80 @@ const xmllintAvailable = (() => {
   }
 })();
 
-describe.skipIf(!xmllintAvailable)('lineup schema validity (xmllint against xmltv-lineups.xsd)', () => {
-  it('what --list-lineups prints validates against the official schema', async () => {
-    const dir = await tempDir();
-    const file = join(dir, 'lineups.xml');
-    const { config: epg, options } = withLineups(dir, [
-      {
-        id: 'terrestrial',
-        type: 'DTV',
-        displayName: [{ value: 'Digital terrestrial', lang: 'en' }],
-        logo: [{ url: 'https://example.tv/l.png', width: 64, height: 32 }],
-        availability: [{ value: 'SK', area: 'country' }],
-        entries: [{
-          preset: '1',
-          section: 'Entertainment',
-          packages: [{ value: 'Basic', type: 'subscription' }],
-          availability: [{ value: 'West', area: 'region' }],
-          station: {
-            xmltvId: 'one.example.tv',
-            name: 'One',
-            shortName: '1',
-            lang: 'en',
-            logo: [{ url: 'https://example.tv/one.png' }],
-            type: 'TV',
-            commercialFree: true,
-            video: { format: 'HDTV', aspectRatio: '16:9' },
-            audio: { format: 'stereo' },
-          },
-          dvb: [{ originalNetworkId: 8442, transportId: 2049, serviceId: 4351, lcn: '1' }],
-        }],
-      },
-      {
-        id: 'analogue',
-        type: 'Analog',
-        displayName: [{ value: 'Analogue' }],
-        entries: [{
-          station: { xmltvId: 'two.example.tv' },
-          analog: [{ system: 'PAL-B/G', number: 'E7', frequency: 189250, cni: '0x4101' }],
-        }],
-      },
-      {
-        id: 'streams',
-        type: 'IPTV',
-        displayName: [{ value: 'Streams' }],
-        entries: [
-          { station: { xmltvId: 'three.example.tv' }, iptv: [{ url: 'udp://239.0.0.1', port: 1234 }] },
-          { station: { xmltvId: 'four.example.tv' }, stb: [{ preset: '101' }] },
-        ],
-      },
-    ]);
+describe.skipIf(!xmllintAvailable)(
+  'lineup schema validity (xmllint against xmltv-lineups.xsd)',
+  () => {
+    it('what --list-lineups prints validates against the official schema', async () => {
+      const dir = await tempDir();
+      const file = join(dir, 'lineups.xml');
+      const { config: epg, options } = withLineups(dir, [
+        {
+          id: 'terrestrial',
+          type: 'DTV',
+          displayName: [{ value: 'Digital terrestrial', lang: 'en' }],
+          logo: [{ url: 'https://example.tv/l.png', width: 64, height: 32 }],
+          availability: [{ value: 'SK', area: 'country' }],
+          entries: [
+            {
+              preset: '1',
+              section: 'Entertainment',
+              packages: [{ value: 'Basic', type: 'subscription' }],
+              availability: [{ value: 'West', area: 'region' }],
+              station: {
+                xmltvId: 'one.example.tv',
+                name: 'One',
+                shortName: '1',
+                lang: 'en',
+                logo: [{ url: 'https://example.tv/one.png' }],
+                type: 'TV',
+                commercialFree: true,
+                video: { format: 'HDTV', aspectRatio: '16:9' },
+                audio: { format: 'stereo' },
+              },
+              dvb: [{ originalNetworkId: 8442, transportId: 2049, serviceId: 4351, lcn: '1' }],
+            },
+          ],
+        },
+        {
+          id: 'analogue',
+          type: 'Analog',
+          displayName: [{ value: 'Analogue' }],
+          entries: [
+            {
+              station: { xmltvId: 'two.example.tv' },
+              analog: [{ system: 'PAL-B/G', number: 'E7', frequency: 189250, cni: '0x4101' }],
+            },
+          ],
+        },
+        {
+          id: 'streams',
+          type: 'IPTV',
+          displayName: [{ value: 'Streams' }],
+          entries: [
+            {
+              station: { xmltvId: 'three.example.tv' },
+              iptv: [{ url: 'udp://239.0.0.1', port: 1234 }],
+            },
+            { station: { xmltvId: 'four.example.tv' }, stb: [{ preset: '101' }] },
+          ],
+        },
+      ]);
 
-    await runXmltvGrabber(epg, {
-      ...options,
-      argv: ['--list-lineups', '--output', file],
-      stdout: new Sink(),
-      stderr: new Sink(),
+      await runXmltvGrabber(epg, {
+        ...options,
+        argv: ['--list-lineups', '--output', file],
+        stdout: new Sink(),
+        stderr: new Sink(),
+      });
+
+      const schema = join(import.meta.dirname, 'fixtures', 'xmltv-lineups.xsd');
+
+      expect(() =>
+        execFileSync('xmllint', ['--noout', '--schema', schema, file], {
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      ).not.toThrow();
     });
-
-    const schema = join(import.meta.dirname, 'fixtures', 'xmltv-lineups.xsd');
-
-    expect(() => execFileSync('xmllint', ['--noout', '--schema', schema, file], {
-      encoding: 'utf8',
-      stdio: 'pipe',
-    })).not.toThrow();
-  });
-});
+  },
+);

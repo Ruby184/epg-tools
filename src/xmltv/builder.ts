@@ -183,7 +183,10 @@ abstract class ExtraAttributesBuilder {
    * `undefined`: `{}` is truthy, so storing one would keep a `<url>` or a
    * credit name in its object form instead of collapsing to a plain string.
    */
-  protected mergeExtra(primary?: ExtraAttributes, fallback?: ExtraAttributes): ExtraAttributes | undefined {
+  protected mergeExtra(
+    primary?: ExtraAttributes,
+    fallback?: ExtraAttributes,
+  ): ExtraAttributes | undefined {
     // Filtered before merging, so a valueless entry cannot overwrite the other
     // source. `null` is off the type but reachable from JS and from JSON.
     const present = (attrs: ExtraAttributes | undefined): [string, string][] =>
@@ -225,7 +228,10 @@ abstract class XmltvElementBuilder extends ExtraAttributesBuilder {
   }
 
   /** Copies non-standard attributes onto a freshly built element. */
-  protected extraAttrs<T extends XmltvExtraAttributes>(target: T, extraAttributes?: ExtraAttributes): T {
+  protected extraAttrs<T extends XmltvExtraAttributes>(
+    target: T,
+    extraAttributes?: ExtraAttributes,
+  ): T {
     const attrs = this.mergeExtra(extraAttributes);
 
     if (attrs) target.extraAttributes = attrs;
@@ -251,7 +257,11 @@ abstract class XmltvElementBuilder extends ExtraAttributesBuilder {
     return this.text(value, opts?.lang ?? defaultLang, opts?.extraAttributes);
   }
 
-  protected toIcon(value: string, opts: IconOptions = {}, extraAttributes?: ExtraAttributes): XmltvIcon {
+  protected toIcon(
+    value: string,
+    opts: IconOptions = {},
+    extraAttributes?: ExtraAttributes,
+  ): XmltvIcon {
     const icon: XmltvIcon = { src: value };
 
     if (opts.width !== undefined) icon.width = opts.width;
@@ -260,7 +270,11 @@ abstract class XmltvElementBuilder extends ExtraAttributesBuilder {
     return this.extraAttrs(icon, this.mergeExtra(extraAttributes, opts.extraAttributes));
   }
 
-  protected toUrlValue(value: string, opts: UrlOptions = {}, extraAttributes?: ExtraAttributes): XmltvUrlValue {
+  protected toUrlValue(
+    value: string,
+    opts: UrlOptions = {},
+    extraAttributes?: ExtraAttributes,
+  ): XmltvUrlValue {
     const extra = this.mergeExtra(extraAttributes, opts.extraAttributes);
 
     // Collapse to a bare string only when there's nothing but the URL text.
@@ -292,7 +306,12 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
   readonly #programme: XmltvProgramme;
 
   /** Positional shorthand for `new ProgrammeBuilder({ channel, start, title, ...options })`. */
-  static of(channel: string, start: DateInput, title: string, options: ProgrammeOptions = {}): ProgrammeBuilder {
+  static of(
+    channel: string,
+    start: DateInput,
+    title: string,
+    options: ProgrammeOptions = {},
+  ): ProgrammeBuilder {
     return new ProgrammeBuilder({ channel, start, title, ...options });
   }
 
@@ -396,7 +415,11 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     return this;
   }
 
-  length(value: number, units: 'seconds' | 'minutes' | 'hours' = 'minutes', extraAttributes?: ExtraAttributes): this {
+  length(
+    value: number,
+    units: 'seconds' | 'minutes' | 'hours' = 'minutes',
+    extraAttributes?: ExtraAttributes,
+  ): this {
     this.#programme.length = this.extraAttrs<XmltvLength>({ units, value }, extraAttributes);
     return this;
   }
@@ -418,7 +441,9 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
 
   /** Explicit escape hatch for an `episode-num` system not covered by {@link episode}. */
   episodeNum(system: string, value: string, extraAttributes?: ExtraAttributes): this {
-    (this.#programme.episodeNum ??= []).push(this.extraAttrs<XmltvEpisodeNum>({ system, value }, extraAttributes));
+    (this.#programme.episodeNum ??= []).push(
+      this.extraAttrs<XmltvEpisodeNum>({ system, value }, extraAttributes),
+    );
     return this;
   }
 
@@ -466,10 +491,13 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
   }
 
   previouslyShown(opts: PreviouslyShownOptions, extraAttributes?: ExtraAttributes): this {
-    this.#programme.previouslyShown = this.extraAttrs<XmltvPreviouslyShown>({
-      ...(opts.start !== undefined ? { start: xmltvDate(opts.start) } : {}),
-      ...(opts.channel ? { channel: opts.channel } : {}),
-    }, extraAttributes);
+    this.#programme.previouslyShown = this.extraAttrs<XmltvPreviouslyShown>(
+      {
+        ...(opts.start !== undefined ? { start: xmltvDate(opts.start) } : {}),
+        ...(opts.channel ? { channel: opts.channel } : {}),
+      },
+      extraAttributes,
+    );
     return this;
   }
 
@@ -516,16 +544,26 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     return this;
   }
 
-  review(type: 'text' | 'url', value: string, opts: ReviewOptions = {}, extraAttributes?: ExtraAttributes): this {
+  review(
+    type: 'text' | 'url',
+    value: string,
+    opts: ReviewOptions = {},
+    extraAttributes?: ExtraAttributes,
+  ): this {
     const lang = opts.lang ?? this.lang;
 
-    (this.#programme.review ??= []).push(this.extraAttrs<XmltvReview>({
-      type,
-      value,
-      ...(opts.source ? { source: opts.source } : {}),
-      ...(opts.reviewer ? { reviewer: opts.reviewer } : {}),
-      ...(lang ? { lang } : {}),
-    }, extraAttributes));
+    (this.#programme.review ??= []).push(
+      this.extraAttrs<XmltvReview>(
+        {
+          type,
+          value,
+          ...(opts.source ? { source: opts.source } : {}),
+          ...(opts.reviewer ? { reviewer: opts.reviewer } : {}),
+          ...(lang ? { lang } : {}),
+        },
+        extraAttributes,
+      ),
+    );
     return this;
   }
 
@@ -651,7 +689,10 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
    * Build the children of a repeatable option — one or many, each either a
    * bare value or a `[value, options]` pair.
    */
-  #entries<O, R>(input: Many<string | [string, O]> | undefined, build: (value: string, opts?: O) => R): R[] {
+  #entries<O, R>(
+    input: Many<string | [string, O]> | undefined,
+    build: (value: string, opts?: O) => R,
+  ): R[] {
     return this.#toArray(input).map((entry) => {
       const [value, opts]: [string, O?] = Array.isArray(entry) ? entry : [entry];
 
@@ -672,7 +713,11 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     };
   }
 
-  #toPersonValue(value: string, opts: PersonOptions, extraAttributes?: ExtraAttributes): XmltvPersonValue {
+  #toPersonValue(
+    value: string,
+    opts: PersonOptions,
+    extraAttributes?: ExtraAttributes,
+  ): XmltvPersonValue {
     const media = this.#imageUrl(opts);
     const attrs = this.mergeExtra(extraAttributes);
 
@@ -684,7 +729,12 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     return this.extraAttrs<XmltvPerson>({ value, ...media }, attrs);
   }
 
-  #pushPerson(role: PersonRole, value: string, opts: PersonOptions, extraAttributes?: ExtraAttributes): this {
+  #pushPerson(
+    role: PersonRole,
+    value: string,
+    opts: PersonOptions,
+    extraAttributes?: ExtraAttributes,
+  ): this {
     const credits = (this.#programme.credits ??= {});
 
     (credits[role] ??= []).push(this.#toPersonValue(value, opts, extraAttributes));
@@ -706,7 +756,11 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
   }
 
   /** Builds both `xmltv_ns` (0-based) and `onscreen` entries from 1-based season/episode numbers. */
-  #episodeNumbers(episode: number | string, season: number | string, opts: EpisodeOptions): XmltvEpisodeNum[] {
+  #episodeNumbers(
+    episode: number | string,
+    season: number | string,
+    opts: EpisodeOptions,
+  ): XmltvEpisodeNum[] {
     const seasonNum = Number(season);
     const episodeNum = Number(episode);
 
@@ -715,7 +769,8 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
 
     // Each xmltv_ns field is a 0-based index with an optional `/total` count;
     // an unspecified part means "part 1 of 1" (`0/1`).
-    const dim = (index: number, total?: number): string => (total !== undefined ? `${index}/${total}` : `${index}`);
+    const dim = (index: number, total?: number): string =>
+      total !== undefined ? `${index}/${total}` : `${index}`;
     const xmltvNs = [
       dim(seasonNum - 1, opts.seasons),
       dim(episodeNum - 1, opts.episodes),
@@ -873,14 +928,19 @@ export class XmltvDocumentBuilder extends ExtraAttributesBuilder {
 
   /** Sets `generator-info-name` and, if given, `generator-info-url`. */
   generatorInfo(name: string, url?: string): this {
-    return this.meta(url ? { generatorInfoName: name, generatorInfoUrl: url } : { generatorInfoName: name });
+    return this.meta(
+      url ? { generatorInfoName: name, generatorInfoUrl: url } : { generatorInfoName: name },
+    );
   }
 
   /** Adds a channel from its base fields, optionally configured via the callback. */
   channel(base: ChannelBuilderBase, configure?: (channel: ChannelBuilder) => void): this;
   /** Adds a standalone {@link ChannelBuilder}. */
   channel(builder: ChannelBuilder): this;
-  channel(arg: ChannelBuilderBase | ChannelBuilder, configure?: (channel: ChannelBuilder) => void): this {
+  channel(
+    arg: ChannelBuilderBase | ChannelBuilder,
+    configure?: (channel: ChannelBuilder) => void,
+  ): this {
     this.#channels.push(this.#resolveChannel(arg, configure));
     return this;
   }
@@ -889,7 +949,10 @@ export class XmltvDocumentBuilder extends ExtraAttributesBuilder {
   programme(base: ProgrammeBuilderBase, configure?: (programme: ProgrammeBuilder) => void): this;
   /** Adds a standalone {@link ProgrammeBuilder}. */
   programme(builder: ProgrammeBuilder): this;
-  programme(arg: ProgrammeBuilderBase | ProgrammeBuilder, configure?: (programme: ProgrammeBuilder) => void): this {
+  programme(
+    arg: ProgrammeBuilderBase | ProgrammeBuilder,
+    configure?: (programme: ProgrammeBuilder) => void,
+  ): this {
     this.#programmes.push(this.#resolveProgramme(arg, configure));
     return this;
   }
@@ -929,23 +992,31 @@ export class XmltvDocumentBuilder extends ExtraAttributesBuilder {
 
   /** The whole document serialized to an XML string. Compact by default; pass `{ indent }`. */
   toXml(options?: SerializeOptions): string {
-    return serializeDocumentHeader(this.#meta, options)
-      + this.#channels.map((channel) => serializeChannel(channel, options)).join('')
-      + this.#programmes.map((programme) => serializeProgramme(programme, options)).join('')
-      + serializeDocumentFooter(options);
+    return (
+      serializeDocumentHeader(this.#meta, options) +
+      this.#channels.map((channel) => serializeChannel(channel, options)).join('') +
+      this.#programmes.map((programme) => serializeProgramme(programme, options)).join('') +
+      serializeDocumentFooter(options)
+    );
   }
 
   protected get extraAttributesTarget(): XmltvExtraAttributes {
     return this.#meta;
   }
 
-  #resolveChannel(arg: ChannelBuilderBase | ChannelBuilder, configure?: (channel: ChannelBuilder) => void): XmltvChannel {
+  #resolveChannel(
+    arg: ChannelBuilderBase | ChannelBuilder,
+    configure?: (channel: ChannelBuilder) => void,
+  ): XmltvChannel {
     const builder = arg instanceof ChannelBuilder ? arg : new ChannelBuilder(arg);
     configure?.(builder);
     return builder.build();
   }
 
-  #resolveProgramme(arg: ProgrammeBuilderBase | ProgrammeBuilder, configure?: (programme: ProgrammeBuilder) => void): XmltvProgramme {
+  #resolveProgramme(
+    arg: ProgrammeBuilderBase | ProgrammeBuilder,
+    configure?: (programme: ProgrammeBuilder) => void,
+  ): XmltvProgramme {
     const builder = arg instanceof ProgrammeBuilder ? arg : new ProgrammeBuilder(arg);
     configure?.(builder);
     return builder.build();

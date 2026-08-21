@@ -94,10 +94,7 @@ describe('sitePacing', () => {
         await gate;
         ran.push('gate');
       });
-      const waiting = [
-        queue.add(() => void ran.push('a')),
-        queue.add(() => void ran.push('b')),
-      ];
+      const waiting = [queue.add(() => void ran.push('a')), queue.add(() => void ran.push('b'))];
 
       await http.get(server.url, { retry: 0, throwHttpErrors: false });
       const toldOff = Date.now();
@@ -124,10 +121,9 @@ describe('sitePacing', () => {
 
     try {
       const logs: string[] = [];
-      const { http, dispose } = sitePacing(
-        site({ backoff: { maxMs: 40 } }),
-        { log: (message) => logs.push(message) },
-      );
+      const { http, dispose } = sitePacing(site({ backoff: { maxMs: 40 } }), {
+        log: (message) => logs.push(message),
+      });
 
       await http.get(server.url, { retry: 0, throwHttpErrors: false });
 
@@ -178,8 +174,9 @@ describe('sitePacing', () => {
       // Four requests in flight together are told off together: one violation,
       // one penalty. Halving per response would leave concurrency at 1, and
       // then charge 30 clean responses to climb back.
-      await Promise.all(Array.from({ length: 4 }, () =>
-        http.get(server.url, { retry: 0, throwHttpErrors: false })));
+      await Promise.all(
+        Array.from({ length: 4 }, () => http.get(server.url, { retry: 0, throwHttpErrors: false })),
+      );
 
       expect(server.hits).toBe(4);
       expect(queue.concurrency).toBe(4);
@@ -209,10 +206,9 @@ describe('sitePacing', () => {
 
     try {
       const controller = new AbortController();
-      const { queue, http, dispose } = sitePacing(
-        site({ backoff: { maxMs: 30_000 } }),
-        { signal: controller.signal },
-      );
+      const { queue, http, dispose } = sitePacing(site({ backoff: { maxMs: 30_000 } }), {
+        signal: controller.signal,
+      });
 
       await http.get(server.url, { retry: 0, throwHttpErrors: false }).catch(() => {});
       expect(queue.isPaused).toBe(true);
@@ -231,14 +227,15 @@ describe('sitePacing', () => {
 
   it('rate-limits by a sliding window, reporting when it is waiting', async () => {
     const logs: string[] = [];
-    const { queue, dispose } = sitePacing(
-      site({ rateLimit: { requests: 2, perMs: 80 } }),
-      { log: (message) => logs.push(message) },
-    );
+    const { queue, dispose } = sitePacing(site({ rateLimit: { requests: 2, perMs: 80 } }), {
+      log: (message) => logs.push(message),
+    });
 
     const started: number[] = [];
     const began = Date.now();
-    await Promise.all(Array.from({ length: 4 }, () => queue.add(() => void started.push(Date.now() - began))));
+    await Promise.all(
+      Array.from({ length: 4 }, () => queue.add(() => void started.push(Date.now() - began))),
+    );
 
     expect(started).toHaveLength(4);
     // Two through at once, the rest only after the window moves on.

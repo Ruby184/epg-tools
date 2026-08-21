@@ -86,7 +86,10 @@ describe('FsCacheStore', () => {
         start: new Date('2026-07-17T19:00:00.000Z'),
         stop: new Date('2026-07-17T20:30:00.000Z'),
         title: [{ value: 'Movie Night' }],
-        previouslyShown: { start: new Date('2026-01-02T20:00:00.000Z'), channel: 'two.example.com' },
+        previouslyShown: {
+          start: new Date('2026-01-02T20:00:00.000Z'),
+          channel: 'two.example.com',
+        },
       }),
     ];
 
@@ -100,7 +103,9 @@ describe('FsCacheStore', () => {
     expect(read![0]!.start.getTime()).toBe(Date.parse('2026-07-17T18:00:00.000Z'));
     expect(read![0]!.stop!.getTime()).toBe(Date.parse('2026-07-17T19:00:00.000Z'));
     expect(read![1]!.previouslyShown!.start).toBeInstanceOf(Date);
-    expect(read![1]!.previouslyShown!.start!.getTime()).toBe(Date.parse('2026-01-02T20:00:00.000Z'));
+    expect(read![1]!.previouslyShown!.start!.getTime()).toBe(
+      Date.parse('2026-01-02T20:00:00.000Z'),
+    );
     expect(read).toEqual(programmes);
   });
 
@@ -164,7 +169,12 @@ describe('FsCacheStore', () => {
 
     await store.write(trickyKey, [programme()]);
 
-    const file = path.join(dir, encodeURIComponent('a/b'), encodeURIComponent('c:1/..'), '2026-07-17.ndjson');
+    const file = path.join(
+      dir,
+      encodeURIComponent('a/b'),
+      encodeURIComponent('c:1/..'),
+      '2026-07-17.ndjson',
+    );
     await expect(fs.access(file)).resolves.toBeUndefined();
     expect(await store.read(trickyKey)).toHaveLength(1);
   });
@@ -234,7 +244,10 @@ describe.skipIf(!xmltvAvailable)('FsCacheStore (xmltv format)', () => {
 
   it('round-trips programmes through xmltv format', async () => {
     const store = new FsCacheStore({ dir, format: 'xmltv' });
-    const programmes = [programme(), programme({ start: new Date('2026-07-17T19:00:00.000Z'), title: [{ value: 'Late Show' }] })];
+    const programmes = [
+      programme(),
+      programme({ start: new Date('2026-07-17T19:00:00.000Z'), title: [{ value: 'Late Show' }] }),
+    ];
 
     await store.write(key, programmes, { grabbedAt: '2026-07-17T08:00:00.000Z' });
 

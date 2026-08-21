@@ -82,9 +82,12 @@ export async function runXmltvGrabber(
   } catch (error) {
     // An output that cannot be written is the same kind of news as any other
     // failure a capability reports: one line, and a code.
-    const failure = error instanceof GrabberError ? error
-      : error instanceof OutputError ? new GrabberError(error.message)
-        : undefined;
+    const failure =
+      error instanceof GrabberError
+        ? error
+        : error instanceof OutputError
+          ? new GrabberError(error.message)
+          : undefined;
 
     if (failure === undefined) {
       throw error;
@@ -274,7 +277,8 @@ async function execute(
     failed = summary.failed.length;
 
     for (const failure of summary.failed) {
-      const message = failure.error instanceof Error ? failure.error.message : String(failure.error);
+      const message =
+        failure.error instanceof Error ? failure.error.message : String(failure.error);
       // An error, so it is printed even under --quiet.
       queueLine(stderr, `${failure.site} ${failure.channelId} ${failure.day}: ${message}`);
     }

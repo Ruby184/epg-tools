@@ -303,10 +303,18 @@ export function parseXmltvDate(value: string, timezones?: XmltvTimezoneOffsets):
     throw new XmltvDateError(value, 'datetime must begin with a 4-digit year', start);
   }
   if (count > 14) {
-    throw new XmltvDateError(value, 'datetime has too many digits (YYYYMMDDhhmmss at most)', start + 14);
+    throw new XmltvDateError(
+      value,
+      'datetime has too many digits (YYYYMMDDhhmmss at most)',
+      start + 14,
+    );
   }
   if (count % 2 !== 0) {
-    throw new XmltvDateError(value, 'datetime needs an even digit count (YYYY, YYYYMM, YYYYMMDD, ...)', start + count - 1);
+    throw new XmltvDateError(
+      value,
+      'datetime needs an even digit count (YYYY, YYYYMM, YYYYMMDD, ...)',
+      start + count - 1,
+    );
   }
 
   const year = digits(value, start, start + 4);
@@ -329,7 +337,11 @@ export function parseXmltvDate(value: string, timezones?: XmltvTimezoneOffsets):
   const maxDay = month === 2 && isLeapYear(year) ? 29 : MONTH_DAYS[month - 1]!;
 
   if (day < 1 || day > maxDay) {
-    throw new XmltvDateError(value, `day ${pad(day)} is out of range for month ${pad(month)}`, start + 6);
+    throw new XmltvDateError(
+      value,
+      `day ${pad(day)} is out of range for month ${pad(month)}`,
+      start + 6,
+    );
   }
   if (hour > 23) {
     throw new XmltvDateError(value, 'hour must be in 00–23', start + 8);
@@ -379,7 +391,11 @@ export function parseXmltvDate(value: string, timezones?: XmltvTimezoneOffsets):
         throw new XmltvDateError(value, 'timezone offset hours must be in 00–23', offsetStart + 1);
       }
       if (offM > 59) {
-        throw new XmltvDateError(value, 'timezone offset minutes must be in 00–59', offsetStart + 3);
+        throw new XmltvDateError(
+          value,
+          'timezone offset minutes must be in 00–59',
+          offsetStart + 3,
+        );
       }
 
       offset = sign === MINUS ? -(offH * 60 + offM) : offH * 60 + offM;
@@ -393,7 +409,11 @@ export function parseXmltvDate(value: string, timezones?: XmltvTimezoneOffsets):
       if (mapped !== undefined) {
         offset = mapped;
       } else if (!UTC_ZONES.has(zone)) {
-        throw new XmltvDateError(value, `unknown timezone "${zone}" — add it to the timezone offset map`, offsetStart);
+        throw new XmltvDateError(
+          value,
+          `unknown timezone "${zone}" — add it to the timezone offset map`,
+          offsetStart,
+        );
       }
       // else: GMT/UTC/UT/Z — UTC, so `offset` stays 0.
     }

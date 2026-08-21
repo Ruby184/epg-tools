@@ -82,7 +82,11 @@ function mergeCredits(
     }
   }
 
-  const actors = unionBy(base?.actor, extra?.actor, (actor) => `${actor.value}|${actor.role ?? ''}`);
+  const actors = unionBy(
+    base?.actor,
+    extra?.actor,
+    (actor) => `${actor.value}|${actor.role ?? ''}`,
+  );
 
   if (actors.length > 0) {
     merged.actor = actors;

@@ -1,7 +1,12 @@
 import { defineCapability } from '../capability.js';
 import { GrabberError } from '../../core/error.js';
 import { listChannelChoices, listChannelsXml } from '../list-channels.js';
-import { findStage, renderSelectChannelsStage, renderStageXml, SELECT_CHANNELS } from '../stages.js';
+import {
+  findStage,
+  renderSelectChannelsStage,
+  renderStageXml,
+  SELECT_CHANNELS,
+} from '../stages.js';
 
 /**
  * `apiconfig` — the machine-driven counterpart to `--configure`: the caller

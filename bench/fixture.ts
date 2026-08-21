@@ -53,10 +53,12 @@ export function makeGuide(channelCount: number, days: number, programmesPerDay: 
             { value: `Relácia ${tag}`, lang: 'sk' },
           ],
           subTitle: [{ value: `Episode ${p}`, lang: 'en' }],
-          desc: [{
-            value: `Description of programme ${p} on channel ${c}, day ${d}. Contains some & special <characters> that need escaping.`,
-            lang: 'en',
-          }],
+          desc: [
+            {
+              value: `Description of programme ${p} on channel ${c}, day ${d}. Contains some & special <characters> that need escaping.`,
+              lang: 'en',
+            },
+          ],
           date: parseXmltvDate('2026'),
           category: [
             { value: 'News', lang: 'en' },
@@ -93,7 +95,14 @@ export function makeGuide(channelCount: number, days: number, programmesPerDay: 
           rating: [{ system: 'VCHIP', value: 'TV-PG' }],
           starRating: [{ system: 'imdb', value: '7.5/10' }],
           review: [{ type: 'text', source: 'Critic Weekly', value: 'A solid watch.' }],
-          image: [{ type: 'poster', size: '3', orient: 'P', value: `https://example.tv/poster-${tag}.jpg` }],
+          image: [
+            {
+              type: 'poster',
+              size: '3',
+              orient: 'P',
+              value: `https://example.tv/poster-${tag}.jpg`,
+            },
+          ],
         };
 
         if (p % 4 === 0) {

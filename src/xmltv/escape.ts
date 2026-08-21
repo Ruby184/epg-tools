@@ -14,9 +14,7 @@ const ESCAPE_ALL = /[&<>"']/g;
  * Fast path: most strings contain nothing to escape and are returned as-is.
  */
 export function escapeXml(value: string): string {
-  return NEEDS_ESCAPE.test(value)
-    ? value.replace(ESCAPE_ALL, (char) => ESCAPES[char]!)
-    : value;
+  return NEEDS_ESCAPE.test(value) ? value.replace(ESCAPE_ALL, (char) => ESCAPES[char]!) : value;
 }
 
 const HASH = '#'.charCodeAt(0);
@@ -39,12 +37,18 @@ function isHexDigit(code: number): boolean {
 /** The predefined entity name → replacement, or `undefined` if not one of them. */
 function namedEntity(name: string): string | undefined {
   switch (name) {
-    case 'amp': return '&';
-    case 'lt': return '<';
-    case 'gt': return '>';
-    case 'quot': return '"';
-    case 'apos': return "'";
-    default: return undefined;
+    case 'amp':
+      return '&';
+    case 'lt':
+      return '<';
+    case 'gt':
+      return '>';
+    case 'quot':
+      return '"';
+    case 'apos':
+      return "'";
+    default:
+      return undefined;
   }
 }
 
@@ -86,7 +90,10 @@ export function decodeEntities(value: string): string {
 
       const digitsStart = j;
 
-      while (j < len && (hex ? isHexDigit(value.charCodeAt(j)) : isDecimalDigit(value.charCodeAt(j)))) {
+      while (
+        j < len &&
+        (hex ? isHexDigit(value.charCodeAt(j)) : isDecimalDigit(value.charCodeAt(j)))
+      ) {
         j++;
       }
 

@@ -45,15 +45,17 @@ export const newChannelsCapability = defineCapability({
       default: 'notify',
       placeholder: CHANNEL_UPDATES.join('|'),
       description:
-        `What to do about channels that have appeared upstream: report them (notify, the `
-        + `default), report them and exit ${NEW_CHANNELS_CODE} (signal), select them (add), `
-        + `or say nothing (ignore).`,
+        `What to do about channels that have appeared upstream: report them (notify, the ` +
+        `default), report them and exit ${NEW_CHANNELS_CODE} (signal), select them (add), ` +
+        `or say nothing (ignore).`,
       transform: (raw: string, flag: string): ChannelUpdates => {
         if ((CHANNEL_UPDATES as readonly string[]).includes(raw)) {
           return raw as ChannelUpdates;
         }
 
-        throw new OptionError(`Invalid ${flag} value: ${raw} (expected ${CHANNEL_UPDATES.join(', ')})`);
+        throw new OptionError(
+          `Invalid ${flag} value: ${raw} (expected ${CHANNEL_UPDATES.join(', ')})`,
+        );
       },
     },
   },

@@ -8,14 +8,22 @@ import {
 } from '../src/core/answers.js';
 import { GrabberError } from '../src/core/error.js';
 
-const STAGES = [{
-  name: 'start',
-  next: 'select-channels',
-  fields: [
-    { type: 'string' as const, id: 'username', title: 'User', description: 'Who you are.' },
-    { type: 'string' as const, id: 'region', title: 'Region', description: 'Where.', default: 'west' },
-  ],
-}];
+const STAGES = [
+  {
+    name: 'start',
+    next: 'select-channels',
+    fields: [
+      { type: 'string' as const, id: 'username', title: 'User', description: 'Who you are.' },
+      {
+        type: 'string' as const,
+        id: 'region',
+        title: 'Region',
+        description: 'Where.',
+        default: 'west',
+      },
+    ],
+  },
+];
 
 /** A source with fixed answers, standing in for a grabber configuration file. */
 function fixed(name: string, values: Record<string, string[]>): ConfigReader {
@@ -26,8 +34,11 @@ function fixed(name: string, values: Record<string, string[]>): ConfigReader {
   };
 }
 
-const named = (ctx: { require(id: string): string }): EpgConfig =>
-  ({ sites: [], output: 'guide.xml', meta: { sourceInfoName: ctx.require('username') } });
+const named = (ctx: { require(id: string): string }): EpgConfig => ({
+  sites: [],
+  output: 'guide.xml',
+  meta: { sourceInfoName: ctx.require('username') },
+});
 
 describe('answer sources', () => {
   it('asks each in turn and takes the first that answers', () => {
@@ -54,12 +65,17 @@ describe('answer sources', () => {
 
     expect(() => ctx.require('password')).toThrow(GrabberError);
     // In the order they are asked, so the first is the one that takes effect.
-    expect(() => ctx.require('password'))
-      .toThrow('No value for "password": put it in the file, or set EPG_PASSWORD');
+    expect(() => ctx.require('password')).toThrow(
+      'No value for "password": put it in the file, or set EPG_PASSWORD',
+    );
   });
 
   it('reads the environment under a prefix, treating an empty variable as unset', () => {
-    const reader = envReader('EPG_', { EPG_USERNAME: 'mattias', EPG_PASSWORD: '', EPG_API_KEY: 'k' });
+    const reader = envReader('EPG_', {
+      EPG_USERNAME: 'mattias',
+      EPG_PASSWORD: '',
+      EPG_API_KEY: 'k',
+    });
 
     expect(reader.read('username')).toEqual(['mattias']);
     // An unset variable and one a shell expanded to nothing are the same thing.
@@ -117,8 +133,9 @@ describe('defineConfig', () => {
         readers: (supplied) => [envReader('EPG_'), ...supplied],
       });
 
-      expect((await config(fixed('conf', { username: ['supplied'] }))).meta?.sourceInfoName)
-        .toBe('from-env');
+      expect((await config(fixed('conf', { username: ['supplied'] }))).meta?.sourceInfoName).toBe(
+        'from-env',
+      );
     } finally {
       vi.unstubAllEnvs();
     }
@@ -126,7 +143,11 @@ describe('defineConfig', () => {
 
   it('answers from a stage default when nothing else does', async () => {
     const config = defineConfig(
-      (ctx) => ({ sites: [], output: 'guide.xml', meta: { sourceInfoName: ctx.require('region') } }),
+      (ctx) => ({
+        sites: [],
+        output: 'guide.xml',
+        meta: { sourceInfoName: ctx.require('region') },
+      }),
       { stages: STAGES, env: 'EPG_' },
     );
 
@@ -140,10 +161,13 @@ describe('defineConfig', () => {
   });
 
   it('awaits a factory that has to fetch something first', async () => {
-    const config = defineConfig(async (ctx) => {
-      await Promise.resolve();
-      return { sites: [], output: `${ctx.get('region') ?? 'nowhere'}.xml` };
-    }, { stages: STAGES });
+    const config = defineConfig(
+      async (ctx) => {
+        await Promise.resolve();
+        return { sites: [], output: `${ctx.get('region') ?? 'nowhere'}.xml` };
+      },
+      { stages: STAGES },
+    );
 
     expect((await config()).output).toBe('west.xml');
   });

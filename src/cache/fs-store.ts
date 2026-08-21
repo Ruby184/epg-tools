@@ -128,9 +128,10 @@ export class FsCacheStore implements CacheStore {
 
     // Both formats are readable regardless of the configured write format;
     // try the configured one first to avoid a pointless ENOENT per read.
-    const readers = this.#format === 'ndjson'
-      ? [() => this.#readNdjson(base), () => this.#readXml(base)]
-      : [() => this.#readXml(base), () => this.#readNdjson(base)];
+    const readers =
+      this.#format === 'ndjson'
+        ? [() => this.#readNdjson(base), () => this.#readXml(base)]
+        : [() => this.#readXml(base), () => this.#readNdjson(base)];
 
     for (const reader of readers) {
       const programmes = await reader();

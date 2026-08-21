@@ -17,8 +17,9 @@ describe('parseOptions', () => {
   });
 
   it('rejects positionals unless allowed', () => {
-    expect(() => parseOptions(['build'], { quiet: { type: 'boolean' } }))
-      .toThrow("Unexpected argument 'build'");
+    expect(() => parseOptions(['build'], { quiet: { type: 'boolean' } })).toThrow(
+      "Unexpected argument 'build'",
+    );
   });
 
   it('stops treating arguments as options after --', () => {
@@ -33,14 +34,16 @@ describe('parseOptions', () => {
   });
 
   it('reports a missing value', () => {
-    expect(() => parseOptions(['--config'], { config: { type: 'string' } }))
-      .toThrow("Option '--config' requires a value");
+    expect(() => parseOptions(['--config'], { config: { type: 'string' } })).toThrow(
+      "Option '--config' requires a value",
+    );
   });
 
   it('rejects unknown options', () => {
     // tv_validate_grabber probes with a nonsense flag and requires a failure.
-    expect(() => parseOptions(['--ahdmegkeja'], { quiet: { type: 'boolean' } }))
-      .toThrow(/Unknown option/);
+    expect(() => parseOptions(['--ahdmegkeja'], { quiet: { type: 'boolean' } })).toThrow(
+      /Unknown option/,
+    );
   });
 
   describe('numbers', () => {
@@ -54,20 +57,30 @@ describe('parseOptions', () => {
     it('rejects fractions and trailing junk instead of truncating them', () => {
       const specs = { days: { type: 'number' } } as const;
 
-      expect(() => parseOptions(['--days=7.5'], specs)).toThrow('Invalid --days value: 7.5 (expected a whole number)');
-      expect(() => parseOptions(['--days=7x'], specs)).toThrow('Invalid --days value: 7x (expected a number)');
-      expect(() => parseOptions(['--days='], specs)).toThrow('Invalid --days value:  (expected a number)');
+      expect(() => parseOptions(['--days=7.5'], specs)).toThrow(
+        'Invalid --days value: 7.5 (expected a whole number)',
+      );
+      expect(() => parseOptions(['--days=7x'], specs)).toThrow(
+        'Invalid --days value: 7x (expected a number)',
+      );
+      expect(() => parseOptions(['--days='], specs)).toThrow(
+        'Invalid --days value:  (expected a number)',
+      );
     });
 
     it('enforces min and max', () => {
-      expect(() => parseOptions(['--days=0'], { days: { type: 'number', min: 1 } }))
-        .toThrow('Invalid --days value: 0 (must be at least 1)');
-      expect(() => parseOptions(['--days=99'], { days: { type: 'number', max: 14 } }))
-        .toThrow('Invalid --days value: 99 (must be at most 14)');
+      expect(() => parseOptions(['--days=0'], { days: { type: 'number', min: 1 } })).toThrow(
+        'Invalid --days value: 0 (must be at least 1)',
+      );
+      expect(() => parseOptions(['--days=99'], { days: { type: 'number', max: 14 } })).toThrow(
+        'Invalid --days value: 99 (must be at most 14)',
+      );
     });
 
     it('accepts a fractional value when integer is off', () => {
-      const { values } = parseOptions(['--ratio=1.5'], { ratio: { type: 'number', integer: false } });
+      const { values } = parseOptions(['--ratio=1.5'], {
+        ratio: { type: 'number', integer: false },
+      });
 
       expect(values.ratio).toBe(1.5);
     });
@@ -79,14 +92,18 @@ describe('parseOptions', () => {
 
       expect(parseOptions(['--offset', '-1'], specs).values.offset).toBe(-1);
       expect(parseOptions(['--offset=-1'], specs).values.offset).toBe(-1);
-      expect(parseOptions(['-O', '-2'], { offset: { type: 'number', short: 'O' } }).values.offset).toBe(-2);
+      expect(
+        parseOptions(['-O', '-2'], { offset: { type: 'number', short: 'O' } }).values.offset,
+      ).toBe(-2);
     });
 
     it('still reports a following option as a missing value', () => {
-      expect(() => parseOptions(['--offset', '--quiet'], {
-        offset: { type: 'number' },
-        quiet: { type: 'boolean' },
-      })).toThrow(OptionError);
+      expect(() =>
+        parseOptions(['--offset', '--quiet'], {
+          offset: { type: 'number' },
+          quiet: { type: 'boolean' },
+        }),
+      ).toThrow(OptionError);
     });
 
     it('applies a numeric default', () => {
@@ -101,8 +118,9 @@ describe('parseOptions', () => {
 
     it('uses the fallback for a bare flag, at the end or before another option', () => {
       expect(parseOptions(['--cache'], specs).values.cache).toBe('.epg-cache');
-      expect(parseOptions(['--cache', '--quiet'], { ...specs, quiet: { type: 'boolean' } }).values.cache)
-        .toBe('.epg-cache');
+      expect(
+        parseOptions(['--cache', '--quiet'], { ...specs, quiet: { type: 'boolean' } }).values.cache,
+      ).toBe('.epg-cache');
     });
 
     it('still takes an explicit value', () => {
@@ -122,7 +140,10 @@ describe('parseOptions', () => {
     });
 
     it('leaves a following flag intact instead of eating it', () => {
-      const { values } = parseOptions(['--cache', '--quiet'], { ...specs, quiet: { type: 'boolean' } });
+      const { values } = parseOptions(['--cache', '--quiet'], {
+        ...specs,
+        quiet: { type: 'boolean' },
+      });
 
       expect(values).toEqual({ cache: '.epg-cache', quiet: true });
     });
@@ -139,11 +160,9 @@ describe('parseOptions', () => {
     });
 
     it('removes the claimed word from the positionals', () => {
-      const { values, positionals } = parseOptions(
-        ['build', '--cache', '/tmp/c', 'extra'],
-        specs,
-        { allowPositionals: true },
-      );
+      const { values, positionals } = parseOptions(['build', '--cache', '/tmp/c', 'extra'], specs, {
+        allowPositionals: true,
+      });
 
       expect(values.cache).toBe('/tmp/c');
       expect(positionals).toEqual(['build', 'extra']);
@@ -189,15 +208,18 @@ describe('parseOptions', () => {
     });
 
     it('rejects --no- on an option that did not opt in', () => {
-      expect(() => parseOptions(['--no-quiet'], { quiet: { type: 'boolean' } }))
-        .toThrow("Unknown option '--no-quiet'");
-      expect(() => parseOptions(['--no-output'], { output: { type: 'string' } }))
-        .toThrow("Unknown option '--no-output'");
+      expect(() => parseOptions(['--no-quiet'], { quiet: { type: 'boolean' } })).toThrow(
+        "Unknown option '--no-quiet'",
+      );
+      expect(() => parseOptions(['--no-output'], { output: { type: 'string' } })).toThrow(
+        "Unknown option '--no-output'",
+      );
     });
 
     it('rejects --no- on an option that does not exist', () => {
-      expect(() => parseOptions(['--no-zzz'], { quiet: { type: 'boolean' } }))
-        .toThrow("Unknown option '--no-zzz'");
+      expect(() => parseOptions(['--no-zzz'], { quiet: { type: 'boolean' } })).toThrow(
+        "Unknown option '--no-zzz'",
+      );
     });
   });
 
@@ -219,18 +241,20 @@ describe('parseOptions', () => {
     });
 
     it('surfaces a rejection as an OptionError', () => {
-      expect(() => parseOptions(['--day=nope'], {
-        day: {
-          type: 'string',
-          transform: (raw, flag) => {
-            if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-              throw new OptionError(`Invalid ${flag} value: ${raw} (expected YYYY-MM-DD)`);
-            }
+      expect(() =>
+        parseOptions(['--day=nope'], {
+          day: {
+            type: 'string',
+            transform: (raw, flag) => {
+              if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+                throw new OptionError(`Invalid ${flag} value: ${raw} (expected YYYY-MM-DD)`);
+              }
 
-            return raw;
+              return raw;
+            },
           },
-        },
-      })).toThrow('Invalid --day value: nope (expected YYYY-MM-DD)');
+        }),
+      ).toThrow('Invalid --day value: nope (expected YYYY-MM-DD)');
     });
   });
 });

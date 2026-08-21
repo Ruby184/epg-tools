@@ -159,22 +159,26 @@ export async function initGrabber(options: InitGrabberOptions): Promise<InitGrab
   // plain relative specifier — and one that survives being symlinked.
   const dir = path.dirname(options.configFile);
   const file = path.join(dir, options.name);
-  const version = options.version ?? await projectVersion(dir) ?? '0.1.0';
+  const version = options.version ?? (await projectVersion(dir)) ?? '0.1.0';
 
   if (!VERSION.test(version)) {
     throw new GrabberError(`Invalid grabber version "${version}" (expected x, x.y or x.y.z)`);
   }
 
-  if (!options.force && await exists(file)) {
+  if (!options.force && (await exists(file))) {
     throw new GrabberError(`${file} already exists; pass --force to replace it`);
   }
 
-  await writeFile(file, grabberShim({
-    name: options.name,
-    description: options.description ?? defaultDescription(options.name),
-    version,
-    config: `./${path.basename(options.configFile)}`,
-  }), 'utf8');
+  await writeFile(
+    file,
+    grabberShim({
+      name: options.name,
+      description: options.description ?? defaultDescription(options.name),
+      version,
+      config: `./${path.basename(options.configFile)}`,
+    }),
+    'utf8',
+  );
 
   // It is run by name, so it has to be executable — the one step a user would
   // otherwise have to be told about.
@@ -182,10 +186,12 @@ export async function initGrabber(options: InitGrabberOptions): Promise<InitGrab
 
   return {
     file,
-    warnings: GRABBER_NAME.test(options.name) ? [] : [
-      `Warning: "${options.name}" is not named tv_grab_<country>[_<source>], so`
-      + ` tv_find_grabbers and tvheadend will not find it on PATH`,
-    ],
+    warnings: GRABBER_NAME.test(options.name)
+      ? []
+      : [
+          `Warning: "${options.name}" is not named tv_grab_<country>[_<source>], so` +
+            ` tv_find_grabbers and tvheadend will not find it on PATH`,
+        ],
     hints: [
       '',
       'Put it on your PATH, then configure it:',

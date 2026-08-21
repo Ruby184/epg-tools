@@ -135,11 +135,13 @@ export function defineConfig<S extends readonly StageDefaults[]>(
 
   const stages = options.stages ?? ([] as unknown as S);
 
-  const compose = options.readers ?? ((supplied: readonly ConfigReader[]): ConfigReader[] => [
-    ...supplied,
-    ...(options.env === undefined ? [] : [envReader(options.env)]),
-    defaultsReader(stages),
-  ]);
+  const compose =
+    options.readers ??
+    ((supplied: readonly ConfigReader[]): ConfigReader[] => [
+      ...supplied,
+      ...(options.env === undefined ? [] : [envReader(options.env)]),
+      defaultsReader(stages),
+    ]);
 
   const resolve = async (...supplied: ConfigReader[]): Promise<EpgConfig> =>
     config(createConfigContext(compose(supplied)));

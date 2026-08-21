@@ -52,12 +52,15 @@ function siteSource(fail = false): string {
 }
 
 async function plainConfig(dir: string, options: { fail?: boolean } = {}): Promise<string> {
-  return configFile(dir, `export default {
+  return configFile(
+    dir,
+    `export default {
     sites: [${siteSource(options.fail)}],
     days: 1,
     output: ${JSON.stringify(join(dir, 'guide.xml'))},
     cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
-  };`);
+  };`,
+  );
 }
 
 async function run(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
@@ -101,7 +104,9 @@ describe('epg', () => {
     expect(stderr).toBe('');
     expect(stdout).toContain('Grab done: 1 fetched, 0 from cache, 0 failed');
     expect(stdout).toContain(`Guide written to ${join(dir, 'guide.xml')}`);
-    expect(await readFile(join(dir, 'guide.xml'), 'utf8')).toContain('<channel id="one.example.tv">');
+    expect(await readFile(join(dir, 'guide.xml'), 'utf8')).toContain(
+      '<channel id="one.example.tv">',
+    );
   });
 
   it('says nothing under --quiet, and still writes the guide', async () => {
@@ -135,8 +140,16 @@ describe('epg', () => {
     const output = join(dir, 'elsewhere', 'other.xml');
 
     const { code } = await run([
-      'build', '--config', config, '--quiet',
-      '--days', '2', '--output', output, '--cache-dir', join(dir, 'other-cache'),
+      'build',
+      '--config',
+      config,
+      '--quiet',
+      '--days',
+      '2',
+      '--output',
+      output,
+      '--cache-dir',
+      join(dir, 'other-cache'),
     ]);
 
     expect(code).toBe(0);
@@ -168,7 +181,9 @@ describe('epg', () => {
 
   it('resolves a configuration that answers itself from the environment', async () => {
     const dir = await tempDir();
-    const config = await configFile(dir, `export default (...readers) => {
+    const config = await configFile(
+      dir,
+      `export default (...readers) => {
       const value = readers.map((reader) => reader.read('label')).find(Boolean)
         ?? [process.env.EPG_CLI_TEST_LABEL];
 
@@ -179,7 +194,8 @@ describe('epg', () => {
         cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
         meta: { sourceInfoName: value[0] },
       };
-    };`);
+    };`,
+    );
 
     vi.stubEnv('EPG_CLI_TEST_LABEL', 'from-env');
 
@@ -187,8 +203,9 @@ describe('epg', () => {
       const { code } = await run(['build', '--config', config, '--quiet']);
 
       expect(code).toBe(0);
-      expect(await readFile(join(dir, 'guide.xml'), 'utf8'))
-        .toContain('source-info-name="from-env"');
+      expect(await readFile(join(dir, 'guide.xml'), 'utf8')).toContain(
+        'source-info-name="from-env"',
+      );
     } finally {
       vi.unstubAllEnvs();
     }
@@ -230,7 +247,10 @@ describe('epg init-grabber', () => {
     const config = await plainConfig(dir);
 
     const { code, stdout, stderr } = await run([
-      'init-grabber', 'tv_grab_sk_example', '--config', config,
+      'init-grabber',
+      'tv_grab_sk_example',
+      '--config',
+      config,
     ]);
 
     expect(code).toBe(0);
@@ -279,8 +299,14 @@ describe('epg init-grabber', () => {
     const config = await plainConfig(dir);
 
     const { code } = await run([
-      'init-grabber', 'tv_grab_sk_example', '--config', config,
-      '--description', 'Slovakia (example.tv)', '--grabber-version', '2.3.4',
+      'init-grabber',
+      'tv_grab_sk_example',
+      '--config',
+      config,
+      '--description',
+      'Slovakia (example.tv)',
+      '--grabber-version',
+      '2.3.4',
     ]);
 
     expect(code).toBe(0);
@@ -291,7 +317,12 @@ describe('epg init-grabber', () => {
 
     // Caught while writing the file rather than on the grabber's first run.
     const bad = await run([
-      'init-grabber', 'tv_grab_sk_other', '--config', config, '--grabber-version', '1.0-beta',
+      'init-grabber',
+      'tv_grab_sk_other',
+      '--config',
+      config,
+      '--grabber-version',
+      '1.0-beta',
     ]);
 
     expect(bad.code).toBe(1);
