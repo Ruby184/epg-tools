@@ -188,16 +188,19 @@ export function sitePacing(
   queue.on('rateLimit', () => log(`[${config.site}] rate limit reached, waiting for the window`));
   queue.on('rateLimitCleared', () => log(`[${config.site}] rate limit window open again`));
 
-  // A cancelled run must not sit out the rest of a hold, and must not send what
-  // it had queued either: dropping those here is one listener for the site
-  // rather than one per task. A paused queue with nothing left in it still has
-  // to reach idle, so it is released rather than left holding.
+  // A cancelled run must not sit out the rest of a hold — the timer is not
+  // unref'd, so it would hold the process open — and must not resume either.
+  // Resuming would *send* what the cancel is dropping: a listener on the run's
+  // signal is called before the task signals derived from it are aborted, so
+  // starting the queue here hands out tasks that are about to be removed. The
+  // hold is dropped and the queue left paused; each task takes itself out of it,
+  // and an emptied queue reaches idle whether it is paused or not.
   options.signal?.addEventListener(
     'abort',
     () => {
       clearTimeout(timer);
-      queue.clear();
-      release();
+      timer = undefined;
+      holdingUntil = 0;
     },
     { once: true },
   );

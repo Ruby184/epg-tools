@@ -234,7 +234,7 @@ describe('sitePacing', () => {
     }
   });
 
-  it('releases a hold when the run is cancelled, so the queue can reach idle', async () => {
+  it('drops a hold when the run is cancelled, without sending what it held', async () => {
     const server = await scripted([{ status: 429, headers: { 'retry-after': '600' } }]);
 
     try {
@@ -246,18 +246,25 @@ describe('sitePacing', () => {
       await hit(http, server.url);
       expect(queue.isPaused).toBe(true);
 
-      // Waiting behind the hold, and never sent: the cancel drops what is
-      // queued here, once for the site, rather than a task at a time.
+      // Queued the way a grab queues: with a signal of the task's own following
+      // the run's, which is what takes it out of the queue.
       let sent = 0;
-      void queue.add(async () => void sent++).catch(() => {});
+      const queued = queue
+        .add(async () => void sent++, { signal: AbortSignal.any([controller.signal]) })
+        .catch(() => 'dropped');
+
       expect(queue.size).toBe(1);
 
       controller.abort(new Error('cancelled'));
 
+      // Left paused on purpose: starting it here would hand out the very task
+      // the cancel is dropping, because this listener runs before the task's own
+      // signal is aborted.
+      expect(await queued).toBe('dropped');
+      expect(queue.isPaused).toBe(true);
+      expect(queue.size).toBe(0);
       // A paused queue with tasks in it never reaches idle, so a cancelled run
       // in the middle of a hold would otherwise wait out the whole 30 seconds.
-      expect(queue.isPaused).toBe(false);
-      expect(queue.size).toBe(0);
       await queue.onIdle();
       expect(sent).toBe(0);
       dispose();

@@ -226,59 +226,32 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
   });
 
   /**
-   * The run's signal, in the shape everything that passes it on wants: a site's
-   * pacing, its channel list and a request's context.
-   */
-  const cancel = signal ? { signal } : {};
-
-  /**
-   * The abort, as something a queued task can be raced against — one listener
-   * for the whole run.
+   * Queue one task, cancellable without paying for the privilege.
    *
-   * p-queue takes a signal per task, and adds two abort listeners for each — one
-   * while the task waits, another while it runs — which is what it costs:
-   * `addEventListener` scans the listeners already on that signal to reject a
-   * duplicate handler, so the price grows with the square of what is queued at
-   * once. The settling those listeners do can come from here instead, and the
-   * dropping from `clear()`, which is what the queues do when the signal fires —
-   * and which is also the removal the abort itself would otherwise do a task at
-   * a time, each scanning the queue for its own.
-   */
-  const cancelled = signal
-    ? new Promise<never>((_, reject) => {
-        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
-      })
-    : undefined;
-
-  // Nothing may be awaiting it at the moment it fires — a run that has already
-  // finished, say — and a rejection nobody is listening to is an unhandled one.
-  cancelled?.catch(() => {});
-
-  // What the sites' own queues do for themselves, in `sitePacing`.
-  signal?.addEventListener('abort', () => local.clear(), { once: true });
-
-  /**
-   * Queue one task, settled by whichever comes first: the task, or the abort.
+   * p-queue drops a waiting task and rejects it with the abort reason when the
+   * signal it was given fires, which is exactly the wanted behaviour: a
+   * cancelled run stops instead of dequeuing thousands of tasks only for each to
+   * notice and record a failure. What it cannot be given is the run's own
+   * signal, once per task — it registers two abort listeners for each, and
+   * `addEventListener` scans the listeners already there to reject a duplicate,
+   * so a shared signal costs with the square of what is queued at once.
    *
-   * A cancelled run stops rather than dequeuing thousands of tasks only for each
-   * to notice and record a failure — the queue drops what is waiting, and this
-   * is what tells the caller, which the drop itself does not: `clear()` discards
-   * the closure that would have settled the promise `add` returned.
-   *
-   * Already aborted, nothing is queued at all: the task must not run after the
-   * run it belongs to has been called off.
+   * A signal of the task's own, following the run's, is that same behaviour for
+   * nothing: each list holds only its own task's listeners, and aborting the run
+   * aborts every one of them. Filling and draining 8000 tasks costs what passing
+   * no signal at all costs.
    */
-  const enqueue = async <T>(
+  const enqueue = <T>(
     queue: PQueue,
-    task: () => Promise<T>,
+    task: (options: { signal?: AbortSignal | undefined }) => Promise<T>,
     options: { priority?: number } = {},
-  ): Promise<T> => {
-    signal?.throwIfAborted();
-
-    const running = queue.add(task, options);
-
-    return cancelled ? Promise.race([running, cancelled]) : running;
-  };
+  ): Promise<T> =>
+    queue.add(task, {
+      ...options,
+      // Not `[signal]` for the sake of a copy: `any` is what makes the listeners
+      // land on a list of this task's own.
+      ...(signal ? { signal: AbortSignal.any([signal]) } : {}),
+    });
 
   const runSite = async (config: AnySiteConfig): Promise<void> => {
     // Before its queue exists, let alone a request: a site that cannot be
@@ -293,13 +266,24 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // The queue and the client together: the signal rides on the instance, so
     // every call a site makes through it is abortable without the site having
     // to pass it on, and a slow-down the client meets stops the queue.
-    const { queue: inner, http, dispose } = sitePacing(config, { ...cancel, log });
+    const {
+      queue: inner,
+      http,
+      dispose,
+    } = sitePacing(config, {
+      ...(signal ? { signal } : {}),
+      log,
+    });
     const grabbedAt = now.toISOString();
 
     // Fetching the channel list is a request to the same source as the rest, so
     // it goes through the same queue: a site's `rateLimit` spaces the first EPG
     // request after it, rather than the two landing back to back.
-    const channels = await enqueue(inner, () => resolveChannels(config, { http, ...cancel }));
+    // The signal it is handed is p-queue's, this task's own: what governs the
+    // slot governs the work in it.
+    const channels = await enqueue(inner, ({ signal }) =>
+      resolveChannels(config, { http, ...(signal ? { signal } : {}) }),
+    );
 
     // Parse one channel-day out of the payload and cache it. Queued: `parseDay`
     // is the site's own code and the write is a file, so a wide response must
@@ -392,7 +376,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
 
     // The context for one request, in the shape this site's mode declares —
     // plus the channel-days it is for, which the plan already worked out.
-    const contextFor = (request: Request): RequestContextFor<BatchMode> => {
+    const contextFor = (request: Request, signal?: AbortSignal): RequestContextFor<BatchMode> => {
       // A Date of its own everywhere one is handed out, `from` and `to`
       // included. They are mutable — `Object.freeze` does not help, a Date
       // keeps its value in an internal slot rather than a property — so the
@@ -416,7 +400,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
             }
           : { day: request.days[0]!, date: dates[0]! }),
         http,
-        ...cancel,
+        ...(signal ? { signal } : {}),
       };
 
       // The mode and this shape were chosen together right here; the compiler
@@ -427,11 +411,11 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     for (const request of plan(await collectStale())) {
       // Nothing awaits this, and the task reports its own failures, so the only
       // rejection to swallow is the abort dropping it from the queue.
-      void enqueue(inner, async () => {
+      void enqueue(inner, async ({ signal }) => {
         let payload: unknown;
 
         try {
-          payload = await config.request(contextFor(request));
+          payload = await config.request(contextFor(request, signal));
         } catch (error) {
           // A failed request fails every channel-day it was covering.
           for (const { channel, day } of request.pairs) {
