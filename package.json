@@ -21,7 +21,7 @@
     "url": "git+https://github.com/Ruby184/epg-tools.git"
   },
   "bin": {
-    "epg": "./dist/cli/main.js"
+    "epg": "dist/cli/main.js"
   },
   "files": [
     "dist"
