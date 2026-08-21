@@ -14,7 +14,7 @@ Memory-efficient EPG toolkit for building [XMLTV](https://github.com/XMLTV/xmltv
 - **Provider extensions preserved** — non-DTD attributes and elements round-trip instead of being dropped, so consumers like [tvheadend's XPath-based grabber](https://github.com/tvheadend/tvheadend/blob/master/docs/class/epggrabber_modules.md#xmltv-xpath-examples-and-notes) can extract them: `uniqueID` on `<programme>`, `eit` codes on `<category>`, `<crid><series>…</series></crid>`, `<live/>`, `<lcn>`
 - **Warnings, not crashes** — malformed feeds never abort the stream. A bad programme is skipped and [reported as a warning](./docs/xmltv.md#warnings), not thrown: one bad programme in a 20 MB feed costs you one programme, not the guide
 - **Fluent builders** — [`ProgrammeBuilder`](./docs/xmltv.md#builders) and friends write the language-tagged model for you, and `parseDay` is handed one already bound to the channel-day it is parsing
-- **Merge strategies** — combine multiple sources per channel, including merging multi-language attributes of the same programme
+- **Merge strategies** — combine multiple sources per channel, including merging multi-language attributes of the same programme. Two sources rarely agree to the second, so the same broadcast is [recognized within a tolerance](./docs/configuration.md#what-counts-as-the-same-broadcast) — corroborated by the title, and by the two durations where they are known — and a programme that two adjacent days both reported is emitted once rather than twice
 - **An XMLTV grabber, from the same config** — [`epg init-grabber`](./docs/tv-grab.md) turns it into a `tv_grab_*` executable that tvheadend and `tv_find_grabbers` can drive
 
 Requires Node.js >= 20 (Node >= 23.6 to load `epg.config.ts` directly via native type stripping).
@@ -99,11 +99,13 @@ export default defineConfig({
     staleness: {
       alwaysRefetchDays: 1, // always refetch today
       maxAgeDays: 7,        // bust anything grabbed more than 7 days ago
+      emptyMaxAgeDays: 1,   // and a day that came back empty after one
     },
   },
   merge: {
     channelStrategy: 'merge-programmes',
     programmeStrategy: 'merge',
+    // match: { startToleranceMs: 300_000, titles: 'when-shifted' },  // the default
   },
 });
 ```

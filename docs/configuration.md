@@ -49,7 +49,7 @@ hardcode — a username, a password, a region. See
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
 | `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works). Bounds open files rather than pacing any source. |
-| `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge' }` | How several sites covering one channel are combined — see [Merge strategies](#merge-strategies). |
+| `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge' }` | How several sites covering one channel are combined, and what counts as the same broadcast (`match`) — see [Merge strategies](#merge-strategies). |
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 
@@ -88,7 +88,7 @@ Non-DTD attributes go in `extraAttributes` and are emitted verbatim.
 |---|---|---|---|
 | `dir` | `string` | `.epg-cache` in the working directory | Cache root. **Make it absolute** if the config is also used by a [grabber](./tv-grab.md), which runs from wherever it is called. |
 | `format` | `'ndjson' \| 'xmltv'` | `'ndjson'` | On-disk representation for **newly written** entries: `ndjson` writes `<day>.ndjson`, one JSON programme per line; `xmltv` writes `<day>.xml`, the programmes as XMLTV — pick it when you want the cache files readable by other XMLTV tooling. A store reads entries in **either** format whatever it is set to, so changing it does not invalidate what is already there, and an entry only ever exists in one format (the other is removed on write). |
-| `staleness` | `Partial<StalenessPolicy>` | `{ alwaysRefetchDays: 1, maxAgeDays: 7 }` | When a cached day is refetched. `alwaysRefetchDays: 1` means today only, `2` today and tomorrow, `0` never force-refetch. `maxAgeDays` busts anything grabbed longer ago than that. |
+| `staleness` | `Partial<StalenessPolicy>` | `{ alwaysRefetchDays: 1, maxAgeDays: 7, emptyMaxAgeDays: 1 }` | When a cached day is refetched. `alwaysRefetchDays: 1` means today only, `2` today and tomorrow, `0` never force-refetch. `maxAgeDays` busts anything grabbed longer ago than that, and `emptyMaxAgeDays` does the same for an entry that came back with **no programmes** — a source that was briefly broken is asked again the next day instead of leaving a hole for a week, while a channel that genuinely has nothing on costs one request a day rather than one per run. `0` refetches an empty day on any later run; a value as large as `maxAgeDays` turns the distinction off. |
 | `prune` | `boolean` | `true` | Remove cached days older than today after a successful grab. |
 
 ## CLI reference
@@ -148,9 +148,12 @@ was grabbed). On every run a channel-day is refetched only when:
 
 - it is not cached yet (e.g. day 14 after a day passed), or
 - it is within `alwaysRefetchDays` from today (near-term EPG changes often), or
-- it was grabbed more than `maxAgeDays` ago.
+- it was grabbed more than `maxAgeDays` ago, or
+- it holds no programmes and was grabbed more than `emptyMaxAgeDays` ago.
 
-Everything else is served from disk. Old days are pruned automatically after a
+Everything else is served from disk. A run says how many channel-days came back
+empty (`Grab done: 42 fetched (3 empty), …`), since nothing else would: no
+request failed, and the entries are cached like any other. Old days are pruned automatically after a
 grab (disable with `cache.prune: false`).
 
 Passing a `signal` cancels a run: what is still queued — requests, staleness
@@ -181,8 +184,48 @@ When several sites cover the same `xmltvId` (site order in `sites` = priority):
   - `first-wins` — one `<channel>`, programmes only from the first covering site
   - `keep-all` — no deduplication
 - `programmeStrategy` (for `merge-programmes`)
-  - `merge` (default) — programmes with the same start time become one element; language-tagged fields (`title`, `desc`, `category`, …) are unioned by `(lang, value)` — grab the same channel from a Slovak and an English source and get both languages in one programme
+  - `merge` (default) — programmes describing the same broadcast become one element; language-tagged fields (`title`, `desc`, `category`, …) are unioned by `(lang, value)` — grab the same channel from a Slovak and an English source and get both languages in one programme
   - `concat` — keep all programmes sorted by start
+
+### What counts as the same broadcast
+
+Sources rarely agree to the second: one publishes the schedule on a five-minute
+grid while another carries the real start. Matching on the instant alone would
+leave two elements per programme, which is the one thing merging is for — so
+`merge.match` decides, and by default:
+
+| field | default | what it does |
+|---|---|---|
+| `startToleranceMs` | `300_000` | How far apart two starts may be and still be one broadcast. `0` matches the instant exactly. |
+| `titles` | `'when-shifted'` | When titles must agree: only for starts that differ (`when-shifted`), for every pair (`always`), or never (`never`). Titles are compared case- and accent-insensitively, with whitespace collapsed; nothing a programme carries is rewritten. |
+
+A five-minute window is safe because a shifted pair has two more hurdles: it
+must agree on its title, and — when both sides say where they end — the shift
+must be **smaller than the shorter of the two durations**. Programmes that
+follow one another are separated by exactly the earlier one's duration, so that
+last rule is what keeps two same-titled three-minute clips apart however wide
+the tolerance is.
+
+Inside one source's own list none of this applies: two entries in a schedule are
+two broadcasts, and only entries naming the identical instant are pooled. For a
+source pair no option describes, pass a predicate instead:
+
+```ts
+merge: {
+  match: (a, b) => a.episodeNum?.[0]?.value === b.episodeNum?.[0]?.value,
+}
+```
+
+### Across the day boundary
+
+A cache entry is a channel-day, but a source's idea of a day is its own — plenty
+run 06:00 to 06:00, and plenty repeat the programme spanning midnight in both
+days' payloads. So a day is held back as the guide is written and merged with
+the next one before it is emitted: a programme two adjacent days both reported
+appears once, and programmes come out in start order across the boundary (under
+`concat` too, which keeps both copies but no longer emits them out of order).
+The working set is two days of one channel — flat in the size of the guide,
+whichever way.
 
 ---
 

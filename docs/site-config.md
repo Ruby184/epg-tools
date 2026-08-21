@@ -37,7 +37,7 @@ accepted) and the type of a channel's `data` from what `channels` returns.
 | `backoff` | `false \| SiteBackoff` | on: `{ statuses: [429, 503], fallbackMs: 5000, maxMs: 60000, adapt: true }` | What to do when the source says slow down. |
 | `batching` | `BatchMode` or `{ mode, channelsPerRequest?, daysPerRequest? }` | `'none'` | How much of the channel × day grid one `request` covers. |
 | `ky` | ky `Options` | — | Base options for this site's own ky instance: `prefix`, `headers`, `hooks`, `retry`, `timeout`, `dispatcher`, … |
-| `staleness` | `Partial<StalenessPolicy>` | the config's policy | Per-site override of when a cached day is refetched. |
+| `staleness` | `Partial<StalenessPolicy>` | the config's policy | Per-site override of when a cached day is refetched — including `emptyMaxAgeDays`, worth raising for a source with genuinely empty channels in it. |
 
 ### `GrabberChannel`
 

@@ -115,7 +115,7 @@ want is to read or write XMLTV; and a handful of names live only on a subpath
 | XMLTV | `escapeXml`, `serializeChannel`, `serializeProgramme`, `writeXmltvStream`, `writeXmltvToFile`, `parseXmltvStream`, `parseXmltvFile`, and every [date helper](./xmltv.md#dates) |
 | Cache | `FsCacheStore`, `isStale`, `DEFAULT_STALENESS` |
 | Grabber | `grab`, `defineSiteConfig`, `resolveChannels`, `resolveSites`, `channelElement`, `siteHttp`, `sitePacing`, `retryAfterMs` |
-| Merge | `mergeProgrammes`, `mergeProgrammeLists`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
+| Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
 
 Plus the types for all of the above (`EpgConfig`, `SiteConfig`,
 `GrabberChannel`, `XmltvProgramme`, `XmltvChannel`, …).
@@ -156,7 +156,19 @@ through — the site's `channelInfo` if it has one, `defaultChannelInfo` if not.
 ### `epg-tools/merge`
 
 `generateGuide`, `writeGuide`, `mergeProgrammes`, `mergeProgrammeLists`,
+`mergeInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`,
 `mergeChannels`*, `defaultChannelInfo`.
+
+`mergeProgrammeLists(lists, strategy, match?)` combines per-site lists in
+priority order; `match` is a `ProgrammeMatch` object, or a predicate of
+your own — see [what counts as the same
+broadcast](./configuration.md#what-counts-as-the-same-broadcast).
+`mergeInto(target, incoming, resolveMatch(match))` is the piece underneath it:
+one source's list folded into a sorted accumulator, which is also how the guide
+carries a day across the boundary into the next.
+
+`generateGuide` takes `siteConcurrency` as well, bounding how many sites resolve
+a fetched channel list at once — `build` passes the config's own.
 
 ### `epg-tools/tv-grab`
 
