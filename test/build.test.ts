@@ -222,4 +222,67 @@ describe('a configuration that still needs its answers', () => {
     expect(calls).toBe(1);
     expect(await readFile(join(dir, 'guide.xml'), 'utf8')).toContain('one.example');
   });
+
+  it('asks every site for its channels at once when a merge has to ask', async () => {
+    const dir = await tempDir();
+    let waiting = 0;
+    let both: (() => void) | undefined;
+    // Nobody resolves until both sites are inside their channels function, so
+    // this only settles if the merge asks them in parallel.
+    const together = new Promise<void>((resolve) => {
+      both = resolve;
+    });
+
+    const lazy = (id: string): SiteConfig<unknown> => ({
+      ...site([]),
+      site: id,
+      channels: async () => {
+        if (++waiting === 2) {
+          both?.();
+        }
+
+        await together;
+
+        return [{ xmltvId: id, siteId: '1', name: id }];
+      },
+    });
+
+    // Only the merge runs, so the pre-resolved lists a build hands down are not
+    // what is being measured here.
+    await runMerge(config(dir, { sites: [lazy('a.example'), lazy('b.example')] }), { now: NOW });
+
+    const guide = await readFile(join(dir, 'guide.xml'), 'utf8');
+
+    expect(guide).toContain('a.example');
+    expect(guide).toContain('b.example');
+  });
+
+  it('holds a merge to siteConcurrency when it is set', async () => {
+    const dir = await tempDir();
+    let inFlight = 0;
+    let peak = 0;
+
+    const lazy = (id: string): SiteConfig<unknown> => ({
+      ...site([]),
+      site: id,
+      channels: async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inFlight--;
+
+        return [{ xmltvId: id, siteId: '1', name: id }];
+      },
+    });
+
+    await runMerge(
+      config(dir, {
+        sites: [lazy('a.example'), lazy('b.example'), lazy('c.example')],
+        siteConcurrency: 1,
+      }),
+      { now: NOW },
+    );
+
+    expect(peak).toBe(1);
+  });
 });

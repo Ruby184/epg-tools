@@ -1,6 +1,6 @@
 import { dayRange, toDayString } from '../core/days.js';
 import { writeOutput, type OutputTarget } from '../core/output.js';
-import { channelElement, defaultChannelInfo, resolveChannels } from '../grabber/channels.js';
+import { channelElement, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { writeXmltvStream } from '../xmltv/main.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
@@ -36,11 +36,14 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   const programmeStrategy = options.merge?.programmeStrategy ?? 'merge';
   const { cache, logger } = options;
 
-  const resolved: { config: AnySiteConfig; channels: GrabberChannel[] }[] = [];
-
-  for (const config of options.sites) {
-    resolved.push({ config, channels: await resolveChannels(config) });
-  }
+  // Through the same helper the grab uses, so a site that fetches its channel
+  // list is asked the same way by both — and every site at once rather than one
+  // after another, since each is a single request to a host of its own.
+  const resolved = (
+    await resolveSites(options.sites, {
+      ...(options.siteConcurrency !== undefined ? { concurrency: options.siteConcurrency } : {}),
+    })
+  ).map((config) => ({ config, channels: config.channels as GrabberChannel[] }));
 
   const registry: RegistryEntry[] = [];
 

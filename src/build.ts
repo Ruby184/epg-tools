@@ -44,6 +44,7 @@ function guideOptions(config: EpgConfig, options: RunOptions, now: Date): BuildG
     startDay: startDayOf(options, now),
     now,
     ...(config.days !== undefined ? { days: config.days } : {}),
+    ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
     ...(config.merge ? { merge: config.merge } : {}),
     ...(config.meta ? { meta: config.meta } : {}),
     ...(config.indent !== undefined ? { indent: config.indent } : {}),

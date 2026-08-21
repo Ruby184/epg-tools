@@ -38,6 +38,12 @@ export interface BuildGuideOptions {
   cache: CacheStore;
   /** Days to include, starting at {@link startDay}. Defaults to 7. */
   days?: number;
+  /**
+   * How many sites resolve their channel lists in parallel. Defaults to all —
+   * pass the run's `siteConcurrency` to hold a merge to the same bound the grab
+   * itself uses. Only sites whose `channels` is a function make a request here.
+   */
+  siteConcurrency?: number;
   now?: Date;
   /**
    * First day of the guide window as `YYYY-MM-DD`. Defaults to `now`'s day.
