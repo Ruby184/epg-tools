@@ -127,9 +127,15 @@ async function report(
   log: ((message: string) => void) | undefined,
   stderr: Writable,
 ): Promise<number> {
-  log?.(
-    `Grab done: ${summary.fetched} fetched, ${summary.fromCache} from cache, ${summary.failed.length} failed`,
-  );
+  // A day that came back with nothing is not a failure — a channel with no
+  // listings is a legitimate answer — but it is the one thing a run cannot
+  // otherwise see, so it is named beside the fetches it is part of.
+  const fetched =
+    summary.empty > 0
+      ? `${summary.fetched} fetched (${summary.empty} empty)`
+      : `${summary.fetched} fetched`;
+
+  log?.(`Grab done: ${fetched}, ${summary.fromCache} from cache, ${summary.failed.length} failed`);
 
   // Failures, so they are reported even under --quiet.
   await writeLines(

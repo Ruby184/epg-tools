@@ -478,6 +478,17 @@ export interface GrabTaskError {
 export interface GrabSummary {
   /** Channel-days fetched from the network. */
   fetched: number;
+  /**
+   * Of those, the ones that parsed to no programmes at all — counted here as
+   * well as in {@link fetched}, since the request did happen.
+   *
+   * A day that comes back empty is the one failure a run cannot see: nothing
+   * threw, and the entry is cached like any other. It is reported rather than
+   * treated as a failure because a channel with nothing on is a legitimate
+   * answer; a number that climbs is what says otherwise. `emptyMaxAgeDays`
+   * governs how soon such an entry is asked about again.
+   */
+  empty: number;
   /** Channel-days skipped because the cache was fresh. */
   fromCache: number;
   failed: GrabTaskError[];

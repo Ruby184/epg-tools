@@ -46,13 +46,13 @@ describe('isStale', () => {
   });
 
   it('does not force-refetch past days even inside the refetch window', () => {
-    const policy: StalenessPolicy = { alwaysRefetchDays: 5, maxAgeDays: 7 };
+    const policy: StalenessPolicy = { ...DEFAULT_STALENESS, alwaysRefetchDays: 5 };
 
     expect(isStale('2026-07-10', freshMeta, policy, now)).toBe(false);
   });
 
   it('respects a wider alwaysRefetchDays window for future days', () => {
-    const policy: StalenessPolicy = { alwaysRefetchDays: 3, maxAgeDays: 7 };
+    const policy: StalenessPolicy = { ...DEFAULT_STALENESS, alwaysRefetchDays: 3 };
 
     expect(isStale('2026-07-19', freshMeta, policy, now)).toBe(true);
     expect(isStale('2026-07-20', freshMeta, policy, now)).toBe(false);
@@ -62,6 +62,41 @@ describe('isStale', () => {
     const corruptMeta = { grabbedAt: 'not-a-date', programmeCount: 3 };
 
     expect(isStale('2026-07-20', corruptMeta, DEFAULT_STALENESS, now)).toBe(true);
+  });
+
+  describe('an entry that came back with no programmes', () => {
+    // Hours old, so it is inside emptyMaxAgeDays as well as maxAgeDays.
+    const emptyMeta = { grabbedAt: '2026-07-17T10:00:00.000Z', programmeCount: 0 };
+
+    it('stays fresh on the run that wrote it', () => {
+      expect(isStale('2026-07-20', emptyMeta, DEFAULT_STALENESS, now)).toBe(false);
+    });
+
+    it('goes stale a day later, while a full entry of the same age does not', () => {
+      const yesterday = { grabbedAt: '2026-07-16T09:00:00.000Z', programmeCount: 0 };
+      const full = { ...yesterday, programmeCount: 3 };
+
+      expect(isStale('2026-07-20', yesterday, DEFAULT_STALENESS, now)).toBe(true);
+      expect(isStale('2026-07-20', full, DEFAULT_STALENESS, now)).toBe(false);
+    });
+
+    it('is stale on any later run when emptyMaxAgeDays is 0', () => {
+      const policy: StalenessPolicy = { ...DEFAULT_STALENESS, emptyMaxAgeDays: 0 };
+
+      expect(isStale('2026-07-20', emptyMeta, policy, now)).toBe(true);
+      // The entry this run just wrote is not yet older than "no days", so a
+      // grab does not refetch what it has only now cached.
+      expect(
+        isStale('2026-07-20', { grabbedAt: now.toISOString(), programmeCount: 0 }, policy, now),
+      ).toBe(false);
+    });
+
+    it('ages out with maxAgeDays when emptyMaxAgeDays is turned off', () => {
+      const policy: StalenessPolicy = { ...DEFAULT_STALENESS, emptyMaxAgeDays: 7 };
+      const yesterday = { grabbedAt: '2026-07-16T09:00:00.000Z', programmeCount: 0 };
+
+      expect(isStale('2026-07-20', yesterday, policy, now)).toBe(false);
+    });
   });
 });
 

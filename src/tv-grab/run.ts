@@ -283,7 +283,12 @@ async function execute(
       queueLine(stderr, `${failure.site} ${failure.channelId} ${failure.day}: ${message}`);
     }
 
-    log?.(`grabbed ${summary.fetched}, from cache ${summary.fromCache}, failed ${failed}`);
+    // Empty channel-days are a subset of what was grabbed, so they are named
+    // beside it — and only when there are any, since none is the normal case.
+    const grabbed =
+      summary.empty > 0 ? `${summary.fetched} (${summary.empty} empty)` : `${summary.fetched}`;
+
+    log?.(`grabbed ${grabbed}, from cache ${summary.fromCache}, failed ${failed}`);
   }
 
   await writeOutput(values.output ?? stdout, guideStream(selected, runOptions));

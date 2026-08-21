@@ -10,7 +10,10 @@ const DAY_MS = 86_400_000;
  * - it is not cached at all (`meta` is `undefined`), or
  * - the day falls within the policy's always-refetch window, i.e.
  *   `0 <= diffDays(day, today) < alwaysRefetchDays`, or
- * - the entry was grabbed more than `maxAgeDays` days before `now`.
+ * - the entry was grabbed more than `maxAgeDays` days before `now` —
+ *   `emptyMaxAgeDays` instead for an entry that holds no programmes, since a
+ *   day that came back empty is as likely to be a source that was briefly
+ *   broken as it is a channel with nothing on.
  */
 export function isStale(
   day: string,
@@ -31,5 +34,7 @@ export function isStale(
   // An unparseable grabbedAt makes the age NaN; treat that as stale rather
   // than letting a corrupt entry stay "fresh" forever.
   const age = now.getTime() - Date.parse(meta.grabbedAt);
-  return Number.isNaN(age) || age > policy.maxAgeDays * DAY_MS;
+  const maxAgeDays = meta.programmeCount === 0 ? policy.emptyMaxAgeDays : policy.maxAgeDays;
+
+  return Number.isNaN(age) || age > maxAgeDays * DAY_MS;
 }

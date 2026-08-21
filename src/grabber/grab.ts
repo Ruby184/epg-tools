@@ -208,6 +208,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
   const { cache, signal } = options;
 
   let fetched = 0;
+  let empty = 0;
   let fromCache = 0;
   const failed: GrabTaskError[] = [];
 
@@ -320,6 +321,11 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
             grabbedAt,
           });
           fetched++;
+
+          if (programmes.length === 0) {
+            empty++;
+          }
+
           log(`[${site}] ${channel.xmltvId} ${day}: ${programmes.length} programmes`);
         },
         { priority: 1 },
@@ -499,5 +505,5 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     ),
   );
 
-  return { fetched, fromCache, failed };
+  return { fetched, empty, fromCache, failed };
 }

@@ -167,6 +167,64 @@ describe('grab', () => {
     expect(fetchedDays).toEqual([TOMORROW]);
   });
 
+  it('counts a channel-day that parsed to nothing, without failing it', async () => {
+    const cache = new MemoryCache();
+    const config = makeConfig({
+      days: 2,
+      channels: [channel('one.example'), channel('two.example')],
+      parseDay({ channel: ch, day }) {
+        return ch.xmltvId === 'two.example' ? [] : [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    expect(summary.fetched).toBe(4);
+    expect(summary.empty).toBe(2);
+    expect(summary.failed).toEqual([]);
+    // Cached like any other entry — what makes it come round again is the
+    // staleness policy, not the grab.
+    expect(
+      cache.get({ site: 'example.com', channelId: 'two.example', day: TODAY })?.meta,
+    ).toMatchObject({ programmeCount: 0 });
+  });
+
+  it('refetches a day cached empty a day ago, and leaves a full one alone', async () => {
+    const cache = new MemoryCache();
+    const yesterday = new Date(NOW.getTime() - 26 * 3_600_000).toISOString();
+    const asked: string[] = [];
+
+    cache.seed(
+      { site: 'example.com', channelId: 'empty.example', day: TOMORROW },
+      {
+        grabbedAt: yesterday,
+        programmeCount: 0,
+      },
+    );
+    cache.seed(
+      { site: 'example.com', channelId: 'full.example', day: TOMORROW },
+      {
+        grabbedAt: yesterday,
+        programmeCount: 3,
+      },
+    );
+
+    const config = makeConfig({
+      days: 2,
+      channels: [channel('empty.example'), channel('full.example')],
+      staleness: { alwaysRefetchDays: 0 },
+      async request({ channel: ch, day }) {
+        asked.push(`${ch.xmltvId} ${day}`);
+        return { canned: true };
+      },
+    });
+
+    await grab([config], { cache, now: NOW });
+
+    expect(asked).toContain(`empty.example ${TOMORROW}`);
+    expect(asked).not.toContain(`full.example ${TOMORROW}`);
+  });
+
   it('alwaysRefetchDays=1 forces a refetch of today even when cached fresh', async () => {
     const cache = new MemoryCache();
 
@@ -646,7 +704,7 @@ describe('grab', () => {
     const summary = await grab([config], { cache, now: NOW, signal: controller.signal });
 
     expect(calls).toBe(0);
-    expect(summary).toEqual({ fetched: 0, fromCache: 0, failed: [] });
+    expect(summary).toEqual({ fetched: 0, empty: 0, fromCache: 0, failed: [] });
   });
 
   it('leaves nothing unhandled when the abort lands after the run is over', async () => {

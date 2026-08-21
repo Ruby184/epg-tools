@@ -109,6 +109,32 @@ describe('epg', () => {
     );
   });
 
+  it('names the channel-days that came back with nothing, and still succeeds', async () => {
+    const dir = await tempDir();
+    const config = await configFile(
+      dir,
+      `export default {
+        sites: [{
+          site: 'example.tv',
+          channels: [{ xmltvId: 'one.example.tv', siteId: '1', name: 'One' }],
+          async request() { return {}; },
+          parseDay: () => [],
+        }],
+        days: 1,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+    );
+
+    const { code, stdout, stderr } = await run(['build', '--config', config]);
+
+    // A channel with nothing on is a legitimate answer, so it is reported
+    // rather than failed.
+    expect(code).toBe(0);
+    expect(stderr).toBe('');
+    expect(stdout).toContain('Grab done: 1 fetched (1 empty), 0 from cache, 0 failed');
+  });
+
   it('says nothing under --quiet, and still writes the guide', async () => {
     const dir = await tempDir();
     const config = await plainConfig(dir);
