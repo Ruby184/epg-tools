@@ -1127,23 +1127,60 @@ describe('grab with batching: both', () => {
   });
 });
 
-describe('grab without a fetch', () => {
-  it('fails the site rather than silently grabbing nothing', async () => {
+describe('grab with a site that is missing a mandatory member', () => {
+  /** What the site failed with, for a config the types would have caught. */
+  async function failure(config: Partial<SiteConfig<unknown>>): Promise<string> {
     const cache = new MemoryCache();
-    const config = {
+    const summary = await grab([config as SiteConfig<unknown>], { cache, now: NOW });
+
+    expect(summary.fetched).toBe(0);
+    expect(cache.entries.size).toBe(0);
+    expect(summary.failed).toHaveLength(1);
+    expect(summary.failed[0]!.error).toBeInstanceOf(TypeError);
+
+    return (summary.failed[0]!.error as Error).message;
+  }
+
+  /** A site that would work, less the one member the case is about. */
+  function without(missing: keyof SiteConfig<unknown>): Partial<SiteConfig<unknown>> {
+    const config: Partial<SiteConfig<unknown>> = {
       site: 'example.com',
       channels: [channel('one.example')],
       days: 1,
-      parseDay({ day }: { day: string }) {
+      async request() {
+        return { canned: true };
+      },
+      parseDay({ day }) {
         return [programme(`${day}T06:00:00.000Z`)];
       },
-    } as unknown as SiteConfig<unknown>;
+    };
 
-    const summary = await grab([config], { cache, now: NOW });
+    delete config[missing];
 
-    expect(summary.fetched).toBe(0);
-    expect(summary.failed).toHaveLength(1);
-    expect(summary.failed[0]!.error).toBeInstanceOf(Error);
-    expect((summary.failed[0]!.error as Error).message).toContain('must define request');
+    return config;
+  }
+
+  it('names the cache namespace a site without one would have shared', async () => {
+    expect(await failure(without('site'))).toContain('A site must define site');
+  });
+
+  it('fails the site rather than dying on the channel list', async () => {
+    expect(await failure(without('channels'))).toContain('Site "example.com" must define channels');
+  });
+
+  // The two halves of a site: both are checked before the first request goes
+  // out, rather than each where it is called.
+  it('fails the site rather than silently grabbing nothing', async () => {
+    expect(await failure(without('request'))).toContain('Site "example.com" must define request');
+  });
+
+  it('fails the site rather than once per channel-day it fetched', async () => {
+    expect(await failure(without('parseDay'))).toContain('Site "example.com" must define parseDay');
+  });
+
+  it('says what arrived when the member is there but is not a function', async () => {
+    const config = { ...without('parseDay'), parseDay: 'parseDay' as unknown as never };
+
+    expect(await failure(config)).toContain("channel-day's programmes (got a string)");
   });
 });

@@ -30,6 +30,12 @@ console.log(summary); // { fetched, fromCache, failed }
 `fromCache` (skipped because the cache was fresh); `failed` is the **list** of
 errors, not a count, so `summary.failed.length` is what to check.
 
+A `failed` entry names the channel-day it is about, except where the failure is
+the whole site's — a site that cannot be read at all, because it is missing
+`site`, `channels`, `request` or `parseDay`, is one entry with `channelId` and
+`day` as `*`. That is checked before the site's first request, and it fails only
+that site: the others in the same run carry on.
+
 `build`, `runGrab`, `runMerge` and `guideStream` all take either shape — a
 plain `EpgConfig` or a `defineConfig` factory still waiting for its answers —
 so the import above works whichever your config file is, exactly as the CLI

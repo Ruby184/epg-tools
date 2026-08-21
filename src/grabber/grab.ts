@@ -26,6 +26,9 @@ import type {
  */
 const DEFAULT_LOCAL_CONCURRENCY = 16;
 
+/** How many days a run covers when neither the site nor the run says. */
+const DEFAULT_DAYS = 7;
+
 /** A parse may hand back either form; the cache only knows the object. */
 function built(entry: ParsedProgramme): XmltvProgramme {
   return entry instanceof ProgrammeBuilder ? entry.build() : entry;
@@ -44,12 +47,14 @@ function errorMessage(error: unknown): string {
  * Keeping the two axes as plain numbers is what lets one chunking pass serve
  * every mode — `none` is just the grid cut into 1×1 requests.
  */
-function resolveBatching(batching: BatchingOption | undefined): {
+interface ResolvedBatching {
   manyChannels: boolean;
   manyDays: boolean;
   maxChannels: number;
   maxDays: number;
-} {
+}
+
+function resolveBatching(batching: BatchingOption | undefined): ResolvedBatching {
   // Both shapes `batching` accepts, and its absence, as one object.
   const settings: { mode: BatchMode; channelsPerRequest?: number; daysPerRequest?: number } =
     typeof batching === 'string' ? { mode: batching } : (batching ?? { mode: 'none' });
@@ -81,6 +86,92 @@ function chunk<T>(items: T[], size: number): T[][] {
   }
 
   return chunks;
+}
+
+/** What arrived instead, so a message about a mandatory member can name it. */
+function received(value: unknown): string {
+  if (value === null) {
+    return 'null';
+  }
+
+  if (Array.isArray(value)) {
+    return 'an array';
+  }
+
+  const kind = typeof value;
+
+  return kind === 'undefined' ? 'undefined' : `${kind === 'object' ? 'an' : 'a'} ${kind}`;
+}
+
+/**
+ * A site's settings as the planner needs them: checked, and with the run's
+ * defaults and the site's own overrides already folded in.
+ *
+ * Settings only — the site's `request` and `parseDay` are still called on the
+ * config itself, so a site written with `this` keeps it.
+ */
+interface ResolvedSite {
+  /** Cache namespace and log prefix. */
+  site: string;
+  /** The days this run covers for this site, ascending. */
+  window: string[];
+  /** How wide a request may be along each axis, and the context shape it gets. */
+  batching: ResolvedBatching;
+  /** When a cached day counts as stale: run policy under site override. */
+  staleness: StalenessPolicy;
+}
+
+/**
+ * Resolve one site against the run: check what it must bring, then settle every
+ * default in one pass, so nothing downstream spells one out again.
+ *
+ * The types make all four members mandatory, so the checks are for configs that
+ * arrive without having been held to them — plain JS, or a config file the CLI
+ * imported and this package never saw compiled. Each would otherwise surface a
+ * long way from its cause: `parseDay` once per channel-day, and only after every
+ * request had already gone out; `channels` as a missing `flatMap`; and `site`
+ * not at all, quietly filing this site's cached days under `undefined`, in with
+ * those of every other site that left it out.
+ *
+ * Each message says what the member is *for*, because at this point the mistake
+ * is usually a misspelling or a shape that has moved on, not ignorance that it
+ * exists.
+ */
+function resolveSite(config: AnySiteConfig, options: GrabOptions, startDay: string): ResolvedSite {
+  if (typeof config.site !== 'string' || config.site === '') {
+    throw new TypeError(
+      `A site must define site: a non-empty string, unique to it, naming its cache namespace ` +
+        `(got ${received(config.site)})`,
+    );
+  }
+
+  if (typeof config.channels !== 'function' && !Array.isArray(config.channels)) {
+    throw new TypeError(
+      `Site "${config.site}" must define channels: an array of channels, or a function ` +
+        `returning one (got ${received(config.channels)})`,
+    );
+  }
+
+  if (typeof config.request !== 'function') {
+    throw new TypeError(
+      `Site "${config.site}" must define request: a function fetching one request's raw data ` +
+        `(got ${received(config.request)})`,
+    );
+  }
+
+  if (typeof config.parseDay !== 'function') {
+    throw new TypeError(
+      `Site "${config.site}" must define parseDay: a function turning a response into one ` +
+        `channel-day's programmes (got ${received(config.parseDay)})`,
+    );
+  }
+
+  return {
+    site: config.site,
+    window: [...dayRange(startDay, config.days ?? options.days ?? DEFAULT_DAYS)],
+    batching: resolveBatching(config.batching),
+    staleness: { ...DEFAULT_STALENESS, ...options.staleness, ...config.staleness },
+  };
 }
 
 /** One channel-day: the unit of caching, parsing and failure reporting. */
@@ -144,9 +235,14 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
   const queued = signal ? { signal } : {};
 
   const runSite = async (config: AnySiteConfig): Promise<void> => {
-    if (typeof config.request !== 'function') {
-      throw new Error(`Site "${config.site}" must define request`);
-    }
+    // Before its queue exists, let alone a request: a site that cannot be
+    // resolved is one nothing else here can be asked about.
+    const {
+      site,
+      window,
+      batching: { manyChannels, manyDays, maxChannels, maxDays },
+      staleness: policy,
+    } = resolveSite(config, options, startDay);
 
     // The queue and the client together: the signal rides on the instance, so
     // every call a site makes through it is abortable without the site having
@@ -156,13 +252,6 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       http,
       dispose,
     } = sitePacing(config, { ...(signal ? { signal } : {}), log });
-    const window = [...dayRange(startDay, config.days ?? options.days ?? 7)];
-    const { manyChannels, manyDays, maxChannels, maxDays } = resolveBatching(config.batching);
-    const policy: StalenessPolicy = {
-      ...DEFAULT_STALENESS,
-      ...options.staleness,
-      ...config.staleness,
-    };
     const grabbedAt = now.toISOString();
 
     // Fetching the channel list is a request to the same source as the rest, so
@@ -203,11 +292,11 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
             .map((entry) => ({ ...built(entry), channel: channel.xmltvId }))
             .sort((a, b) => a.start.getTime() - b.start.getTime());
 
-          await cache.write({ site: config.site, channelId: channel.xmltvId, day }, programmes, {
+          await cache.write({ site, channelId: channel.xmltvId, day }, programmes, {
             grabbedAt,
           });
           fetched++;
-          log(`[${config.site}] ${channel.xmltvId} ${day}: ${programmes.length} programmes`);
+          log(`[${site}] ${channel.xmltvId} ${day}: ${programmes.length} programmes`);
         },
         { ...queued, priority: 1 },
       );
@@ -222,18 +311,14 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
         channels.flatMap((channel) =>
           window.map((day) =>
             local.add(async (): Promise<Pair | undefined> => {
-              const meta = await cache.getMeta({
-                site: config.site,
-                channelId: channel.xmltvId,
-                day,
-              });
+              const meta = await cache.getMeta({ site, channelId: channel.xmltvId, day });
 
               if (isStale(day, meta, policy, now)) {
                 return { channel, day };
               }
 
               fromCache++;
-              log(`[${config.site}] ${channel.xmltvId} ${day}: fresh in cache, skipping`);
+              log(`[${site}] ${channel.xmltvId} ${day}: fresh in cache, skipping`);
             }, queued),
           ),
         ),
@@ -311,10 +396,10 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
           } catch (error) {
             // A failed request fails every channel-day it was covering.
             for (const { channel, day } of request.pairs) {
-              failed.push({ site: config.site, channelId: channel.xmltvId, day, error });
+              failed.push({ site, channelId: channel.xmltvId, day, error });
             }
 
-            log(`[${config.site}] ${describe(request)}: ${errorMessage(error)}`);
+            log(`[${site}] ${describe(request)}: ${errorMessage(error)}`);
             return;
           }
 
@@ -325,8 +410,8 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
               try {
                 await store(channel, day, data);
               } catch (error) {
-                failed.push({ site: config.site, channelId: channel.xmltvId, day, error });
-                log(`[${config.site}] ${channel.xmltvId} ${day}: ${errorMessage(error)}`);
+                failed.push({ site, channelId: channel.xmltvId, day, error });
+                log(`[${site}] ${channel.xmltvId} ${day}: ${errorMessage(error)}`);
               }
             }),
           );
