@@ -11,6 +11,54 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.2.0](https://github.com/Ruby184/epg-tools/compare/v0.1.0...v0.2.0) (2026-08-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **grabber:** `parseDay`'s context calls the response `payload` rather than `data`, so a site reads `parseDay({ payload })` where it read `parseDay({ data })`. A channel's own `data` is untouched.
+* **grabber:** `delayMs` is replaced by `rateLimit`; `delayMs: 250` is now
+* **grabber:** `fetchDay` and `fetchDayBatch` are replaced by `request` plus `batching`; `batchSize` becomes `batching.channelsPerRequest`.
+
+### Features
+
+* **cli:** add epg init-grabber to write a tv_grab_* executable ([7cb5c5e](https://github.com/Ruby184/epg-tools/commit/7cb5c5e1d41d7623dce2d8ce00976ba9fe852cd5))
+* **grabber:** build programmes in parseDay with a builder bound to the channel ([690ec99](https://github.com/Ruby184/epg-tools/commit/690ec99372e320ec9aa61d4f0c7865a3070a3240))
+* **grabber:** build the channel element from the default one ([c16c199](https://github.com/Ruby184/epg-tools/commit/c16c199761cb9a1974e56016ebd471a7f8edcb16))
+* **grabber:** fetch a channel list with the site's own client ([be01615](https://github.com/Ruby184/epg-tools/commit/be0161580a2b67502b74bbc5122a8e62d7f4323e))
+* **grabber:** pace requests by rate limit, and stop when told to slow down ([844a21f](https://github.com/Ruby184/epg-tools/commit/844a21f3abb25ef66d99f637db8c17f592165598))
+* **tv-grab:** add defineStages for configuration stage literals ([b4dd603](https://github.com/Ruby184/epg-tools/commit/b4dd60365dec463515cd8ed4af214a0596527b77))
+* **xmltv:** let nested builder elements carry lang and extra children ([302e571](https://github.com/Ruby184/epg-tools/commit/302e57129f2027de845d02ff30a8bc635e68805c))
+
+
+### Bug Fixes
+
+* **build:** resolve a fetched channel list once for a whole build ([675235c](https://github.com/Ruby184/epg-tools/commit/675235c1a0ef82ef6c05d8d3a00bb1fecd8b8b4a))
+* **grabber:** bound the work a run queues, and drop it when aborted ([71d0f3e](https://github.com/Ruby184/epg-tools/commit/71d0f3e0d57f632786569d4e191f5bf4704cfa22))
+* **grabber:** check what a site brings before asking anything of it ([666d276](https://github.com/Ruby184/epg-tools/commit/666d276c8bffa2e2aeb17bae05c2e98e78903678))
+* **grabber:** hand a site nothing that aliases the planner's own state ([84ca311](https://github.com/Ruby184/epg-tools/commit/84ca311f566b46f35911fc0ac2e5bd56da40ed58))
+* **xmltv:** never write out a null attribute value ([9b84ae0](https://github.com/Ruby184/epg-tools/commit/9b84ae078ec1bc613b32c3f3c0b66ae23a088090))
+
+
+### Performance
+
+* **grabber:** cancel a run from one abort listener, not one per task ([68d99f3](https://github.com/Ruby184/epg-tools/commit/68d99f3f0c414957c1446e92ff03152f359f8b4e))
+
+
+### Refactoring
+
+* **cli:** share the stream-writing helpers between entry points ([260935a](https://github.com/Ruby184/epg-tools/commit/260935ac1f2759c6b71a6155277c70ce1e0c36fb))
+* **grabber:** name the parse context's response payload ([13493bc](https://github.com/Ruby184/epg-tools/commit/13493bc11608f2d76e0303add06f04d434b8025f))
+* **grabber:** one request method, batched along channels or days ([52b8606](https://github.com/Ruby184/epg-tools/commit/52b8606b7ac7625a70eec05af35b6b236047f41a))
+* **grabber:** spread the run's signal from one place ([92c1964](https://github.com/Ruby184/epg-tools/commit/92c1964addb3267e22159b77ae86b15d2a2106bd))
+* **xmltv:** extract skipping comments, CDATA and PIs from the scanner ([baf631b](https://github.com/Ruby184/epg-tools/commit/baf631bcc2df7a6c4858434b2a45004e6f01a0c1))
+
+
+### Documentation
+
+* describe what 0.1.0 shipped rather than the surface since ([3a2c2cd](https://github.com/Ruby184/epg-tools/commit/3a2c2cd078d8e4e6186a89f6a9542f740c8935d0))
+* split the manual into a docs/ folder and cover what was missing ([762e76c](https://github.com/Ruby184/epg-tools/commit/762e76c8cbc71a1ee679049f1c31521156dbdb55))
+
 ## 0.1.0
 
 Initial release.
