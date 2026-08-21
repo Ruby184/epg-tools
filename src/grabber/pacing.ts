@@ -133,55 +133,61 @@ export function sitePacing(
     timer = setTimeout(release, ms);
   };
 
-  const http = siteHttp(config, options.signal).extend({
-    hooks: {
-      afterResponse: [
-        ({ response }): void => {
-          if (backoff === undefined) {
-            return;
-          }
+  const client = siteHttp(config, options.signal);
 
-          if (backoff.statuses.includes(response.status)) {
-            clean = 0;
+  // A site with `backoff: false` gets the plain client. Not merely to save the
+  // comparison the hook would begin with: ky clones a response so that a hook
+  // may read it, and a clone left unread is a stream held open — a cost for
+  // nothing, on a site that has said it does not want any of this.
+  const http =
+    backoff === undefined
+      ? client
+      : client.extend({
+          hooks: {
+            afterResponse: [
+              ({ response }): void => {
+                if (backoff.statuses.includes(response.status)) {
+                  clean = 0;
 
-            // Concurrency the source has just told us was too much. Nothing to
-            // give back at 1, which is the default — this is for sites
-            // configured to run several requests at a time.
-            //
-            // Once per hold, not once per response: several requests in flight
-            // together are told off together, and halving for each of them
-            // would take a site from 8 to 1 over one violation — then charge it
-            // ten clean responses per step to climb back.
-            if (backoff.adapt && queue.concurrency > 1 && !holding()) {
-              queue.concurrency = Math.max(1, Math.floor(queue.concurrency / 2));
-              log(`[${config.site}] concurrency down to ${queue.concurrency}`);
-            }
+                  // Concurrency the source has just told us was too much.
+                  // Nothing to give back at 1, which is the default — this is
+                  // for sites configured to run several requests at a time.
+                  //
+                  // Once per hold, not once per response: several requests in
+                  // flight together are told off together, and halving for
+                  // each of them would take a site from 8 to 1 over one
+                  // violation — then charge it ten clean responses per step to
+                  // climb back.
+                  if (backoff.adapt && queue.concurrency > 1 && !holding()) {
+                    queue.concurrency = Math.max(1, Math.floor(queue.concurrency / 2));
+                    log(`[${config.site}] concurrency down to ${queue.concurrency}`);
+                  }
 
-            hold(
-              Math.min(
-                retryAfterMs(response.headers.get('retry-after')) ?? backoff.fallbackMs,
-                backoff.maxMs,
-              ),
-              response.status,
-            );
+                  hold(
+                    Math.min(
+                      retryAfterMs(response.headers.get('retry-after')) ?? backoff.fallbackMs,
+                      backoff.maxMs,
+                    ),
+                    response.status,
+                  );
 
-            return;
-          }
+                  return;
+                }
 
-          if (
-            backoff.adapt &&
-            response.ok &&
-            queue.concurrency < ceiling &&
-            ++clean >= RECOVER_AFTER
-          ) {
-            clean = 0;
-            queue.concurrency += 1;
-            log(`[${config.site}] concurrency back up to ${queue.concurrency}`);
-          }
-        },
-      ],
-    },
-  });
+                if (
+                  backoff.adapt &&
+                  response.ok &&
+                  queue.concurrency < ceiling &&
+                  ++clean >= RECOVER_AFTER
+                ) {
+                  clean = 0;
+                  queue.concurrency += 1;
+                  log(`[${config.site}] concurrency back up to ${queue.concurrency}`);
+                }
+              },
+            ],
+          },
+        });
 
   // Only ever fires for a site that is paced, and it is the one thing a
   // `rateLimit` gives no other sign of.
