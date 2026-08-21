@@ -226,13 +226,16 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
   });
 
   /**
-   * Handed to every queued task, which is what makes an abort take effect at
-   * once: p-queue drops a task that is still waiting and rejects it with the
-   * abort reason, so a cancelled run stops instead of dequeuing thousands of
-   * tasks only for each to notice and record a failure. What is already in
-   * flight aborts on its own — the same signal rides on the site's client.
+   * The run's signal, in the shape everything that passes it on wants: a site's
+   * pacing, its channel list, a request's context, and every queued task.
+   *
+   * Handing it to a task is what makes an abort take effect at once: p-queue
+   * drops a task that is still waiting and rejects it with the abort reason, so
+   * a cancelled run stops instead of dequeuing thousands of tasks only for each
+   * to notice and record a failure. What is already in flight aborts on its
+   * own — the same signal rides on the site's client.
    */
-  const queued = signal ? { signal } : {};
+  const cancel = signal ? { signal } : {};
 
   const runSite = async (config: AnySiteConfig): Promise<void> => {
     // Before its queue exists, let alone a request: a site that cannot be
@@ -247,20 +250,13 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // The queue and the client together: the signal rides on the instance, so
     // every call a site makes through it is abortable without the site having
     // to pass it on, and a slow-down the client meets stops the queue.
-    const {
-      queue: inner,
-      http,
-      dispose,
-    } = sitePacing(config, { ...(signal ? { signal } : {}), log });
+    const { queue: inner, http, dispose } = sitePacing(config, { ...cancel, log });
     const grabbedAt = now.toISOString();
 
     // Fetching the channel list is a request to the same source as the rest, so
     // it goes through the same queue: a site's `rateLimit` spaces the first EPG
     // request after it, rather than the two landing back to back.
-    const channels = await inner.add(
-      () => resolveChannels(config, { http, ...(signal ? { signal } : {}) }),
-      queued,
-    );
+    const channels = await inner.add(() => resolveChannels(config, { http, ...cancel }), cancel);
 
     // Parse one channel-day out of `data` and cache it. Queued: `parseDay` is
     // the site's own code and the write is a file, so a wide response must not
@@ -298,7 +294,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
           fetched++;
           log(`[${site}] ${channel.xmltvId} ${day}: ${programmes.length} programmes`);
         },
-        { ...queued, priority: 1 },
+        { ...cancel, priority: 1 },
       );
 
     // Which channel-days actually need fetching. The meta reads never leave the
@@ -319,7 +315,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
 
               fromCache++;
               log(`[${site}] ${channel.xmltvId} ${day}: fresh in cache, skipping`);
-            }, queued),
+            }, cancel),
           ),
         ),
       );
@@ -376,7 +372,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
             }
           : { day: request.days[0]!, date: dates[0]! }),
         http,
-        ...(signal ? { signal } : {}),
+        ...cancel,
       };
 
       // The mode and this shape were chosen together right here; the compiler
@@ -415,7 +411,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
               }
             }),
           );
-        }, queued)
+        }, cancel)
         .catch(() => {});
     }
 
@@ -438,7 +434,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
             failed.push({ site: config.site, channelId: '*', day: '*', error });
             log(`[${config.site}] site failed: ${errorMessage(error)}`);
           }
-        }, queued)
+        }, cancel)
         .catch(() => {}),
     ),
   );
