@@ -81,6 +81,7 @@
   "devDependencies": {
     "@commitlint/cli": "^21.2.2",
     "@commitlint/config-conventional": "^21.2.2",
+    "@conventional-commits/parser": "^0.4.1",
     "@iptv/xmltv": "^1.0.1",
     "@types/node": "^26.2.0",
     "epg-parser": "^0.5.0",

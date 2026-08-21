@@ -7,9 +7,88 @@
  * `BREAKING CHANGE:` footer) a major one.
  */
 
+import { parser, toConventionalChangelogFormat } from '@conventional-commits/parser';
+
+const BREAKING = ['BREAKING CHANGE', 'BREAKING-CHANGE'];
+
+/**
+ * The breaking-change note as written: everything from the keyword to the end
+ * of its paragraph.
+ */
+function noteAsWritten(raw) {
+  const lines = raw.split('\n');
+  const start = lines.findIndex((line) => BREAKING.some((word) => line.startsWith(`${word}:`)));
+
+  if (start === -1) {
+    return undefined;
+  }
+
+  const note = [lines[start].slice(lines[start].indexOf(':') + 1)];
+
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === '') {
+      break;
+    }
+
+    note.push(line);
+  }
+
+  return note.join('\n');
+}
+
+/**
+ * The same note as release-please will read it.
+ *
+ * Deliberately the very parser release-please uses, rather than a rule of our
+ * own about what a footer may look like: the two cannot then drift apart, and
+ * an upgrade that changes the parsing shows up here as a failing commit rather
+ * than as a sentence that stops halfway in a published changelog.
+ */
+function noteAsParsed(raw) {
+  try {
+    return toConventionalChangelogFormat(parser(raw)).notes.find((note) =>
+      BREAKING.includes(note.title),
+    )?.text;
+  } catch {
+    // Not parseable as a conventional commit at all, which the rules that
+    // config-conventional brings will say far better than this one could.
+    return undefined;
+  }
+}
+
+const flatten = (text) => text.replace(/\s+/g, ' ').trim();
+
+/**
+ * A `BREAKING CHANGE:` footer must survive the trip into the changelog whole.
+ *
+ * The parser ends a footer at the first line that looks like the start of
+ * another one — `token:` or `Token #123`, backticks around it or not — so a
+ * note whose second line opens with something like `rateLimit: { … }` is
+ * published cut off mid-sentence, in the one place readers go to find out what
+ * broke. It has happened here: v0.2.0's `delayMs` entry ends at "is now".
+ */
+function breakingNoteComplete(parsed) {
+  const raw = parsed.raw ?? '';
+  const written = noteAsWritten(raw);
+  const read = noteAsParsed(raw);
+
+  if (written === undefined || read === undefined) {
+    return [true];
+  }
+
+  const lost = flatten(written).slice(flatten(read).length).trim();
+
+  return [
+    lost === '',
+    `BREAKING CHANGE note is cut short — the changelog would lose ${JSON.stringify(lost)}. ` +
+      `Reword so no line of the footer starts with something like "token:" or "Token #1".`,
+  ];
+}
+
 /** @type {import('@commitlint/types').UserConfig} */
 export default {
   extends: ['@commitlint/config-conventional'],
+  plugins: [{ rules: { 'breaking-note-complete': breakingNoteComplete } }],
   rules: {
     'scope-enum': [
       2,
@@ -34,5 +113,6 @@ export default {
     // overrun rather than forcing a wrap that breaks it.
     'body-max-line-length': [0],
     'footer-max-line-length': [0],
+    'breaking-note-complete': [2, 'always'],
   },
 };
