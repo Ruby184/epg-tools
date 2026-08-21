@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { KyInstance } from 'ky';
 import { describe, expect, it } from 'vitest';
 import { retryAfterMs, sitePacing } from '../src/grabber/pacing.js';
 import type { AnySiteConfig } from '../src/grabber/types.js';
@@ -46,6 +47,27 @@ async function scripted(answers: { status: number; headers?: Record<string, stri
   };
 }
 
+/**
+ * One request, its body discarded.
+ *
+ * Nothing here reads a response, and a body left unread keeps its stream open.
+ * That matters because `afterResponse` makes ky clone the response: cancelling
+ * one branch of the tee cannot release the source while the other is still
+ * outstanding, so the pending cancellation is left for a later `abort()` to
+ * reject — into nobody, which is an unhandled rejection and a failed run.
+ *
+ * `throwHttpErrors` is off because these tests are about what the pacing does
+ * with a 4xx, not about the error ky would raise for one; that path reads the
+ * body itself.
+ */
+async function hit(http: KyInstance, url: string): Promise<Response> {
+  const response = await http.get(url, { retry: 0, throwHttpErrors: false });
+
+  await response.body?.cancel();
+
+  return response;
+}
+
 describe('retryAfterMs', () => {
   it('reads delta-seconds', () => {
     expect(retryAfterMs('30')).toBe(30_000);
@@ -76,9 +98,23 @@ describe('sitePacing', () => {
 
     try {
       const logs: string[] = [];
+      // Stamped from inside the log callback, which runs in the same tick as
+      // the hold's timer is scheduled. Reading the clock after the request
+      // instead would time from somewhere in the middle of the hold — the
+      // response still has to make its way back — and call a hold that worked
+      // too short.
+      let heldFrom = 0;
       const { queue, http, dispose } = sitePacing(
         site({ backoff: { fallbackMs: 60, maxMs: 60 } }),
-        { log: (message) => logs.push(message) },
+        {
+          log: (message) => {
+            logs.push(message);
+
+            if (message.includes('holding requests')) {
+              heldFrom = Date.now();
+            }
+          },
+        },
       );
 
       const ran: string[] = [];
@@ -96,8 +132,7 @@ describe('sitePacing', () => {
       });
       const waiting = [queue.add(() => void ran.push('a')), queue.add(() => void ran.push('b'))];
 
-      await http.get(server.url, { retry: 0, throwHttpErrors: false });
-      const toldOff = Date.now();
+      await hit(http, server.url);
 
       expect(queue.isPaused).toBe(true);
       expect(queue.size).toBe(2); // still queued, not thrown away
@@ -108,7 +143,7 @@ describe('sitePacing', () => {
 
       // They ran, and only once the hold was over.
       expect(ran).toEqual(['gate', 'a', 'b']);
-      expect(Date.now() - toldOff).toBeGreaterThanOrEqual(50);
+      expect(Date.now() - heldFrom).toBeGreaterThanOrEqual(60);
       expect(queue.isPaused).toBe(false);
       dispose();
     } finally {
@@ -125,7 +160,7 @@ describe('sitePacing', () => {
         log: (message) => logs.push(message),
       });
 
-      await http.get(server.url, { retry: 0, throwHttpErrors: false });
+      await hit(http, server.url);
 
       // Ten minutes is what it asked for; a grab is not sitting still for that.
       expect(logs).toContain('[example.tv] HTTP 429: holding requests for 40ms');
@@ -146,7 +181,7 @@ describe('sitePacing', () => {
         site({ concurrency: 4, backoff: { fallbackMs: 1, maxMs: 1 } }),
       );
 
-      await http.get(server.url, { retry: 0, throwHttpErrors: false });
+      await hit(http, server.url);
       expect(queue.concurrency).toBe(2);
 
       // Recovery is one at a time, and only after a clean stretch.
@@ -174,9 +209,7 @@ describe('sitePacing', () => {
       // Four requests in flight together are told off together: one violation,
       // one penalty. Halving per response would leave concurrency at 1, and
       // then charge 30 clean responses to climb back.
-      await Promise.all(
-        Array.from({ length: 4 }, () => http.get(server.url, { retry: 0, throwHttpErrors: false })),
-      );
+      await Promise.all(Array.from({ length: 4 }, () => hit(http, server.url)));
 
       expect(server.hits).toBe(4);
       expect(queue.concurrency).toBe(4);
@@ -192,7 +225,7 @@ describe('sitePacing', () => {
     try {
       const { queue, http, dispose } = sitePacing(site({ backoff: false }));
 
-      await http.get(server.url, { retry: 0, throwHttpErrors: false });
+      await hit(http, server.url);
 
       expect(queue.isPaused).toBe(false);
       dispose();
@@ -210,7 +243,7 @@ describe('sitePacing', () => {
         signal: controller.signal,
       });
 
-      await http.get(server.url, { retry: 0, throwHttpErrors: false }).catch(() => {});
+      await hit(http, server.url);
       expect(queue.isPaused).toBe(true);
 
       controller.abort(new Error('cancelled'));
