@@ -43,8 +43,8 @@ const example = defineSiteConfig({
       .post('epg', { json: { channel_id: channel.siteId, date: date.toISOString() } })
       .json<{ items: { start: string; end: string; title: string }[] }>();
   },
-  parseDay({ data, programme }) {
-    return data.items.map((item) =>
+  parseDay({ payload, programme }) {
+    return payload.items.map((item) =>
       programme(new Date(item.start), item.title).stop(new Date(item.end)),
     );
   },
@@ -69,8 +69,8 @@ const byChannels = defineSiteConfig({
       })
       .json<{ items: { channelId: string; programmes: RawProgramme[] }[] }>();
   },
-  parseDay({ data, channel }) {
-    const item = data.items.find((i) => i.channelId === channel.siteId);
+  parseDay({ payload, channel }) {
+    const item = payload.items.find((i) => i.channelId === channel.siteId);
     return (item?.programmes ?? []).map((p) => ({
       channel: channel.xmltvId,
       start: new Date(p.start),
@@ -90,8 +90,8 @@ const byDays = defineSiteConfig({
       })
       .json<{ items: { day: string; programmes: RawProgramme[] }[] }>();
   },
-  parseDay({ data, day, channel }) {
-    const item = data.items.find((i) => i.day === day);
+  parseDay({ payload, day, channel }) {
+    const item = payload.items.find((i) => i.day === day);
     return (item?.programmes ?? []).map((p) => ({
       channel: channel.xmltvId,
       start: new Date(p.start),
@@ -112,8 +112,8 @@ const byPairs = defineSiteConfig({
       })
       .json<{ items: { channelId: string; day: string; programmes: RawProgramme[] }[] }>();
   },
-  parseDay({ data, channel, day }) {
-    const item = data.items.find((i) => i.channelId === channel.siteId && i.day === day);
+  parseDay({ payload, channel, day }) {
+    const item = payload.items.find((i) => i.channelId === channel.siteId && i.day === day);
     return (item?.programmes ?? []).map((p) => ({
       channel: channel.xmltvId,
       start: new Date(p.start),
@@ -142,8 +142,8 @@ export const built = defineSiteConfig({
   async request({ http }) {
     return http.get('epg').json<{ items: RawItem[] }>();
   },
-  parseDay({ data, programme }) {
-    return data.items.map((item) =>
+  parseDay({ payload, programme }) {
+    return payload.items.map((item) =>
       programme(new Date(item.start), item.title)
         .stop(new Date(item.end))
         .desc(item.summary)
@@ -201,8 +201,8 @@ const fetchedChannels = defineSiteConfig({
       .get('epg', { searchParams: { id: channel.siteId, date: date.toISOString() } })
       .json<{ items: RawProgramme[] }>();
   },
-  parseDay({ channel, data }) {
-    return data.items.map((p) => ({
+  parseDay({ channel, payload }) {
+    return payload.items.map((p) => ({
       channel: channel.xmltvId,
       start: new Date(p.start),
       title: [{ value: p.title }],

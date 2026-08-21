@@ -118,6 +118,16 @@ that wants a site's channels without caring which form they came in.
 request can cover many channel-days: `parseDay` runs **once per channel-day**,
 each call handed the same shared response.
 
+What a `parseDay` call is given:
+
+| field | type | what it is |
+| --- | --- | --- |
+| `payload` | `TRaw` | Whatever `request` returned, whole and unchanged. Every channel-day of that request sees this same value, so pick out the part belonging to `channel` and `day`. |
+| `channel` | `GrabberChannel<TData>` | The channel being parsed, as the site declared it — its `siteId`, `lang` and `data` included. |
+| `day` | `string` | The day being parsed, as `YYYY-MM-DD`. |
+| `date` | `Date` | The same day as UTC midnight. |
+| `programme` | `(start, title, options?) => ProgrammeBuilder` | A [builder bound to this channel-day](#building-programmes). |
+
 ```ts
 const example = defineSiteConfig({
   site: 'example.tv',
@@ -127,10 +137,10 @@ const example = defineSiteConfig({
       json: { channel_id: channel.siteId, date: date.toISOString() },
     }).json<{ items: { start: string; end: string; title: string; desc?: string }[] }>();
   },
-  parseDay({ data, programme }) {
+  parseDay({ payload, programme }) {
     // `programme` is the XMLTV builder, already bound to this channel-day —
     // no channel id, and text elements take the channel's `lang`.
-    return data.items.map((item) => {
+    return payload.items.map((item) => {
       const p = programme(new Date(item.start), item.title).stop(new Date(item.end));
       return item.desc ? p.desc(item.desc) : p;
     });
@@ -152,8 +162,8 @@ the one being parsed, and every text element defaults to its `lang`:
 
 ```ts
 channels: [{ xmltvId: 'one.example.tv', siteId: '101', lang: 'sk' }],
-parseDay({ data, programme }) {
-  return data.items.map((item) => programme(new Date(item.start), item.title)
+parseDay({ payload, programme }) {
+  return payload.items.map((item) => programme(new Date(item.start), item.title)
     .stop(new Date(item.end))
     .desc(item.summary)             // lang: 'sk', because the channel said so
     .category(item.genre)
@@ -253,8 +263,8 @@ const example = defineSiteConfig({
       searchParams: { ids: channels.map((c) => c.siteId).join(','), date: date.toISOString() },
     }).json<{ items: { channelId: string; programmes: RawProgramme[] }[] }>();
   },
-  parseDay({ data, channel }) {
-    const item = data.items.find((i) => i.channelId === channel.siteId);
+  parseDay({ payload, channel }) {
+    const item = payload.items.find((i) => i.channelId === channel.siteId);
     return item ? item.programmes.map(/* … */) : [];
   },
 });
@@ -274,8 +284,8 @@ const example = defineSiteConfig({
       searchParams: { id: channel.siteId, from: from.toISOString(), to: to.toISOString() },
     }).json<{ items: { day: string; programmes: RawProgramme[] }[] }>();
   },
-  parseDay({ data, day }) {
-    const item = data.items.find((i) => i.day === day);
+  parseDay({ payload, day }) {
+    const item = payload.items.find((i) => i.day === day);
     return item ? item.programmes.map(/* … */) : [];
   },
 });

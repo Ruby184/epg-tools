@@ -78,10 +78,10 @@ const example = defineSiteConfig({
       json: { channel_id: channel.siteId, date: date.toISOString() },
     }).json<{ items: { start: string; end: string; title: string; desc?: string }[] }>();
   },
-  parseDay({ data, programme }) {
+  parseDay({ payload, programme }) {
     // `programme` is the XMLTV builder, already bound to this channel-day —
     // no channel id, and text elements take the channel's `lang`.
-    return data.items.map((item) => {
+    return payload.items.map((item) => {
       const p = programme(new Date(item.start), item.title).stop(new Date(item.end));
       return item.desc ? p.desc(item.desc) : p;
     });

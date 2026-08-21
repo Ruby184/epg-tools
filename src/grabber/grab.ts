@@ -301,14 +301,14 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // request after it, rather than the two landing back to back.
     const channels = await enqueue(inner, () => resolveChannels(config, { http, ...cancel }));
 
-    // Parse one channel-day out of `data` and cache it. Queued: `parseDay` is
-    // the site's own code and the write is a file, so a wide response must not
-    // put every one of its channel-days through both at once.
+    // Parse one channel-day out of the payload and cache it. Queued: `parseDay`
+    // is the site's own code and the write is a file, so a wide response must
+    // not put every one of its channel-days through both at once.
     //
     // Ahead of the sweep in the queue, because a response already in hand is
     // held in memory until it is written, while a staleness check only
     // discovers more work to do.
-    const store = (channel: GrabberChannel, day: string, data: unknown): Promise<void> =>
+    const store = (channel: GrabberChannel, day: string, payload: unknown): Promise<void> =>
       enqueue(
         local,
         async () => {
@@ -316,7 +316,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
             channel,
             date: dayToDate(day),
             day,
-            data,
+            payload,
             // Bound to the channel-day being parsed, so a parse repeats neither
             // the id nor the language on every programme it builds.
             programme: (start, title, options) =>
@@ -428,10 +428,10 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       // Nothing awaits this, and the task reports its own failures, so the only
       // rejection to swallow is the abort dropping it from the queue.
       void enqueue(inner, async () => {
-        let data: unknown;
+        let payload: unknown;
 
         try {
-          data = await config.request(contextFor(request));
+          payload = await config.request(contextFor(request));
         } catch (error) {
           // A failed request fails every channel-day it was covering.
           for (const { channel, day } of request.pairs) {
@@ -447,7 +447,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
         await Promise.all(
           request.pairs.map(async ({ channel, day }) => {
             try {
-              await store(channel, day, data);
+              await store(channel, day, payload);
             } catch (error) {
               failed.push({ site, channelId: channel.xmltvId, day, error });
               log(`[${site}] ${channel.xmltvId} ${day}: ${errorMessage(error)}`);

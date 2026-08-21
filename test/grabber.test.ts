@@ -112,8 +112,8 @@ function makeBatchConfig(overrides: Partial<ChannelsConfig> = {}): ChannelsConfi
     async request({ channels }) {
       return { items: channels.map((c) => ({ id: c.siteId })) } satisfies BatchData;
     },
-    parseDay({ channel: ch, data, day }) {
-      const item = (data as BatchData).items.find((i) => i.id === ch.siteId);
+    parseDay({ channel: ch, payload, day }) {
+      const item = (payload as BatchData).items.find((i) => i.id === ch.siteId);
       return item ? [programme(`${day}T06:00:00.000Z`, ch.siteId)] : [];
     },
     ...overrides,
@@ -132,8 +132,8 @@ function makeDaysConfig(overrides: Partial<DaysConfig> = {}): DaysConfig {
     async request({ days }) {
       return { items: days.map((day) => ({ id: day })) } satisfies BatchData;
     },
-    parseDay({ channel: ch, data, day }) {
-      const item = (data as BatchData).items.find((i) => i.id === day);
+    parseDay({ channel: ch, payload, day }) {
+      const item = (payload as BatchData).items.find((i) => i.id === day);
       return item ? [programme(`${day}T06:00:00.000Z`, ch.siteId)] : [];
     },
     ...overrides,

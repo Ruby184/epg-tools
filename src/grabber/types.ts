@@ -257,18 +257,27 @@ export interface SiteBackoff {
 }
 
 export interface ParseContext<TRaw, TData = unknown> {
+  /** The channel this call is parsing, as the site declared it. */
   channel: GrabberChannel<TData>;
+  /** The day as UTC midnight, a `Date` of this call's own. */
   date: Date;
+  /** The same day as `YYYY-MM-DD`. */
   day: string;
-  data: TRaw;
+  /**
+   * What {@link SiteConfig.request} handed back, whole and unchanged. A request
+   * covering several channel-days is parsed once for each of them, and every
+   * one of those calls sees this same value — pick out the part that belongs to
+   * `channel` and `day`.
+   */
+  payload: TRaw;
   /**
    * A programme builder for this channel-day, with the parts a parse should not
    * have to repeat already filled in: the channel is this context's channel,
    * and text elements default to its `lang`.
    *
    * ```ts
-   * parseDay({ data, programme }) {
-   *   return data.items.map((item) => programme(item.start, item.title)
+   * parseDay({ payload, programme }) {
+   *   return payload.items.map((item) => programme(item.start, item.title)
    *     .stop(item.end)
    *     .desc(item.summary)
    *     .category(item.genre));
@@ -372,7 +381,7 @@ export interface SiteConfig<
   request(ctx: RequestContextFor<ModeOf<TBatching>, TData>): Promise<TRaw>;
   /**
    * Parse one channel-day out of a response — called once per channel-day the
-   * request covered, each with the same `data`. `programme.channel` is
+   * request covered, each with the same `payload`. `programme.channel` is
    * normalized to `xmltvId` afterwards.
    */
   parseDay(ctx: ParseContext<TRaw, TData>): ParsedProgramme[] | Promise<ParsedProgramme[]>;
