@@ -367,7 +367,10 @@ describe('epg --version', () => {
     const { code, stdout, stderr } = await run(['--version']);
 
     expect(code).toBe(0);
-    expect(stdout).toBe('epg-tools 0.1.0\n');
+    // Whatever the package currently says, from the same two constants the CLI
+    // prints: a literal here goes stale the moment a release bumps the version,
+    // and the first thing to notice would be the release PR's own CI.
+    expect(stdout).toBe(`${__PKG_NAME__} ${__PKG_VERSION__}\n`);
     expect(stderr).toBe('');
   });
 
