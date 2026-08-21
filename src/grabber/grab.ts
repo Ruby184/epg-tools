@@ -58,8 +58,11 @@ function resolveBatching(batching: BatchingOption | undefined): {
 }
 
 function chunk<T>(items: T[], size: number): T[][] {
+  // Always a copy, even when the whole lot fits in one chunk: a chunk becomes
+  // the `channels` a site is handed, and site code sorting that in place must
+  // not reach back into the planner's own array.
   if (items.length <= size) {
-    return items.length > 0 ? [items] : [];
+    return items.length > 0 ? [[...items]] : [];
   }
 
   const chunks: T[][] = [];
@@ -215,13 +218,23 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // The context for one request, in the shape this site's mode declares —
     // plus the channel-days it is for, which the plan already worked out.
     const contextFor = (request: Request): RequestContextFor<BatchMode> => {
+      // A Date of its own everywhere one is handed out, `from` and `to`
+      // included. They are mutable — `Object.freeze` does not help, a Date
+      // keeps its value in an internal slot rather than a property — so the
+      // hazard worth removing is not that a site can change one, it is that
+      // changing one would silently change the others: `from` and `dates[0]`
+      // as the same object is a bug nobody would find.
       const dates = request.days.map(dayToDate);
-      const dateOf = new Map(request.days.map((day, index) => [day, dates[index]!]));
       const context = {
-        channelDays: request.pairs.map(({ channel, day }) => ({ channel, day, date: dateOf.get(day)! })),
+        channelDays: request.pairs.map(({ channel, day }) => ({ channel, day, date: dayToDate(day) })),
         ...(manyChannels ? { channels: request.channels } : { channel: request.channels[0]! }),
         ...(manyDays
-          ? { days: request.days, dates, from: dates[0]!, to: dates[dates.length - 1]! }
+          ? {
+              days: request.days,
+              dates,
+              from: dayToDate(request.days[0]!),
+              to: dayToDate(request.days[request.days.length - 1]!),
+            }
           : { day: request.days[0]!, date: dates[0]! }),
         http,
         ...(signal ? { signal } : {}),

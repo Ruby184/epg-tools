@@ -690,6 +690,42 @@ describe('grab with batching: channels', () => {
     expect(batchCalls).toEqual([['a', 'b'], ['c']]); // sequential at concurrency 1
   });
 
+  it('hands out a Date of its own for every day in a context', async () => {
+    const cache = new MemoryCache();
+    let same = true;
+    let parsedDate: Date | undefined;
+    let contextDate: Date | undefined;
+
+    const config: SiteConfig<unknown, DaysBatching> = {
+      site: 'days.example',
+      channels: [channel('a')],
+      days: 2,
+      batching: { mode: 'days' },
+      async request({ days, dates, from, to, channelDays }) {
+        // A site shifting `from` to widen its query must not quietly move the
+        // days it is about to parse: these all describe the same day and used
+        // to be the same object.
+        same = from === dates[0] || to === dates[1] || channelDays[0]!.date === dates[0];
+        from.setUTCHours(6);
+        contextDate = dates[0]!;
+        return { days };
+      },
+      parseDay({ day, date }) {
+        if (day === TODAY) {
+          parsedDate = date;
+        }
+
+        return [];
+      },
+    };
+
+    await grab([config], { cache, now: NOW });
+
+    expect(same).toBe(false);
+    expect(contextDate?.toISOString()).toBe(`${TODAY}T00:00:00.000Z`);
+    expect(parsedDate?.toISOString()).toBe(`${TODAY}T00:00:00.000Z`);
+  });
+
   it('lists the channel-days it is for, matching the channels it covers', async () => {
     const cache = new MemoryCache();
     const wanted: string[][] = [];
