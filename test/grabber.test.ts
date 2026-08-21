@@ -649,6 +649,32 @@ describe('grab', () => {
     expect(summary).toEqual({ fetched: 0, fromCache: 0, failed: [] });
   });
 
+  it('leaves nothing unhandled when the abort lands after the run is over', async () => {
+    // The run holds one rejection for the whole of itself, raced against every
+    // queued task. A cancel that arrives once there is nothing left to race
+    // must not surface as an unhandled rejection.
+    const cache = new MemoryCache();
+    const controller = new AbortController();
+    const unhandled: unknown[] = [];
+    const record = (error: unknown): void => void unhandled.push(error);
+
+    process.on('unhandledRejection', record);
+
+    try {
+      const summary = await grab([makeConfig()], { cache, now: NOW, signal: controller.signal });
+
+      controller.abort(new Error('cancelled too late'));
+
+      // An unhandled rejection is reported a turn of the loop after the fact.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(summary.fetched).toBe(1);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', record);
+    }
+  });
+
   it('startDay moves the window', async () => {
     const cache = new MemoryCache();
     const fetchedDays: string[] = [];

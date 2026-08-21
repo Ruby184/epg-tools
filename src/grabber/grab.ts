@@ -227,15 +227,58 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
 
   /**
    * The run's signal, in the shape everything that passes it on wants: a site's
-   * pacing, its channel list, a request's context, and every queued task.
-   *
-   * Handing it to a task is what makes an abort take effect at once: p-queue
-   * drops a task that is still waiting and rejects it with the abort reason, so
-   * a cancelled run stops instead of dequeuing thousands of tasks only for each
-   * to notice and record a failure. What is already in flight aborts on its
-   * own — the same signal rides on the site's client.
+   * pacing, its channel list and a request's context.
    */
   const cancel = signal ? { signal } : {};
+
+  /**
+   * The abort, as something a queued task can be raced against — one listener
+   * for the whole run.
+   *
+   * p-queue takes a signal per task, and adds two abort listeners for each — one
+   * while the task waits, another while it runs — which is what it costs:
+   * `addEventListener` scans the listeners already on that signal to reject a
+   * duplicate handler, so the price grows with the square of what is queued at
+   * once. The settling those listeners do can come from here instead, and the
+   * dropping from `clear()`, which is what the queues do when the signal fires —
+   * and which is also the removal the abort itself would otherwise do a task at
+   * a time, each scanning the queue for its own.
+   */
+  const cancelled = signal
+    ? new Promise<never>((_, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      })
+    : undefined;
+
+  // Nothing may be awaiting it at the moment it fires — a run that has already
+  // finished, say — and a rejection nobody is listening to is an unhandled one.
+  cancelled?.catch(() => {});
+
+  // What the sites' own queues do for themselves, in `sitePacing`.
+  signal?.addEventListener('abort', () => local.clear(), { once: true });
+
+  /**
+   * Queue one task, settled by whichever comes first: the task, or the abort.
+   *
+   * A cancelled run stops rather than dequeuing thousands of tasks only for each
+   * to notice and record a failure — the queue drops what is waiting, and this
+   * is what tells the caller, which the drop itself does not: `clear()` discards
+   * the closure that would have settled the promise `add` returned.
+   *
+   * Already aborted, nothing is queued at all: the task must not run after the
+   * run it belongs to has been called off.
+   */
+  const enqueue = async <T>(
+    queue: PQueue,
+    task: () => Promise<T>,
+    options: { priority?: number } = {},
+  ): Promise<T> => {
+    signal?.throwIfAborted();
+
+    const running = queue.add(task, options);
+
+    return cancelled ? Promise.race([running, cancelled]) : running;
+  };
 
   const runSite = async (config: AnySiteConfig): Promise<void> => {
     // Before its queue exists, let alone a request: a site that cannot be
@@ -256,7 +299,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // Fetching the channel list is a request to the same source as the rest, so
     // it goes through the same queue: a site's `rateLimit` spaces the first EPG
     // request after it, rather than the two landing back to back.
-    const channels = await inner.add(() => resolveChannels(config, { http, ...cancel }), cancel);
+    const channels = await enqueue(inner, () => resolveChannels(config, { http, ...cancel }));
 
     // Parse one channel-day out of `data` and cache it. Queued: `parseDay` is
     // the site's own code and the write is a file, so a wide response must not
@@ -266,7 +309,8 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // held in memory until it is written, while a staleness check only
     // discovers more work to do.
     const store = (channel: GrabberChannel, day: string, data: unknown): Promise<void> =>
-      local.add(
+      enqueue(
+        local,
         async () => {
           const parsed = await config.parseDay({
             channel,
@@ -294,7 +338,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
           fetched++;
           log(`[${site}] ${channel.xmltvId} ${day}: ${programmes.length} programmes`);
         },
-        { ...cancel, priority: 1 },
+        { priority: 1 },
       );
 
     // Which channel-days actually need fetching. The meta reads never leave the
@@ -306,7 +350,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       const checked = await Promise.all(
         channels.flatMap((channel) =>
           window.map((day) =>
-            local.add(async (): Promise<Pair | undefined> => {
+            enqueue(local, async (): Promise<Pair | undefined> => {
               const meta = await cache.getMeta({ site, channelId: channel.xmltvId, day });
 
               if (isStale(day, meta, policy, now)) {
@@ -315,7 +359,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
 
               fromCache++;
               log(`[${site}] ${channel.xmltvId} ${day}: fresh in cache, skipping`);
-            }, cancel),
+            }),
           ),
         ),
       );
@@ -383,36 +427,34 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     for (const request of plan(await collectStale())) {
       // Nothing awaits this, and the task reports its own failures, so the only
       // rejection to swallow is the abort dropping it from the queue.
-      void inner
-        .add(async () => {
-          let data: unknown;
+      void enqueue(inner, async () => {
+        let data: unknown;
 
-          try {
-            data = await config.request(contextFor(request));
-          } catch (error) {
-            // A failed request fails every channel-day it was covering.
-            for (const { channel, day } of request.pairs) {
-              failed.push({ site, channelId: channel.xmltvId, day, error });
-            }
-
-            log(`[${site}] ${describe(request)}: ${errorMessage(error)}`);
-            return;
+        try {
+          data = await config.request(contextFor(request));
+        } catch (error) {
+          // A failed request fails every channel-day it was covering.
+          for (const { channel, day } of request.pairs) {
+            failed.push({ site, channelId: channel.xmltvId, day, error });
           }
 
-          // Parsing and caching are per channel-day, so one bad slice does not
-          // sink the rest of the response.
-          await Promise.all(
-            request.pairs.map(async ({ channel, day }) => {
-              try {
-                await store(channel, day, data);
-              } catch (error) {
-                failed.push({ site, channelId: channel.xmltvId, day, error });
-                log(`[${site}] ${channel.xmltvId} ${day}: ${errorMessage(error)}`);
-              }
-            }),
-          );
-        }, cancel)
-        .catch(() => {});
+          log(`[${site}] ${describe(request)}: ${errorMessage(error)}`);
+          return;
+        }
+
+        // Parsing and caching are per channel-day, so one bad slice does not
+        // sink the rest of the response.
+        await Promise.all(
+          request.pairs.map(async ({ channel, day }) => {
+            try {
+              await store(channel, day, data);
+            } catch (error) {
+              failed.push({ site, channelId: channel.xmltvId, day, error });
+              log(`[${site}] ${channel.xmltvId} ${day}: ${errorMessage(error)}`);
+            }
+          }),
+        );
+      }).catch(() => {});
     }
 
     try {
@@ -426,16 +468,14 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
 
   await Promise.all(
     configs.map((config) =>
-      outer
-        .add(async () => {
-          try {
-            await runSite(config);
-          } catch (error) {
-            failed.push({ site: config.site, channelId: '*', day: '*', error });
-            log(`[${config.site}] site failed: ${errorMessage(error)}`);
-          }
-        }, cancel)
-        .catch(() => {}),
+      enqueue(outer, async () => {
+        try {
+          await runSite(config);
+        } catch (error) {
+          failed.push({ site: config.site, channelId: '*', day: '*', error });
+          log(`[${config.site}] site failed: ${errorMessage(error)}`);
+        }
+      }).catch(() => {}),
     ),
   );
 

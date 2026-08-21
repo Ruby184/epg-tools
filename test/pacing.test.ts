@@ -246,12 +246,20 @@ describe('sitePacing', () => {
       await hit(http, server.url);
       expect(queue.isPaused).toBe(true);
 
+      // Waiting behind the hold, and never sent: the cancel drops what is
+      // queued here, once for the site, rather than a task at a time.
+      let sent = 0;
+      void queue.add(async () => void sent++).catch(() => {});
+      expect(queue.size).toBe(1);
+
       controller.abort(new Error('cancelled'));
 
       // A paused queue with tasks in it never reaches idle, so a cancelled run
       // in the middle of a hold would otherwise wait out the whole 30 seconds.
       expect(queue.isPaused).toBe(false);
+      expect(queue.size).toBe(0);
       await queue.onIdle();
+      expect(sent).toBe(0);
       dispose();
     } finally {
       server.close();

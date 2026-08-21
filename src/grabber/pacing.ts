@@ -188,13 +188,15 @@ export function sitePacing(
   queue.on('rateLimit', () => log(`[${config.site}] rate limit reached, waiting for the window`));
   queue.on('rateLimitCleared', () => log(`[${config.site}] rate limit window open again`));
 
-  // A cancelled run must not sit out the rest of a hold: the queue's tasks are
-  // dropped by their own signals, and a paused queue with nothing left in it
-  // still has to reach idle.
+  // A cancelled run must not sit out the rest of a hold, and must not send what
+  // it had queued either: dropping those here is one listener for the site
+  // rather than one per task. A paused queue with nothing left in it still has
+  // to reach idle, so it is released rather than left holding.
   options.signal?.addEventListener(
     'abort',
     () => {
       clearTimeout(timer);
+      queue.clear();
       release();
     },
     { once: true },
