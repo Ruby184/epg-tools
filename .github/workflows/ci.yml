@@ -6,8 +6,8 @@ on:
   pull_request:
 
 jobs:
-  # Formatting, lint and commit messages are the same on every Node version, so
-  # they run once rather than three times in the matrix below.
+  # Formatting, lint, commit messages and the bundle are the same on every Node
+  # version, so they run once rather than three times in the matrix below.
   check:
     runs-on: ubuntu-latest
     steps:
@@ -22,6 +22,10 @@ jobs:
       - run: npm ci
       - run: npm run format:check
       - run: npm run lint
+      # tsdown needs Node >= 22.18, above this package's own floor, so the
+      # bundle is built here rather than on each leg of the matrix. The output
+      # targets Node 20 either way.
+      - run: npm run build
       # The hooks are bypassable with --no-verify, so the messages are checked
       # here too. On a PR that is every commit it contributes; on a push to
       # main, the one that arrived.
@@ -53,4 +57,3 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - run: npm run build

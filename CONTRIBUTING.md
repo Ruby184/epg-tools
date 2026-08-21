@@ -12,6 +12,12 @@ npm ci
 Node **>= 20** is required, and >= 23.6 if you want to run `epg.config.ts`
 files directly via native type stripping. CI runs the suite on 20, 22 and 24.
 
+`npm run build` asks for more — **>= 22.18**, which is what
+[tsdown](https://tsdown.dev) needs. That is a bound on building the package,
+not on using it: the bundle targets Node 20 and the suite runs against the
+sources, so the floor above is what the tests and the published package hold
+to. CI builds once, on 22.
+
 ## The loop
 
 | command | does |
@@ -23,7 +29,7 @@ files directly via native type stripping. CI runs the suite on 20, 22 and 24.
 | `npm run format:check` | fail instead of writing — what CI runs |
 | `npm run lint` | [oxlint](https://oxc.rs) over the whole tree |
 | `npm run lint:fix` | …and apply what it can fix |
-| `npm run build` | bundle to `dist/` with tsup |
+| `npm run build` | bundle to `dist/` with [tsdown](https://tsdown.dev) |
 | `npm run bench` | speed benchmarks (`vitest bench`) |
 | `npm run bench:memory` | memory benchmarks — builds first, then runs isolated processes |
 
