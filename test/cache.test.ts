@@ -2,16 +2,14 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { DEFAULT_STALENESS, FsCacheStore, isStale } from '../src/cache/main.js';
+import {
+  DEFAULT_STALENESS,
+  FsNdjsonCacheStore,
+  FsXmltvCacheStore,
+  isStale,
+} from '../src/cache/main.js';
 import type { StalenessPolicy } from '../src/cache/main.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
-
-// TODO: drop this probe (and the skipIf guards below) once src/xmltv/main.ts
-// is merged; it is being implemented concurrently and may not exist yet.
-const xmltvAvailable = await import('../src/xmltv/main.js').then(
-  () => true,
-  () => false,
-);
 
 function programme(overrides: Partial<XmltvProgramme> = {}): XmltvProgramme {
   return {
@@ -100,7 +98,7 @@ describe('isStale', () => {
   });
 });
 
-describe('FsCacheStore cancellation', () => {
+describe('FsNdjsonCacheStore cancellation', () => {
   let dir: string;
 
   beforeEach(async () => {
@@ -115,7 +113,7 @@ describe('FsCacheStore cancellation', () => {
 
   it('refuses a write, leaving no entry and no temp file behind', async () => {
     const controller = new AbortController();
-    const store = new FsCacheStore({ dir, signal: controller.signal });
+    const store = new FsNdjsonCacheStore({ dir, signal: controller.signal });
 
     controller.abort(new Error('cancelled'));
 
@@ -128,9 +126,9 @@ describe('FsCacheStore cancellation', () => {
 
   it('refuses a read', async () => {
     const controller = new AbortController();
-    await new FsCacheStore({ dir }).write(key, [programme()]);
+    await new FsNdjsonCacheStore({ dir }).write(key, [programme()]);
 
-    const store = new FsCacheStore({ dir, signal: controller.signal });
+    const store = new FsNdjsonCacheStore({ dir, signal: controller.signal });
     controller.abort(new Error('cancelled'));
 
     await expect(store.read(key)).rejects.toMatchObject({ name: 'AbortError' });
@@ -138,14 +136,14 @@ describe('FsCacheStore cancellation', () => {
   });
 
   it('stops a prune between days, keeping what it has already removed', async () => {
-    const seeding = new FsCacheStore({ dir });
+    const seeding = new FsNdjsonCacheStore({ dir });
 
     for (const site of ['a.example', 'b.example', 'c.example']) {
       await seeding.write({ site, channelId: 'one', day: '2026-07-01' }, [programme()]);
     }
 
     const controller = new AbortController();
-    const store = new FsCacheStore({ dir, signal: controller.signal });
+    const store = new FsNdjsonCacheStore({ dir, signal: controller.signal });
     controller.abort(new Error('cancelled'));
 
     // A prune is a walk, so this is where it can stop — having removed whole
@@ -157,7 +155,7 @@ describe('FsCacheStore cancellation', () => {
   });
 });
 
-describe('FsCacheStore', () => {
+describe('FsNdjsonCacheStore', () => {
   let dir: string;
 
   beforeEach(async () => {
@@ -171,7 +169,7 @@ describe('FsCacheStore', () => {
   const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
 
   it('makes a channel directory once, and again after a prune took it away', async () => {
-    const store = new FsCacheStore({ dir });
+    const store = new FsNdjsonCacheStore({ dir });
     const channelDir = path.join(dir, 'example.com', 'one');
 
     // Every day of a channel in turn — the shape of a grab.
@@ -192,7 +190,7 @@ describe('FsCacheStore', () => {
   });
 
   it('round-trips programmes through ndjson with Dates revived', async () => {
-    const store = new FsCacheStore({ dir });
+    const store = new FsNdjsonCacheStore({ dir });
     const programmes = [
       programme(),
       programme({
@@ -223,7 +221,7 @@ describe('FsCacheStore', () => {
   });
 
   it('round-trips metadata through the sidecar file', async () => {
-    const store = new FsCacheStore({ dir });
+    const store = new FsNdjsonCacheStore({ dir });
 
     await store.write(key, [programme()], { grabbedAt: '2026-07-17T08:00:00.000Z' });
 
@@ -234,7 +232,7 @@ describe('FsCacheStore', () => {
   });
 
   it('defaults grabbedAt to now when meta is omitted', async () => {
-    const store = new FsCacheStore({ dir });
+    const store = new FsNdjsonCacheStore({ dir });
     const before = Date.now();
 
     await store.write(key, []);
@@ -247,14 +245,14 @@ describe('FsCacheStore', () => {
   });
 
   it('returns undefined for uncached entries', async () => {
-    const store = new FsCacheStore({ dir });
+    const store = new FsNdjsonCacheStore({ dir });
 
     expect(await store.getMeta(key)).toBeUndefined();
     expect(await store.read(key)).toBeUndefined();
   });
 
   it('treats a corrupt meta sidecar as missing and deletes the entry', async () => {
-    const store = new FsCacheStore({ dir });
+    const store = new FsNdjsonCacheStore({ dir });
 
     await store.write(key, [programme()]);
     const base = path.join(dir, 'example.com', 'one', '2026-07-17');
@@ -266,7 +264,7 @@ describe('FsCacheStore', () => {
   });
 
   it('treats a meta sidecar with a wrong shape as corrupt', async () => {
-    const store = new FsCacheStore({ dir });
+    const store = new FsNdjsonCacheStore({ dir });
 
     await store.write(key, [programme()]);
     const base = path.join(dir, 'example.com', 'one', '2026-07-17');
@@ -277,7 +275,7 @@ describe('FsCacheStore', () => {
   });
 
   it('sanitizes site and channel path segments', async () => {
-    const store = new FsCacheStore({ dir });
+    const store = new FsNdjsonCacheStore({ dir });
     const trickyKey = { site: 'a/b', channelId: 'c:1/..', day: '2026-07-17' };
 
     await store.write(trickyKey, [programme()]);
@@ -293,7 +291,7 @@ describe('FsCacheStore', () => {
   });
 
   it('deletes an entry including its sidecar', async () => {
-    const store = new FsCacheStore({ dir });
+    const store = new FsNdjsonCacheStore({ dir });
 
     await store.write(key, [programme()]);
     await store.delete(key);
@@ -304,8 +302,61 @@ describe('FsCacheStore', () => {
     await expect(store.delete(key)).resolves.toBeUndefined();
   });
 
+  it('keeps the offset and precision a date was written with', async () => {
+    const { parseXmltvString, serializeProgramme, getXmltvOffset, getXmltvPrecision } =
+      await import('../src/xmltv/main.js');
+    const source =
+      '<?xml version="1.0"?><tv><programme start="20260807203000 +0200" ' +
+      'stop="20260807221500 +0200" channel="one.tv"><title>Film</title><date>2020</date>' +
+      '<previously-shown start="20200101120000 +0200"/></programme></tv>';
+    const original = parseXmltvString(source).programmes[0]!;
+
+    for (const Store of [FsNdjsonCacheStore, FsXmltvCacheStore]) {
+      const store = new Store({ dir: path.join(dir, Store.name) });
+      await store.write(key, [original]);
+      const [back] = (await store.read(key))!;
+
+      // A `Date` is an instant; the offset the source wrote it in and how
+      // precise it was live on symbol keys beside it, which JSON does not see.
+      // So the entry holds the XMLTV form, and what comes back out serializes
+      // to exactly what went in — `+0200` still, and a year still a year.
+      expect(serializeProgramme(back!)).toBe(serializeProgramme(original));
+      expect(getXmltvOffset(back!.start)).toBe(120);
+      expect(back!.date).toBeInstanceOf(Date);
+      expect(getXmltvPrecision(back!.date!)).toBe(4);
+      expect(getXmltvOffset(back!.previouslyShown!.start!)).toBe(120);
+    }
+  });
+
+  it('revives every date a programme can carry', async () => {
+    const store = new FsNdjsonCacheStore({ dir });
+    // Every date-valued field in the model, so a seventh one added to
+    // `XmltvProgramme` without being taught to the store fails here rather than
+    // coming back a string and throwing at the serializer — which is how the
+    // production `<date>` was missed.
+    const dated = programme({
+      start: new Date('2026-07-17T18:00:00.000Z'),
+      stop: new Date('2026-07-17T19:00:00.000Z'),
+      pdcStart: new Date('2026-07-17T18:01:00.000Z'),
+      vpsStart: new Date('2026-07-17T18:02:00.000Z'),
+      date: new Date('2020-01-01T00:00:00.000Z'),
+      previouslyShown: { start: new Date('2019-05-05T10:00:00.000Z'), channel: 'two.example' },
+    });
+
+    await store.write(key, [dated]);
+    const [back] = (await store.read(key))!;
+
+    for (const field of ['start', 'stop', 'pdcStart', 'vpsStart', 'date'] as const) {
+      expect(back![field], field).toBeInstanceOf(Date);
+      expect(back![field]!.toISOString(), field).toBe(dated[field]!.toISOString());
+    }
+
+    expect(back!.previouslyShown!.start).toBeInstanceOf(Date);
+    expect(back!.previouslyShown!.start!.toISOString()).toBe('2019-05-05T10:00:00.000Z');
+  });
+
   it('prunes entries older than the cutoff and removes empty directories', async () => {
-    const store = new FsCacheStore({ dir });
+    const store = new FsNdjsonCacheStore({ dir });
 
     await store.write({ site: 's1', channelId: 'c1', day: '2026-07-10' }, [programme()]);
     await store.write({ site: 's1', channelId: 'c1', day: '2026-07-15' }, [programme()]);
@@ -323,7 +374,7 @@ describe('FsCacheStore', () => {
   });
 
   it('leaves a directory that is not empty, without failing over it', async () => {
-    const store = new FsCacheStore({ dir });
+    const store = new FsNdjsonCacheStore({ dir });
 
     await store.write({ site: 's1', channelId: 'c1', day: '2026-07-10' }, [programme()]);
     // Something that is not an entry, so the day goes and the directory cannot.
@@ -338,25 +389,13 @@ describe('FsCacheStore', () => {
   });
 
   it('prune on a missing cache root returns 0', async () => {
-    const store = new FsCacheStore({ dir: path.join(dir, 'does-not-exist') });
+    const store = new FsNdjsonCacheStore({ dir: path.join(dir, 'does-not-exist') });
 
     expect(await store.prune({ before: '2026-07-16' })).toBe(0);
   });
-
-  it('reads an ndjson entry with a store configured for xmltv format', async () => {
-    const ndjsonStore = new FsCacheStore({ dir });
-    const xmltvStore = new FsCacheStore({ dir, format: 'xmltv' });
-
-    await ndjsonStore.write(key, [programme()]);
-    const read = await xmltvStore.read(key);
-
-    expect(read).toHaveLength(1);
-    expect(read![0]!.start.getTime()).toBe(Date.parse('2026-07-17T18:00:00.000Z'));
-  });
 });
 
-// TODO: remove skipIf once src/xmltv/main.ts exists (implemented concurrently).
-describe.skipIf(!xmltvAvailable)('FsCacheStore (xmltv format)', () => {
+describe('FsXmltvCacheStore', () => {
   let dir: string;
 
   beforeEach(async () => {
@@ -371,7 +410,7 @@ describe.skipIf(!xmltvAvailable)('FsCacheStore (xmltv format)', () => {
   const base = () => path.join(dir, 'example.com', 'one', '2026-07-17');
 
   it('round-trips programmes through xmltv format', async () => {
-    const store = new FsCacheStore({ dir, format: 'xmltv' });
+    const store = new FsXmltvCacheStore({ dir });
     const programmes = [
       programme(),
       programme({ start: new Date('2026-07-17T19:00:00.000Z'), title: [{ value: 'Late Show' }] }),
@@ -395,32 +434,5 @@ describe.skipIf(!xmltvAvailable)('FsCacheStore (xmltv format)', () => {
       grabbedAt: '2026-07-17T08:00:00.000Z',
       programmeCount: 2,
     });
-  });
-
-  it('reads an xmltv entry with a store configured for ndjson format', async () => {
-    const xmltvStore = new FsCacheStore({ dir, format: 'xmltv' });
-    const ndjsonStore = new FsCacheStore({ dir });
-
-    await xmltvStore.write(key, [programme()]);
-    const read = await ndjsonStore.read(key);
-
-    expect(read).toHaveLength(1);
-    expect(read![0]!.start.getTime()).toBe(Date.parse('2026-07-17T18:00:00.000Z'));
-  });
-
-  it('writing replaces a stale opposite-format data file', async () => {
-    const ndjsonStore = new FsCacheStore({ dir });
-    const xmltvStore = new FsCacheStore({ dir, format: 'xmltv' });
-
-    await ndjsonStore.write(key, [programme()]);
-    await xmltvStore.write(key, [programme(), programme({ title: [{ value: 'Second' }] })]);
-
-    await expect(fs.access(`${base()}.ndjson`)).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(await ndjsonStore.read(key)).toHaveLength(2);
-
-    await ndjsonStore.write(key, [programme()]);
-
-    await expect(fs.access(`${base()}.xml`)).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(await xmltvStore.read(key)).toHaveLength(1);
   });
 });

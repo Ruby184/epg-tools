@@ -1,19 +1,24 @@
-import { createReadStream } from 'node:fs';
+/**
+ * The filesystem side of a cache, without an opinion about what an entry looks
+ * like inside.
+ *
+ * Layout: `<dir>/<site>/<channelId>/<day>.<ext>`, plus a sidecar
+ * `<day>.meta.json` holding {@link CacheEntryMeta}. Site and channel path
+ * segments are sanitized with `encodeURIComponent`.
+ *
+ * What a store keeps and what it keeps it *as* are separate problems, so the
+ * second one belongs to a subclass: `FsNdjsonCacheStore` and `FsXmltvCacheStore` say
+ * what one entry is, and everything else — the layout, the sidecar,
+ * cancellation, deleting, pruning — is the same either way and lives here.
+ * Which is also what keeps the xmltv module out of a run that does not use it:
+ * the store that needs it is the one that imports it.
+ */
+
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { writeFileAtomic } from '../core/atomic.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
-import type {
-  CacheEntryMeta,
-  CacheFormat,
-  CacheStore,
-  ChannelDayKey,
-  FsCacheStoreOptions,
-} from './types.js';
-
-type XmltvModule = typeof import('../xmltv/main.js');
-
-const ENTRY_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.(?:ndjson|xml|meta\.json)$/;
+import type { CacheEntryMeta, CacheStore, ChannelDayKey, FsCacheStoreOptions } from './types.js';
 
 function isNotFound(error: unknown): boolean {
   return code(error) === 'ENOENT';
@@ -69,45 +74,9 @@ async function inParallel<T>(items: T[], limit: number, work: (item: T) => Promi
 /** How much of a prune's directory walk is in flight at once. */
 const PRUNE_CONCURRENCY = 8;
 
-/** Revive Date fields of a programme parsed from an ndjson line. */
-function reviveProgramme(line: string): XmltvProgramme {
-  const raw = JSON.parse(line) as XmltvProgramme;
-
-  raw.start = new Date(raw.start);
-
-  if (raw.stop !== undefined) {
-    raw.stop = new Date(raw.stop);
-  }
-
-  if (raw.pdcStart !== undefined) {
-    raw.pdcStart = new Date(raw.pdcStart);
-  }
-
-  if (raw.vpsStart !== undefined) {
-    raw.vpsStart = new Date(raw.vpsStart);
-  }
-
-  if (raw.previouslyShown?.start !== undefined) {
-    raw.previouslyShown.start = new Date(raw.previouslyShown.start);
-  }
-
-  return raw;
-}
-
-/**
- * Filesystem-backed {@link CacheStore}.
- *
- * Layout: `<dir>/<site>/<channelId>/<day>.<ext>` where `ext` is `ndjson` or
- * `xml`, plus a sidecar `<day>.meta.json` holding {@link CacheEntryMeta}.
- * Site and channel path segments are sanitized with `encodeURIComponent`.
- *
- * A store reads entries written in either format regardless of its
- * configured write format.
- */
-export class FsCacheStore implements CacheStore {
-  readonly #dir: string;
-  readonly #format: CacheFormat;
-  readonly #signal: AbortSignal | undefined;
+export abstract class FsCacheStore implements CacheStore {
+  protected readonly dir: string;
+  protected readonly signal: AbortSignal | undefined;
   /**
    * Channel directories this store has already made. A grab writes every day of
    * a channel in turn, so without this each of them asks the filesystem to make
@@ -115,33 +84,37 @@ export class FsCacheStore implements CacheStore {
    * quarter of a second of learning what we already knew.
    */
   readonly #ensured = new Set<string>();
-  #xmltv: Promise<XmltvModule> | undefined;
 
   constructor(options: FsCacheStoreOptions) {
-    this.#dir = options.dir;
-    this.#format = options.format ?? 'ndjson';
-    this.#signal = options.signal;
+    this.dir = options.dir;
+    this.signal = options.signal;
   }
+
+  /** The extension one entry is written with, without the dot. */
+  protected abstract get extension(): string;
+
+  /**
+   * What one entry holds — written atomically, and with its sidecar, here. The
+   * meta comes along for a format with somewhere to put it.
+   */
+  protected abstract entryData(programmes: XmltvProgramme[], meta: CacheEntryMeta): string;
+
+  /** The programmes one entry held. The file is read out here. */
+  protected abstract parseEntry(content: string): XmltvProgramme[];
 
   /**
    * Reading options for `fs`: the encoding, and the signal when there is one.
    *
    * A store belongs to a run, so the signal lives here rather than on every
-   * method — which is also what keeps the `CacheStore` interface something
+   * method — which is also what keeps the {@link CacheStore} interface something
    * anyone can implement with three arguments and no ceremony.
    */
-  #readOptions(): { encoding: BufferEncoding; signal: AbortSignal | undefined } {
-    return { encoding: 'utf8', signal: this.#signal };
-  }
-
-  /** The xmltv module is loaded lazily so ndjson-only usage never needs it. */
-  #loadXmltv(): Promise<XmltvModule> {
-    this.#xmltv ??= import('../xmltv/main.js');
-    return this.#xmltv;
+  protected readOptions(): { encoding: BufferEncoding; signal: AbortSignal | undefined } {
+    return { encoding: 'utf8', signal: this.signal };
   }
 
   #channelDir(key: ChannelDayKey): string {
-    return path.join(this.#dir, encodeURIComponent(key.site), encodeURIComponent(key.channelId));
+    return path.join(this.dir, encodeURIComponent(key.site), encodeURIComponent(key.channelId));
   }
 
   /** The channel's directory, made once per store however many days it holds. */
@@ -163,10 +136,10 @@ export class FsCacheStore implements CacheStore {
     let content: string;
 
     try {
-      content = await fs.readFile(`${this.#entryBase(key)}.meta.json`, this.#readOptions());
+      content = await fs.readFile(`${this.#entryBase(key)}.meta.json`, this.readOptions());
     } catch (error) {
       if (isNotFound(error)) {
-        return undefined;
+        return;
       }
 
       throw error;
@@ -183,72 +156,21 @@ export class FsCacheStore implements CacheStore {
     } catch {
       // Corrupt sidecar: treat the whole entry as missing and remove it.
       await this.delete(key);
-      return undefined;
     }
   }
 
   async read(key: ChannelDayKey): Promise<XmltvProgramme[] | undefined> {
-    const base = this.#entryBase(key);
-
-    // Both formats are readable regardless of the configured write format;
-    // try the configured one first to avoid a pointless ENOENT per read.
-    const readers =
-      this.#format === 'ndjson'
-        ? [() => this.#readNdjson(base), () => this.#readXml(base)]
-        : [() => this.#readXml(base), () => this.#readNdjson(base)];
-
-    for (const reader of readers) {
-      const programmes = await reader();
-
-      if (programmes !== undefined) {
-        return programmes;
-      }
-    }
-
-    return undefined;
-  }
-
-  async #readNdjson(base: string): Promise<XmltvProgramme[] | undefined> {
-    let content: string;
-
     try {
-      content = await fs.readFile(`${base}.ndjson`, this.#readOptions());
+      return this.parseEntry(
+        await fs.readFile(`${this.#entryBase(key)}.${this.extension}`, this.readOptions()),
+      );
     } catch (error) {
       if (isNotFound(error)) {
-        return undefined;
+        return;
       }
 
       throw error;
     }
-
-    return content
-      .split('\n')
-      .filter((line) => line.trim() !== '')
-      .map(reviveProgramme);
-  }
-
-  async #readXml(base: string): Promise<XmltvProgramme[] | undefined> {
-    const { parseXmltvStream } = await this.#loadXmltv();
-    const programmes: XmltvProgramme[] = [];
-
-    try {
-      // A missing file surfaces as ENOENT on the first stream read.
-      const reading = createReadStream(`${base}.xml`, { signal: this.#signal });
-
-      for await (const event of parseXmltvStream(reading)) {
-        if (event.type === 'programme') {
-          programmes.push(event.value);
-        }
-      }
-    } catch (error) {
-      if (isNotFound(error)) {
-        return undefined;
-      }
-
-      throw error;
-    }
-
-    return programmes;
   }
 
   async write(
@@ -259,44 +181,24 @@ export class FsCacheStore implements CacheStore {
     await this.#ensureDir(this.#channelDir(key));
 
     const base = this.#entryBase(key);
-    let data: string;
-    let staleFile: string;
-
-    if (this.#format === 'ndjson') {
-      data = programmes.map((programme) => `${JSON.stringify(programme)}\n`).join('');
-      staleFile = `${base}.xml`;
-    } else {
-      const { serializeProgramme } = await this.#loadXmltv();
-      const elements = programmes
-        .map((programme) => serializeProgramme(programme))
-        .map((element) => (element.endsWith('\n') ? element : `${element}\n`))
-        .join('');
-      data = `<?xml version="1.0" encoding="UTF-8"?>\n<tv>\n${elements}</tv>\n`;
-      staleFile = `${base}.ndjson`;
-    }
-
-    await writeFileAtomic(
-      `${base}.${this.#format === 'ndjson' ? 'ndjson' : 'xml'}`,
-      data,
-      this.#signal,
-    );
-    // An entry must exist in a single format only.
-    await fs.rm(staleFile, { force: true });
-
     const fullMeta: CacheEntryMeta = {
       grabbedAt: meta?.grabbedAt ?? new Date().toISOString(),
       programmeCount: programmes.length,
     };
 
-    await writeFileAtomic(`${base}.meta.json`, `${JSON.stringify(fullMeta)}\n`, this.#signal);
+    await writeFileAtomic(
+      `${base}.${this.extension}`,
+      this.entryData(programmes, fullMeta),
+      this.signal,
+    );
+    await writeFileAtomic(`${base}.meta.json`, `${JSON.stringify(fullMeta)}\n`, this.signal);
   }
 
   async delete(key: ChannelDayKey): Promise<void> {
     const base = this.#entryBase(key);
 
     await Promise.all([
-      fs.rm(`${base}.ndjson`, { force: true }),
-      fs.rm(`${base}.xml`, { force: true }),
+      fs.rm(`${base}.${this.extension}`, { force: true }),
       fs.rm(`${base}.meta.json`, { force: true }),
     ]);
   }
@@ -306,7 +208,7 @@ export class FsCacheStore implements CacheStore {
     let sites;
 
     try {
-      sites = await fs.readdir(this.#dir, { withFileTypes: true });
+      sites = await fs.readdir(this.dir, { withFileTypes: true });
     } catch (error) {
       if (isNotFound(error)) {
         return 0;
@@ -315,26 +217,31 @@ export class FsCacheStore implements CacheStore {
       throw error;
     }
 
+    // This store's own entry files and the sidecars beside them. Built here
+    // rather than in the constructor, where a subclass has yet to say what its
+    // extension is, and a prune is once a run either way.
+    const entryFile = new RegExp(`^(\\d{4}-\\d{2}-\\d{2})\\.(?:${this.extension}|meta\\.json)$`);
+
     for (const site of sites.filter((entry) => entry.isDirectory())) {
       // Between sites, and between channels below: `readdir` and `rm` take no
       // signal of their own, and a prune is a walk rather than one long
       // operation — so this is where it stops, having removed whole days.
-      this.#signal?.throwIfAborted();
+      this.signal?.throwIfAborted();
 
-      const sitePath = path.join(this.#dir, site.name);
+      const sitePath = path.join(this.dir, site.name);
       const channels = await fs.readdir(sitePath, { withFileTypes: true });
 
       await inParallel(
         channels.filter((entry) => entry.isDirectory()),
         PRUNE_CONCURRENCY,
         async (channel) => {
-          this.#signal?.throwIfAborted();
+          this.signal?.throwIfAborted();
 
           const channelPath = path.join(sitePath, channel.name);
           // Counted after the await, not `+= await`: that reads the total
           // before waiting and writes it back after, so two of these running
           // together would each add to the same stale number.
-          const pruned = await this.#pruneChannelDir(channelPath, options.before);
+          const pruned = await this.#pruneChannelDir(channelPath, options.before, entryFile);
 
           removed += pruned;
 
@@ -352,12 +259,12 @@ export class FsCacheStore implements CacheStore {
   }
 
   /** Remove all entries in one channel directory older than `before`. */
-  async #pruneChannelDir(channelPath: string, before: string): Promise<number> {
+  async #pruneChannelDir(channelPath: string, before: string, entryFile: RegExp): Promise<number> {
     const files = await fs.readdir(channelPath);
     const staleDays = new Set<string>();
 
     for (const file of files) {
-      const day = ENTRY_FILE_RE.exec(file)?.[1];
+      const day = entryFile.exec(file)?.[1];
 
       // String comparison works for YYYY-MM-DD day strings.
       if (day !== undefined && day < before) {
@@ -372,8 +279,7 @@ export class FsCacheStore implements CacheStore {
       const base = path.join(channelPath, day);
 
       await Promise.all([
-        fs.rm(`${base}.ndjson`, { force: true }),
-        fs.rm(`${base}.xml`, { force: true }),
+        fs.rm(`${base}.${this.extension}`, { force: true }),
         fs.rm(`${base}.meta.json`, { force: true }),
       ]);
     });

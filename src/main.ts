@@ -52,7 +52,13 @@ export type {
 } from './xmltv/main.js';
 export type * from './xmltv/types.js';
 
-export { FsCacheStore, isStale, DEFAULT_STALENESS } from './cache/main.js';
+export {
+  FsCacheStore,
+  FsNdjsonCacheStore,
+  FsXmltvCacheStore,
+  isStale,
+  DEFAULT_STALENESS,
+} from './cache/main.js';
 export type * from './cache/types.js';
 
 export {

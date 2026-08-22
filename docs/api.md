@@ -24,7 +24,7 @@ console.log(summary); // { fetched, fromCache, failed }
 | `runGrab(source, options?)` | Grab only — fills the cache, writes no guide. |
 | `runMerge(source, options?)` | Write the guide from the cache only. |
 | `guideStream(source, options?)` | The merged guide as an async generator of XML chunks. |
-| `createCacheStore(config)` | The `FsCacheStore` a config describes. |
+| `createCacheStore(config)` | The cache store a config describes — the class its `format` names. |
 
 `GrabSummary` counts `fetched` (channel-days that went to the network) and
 `fromCache` (skipped because the cache was fresh); `failed` is the **list** of
@@ -89,7 +89,7 @@ pretty-print, mirroring `JSON.stringify`: a number of spaces or a string like
 ```ts
 import { build, defineConfig, defineSiteConfig } from 'epg-tools';
 import { parseXmltvFile, writeXmltvStream } from 'epg-tools/xmltv';
-import { FsCacheStore, isStale } from 'epg-tools/cache';
+import { FsNdjsonCacheStore, isStale } from 'epg-tools/cache';
 import { grab, resolveChannels, siteHttp } from 'epg-tools/grabber';
 import { generateGuide, writeGuide, mergeProgrammes } from 'epg-tools/merge';
 import { runXmltvGrabber, defineCapability } from 'epg-tools/tv-grab';
@@ -114,7 +114,7 @@ want is to read or write XMLTV; and a handful of names live only on a subpath
 | Days | `toDayString`, `dayToDate`, `addDays`, `diffDays`, `dayRange` |
 | Options parsing | `parseOptions`, `OptionError` |
 | XMLTV | `escapeXml`, `serializeChannel`, `serializeProgramme`, `writeXmltvStream`, `writeXmltvToFile`, `parseXmltvStream`, `parseXmltvFile`, and every [date helper](./xmltv.md#dates) |
-| Cache | `FsCacheStore`, `isStale`, `DEFAULT_STALENESS` |
+| Cache | `FsCacheStore`, `FsNdjsonCacheStore`, `FsXmltvCacheStore`, `isStale`, `DEFAULT_STALENESS` |
 | Grabber | `grab`, `defineSiteConfig`, `resolveChannels`, `resolveSites`, `channelElement`, `siteHttp`, `sitePacing`, `retryAfterMs` |
 | Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
 
@@ -136,16 +136,19 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 
 ### `epg-tools/cache`
 
-`FsCacheStore`, `isStale`, `DEFAULT_STALENESS`, and the `CacheStore` /
-`ChannelDayKey` / `CacheEntryMeta` / `StalenessPolicy` / `CacheFormat` types.
-Implement `CacheStore` yourself to keep entries somewhere other than the
-filesystem.
+`FsNdjsonCacheStore`, `FsXmltvCacheStore`, the abstract `FsCacheStore` they
+share, `isStale`, `DEFAULT_STALENESS`, and the `CacheStore` / `ChannelDayKey` /
+`CacheEntryMeta` / `StalenessPolicy` / `CacheFormat` types. Implement
+`CacheStore` yourself to keep entries somewhere other than the filesystem, or
+extend `FsCacheStore` to keep them on disk as something else — it asks a subclass
+only what one entry *is*: an extension, a string to write, and how to read one
+back.
 
-`new FsCacheStore({ dir, format?, signal? })` — the signal belongs to the store
-rather than to each call, since a store belongs to one run, and that is what
-keeps `CacheStore` a five-method interface anyone can implement. A write stops
-before its rename, so an entry is either there in full or not there at all, and
-a prune stops between days.
+`new FsNdjsonCacheStore({ dir, signal? })` — the format is the class, and the
+signal belongs to the store rather than to each call, since a store belongs to
+one run. That is what keeps `CacheStore` a five-method interface anyone can
+implement. A write stops before its rename, so an entry is either there in full
+or not there at all, and a prune stops between days.
 
 ### `epg-tools/grabber`
 

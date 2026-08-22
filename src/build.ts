@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { FsCacheStore } from './cache/main.js';
+import { FsCacheStore, FsNdjsonCacheStore, FsXmltvCacheStore } from './cache/main.js';
 import { grab, resolveSites } from './grabber/main.js';
 import type { GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
@@ -36,11 +36,16 @@ export interface RunOptions {
  * synchronously, and resolving may have to await.
  */
 export function createCacheStore(config: EpgConfig, signal?: AbortSignal): FsCacheStore {
-  return new FsCacheStore({
+  const options = {
     dir: config.cache?.dir ?? path.join(process.cwd(), '.epg-cache'),
-    format: config.cache?.format ?? 'ndjson',
     ...(signal ? { signal } : {}),
-  });
+  };
+
+  // The format is the class: one entry is one thing, and which thing it is
+  // decides how it is read as well as written.
+  return config.cache?.format === 'xmltv'
+    ? new FsXmltvCacheStore(options)
+    : new FsNdjsonCacheStore(options);
 }
 
 /** First day of the window implied by `now` + `offset`. */

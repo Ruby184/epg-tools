@@ -64,8 +64,6 @@ export const DEFAULT_STALENESS: StalenessPolicy = {
 export interface FsCacheStoreOptions {
   /** Root directory of the cache. */
   dir: string;
-  /** Format used for newly written entries. Defaults to `ndjson`. */
-  format?: CacheFormat;
   /**
    * Give up on the reads and writes this store is asked for.
    *

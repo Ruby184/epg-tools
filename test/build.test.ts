@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { build, guideStream, runGrab, runMerge } from '../src/build.js';
-import { FsCacheStore } from '../src/cache/main.js';
+import { FsNdjsonCacheStore } from '../src/cache/main.js';
 import { defineConfig, type EpgConfig } from '../src/config.js';
 import type { SiteConfig } from '../src/grabber/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
@@ -179,7 +179,7 @@ describe('cancellation', () => {
   it('leaves the cache unpruned when a run is cancelled', async () => {
     const dir = await tempDir();
     const controller = new AbortController();
-    const cache = new FsCacheStore({ dir: join(dir, 'cache') });
+    const cache = new FsNdjsonCacheStore({ dir: join(dir, 'cache') });
     const stale = { site: 'example.com', channelId: 'one.example', day: YESTERDAY };
 
     await cache.write(stale, [
