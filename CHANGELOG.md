@@ -11,6 +11,50 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.3.0](https://github.com/Ruby184/epg-tools/compare/v0.2.0...v0.3.0) (2026-08-22)
+
+
+### ⚠ BREAKING CHANGES
+
+* **merge:** programmes with no stop time now get one, and a stop overlapping the next programme is pulled back. Set merge.fillStop and merge.clipOverlaps to false for the old output.
+* **grabber:** ParseContext has three new required members, `http`, `paced` and `signal`, so anything constructing one by hand — a test calling parseDay directly — has to supply them.
+* **merge:** under programmeStrategy 'merge', programmes from different sources starting within five minutes and agreeing on their title are now merged into one element instead of both being emitted. Set merge.match.startToleranceMs to 0 for the old behaviour.
+* **cache:** StalenessPolicy has a new required emptyMaxAgeDays, and a day cached with no programmes is refetched a day later rather than after maxAgeDays. GrabSummary has a new empty field.
+
+### Features
+
+* **cache:** age an empty cached day out after a day ([c7d5819](https://github.com/Ruby184/epg-tools/commit/c7d58193df4fdfd1dabc731c0894b10e07d6d814))
+* **cli:** stop a run on a signal instead of dying mid-write ([130845b](https://github.com/Ruby184/epg-tools/commit/130845b80fdf94b217b023566a5cfd42162b1409))
+* **grabber:** let a parse make requests of its own ([f3795c4](https://github.com/Ruby184/epg-tools/commit/f3795c40edae337f27c0c6df07e06c7b4c4230f6))
+* **merge:** fix up the programmes on the way out ([a5365cf](https://github.com/Ruby184/epg-tools/commit/a5365cf284ea663f6ba510c966976e84443b53dd))
+* **merge:** match programmes within a start tolerance ([fa940bf](https://github.com/Ruby184/epg-tools/commit/fa940bfeb94b95408b68e0702ee77b6c5e0f23e5))
+* take a signal everywhere a run can wait ([90b1526](https://github.com/Ruby184/epg-tools/commit/90b1526b949fc5fb42eb6ec102dc8c8b99bf1785))
+
+
+### Bug Fixes
+
+* **core:** stop an aborted write leaving its temp file behind ([3e5164b](https://github.com/Ruby184/epg-tools/commit/3e5164b089effe36d7e65dc0ce4fc6af7efa701c))
+* **grabber:** plan requests without rescanning the channel list ([59d6995](https://github.com/Ruby184/epg-tools/commit/59d69951d9d0b81db6044b9490a90e10e2cb8ff7))
+* **merge:** merge a programme a source repeats on the next day ([597a0e5](https://github.com/Ruby184/epg-tools/commit/597a0e5fbab6c14c4244057b5b30a6b5b2d4105d))
+* **merge:** resolve every site's channels at once ([fe464f5](https://github.com/Ruby184/epg-tools/commit/fe464f5472523f81600a845e8c7cd1fc0ea93249))
+
+
+### Performance
+
+* **merge:** read the cache ahead of the writer ([18462b6](https://github.com/Ruby184/epg-tools/commit/18462b6554787322d2395143ee4058519741ff14))
+
+
+### Refactoring
+
+* **core:** one home for writing a file atomically ([7ce92d6](https://github.com/Ruby184/epg-tools/commit/7ce92d6fc9eb20410851c728962045232a4f6063))
+* **grabber:** give each queued task a signal of its own ([a60661f](https://github.com/Ruby184/epg-tools/commit/a60661f0ccd38c1406a587ce86737db7863a4663))
+* **grabber:** hook the client only when there is a backoff to run ([9139c1b](https://github.com/Ruby184/epg-tools/commit/9139c1be1f7c923fdfe087413b6b04946fb599c0))
+
+
+### Documentation
+
+* describe programme matching, the day boundary and empty days ([2f52a54](https://github.com/Ruby184/epg-tools/commit/2f52a5409d6d0f07d1d5c067e049f9cac5da39fb))
+
 ## [0.2.0](https://github.com/Ruby184/epg-tools/compare/v0.1.0...v0.2.0) (2026-08-21)
 
 
