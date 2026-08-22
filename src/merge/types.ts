@@ -73,6 +73,42 @@ export interface ProgrammeMatch {
   titles?: 'when-shifted' | 'always' | 'never';
 }
 
+/** What a guide-wide {@link MergeOptions.transform} is told about a programme. */
+export interface TransformContext {
+  /** The output channel it belongs to. */
+  xmltvId: string;
+  /**
+   * The programme that follows it on this channel, if the guide has one — the
+   * same one `fillStop` and `clipOverlaps` used. Read-only: change it when its
+   * own turn comes.
+   */
+  next?: XmltvProgramme;
+}
+
+/**
+ * A last say over each programme on its way into the guide: return it, a
+ * different one, or nothing at all to leave it out.
+ *
+ * Returning a *new* object is the safe form — the one handed in may be a cache
+ * store's own, and a memory-backed store hands out the same object every read.
+ */
+export type ProgrammeTransform = (
+  programme: XmltvProgramme,
+  context: TransformContext,
+) => XmltvProgramme | undefined | null;
+
+/**
+ * How long a programme with no `stop` may be made to run when the next one's
+ * start is used as its end.
+ *
+ * Six hours by default: long enough for any film, short enough that the gap
+ * where a channel stops broadcasting for the night does not become a single
+ * nine-hour programme.
+ */
+export interface FillStopOptions {
+  maxMs?: number;
+}
+
 export interface MergeOptions {
   channelStrategy?: ChannelStrategy;
   programmeStrategy?: ProgrammeStrategy;
@@ -83,6 +119,40 @@ export interface MergeOptions {
    * describe.
    */
   match?: ProgrammeMatch | ProgrammeMatcher;
+  /**
+   * Give a programme with no `stop` the next one's start, capped at
+   * {@link FillStopOptions.maxMs} (six hours). On by default.
+   *
+   * A programme without an end is what a consumer can do least with — a
+   * zero-length event in tvheadend, nothing at all in some players — and the
+   * guide knows the answer, since it has the programme that follows.
+   */
+  fillStop?: boolean | FillStopOptions;
+  /**
+   * Pull back a `stop` that reaches past the next programme's start. On by
+   * default.
+   *
+   * Sources overrun for dull reasons — a nominal duration, a late schedule
+   * change published only for the programme that followed — and a consumer
+   * shown two programmes at once has to guess which is on.
+   */
+  clipOverlaps?: boolean;
+  /**
+   * Leave out programmes that start outside the guide's own window. Off by
+   * default: a source that hands back a few hours past the last day is giving
+   * you something, not making a mistake.
+   */
+  clampToWindow?: boolean;
+  /**
+   * The last word on every programme, after the rules above have had theirs —
+   * a category map, a title cleanup, dropping what a source pads its schedule
+   * with. See {@link ProgrammeTransform}.
+   *
+   * A programme dropped here leaves the gap it occupied: the rules ran before
+   * it went. Dropping is `clampToWindow`'s job, or a site's own `transform`,
+   * which runs early enough for the rules to close up after it.
+   */
+  transform?: ProgrammeTransform;
 }
 
 export interface BuildGuideOptions {

@@ -49,7 +49,7 @@ hardcode — a username, a password, a region. See
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
 | `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source. |
-| `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge' }` | How several sites covering one channel are combined, and what counts as the same broadcast (`match`) — see [Merge strategies](#merge-strategies). |
+| `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true }` | How several sites covering one channel are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 
@@ -215,6 +215,44 @@ merge: {
   match: (a, b) => a.episodeNum?.[0]?.value === b.episodeNum?.[0]?.value,
 }
 ```
+
+### Cleaning up the output
+
+Two defects arrive from almost every source, and the guide is in a position to
+fix both because it has the programme that follows:
+
+| field | default | what it does |
+|---|---|---|
+| `fillStop` | `true` (cap 6 h) | A programme with no `stop` gets the next one's start — capped, so the gap where a channel goes off air for the night stays a gap instead of becoming one nine-hour programme. `{ maxMs: 1_800_000 }` for a cap of your own, `false` to leave ends missing. |
+| `clipOverlaps` | `true` | A `stop` that reaches past the next programme's start is pulled back to it. |
+| `clampToWindow` | `false` | Leave out programmes starting outside the guide's window. Off, because a source handing back a few hours past the last day is giving you something. |
+| `transform` | — | The last word on every programme: `(programme, { xmltvId, next }) => programme \| null`. |
+
+A programme with no end is what a consumer can do least with — tvheadend shows
+a zero-length event, some players nothing at all — and two programmes claiming
+the same minute means it has to guess which is on. Both are why `tv_sort` exists
+in the Perl suite; here they are the default.
+
+The last programme of a channel keeps no `stop`: there is nothing after it to
+take one from. Neither rule invents anything — the end comes from the next
+programme's start or not at all.
+
+`transform` runs **after** those two, so it sees the `stop` they settled and the
+programme that follows (`next`):
+
+```ts
+merge: {
+  transform: (programme, { xmltvId }) => ({
+    ...programme,
+    category: programme.category?.map((c) => ({ ...c, value: GENRES[c.value] ?? c.value })),
+  }),
+}
+```
+
+Returning `null` or `undefined` leaves the programme out, but the rules have
+already run, so the gap stays. To drop something and have the gap close, use
+[a site's own `transform`](./site-config.md#fixing-up-one-source), which runs
+before them — or `clampToWindow` for what falls outside the window.
 
 ### Across the day boundary
 

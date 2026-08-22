@@ -803,6 +803,332 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     });
   });
 
+  describe('cleaning up the output', () => {
+    const NEXT_DAY = '2026-01-16';
+
+    /** The `<programme>` elements as (start, stop) pairs, in document order. */
+    function emitted(output: string): { start: string; stop?: string }[] {
+      return [
+        ...output.matchAll(/<programme start="(\d{14})[^"]*"(?: stop="(\d{14})[^"]*")?/g),
+      ].map(([, start, stop]) =>
+        stop === undefined ? { start: start! } : { start: start!, stop },
+      );
+    }
+
+    const site = makeSite('site-a.sk', [{ xmltvId: 'X', siteId: 'a-x' }]);
+
+    function cacheWith(programmes: XmltvProgramme[], day = DAY): CacheStore {
+      return createFakeCache({ [`site-a.sk|X|${day}`]: programmes });
+    }
+
+    const one = (
+      options: Partial<BuildGuideOptions> = {},
+      cache = cacheWith([]),
+    ): Promise<string> =>
+      generate({ sites: [site], cache, days: 1, startDay: DAY, now: NOW, ...options });
+
+    describe('fillStop', () => {
+      it("gives a programme with no stop the next one's start", async () => {
+        const output = await one(
+          {},
+          cacheWith([
+            prog('X', '2026-01-15T10:00:00Z', 'A'),
+            prog('X', '2026-01-15T11:30:00Z', 'B'),
+          ]),
+        );
+
+        expect(emitted(output)).toEqual([
+          { start: '20260115100000', stop: '20260115113000' },
+          // The last one has nothing to take an end from.
+          { start: '20260115113000' },
+        ]);
+      });
+
+      it('caps it at six hours, leaving the gap a channel goes off air for', async () => {
+        const output = await one(
+          {},
+          cacheWith([
+            prog('X', '2026-01-15T01:00:00Z', 'Overnight'),
+            prog('X', '2026-01-15T12:00:00Z', 'Noon'),
+          ]),
+        );
+
+        expect(emitted(output)[0]).toEqual({ start: '20260115010000', stop: '20260115070000' });
+      });
+
+      it('takes a cap of its own', async () => {
+        const output = await one(
+          { merge: { fillStop: { maxMs: 30 * 60_000 } } },
+          cacheWith([
+            prog('X', '2026-01-15T10:00:00Z', 'A'),
+            prog('X', '2026-01-15T12:00:00Z', 'B'),
+          ]),
+        );
+
+        expect(emitted(output)[0]).toEqual({ start: '20260115100000', stop: '20260115103000' });
+      });
+
+      it('leaves an existing stop alone', async () => {
+        const output = await one(
+          {},
+          cacheWith([
+            prog('X', '2026-01-15T10:00:00Z', 'A', undefined, {
+              stop: new Date('2026-01-15T10:45:00Z'),
+            }),
+            prog('X', '2026-01-15T11:30:00Z', 'B'),
+          ]),
+        );
+
+        expect(emitted(output)[0]).toEqual({ start: '20260115100000', stop: '20260115104500' });
+      });
+
+      it('is off when told to be', async () => {
+        const output = await one(
+          { merge: { fillStop: false } },
+          cacheWith([
+            prog('X', '2026-01-15T10:00:00Z', 'A'),
+            prog('X', '2026-01-15T11:30:00Z', 'B'),
+          ]),
+        );
+
+        expect(emitted(output)).toEqual([{ start: '20260115100000' }, { start: '20260115113000' }]);
+      });
+
+      it("reaches across the day boundary for the next day's first programme", async () => {
+        const cache = createFakeCache({
+          [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T23:30:00Z', 'Late')],
+          [`site-a.sk|X|${NEXT_DAY}`]: [prog('X', '2026-01-16T00:15:00Z', 'Later')],
+        });
+
+        const output = await one({ cache, days: 2 });
+
+        // The day held back for merging is the same day that supplies this.
+        expect(emitted(output)[0]).toEqual({ start: '20260115233000', stop: '20260116001500' });
+      });
+    });
+
+    describe('clipOverlaps', () => {
+      const overlapping = (): XmltvProgramme[] => [
+        prog('X', '2026-01-15T10:00:00Z', 'A', undefined, {
+          stop: new Date('2026-01-15T11:00:00Z'),
+        }),
+        prog('X', '2026-01-15T10:45:00Z', 'B', undefined, {
+          stop: new Date('2026-01-15T11:30:00Z'),
+        }),
+      ];
+
+      it('pulls a stop back to the next start', async () => {
+        const output = await one({}, cacheWith(overlapping()));
+
+        expect(emitted(output)[0]).toEqual({ start: '20260115100000', stop: '20260115104500' });
+      });
+
+      it('leaves a stop that reaches exactly to the next start', async () => {
+        const output = await one(
+          {},
+          cacheWith([
+            prog('X', '2026-01-15T10:00:00Z', 'A', undefined, {
+              stop: new Date('2026-01-15T10:45:00Z'),
+            }),
+            prog('X', '2026-01-15T10:45:00Z', 'B'),
+          ]),
+        );
+
+        expect(emitted(output)[0]).toEqual({ start: '20260115100000', stop: '20260115104500' });
+      });
+
+      it('is off when told to be', async () => {
+        const output = await one({ merge: { clipOverlaps: false } }, cacheWith(overlapping()));
+
+        expect(emitted(output)[0]).toEqual({ start: '20260115100000', stop: '20260115110000' });
+      });
+    });
+
+    describe('clampToWindow', () => {
+      const spilling = (): CacheStore =>
+        cacheWith([
+          prog('X', '2026-01-14T23:00:00Z', 'Before'),
+          prog('X', '2026-01-15T10:00:00Z', 'Inside'),
+          prog('X', '2026-01-16T02:00:00Z', 'After'),
+        ]);
+
+      it('keeps what a source spilled either side, by default', async () => {
+        expect(emitted(await one({}, spilling()))).toHaveLength(3);
+      });
+
+      it('leaves out what starts outside the window when asked', async () => {
+        const output = await one({ merge: { clampToWindow: true } }, spilling());
+
+        expect(emitted(output)).toEqual([{ start: '20260115100000' }]);
+      });
+    });
+
+    describe("a site's own transform", () => {
+      it('runs before the merge, so what it returns is what merges', async () => {
+        const siteB = makeSite('site-b.com', [{ xmltvId: 'X', siteId: 'b-x' }]);
+        const shouty: SiteConfig<unknown> = {
+          ...siteB,
+          transform: (programme) => ({
+            ...programme,
+            title: programme.title.map((title) => ({ ...title, value: title.value.toUpperCase() })),
+          }),
+        };
+        const cache = createFakeCache({
+          [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'Správy', 'sk')],
+          [`site-b.com|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'News', 'en')],
+        });
+
+        const output = await generate({
+          sites: [site, shouty],
+          cache,
+          days: 1,
+          startDay: DAY,
+          now: NOW,
+        });
+
+        expect(output).toContain('Správy');
+        expect(output).toContain('NEWS');
+        expect(output).not.toContain('>News<');
+      });
+
+      it('closes the gap when it drops one, since the rules run after it', async () => {
+        const filtered: SiteConfig<unknown> = {
+          ...site,
+          transform: (programme) => (programme.title[0]?.value === 'Filler' ? null : programme),
+        };
+
+        const output = await generate({
+          sites: [filtered],
+          cache: cacheWith([
+            prog('X', '2026-01-15T10:00:00Z', 'A'),
+            prog('X', '2026-01-15T10:30:00Z', 'Filler'),
+            prog('X', '2026-01-15T11:00:00Z', 'B'),
+          ]),
+          days: 1,
+          startDay: DAY,
+          now: NOW,
+        });
+
+        // A's end is B's start, not the dropped programme's.
+        expect(emitted(output)).toEqual([
+          { start: '20260115100000', stop: '20260115110000' },
+          { start: '20260115110000' },
+        ]);
+      });
+
+      it('is told which channel-day it is looking at', async () => {
+        const seen: string[] = [];
+        const noting: SiteConfig<unknown> = {
+          ...site,
+          transform: (programme, { channel, day, date }) => {
+            seen.push(`${channel.xmltvId} ${channel.siteId} ${day} ${date.toISOString()}`);
+            return programme;
+          },
+        };
+
+        await generate({
+          sites: [noting],
+          cache: cacheWith([prog('X', '2026-01-15T10:00:00Z', 'A')]),
+          days: 1,
+          startDay: DAY,
+          now: NOW,
+        });
+
+        expect(seen).toEqual([`X a-x ${DAY} 2026-01-15T00:00:00.000Z`]);
+      });
+
+      it('leaves the cache entry it was handed alone', async () => {
+        const cached = [prog('X', '2026-01-15T10:00:00Z', 'A')];
+        const cache = cacheWith(cached);
+        const options = {
+          sites: [
+            {
+              ...site,
+              transform: (programme: XmltvProgramme) => ({ ...programme, title: [{ value: 'B' }] }),
+            } as SiteConfig<unknown>,
+          ],
+          cache,
+          days: 1,
+          startDay: DAY,
+          now: NOW,
+        };
+
+        expect(await generate(options)).toContain('B');
+        // The same entry, read again: a store that keeps its programmes in
+        // memory hands out the objects themselves.
+        expect(await generate(options)).toContain('B');
+        expect(cached[0]?.title).toEqual([{ value: 'A' }]);
+      });
+    });
+
+    describe('the guide-wide transform', () => {
+      it('sees the stop the rules filled in, and what follows', async () => {
+        const seen: { start: string; stop?: string; next?: string }[] = [];
+
+        await one(
+          {
+            merge: {
+              transform: (programme, { next }) => {
+                seen.push({
+                  start: programme.start.toISOString(),
+                  ...(programme.stop ? { stop: programme.stop.toISOString() } : {}),
+                  ...(next ? { next: next.start.toISOString() } : {}),
+                });
+
+                return programme;
+              },
+            },
+          },
+          cacheWith([
+            prog('X', '2026-01-15T10:00:00Z', 'A'),
+            prog('X', '2026-01-15T11:30:00Z', 'B'),
+          ]),
+        );
+
+        expect(seen).toEqual([
+          {
+            start: '2026-01-15T10:00:00.000Z',
+            stop: '2026-01-15T11:30:00.000Z',
+            next: '2026-01-15T11:30:00.000Z',
+          },
+          { start: '2026-01-15T11:30:00.000Z' },
+        ]);
+      });
+
+      it('leaves out what it returns nothing for', async () => {
+        const output = await one(
+          {
+            merge: {
+              transform: (programme) => (programme.title[0]?.value === 'B' ? null : programme),
+            },
+          },
+          cacheWith([
+            prog('X', '2026-01-15T10:00:00Z', 'A'),
+            prog('X', '2026-01-15T11:30:00Z', 'B'),
+          ]),
+        );
+
+        expect(emitted(output)).toEqual([{ start: '20260115100000', stop: '20260115113000' }]);
+      });
+
+      it('can rewrite a programme on its way out', async () => {
+        const output = await one(
+          {
+            merge: {
+              transform: (programme) => ({
+                ...programme,
+                category: [{ value: 'Movie', lang: 'en' }],
+              }),
+            },
+          },
+          cacheWith([prog('X', '2026-01-15T10:00:00Z', 'A')]),
+        );
+
+        expect(output).toContain('<category lang="en">Movie</category>');
+      });
+    });
+  });
+
   describe('reading the cache ahead of the writer', () => {
     /** A cache that records the order reads were started in, and their overlap. */
     function tracingCache(): {

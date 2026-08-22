@@ -437,6 +437,25 @@ export interface SiteConfig<
    */
   parseDay(ctx: ParseContext<TRaw, TData>): ParsedProgramme[] | Promise<ParsedProgramme[]>;
   /**
+   * A last look at each of this site's programmes on the way *out* of the
+   * cache: return it, a different one, or nothing at all to leave it out.
+   *
+   * For what is wrong with a particular source rather than with the guide — a
+   * category vocabulary of its own, a title with the channel name stuck on the
+   * front, the filler it pads an unpublished schedule with. `parseDay` could do
+   * the same, but this runs when the cache is *read*, so changing it takes
+   * effect on the next merge instead of after a refetch — and it applies to
+   * everything already cached.
+   *
+   * It runs before this site's programmes meet another site's, so what it
+   * returns is what merging sees, and before `fillStop` and `clipOverlaps`, so
+   * a gap it leaves behind is closed up rather than left open.
+   */
+  transform?(
+    programme: XmltvProgramme,
+    context: { channel: GrabberChannel<TData>; day: string; date: Date },
+  ): XmltvProgramme | undefined | null;
+  /**
    * Customize the `<channel>` element. Defaults to id + name + logo.
    *
    * `element` is that default as a builder — see {@link ChannelElement} — so

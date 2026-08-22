@@ -31,6 +31,7 @@ accepted) and the type of a channel's `data` from what `channels` returns.
 | `request` | `(ctx) => Promise<TRaw>` | **required** | Fetch one request's raw data. The context's shape comes from `batching`. |
 | `parseDay` | `(ctx) => ParsedProgramme[] \| Promise<…>` | **required** | Turn part of a response into one channel-day's programmes. Called once per channel-day. May return builders, plain objects, or a mix. |
 | `channelInfo` | `(channel, element) => XmltvChannel \| ChannelBuilder` | `defaultChannelInfo` — id, display name and logo | Build the `<channel>` element for a channel. |
+| `transform` | `(programme, ctx) => XmltvProgramme \| null` | — | A last say over each of this site's programmes as the cache is **read** — see [fixing up one source](#fixing-up-one-source). |
 | `days` | `number` | the config's `days`, then `7` | Override how many days this site grabs. |
 | `concurrency` | `number` | `1` | How many requests this site may have in flight at once. |
 | `rateLimit` | `{ requests, perMs, strict? }` | unset — no pacing | How often this site may be asked. `strict` defaults to `true` (sliding window). |
@@ -193,6 +194,35 @@ per-programme fan-out belongs here rather than there.
 
 How many responses a site holds while parsing them is its `concurrency`: one
 per unit, so a site set to fetch two at a time never has a third in memory.
+
+### Fixing up one source
+
+`transform` is for what is wrong with a *particular source* rather than with the
+guide: a category vocabulary of its own, a title with the channel name stuck on
+the front, the filler it pads an unpublished schedule with.
+
+```ts
+transform(programme, { channel, day }) {
+  if (programme.title[0]?.value === 'Program dňa') return null;   // drop the filler
+
+  return {
+    ...programme,
+    category: programme.category?.map((c) => ({ ...c, value: GENRES[c.value] ?? c.value })),
+  };
+}
+```
+
+`parseDay` could do the same, and should when the fix is really about reading
+the response. The difference is *when*: `transform` runs as the cache is **read**,
+so changing it takes effect on the next `epg merge` rather than after a
+refetch — and it applies to everything already cached. It also runs before this
+site's programmes meet another site's, so what it returns is what gets merged,
+and before `fillStop` and `clipOverlaps`, so a gap it leaves behind is
+[closed up](./configuration.md#cleaning-up-the-output) rather than left open.
+
+Return the programme, a different one, or `null`/`undefined` to leave it out.
+Build a new object rather than changing the one handed in: it may be a cache
+store's own, and a memory-backed store hands out the same object every read.
 
 ### Building programmes
 

@@ -2,7 +2,7 @@ import { dayRange, dayToDate, toDayString } from '../core/days.js';
 import { writeOutput, type OutputTarget } from '../core/output.js';
 import { channelElement, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
-import { writeXmltvStream } from '../xmltv/main.js';
+import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import { mergeChannels } from './channel.js';
 import { mergeInto, resolveMatch } from './programme.js';
@@ -27,6 +27,15 @@ interface RegistryEntry {
  * four by default anyway.
  */
 const DEFAULT_READ_AHEAD = 16;
+
+const DAY_MS = 86_400_000;
+
+/**
+ * How long `fillStop` may make a programme run: long enough for any film, short
+ * enough that the gap where a channel stops broadcasting for the night stays a
+ * gap rather than becoming one nine-hour programme.
+ */
+const DEFAULT_FILL_STOP_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Yield `items` in order, with `depth` of them being read at once.
@@ -163,6 +172,99 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
 
   const listStrategy = channelStrategy === 'merge-programmes' ? programmeStrategy : 'concat';
   const match = resolveMatch(options.merge?.match);
+  const {
+    fillStop = true,
+    clipOverlaps = true,
+    clampToWindow = false,
+    transform,
+  } = options.merge ?? {};
+  const fillStopMs =
+    fillStop === false
+      ? undefined
+      : ((typeof fillStop === 'object' ? fillStop.maxMs : undefined) ?? DEFAULT_FILL_STOP_MS);
+
+  // The guide's own bounds, for `clampToWindow`: the first day's midnight, and
+  // the midnight that ends the last one.
+  const windowStart = days.length > 0 ? dayToDate(days[0]!).getTime() : 0;
+  const windowEnd =
+    days.length > 0
+      ? dayToDate(days[days.length - 1]!).getTime() + DAY_MS
+      : Number.MAX_SAFE_INTEGER;
+
+  /**
+   * One programme as the guide will have it, given the one that follows it.
+   *
+   * The rules only ever need the successor, which the day being held back has
+   * already provided — so nothing is buffered for their sake. A change is made
+   * on a copy: the programme belongs to whatever the cache store handed over,
+   * and a store that keeps its entries in memory hands out the same object
+   * every read.
+   */
+  const finish = (
+    programme: XmltvProgramme,
+    next: XmltvProgramme | undefined,
+    xmltvId: string,
+  ): XmltvProgramme | undefined => {
+    let result = programme;
+
+    if (next !== undefined) {
+      const start = programme.start.getTime();
+      const nextStart = next.start.getTime();
+
+      if (programme.stop === undefined) {
+        if (fillStopMs !== undefined && nextStart > start) {
+          // The next start, unless the two are further apart than a programme
+          // plausibly runs — a channel that stops for the night leaves a gap,
+          // not one very long programme.
+          result = {
+            ...result,
+            stop:
+              nextStart - start <= fillStopMs
+                ? xmltvDate(next.start)
+                : xmltvDate(new Date(start + fillStopMs), {
+                    offset: getXmltvOffset(programme.start),
+                  }),
+          };
+        }
+      } else if (clipOverlaps && start < nextStart && programme.stop.getTime() > nextStart) {
+        result = { ...result, stop: xmltvDate(next.start) };
+      }
+    }
+
+    if (transform === undefined) {
+      return result;
+    }
+
+    return transform(result, { xmltvId, ...(next === undefined ? {} : { next }) }) ?? undefined;
+  };
+
+  /** What a site contributes for one channel-day, as the site would have it. */
+  const contribution = (
+    source: ChannelSource,
+    day: string,
+    list: XmltvProgramme[],
+  ): XmltvProgramme[] => {
+    const { transform: siteTransform } = source.config;
+    let programmes = list;
+
+    if (siteTransform) {
+      const context = { channel: source.channel, day, date: dayToDate(day) };
+
+      programmes = programmes.flatMap((programme) => {
+        const kept = siteTransform(programme, context);
+        return kept ? [kept] : [];
+      });
+    }
+
+    if (clampToWindow) {
+      programmes = programmes.filter((programme) => {
+        const start = programme.start.getTime();
+        return start >= windowStart && start < windowEnd;
+      });
+    }
+
+    return programmes;
+  };
 
   // Every channel-day the guide is made of, in the order it is written: each
   // channel's days in turn. Which is also why the last day of the window is
@@ -185,11 +287,18 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       ),
     );
 
-    return {
-      entry,
-      day,
-      lists: cached.filter((list): list is XmltvProgramme[] => list !== undefined),
-    };
+    const lists: XmltvProgramme[][] = [];
+
+    // Each site's own say over its own programmes, before they meet anyone
+    // else's — so what merging sees, and what the rules run on, is already
+    // what the site meant.
+    for (const [index, list] of cached.entries()) {
+      if (list !== undefined) {
+        lists.push(contribution(entry.sources[index]!, day, list));
+      }
+    }
+
+    return { entry, day, lists };
   };
 
   async function* programmes(): AsyncGenerator<XmltvProgramme> {
@@ -228,14 +337,23 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
         held++;
       }
 
-      yield* pending.splice(0, held);
+      // The window's last day: nothing is left to hold this channel's tail back
+      // for, and the next channel-day read belongs to another channel.
+      const last = day === lastDay;
+      const ready = last ? pending.splice(0) : pending.splice(0, held);
 
-      // The window's last day: nothing is left to hold this channel's tail
-      // back for, and the next channel-day read belongs to another channel.
-      if (day === lastDay) {
-        yield* pending;
-        pending = [];
+      for (const [index, programme] of ready.entries()) {
+        // What follows it on this channel: the next one out, or — for the last
+        // of this batch — the first one still being held. Which is what the day
+        // held back is for, over and above the merging it was added for.
+        const finished = finish(programme, ready[index + 1] ?? pending[0], entry.xmltvId);
 
+        if (finished !== undefined) {
+          yield finished;
+        }
+      }
+
+      if (last) {
         logger?.(`merge: channel ${entry.xmltvId} done`);
       }
     }

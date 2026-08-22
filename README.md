@@ -15,6 +15,7 @@ Memory-efficient EPG toolkit for building [XMLTV](https://github.com/XMLTV/xmltv
 - **Warnings, not crashes** — malformed feeds never abort the stream. A bad programme is skipped and [reported as a warning](./docs/xmltv.md#warnings), not thrown: one bad programme in a 20 MB feed costs you one programme, not the guide
 - **Fluent builders** — [`ProgrammeBuilder`](./docs/xmltv.md#builders) and friends write the language-tagged model for you, and `parseDay` is handed one already bound to the channel-day it is parsing
 - **Merge strategies** — combine multiple sources per channel, including merging multi-language attributes of the same programme. Two sources rarely agree to the second, so the same broadcast is [recognized within a tolerance](./docs/configuration.md#what-counts-as-the-same-broadcast) — corroborated by the title, and by the two durations where they are known — and a programme that two adjacent days both reported is emitted once rather than twice
+- **The output cleaned up on the way out** — a programme with no `stop` runs to the next one's start (capped, so an off-air night stays a gap), a `stop` reaching past that start is pulled back, and a `transform` hook per site or over the whole guide handles the rest: category maps, title cleanups, dropping a source's filler. What `tv_sort` and WebGrab+Plus's postprocess are for, [on by default](./docs/configuration.md#cleaning-up-the-output)
 - **An XMLTV grabber, from the same config** — [`epg init-grabber`](./docs/tv-grab.md) turns it into a `tv_grab_*` executable that tvheadend and `tv_find_grabbers` can drive
 
 Requires Node.js >= 20 (Node >= 23.6 to load `epg.config.ts` directly via native type stripping).
@@ -106,6 +107,8 @@ export default defineConfig({
     channelStrategy: 'merge-programmes',
     programmeStrategy: 'merge',
     // match: { startToleranceMs: 300_000, titles: 'when-shifted' },  // the default
+    // fillStop: true,      // a programme with no end runs to the next one's start
+    // clipOverlaps: true,  // and a stop past that start is pulled back to it
   },
 });
 ```
