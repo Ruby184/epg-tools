@@ -322,6 +322,21 @@ describe('FsCacheStore', () => {
     await expect(fs.access(path.join(dir, 's2'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('leaves a directory that is not empty, without failing over it', async () => {
+    const store = new FsCacheStore({ dir });
+
+    await store.write({ site: 's1', channelId: 'c1', day: '2026-07-10' }, [programme()]);
+    // Something that is not an entry, so the day goes and the directory cannot.
+    // Which is also what a grab writing the day it is grabbing looks like from
+    // here: `rmdir` refusing is the check, rather than a `readdir` beforehand
+    // that another process can make untrue in between.
+    await fs.writeFile(path.join(dir, 's1', 'c1', 'notes.txt'), 'mine', 'utf8');
+
+    expect(await store.prune({ before: '2026-07-16' })).toBe(1);
+
+    expect(await fs.readdir(path.join(dir, 's1', 'c1'))).toEqual(['notes.txt']);
+  });
+
   it('prune on a missing cache root returns 0', async () => {
     const store = new FsCacheStore({ dir: path.join(dir, 'does-not-exist') });
 

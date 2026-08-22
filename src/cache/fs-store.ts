@@ -16,12 +16,58 @@ type XmltvModule = typeof import('../xmltv/main.js');
 const ENTRY_FILE_RE = /^(\d{4}-\d{2}-\d{2})\.(?:ndjson|xml|meta\.json)$/;
 
 function isNotFound(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    (error as NodeJS.ErrnoException).code === 'ENOENT'
-  );
+  return code(error) === 'ENOENT';
 }
+
+function code(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null
+    ? (error as NodeJS.ErrnoException).code
+    : undefined;
+}
+
+/**
+ * Remove a directory if it is empty, without asking first.
+ *
+ * Asking is the race: a grab in another process writes the day it is grabbing a
+ * moment after the answer comes back and before the removal goes out, and a
+ * prune that checked then fails on what it was told was safe. `rmdir` already
+ * refuses a directory with anything in it — POSIX allows either `ENOTEMPTY` or
+ * `EEXIST` for that — so the refusal *is* the check, and a directory somebody
+ * else removed first (`ENOENT`) is equally fine by us.
+ */
+async function removeIfEmpty(dir: string): Promise<void> {
+  try {
+    await fs.rmdir(dir);
+  } catch (error) {
+    if (!['ENOTEMPTY', 'EEXIST', 'ENOENT'].includes(code(error) ?? '')) {
+      throw error;
+    }
+  }
+}
+
+/**
+ * Run `work` over `items`, `limit` of them at a time.
+ *
+ * A prune is thousands of small operations that only wait on the disk, so doing
+ * them one after another spends the whole time waiting — while doing them all at
+ * once is the file descriptor storm the rest of this package is careful to
+ * avoid. Node's own file operations run on a threadpool of four by default, so
+ * there is little to gain past a handful in flight.
+ */
+async function inParallel<T>(items: T[], limit: number, work: (item: T) => Promise<void>) {
+  let next = 0;
+
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      await work(items[next++]!);
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+/** How much of a prune's directory walk is in flight at once. */
+const PRUNE_CONCURRENCY = 8;
 
 /** Revive Date fields of a programme parsed from an ndjson line. */
 function reviveProgramme(line: string): XmltvProgramme {
@@ -269,40 +315,37 @@ export class FsCacheStore implements CacheStore {
       throw error;
     }
 
-    for (const site of sites) {
+    for (const site of sites.filter((entry) => entry.isDirectory())) {
       // Between sites, and between channels below: `readdir` and `rm` take no
       // signal of their own, and a prune is a walk rather than one long
       // operation — so this is where it stops, having removed whole days.
       this.#signal?.throwIfAborted();
 
-      if (!site.isDirectory()) {
-        continue;
-      }
-
       const sitePath = path.join(this.#dir, site.name);
       const channels = await fs.readdir(sitePath, { withFileTypes: true });
 
-      for (const channel of channels) {
-        this.#signal?.throwIfAborted();
+      await inParallel(
+        channels.filter((entry) => entry.isDirectory()),
+        PRUNE_CONCURRENCY,
+        async (channel) => {
+          this.#signal?.throwIfAborted();
 
-        if (!channel.isDirectory()) {
-          continue;
-        }
+          const channelPath = path.join(sitePath, channel.name);
+          // Counted after the await, not `+= await`: that reads the total
+          // before waiting and writes it back after, so two of these running
+          // together would each add to the same stale number.
+          const pruned = await this.#pruneChannelDir(channelPath, options.before);
 
-        const channelPath = path.join(sitePath, channel.name);
-        removed += await this.#pruneChannelDir(channelPath, options.before);
+          removed += pruned;
 
-        if ((await fs.readdir(channelPath)).length === 0) {
-          await fs.rmdir(channelPath);
-          // It is not there any more, so a later write to this channel has to
-          // make it again.
+          await removeIfEmpty(channelPath);
+          // Whether it went or not, this store no longer knows: a write to this
+          // channel makes sure of the directory again.
           this.#ensured.delete(channelPath);
-        }
-      }
+        },
+      );
 
-      if ((await fs.readdir(sitePath)).length === 0) {
-        await fs.rmdir(sitePath);
-      }
+      await removeIfEmpty(sitePath);
     }
 
     return removed;
@@ -322,7 +365,10 @@ export class FsCacheStore implements CacheStore {
       }
     }
 
-    for (const day of staleDays) {
+    // A day's files together, and the days a few at a time: the entries of one
+    // channel are the smallest pieces here, and waiting for each in turn is
+    // most of what a prune used to spend its time on.
+    await inParallel([...staleDays], PRUNE_CONCURRENCY, async (day) => {
       const base = path.join(channelPath, day);
 
       await Promise.all([
@@ -330,7 +376,7 @@ export class FsCacheStore implements CacheStore {
         fs.rm(`${base}.xml`, { force: true }),
         fs.rm(`${base}.meta.json`, { force: true }),
       ]);
-    }
+    });
 
     return staleDays.size;
   }
