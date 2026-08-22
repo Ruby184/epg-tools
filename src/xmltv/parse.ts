@@ -4,6 +4,20 @@ import { XmltvScanner } from './scan.js';
 import type { AnyIterable, XmltvDocument, XmltvParseEvent, XmltvParseOptions } from './types.js';
 
 /**
+ * What the *streaming* parsers take on top of the scanning: a document being
+ * read is as long as the document, so it is the one thing here worth being able
+ * to stop. {@link parseXmltvString} has the whole thing in hand already and
+ * nothing to interrupt.
+ */
+export interface ParseStreamOptions extends XmltvParseOptions {
+  /**
+   * Stop parsing. Checked between chunks, handed to the file read when there is
+   * one, and — for {@link XmltvParseStream} — what destroys it.
+   */
+  signal?: AbortSignal;
+}
+
+/**
  * Streaming XMLTV parser: consumes string/byte chunks and yields `meta`,
  * `channel` and `programme` events while buffering at most one incomplete
  * element at a time. All scanning lives in {@link XmltvScanner}; this is
@@ -11,13 +25,17 @@ import type { AnyIterable, XmltvDocument, XmltvParseEvent, XmltvParseOptions } f
  */
 export async function* parseXmltvStream(
   source: AnyIterable<string | Uint8Array>,
-  options?: XmltvParseOptions,
+  options?: ParseStreamOptions,
 ): AsyncGenerator<XmltvParseEvent> {
   const decoder = new TextDecoder();
   const scanner = new XmltvScanner(options);
   let buf = '';
 
   for await (const chunk of source) {
+    // Between chunks: a source that carries the signal itself has stopped
+    // already, and one that does not stops here.
+    options?.signal?.throwIfAborted();
+
     buf += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
     buf = yield* scanner.consume(buf, false);
   }
@@ -47,8 +65,11 @@ export class XmltvParseStream extends Transform {
   readonly #decoder = new TextDecoder();
   #buf = '';
 
-  constructor(options?: XmltvParseOptions) {
-    super({ readableObjectMode: true });
+  constructor(options?: ParseStreamOptions) {
+    // A stream takes a signal itself: aborting destroys it with an `AbortError`
+    // carrying the reason as its cause, which is what the rest of a
+    // `pipeline()` around it is waiting to hear.
+    super({ readableObjectMode: true, signal: options?.signal });
     this.#scanner = new XmltvScanner(options);
   }
 
@@ -98,9 +119,17 @@ export class XmltvParseStream extends Transform {
  */
 export async function* parseXmltvFile(
   filePath: string,
-  options?: XmltvParseOptions,
+  options?: ParseStreamOptions,
 ): AsyncGenerator<XmltvParseEvent> {
-  yield* parseXmltvStream(createReadStream(filePath, { highWaterMark: 512 * 1024 }), options);
+  yield* parseXmltvStream(
+    createReadStream(filePath, {
+      highWaterMark: 512 * 1024,
+      // `fs` closes the descriptor itself on abort, which a generator abandoned
+      // part-way through a 16 GiB file would otherwise leave to the collector.
+      signal: options?.signal,
+    }),
+    options,
+  );
 }
 
 /**

@@ -100,6 +100,63 @@ describe('isStale', () => {
   });
 });
 
+describe('FsCacheStore cancellation', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'epg-cache-cancel-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
+
+  it('refuses a write, leaving no entry and no temp file behind', async () => {
+    const controller = new AbortController();
+    const store = new FsCacheStore({ dir, signal: controller.signal });
+
+    controller.abort(new Error('cancelled'));
+
+    await expect(store.write(key, [programme()])).rejects.toMatchObject({ name: 'AbortError' });
+    // The directory is made without a signal — `mkdir` takes none, and an empty
+    // one costs nothing — but the entry is written beside its own path first, so
+    // a refused write leaves neither it nor a temp file behind.
+    expect(await fs.readdir(path.join(dir, 'example.com', 'one'))).toEqual([]);
+  });
+
+  it('refuses a read', async () => {
+    const controller = new AbortController();
+    await new FsCacheStore({ dir }).write(key, [programme()]);
+
+    const store = new FsCacheStore({ dir, signal: controller.signal });
+    controller.abort(new Error('cancelled'));
+
+    await expect(store.read(key)).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(store.getMeta(key)).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('stops a prune between days, keeping what it has already removed', async () => {
+    const seeding = new FsCacheStore({ dir });
+
+    for (const site of ['a.example', 'b.example', 'c.example']) {
+      await seeding.write({ site, channelId: 'one', day: '2026-07-01' }, [programme()]);
+    }
+
+    const controller = new AbortController();
+    const store = new FsCacheStore({ dir, signal: controller.signal });
+    controller.abort(new Error('cancelled'));
+
+    // A prune is a walk, so this is where it can stop — having removed whole
+    // days, never half of one. `readdir` and `rm` take no signal, so this is
+    // our own `throwIfAborted`, which raises the reason rather than wrapping it
+    // the way an aborted `fs` call does.
+    await expect(store.prune({ before: '2026-07-17' })).rejects.toThrow('cancelled');
+    expect((await fs.readdir(dir)).sort()).toEqual(['a.example', 'b.example', 'c.example']);
+  });
+});
+
 describe('FsCacheStore', () => {
   let dir: string;
 

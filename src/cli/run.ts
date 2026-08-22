@@ -350,7 +350,7 @@ async function execute(
         throw new UsageError(`Invalid --before value: ${before} (expected YYYY-MM-DD)`);
       }
 
-      const removed = await createCacheStore(config).prune({ before });
+      const removed = await createCacheStore(config, signal).prune({ before });
       log?.(`Pruned ${removed} cached entr${removed === 1 ? 'y' : 'ies'} before ${before}`);
 
       return 0;

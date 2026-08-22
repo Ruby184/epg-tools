@@ -61,6 +61,31 @@ const { meta, channels, programmes, warnings } = parseXmltvString(xml);
 
 It is exported from `epg-tools/xmltv` only, not from the package root.
 
+### Cancelling
+
+`parseXmltvStream`, `parseXmltvFile` and `XmltvParseStream` take a `signal`, as
+`writeXmltvStream`, `writeXmltvToFile` and `XmltvSerializeStream` do:
+
+```ts
+const controller = new AbortController();
+
+for await (const event of parseXmltvFile('guide.xml', { signal: controller.signal })) {
+  if (enough(event)) controller.abort();
+}
+```
+
+Parsing stops **between chunks** and writing **between elements** — a check per
+event would sit in the middle of the hot loop, and a 512 KiB read is a
+millisecond of it. What cancelling promises is that the rest of the file is
+never read: `parseXmltvFile` hands the signal to `fs`, so the descriptor closes
+with it rather than waiting to be collected, and `writeXmltvToFile` discards
+what it had written. The two `Transform`s take the signal the way any Node
+stream does — they are destroyed with an `AbortError` whose `cause` is the
+reason, which is what the rest of a `pipeline()` around them is waiting to hear.
+
+`parseXmltvString` takes none: it has the whole document in hand already and
+nothing to interrupt.
+
 ### Parse options
 
 `XmltvParseOptions` is accepted by every entry point above and by

@@ -51,7 +51,7 @@ export interface OutputSink {
  * and no order to get wrong, and closing is where the write becomes final —
  * the one moment that comes whether the stream ended or was destroyed.
  */
-function atomicFile(file: string): fs.WriteStream {
+function atomicFile(file: string, signal?: AbortSignal): fs.WriteStream {
   const dir = path.dirname(file);
   // Random suffix, so concurrent builds never clobber each other's temp file.
   const tmpPath = `${file}.tmp-${randomBytes(6).toString('hex')}`;
@@ -83,6 +83,10 @@ function atomicFile(file: string): fs.WriteStream {
   };
 
   const stream = fs.createWriteStream(tmpPath, {
+    // Its own, rather than only the one the write is piped with: aborting
+    // destroys the stream, and destroying it is what takes the temp file away —
+    // including when the abort lands between opening this and writing to it.
+    signal,
     // Sync the data out before the descriptor is closed, which is to say
     // before the rename below. Without it the rename can reach the disk first
     // and a crash leaves an empty file where a complete guide used to be.
@@ -149,17 +153,37 @@ function explain(error: NodeJS.ErrnoException, socketPath: string): string {
   return error.message;
 }
 
-/** Connect, naming the failure a caller can act on. `label` is what to call it. */
-function connect(socketPath: string, label: string): Promise<Socket> {
+/**
+ * Connect, naming the failure a caller can act on. `label` is what to call it.
+ *
+ * A connection is the one part of opening an output that can sit there: the
+ * path exists and something is bound to it, but nothing is reading. So a
+ * cancelled run gives up on it rather than waiting to be refused.
+ */
+function connect(socketPath: string, label: string, signal?: AbortSignal): Promise<Socket> {
   const socket = createConnection({ path: socketPath });
 
   return new Promise((resolve, reject) => {
+    const stop = (): void => {
+      socket.destroy();
+      reject(signal?.reason ?? new OutputError(`Cannot write to socket ${label}: cancelled`));
+    };
+
+    if (signal?.aborted) {
+      stop();
+      return;
+    }
+
+    signal?.addEventListener('abort', stop, { once: true });
+
     socket.once('connect', () => {
+      signal?.removeEventListener('abort', stop);
       socket.removeAllListeners('error');
       resolve(socket);
     });
 
     socket.once('error', (error: NodeJS.ErrnoException) => {
+      signal?.removeEventListener('abort', stop);
       reject(new OutputError(`Cannot write to socket ${label}: ${explain(error, socketPath)}`));
     });
   });
@@ -174,8 +198,23 @@ async function isSocket(target: string): Promise<boolean> {
   }
 }
 
+/** What a caller may say about writing, beyond where it goes. */
+export interface OutputOptions {
+  /**
+   * Give up on the write. A file being written is discarded rather than taking
+   * the place of whatever is already there, which is the whole point of writing
+   * it beside its own path first; a socket is connected to no longer, or closed
+   * part-written, and the reader on the other end learns what it always would
+   * from a writer that stopped.
+   */
+  signal?: AbortSignal;
+}
+
 /** Resolve a target to a stream, and to whether finishing it means closing it. */
-export async function openOutput(target: OutputTarget): Promise<OutputSink> {
+export async function openOutput(
+  target: OutputTarget,
+  options: OutputOptions = {},
+): Promise<OutputSink> {
   if (typeof target !== 'string') {
     return { stream: target, end: false };
   }
@@ -183,7 +222,7 @@ export async function openOutput(target: OutputTarget): Promise<OutputSink> {
   const resolved = path.resolve(target);
 
   if (!(await isSocket(resolved))) {
-    return { stream: atomicFile(resolved), end: true };
+    return { stream: atomicFile(resolved, options.signal), end: true };
   }
 
   // Connect by whichever name is shorter. A socket bound from a deep working
@@ -191,7 +230,11 @@ export async function openOutput(target: OutputTarget): Promise<OutputSink> {
   // is past what an address field holds — resolving it would be the only
   // reason the connection failed.
   return {
-    stream: await connect(target.length < resolved.length ? target : resolved, resolved),
+    stream: await connect(
+      target.length < resolved.length ? target : resolved,
+      resolved,
+      options.signal,
+    ),
     end: true,
   };
 }
@@ -200,11 +243,15 @@ export async function openOutput(target: OutputTarget): Promise<OutputSink> {
 export async function writeOutput(
   target: OutputTarget,
   source: AsyncIterable<string> | Iterable<string>,
+  options: OutputOptions = {},
 ): Promise<void> {
-  const sink = await openOutput(target);
+  const sink = await openOutput(target, options);
 
   try {
-    await pipeline(source, sink.stream, { end: sink.end });
+    // The signal goes to the pipeline as well as to the source that feeds it:
+    // a source of its own may be a plain array, or a generator that never
+    // thought to ask, and a write is exactly as long as what it is writing.
+    await pipeline(source, sink.stream, { end: sink.end, signal: options.signal });
   } catch (error) {
     // A failing source rejects the moment it fails, while the stream is still
     // tearing down — and tearing down is what takes the temp file away.

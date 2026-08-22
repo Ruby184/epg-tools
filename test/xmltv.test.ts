@@ -18,6 +18,7 @@ import {
   serializeDocumentHeader,
   serializeDocumentFooter,
   writeXmltvStream,
+  parseXmltvFile,
   parseXmltvStream,
   parseXmltvString,
   XmltvParseStream,
@@ -980,6 +981,118 @@ describe('warnings', () => {
         col: xml.indexOf('guest=') + 1,
       },
     ]);
+  });
+});
+
+describe('cancelling', () => {
+  /** A document as long as the reader's patience, which is the case that matters. */
+  function* endlessXml(): Generator<string> {
+    yield '<tv>';
+
+    for (;;) {
+      yield '<programme start="20260717200000 +0000" channel="c"><title>T</title></programme>';
+    }
+  }
+
+  const oneProgramme = {
+    channel: 'c',
+    start: new Date('2026-07-17T20:00:00Z'),
+    title: [{ value: 'T' }],
+  };
+
+  async function* endlessProgrammes(): AsyncGenerator<typeof oneProgramme> {
+    for (;;) {
+      yield oneProgramme;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+
+  it('stops parsing between chunks', async () => {
+    const controller = new AbortController();
+    let seen = 0;
+
+    await expect(async () => {
+      for await (const event of parseXmltvStream(endlessXml(), { signal: controller.signal })) {
+        if (event.type === 'programme' && ++seen === 5) {
+          controller.abort(new Error('enough'));
+        }
+      }
+    }).rejects.toThrow('enough');
+
+    // Stopped where it was told to, not at the end of a document that has none.
+    expect(seen).toBe(5);
+  });
+
+  it('stops a file read part way, at a chunk boundary', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'epg-xmltv-cancel-'));
+    const file = join(dir, 'guide.xml');
+    const total = 60_000;
+    // Several reads' worth: the parser takes 512 KiB at a time.
+    await writeFile(
+      file,
+      `<tv>${'<programme start="20260717200000 +0000" channel="c"><title>T</title></programme>'.repeat(total)}</tv>`,
+      'utf8',
+    );
+
+    const controller = new AbortController();
+    let seen = 0;
+
+    await expect(async () => {
+      for await (const event of parseXmltvFile(file, { signal: controller.signal })) {
+        if (event.type === 'programme' && ++seen === 10) {
+          controller.abort(new Error('enough'));
+        }
+      }
+    }).rejects.toThrow();
+
+    // The chunk in hand is drained before the signal is looked at again — a
+    // check per event would sit in the middle of the parser's hot loop — so
+    // what cancelling promises is that the rest of the file is never read.
+    expect(seen).toBeGreaterThan(10);
+    expect(seen).toBeLessThan(total);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('stops writing between elements', async () => {
+    const controller = new AbortController();
+    let chunks = 0;
+
+    await expect(async () => {
+      for await (const _chunk of writeXmltvStream(
+        { channels: [], programmes: endlessProgrammes() },
+        { signal: controller.signal, highWaterMark: 64 },
+      )) {
+        if (++chunks === 3) {
+          controller.abort(new Error('enough'));
+        }
+      }
+    }).rejects.toThrow('enough');
+
+    expect(chunks).toBe(3);
+  });
+
+  it('destroys a parse Transform, as any stream does with a signal', async () => {
+    const controller = new AbortController();
+    const parser = new XmltvParseStream({ signal: controller.signal });
+
+    controller.abort(new Error('enough'));
+    await new Promise((resolve) => parser.once('close', resolve));
+
+    expect(parser.destroyed).toBe(true);
+  });
+
+  it('destroys a serialize Transform the same way', async () => {
+    const controller = new AbortController();
+    const writer = new XmltvSerializeStream({ signal: controller.signal });
+    const failed = new Promise<Error>((resolve) => writer.once('error', resolve));
+
+    controller.abort(new Error('enough'));
+
+    // Node's own shape for this: an AbortError carrying the reason as cause.
+    await expect(failed).resolves.toMatchObject({
+      name: 'AbortError',
+      cause: { message: 'enough' },
+    });
   });
 });
 

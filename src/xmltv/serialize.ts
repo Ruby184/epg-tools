@@ -47,6 +47,21 @@ export interface SerializeOptions {
 }
 
 /**
+ * What the *streaming* writers take on top of the formatting: a document being
+ * written is as long as the document, so it is the one thing here worth being
+ * able to stop. The per-element {@link serializeChannel} /
+ * {@link serializeProgramme} return a string and have nothing to interrupt.
+ */
+export interface WriteOptions extends SerializeOptions {
+  /**
+   * Stop writing. Checked between elements — the granularity a document has —
+   * and passed to the file write when there is one, so a partly written file is
+   * closed rather than left open behind an abandoned promise.
+   */
+  signal?: AbortSignal;
+}
+
+/**
  * Resolved whitespace policy threaded through the serializers. `unit` is the
  * per-level indent (`''` when compact) and `nl` the line separator (`''` when
  * compact) — so a compact document carries no formatting whitespace at all,
@@ -558,7 +573,7 @@ export function serializeDocumentFooter(options?: SerializeOptions): string {
  */
 export async function* writeXmltvStream(
   input: XmltvStreamInput,
-  options?: SerializeOptions,
+  options?: WriteOptions,
 ): AsyncGenerator<string> {
   const highWaterMark = options?.highWaterMark ?? DEFAULT_HIGH_WATER_MARK;
 
@@ -572,6 +587,9 @@ export async function* writeXmltvStream(
   let pending = '';
 
   for await (const part of parts()) {
+    // Between elements, which is as often as a document gives the chance.
+    options?.signal?.throwIfAborted();
+
     pending += part;
 
     if (pending.length >= highWaterMark) {
@@ -587,13 +605,15 @@ export async function* writeXmltvStream(
 export async function writeXmltvToFile(
   filePath: string,
   input: XmltvStreamInput,
-  options?: SerializeOptions,
+  options?: WriteOptions,
 ): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
-  await pipeline(Readable.from(writeXmltvStream(input, options)), createWriteStream(filePath));
+  await pipeline(Readable.from(writeXmltvStream(input, options)), createWriteStream(filePath), {
+    signal: options?.signal,
+  });
 }
 
-export interface SerializeStreamOptions extends SerializeOptions {
+export interface SerializeStreamOptions extends WriteOptions {
   /**
    * Root `<tv>` attributes that take **preference** over a `meta` event on the
    * stream: the event supplies base attributes (e.g. the original values when
@@ -654,9 +674,13 @@ export class XmltvSerializeStream extends Transform {
   #started = false;
 
   constructor(options?: SerializeStreamOptions) {
+    // The signal goes to the stream itself: aborting destroys it with an
+    // `AbortError` carrying the reason as its cause, which is what the rest of
+    // a `pipeline()` around it is waiting to hear.
     super({
       writableObjectMode: true,
       readableHighWaterMark: options?.highWaterMark ?? DEFAULT_HIGH_WATER_MARK,
+      signal: options?.signal,
     });
 
     this.#options = options;

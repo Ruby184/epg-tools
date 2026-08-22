@@ -141,6 +141,12 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 Implement `CacheStore` yourself to keep entries somewhere other than the
 filesystem.
 
+`new FsCacheStore({ dir, format?, signal? })` — the signal belongs to the store
+rather than to each call, since a store belongs to one run, and that is what
+keeps `CacheStore` a five-method interface anyone can implement. A write stops
+before its rename, so an entry is either there in full or not there at all, and
+a prune stops between days.
+
 ### `epg-tools/grabber`
 
 `grab`, `defineSiteConfig`, `resolveChannels`, `resolveSites`, `siteHttp`,

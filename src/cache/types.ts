@@ -66,4 +66,14 @@ export interface FsCacheStoreOptions {
   dir: string;
   /** Format used for newly written entries. Defaults to `ndjson`. */
   format?: CacheFormat;
+  /**
+   * Give up on the reads and writes this store is asked for.
+   *
+   * A store belongs to one run, so it is said once here rather than on every
+   * call — which leaves {@link CacheStore} a three-method interface anyone can
+   * implement. A write is stopped before its rename, never during it, so an
+   * entry is either there in full or not there at all; a prune stops between
+   * days.
+   */
+  signal?: AbortSignal;
 }

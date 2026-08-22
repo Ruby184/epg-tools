@@ -34,6 +34,88 @@ describe('writeOutput', () => {
     expect(await readdir(dir)).toEqual([]);
   });
 
+  describe('cancelling', () => {
+    /** A source as long as the guide it stands for, which is the point. */
+    async function* endless(): AsyncGenerator<string> {
+      yield '<tv>';
+
+      for (;;) {
+        yield '<programme/>';
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+
+    it('stops a write and leaves nothing where the file goes', async () => {
+      const dir = await tempDir();
+      const output = join(dir, 'guide.xml');
+      const previous = '<tv>the one already there</tv>';
+      await writeFile(output, previous, 'utf8');
+
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new Error('cancelled')), 5);
+
+      await expect(writeOutput(output, endless(), { signal: controller.signal })).rejects.toThrow();
+
+      // The write is discarded rather than taking the place of what is there,
+      // and its temp file goes with it.
+      expect(await readFile(output, 'utf8')).toBe(previous);
+      expect(await readdir(dir)).toEqual(['guide.xml']);
+    });
+
+    it('stops a source that never thought to ask', async () => {
+      const dir = await tempDir();
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new Error('cancelled')), 5);
+
+      // Not a generator taking the signal — an iterable that cannot stop
+      // itself, which is what the pipeline's own signal is for.
+      const forever = {
+        *[Symbol.iterator](): Generator<string> {
+          for (;;) {
+            yield '<programme/>';
+          }
+        },
+      };
+
+      await expect(
+        writeOutput(join(dir, 'guide.xml'), forever, { signal: controller.signal }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
+      expect(await readdir(dir)).toEqual([]);
+    });
+
+    it('gives up on a socket nothing is reading', async () => {
+      const dir = await tempDir();
+      const socketPath = join(dir, 'xmltv.sock');
+      // Bound, so the path is a socket, but the backlog is never accepted from.
+      const server = createServer();
+      await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+
+      try {
+        const controller = new AbortController();
+        controller.abort(new Error('cancelled'));
+
+        await expect(
+          writeOutput(socketPath, ['<tv></tv>'], { signal: controller.signal }),
+        ).rejects.toThrow('cancelled');
+      } finally {
+        server.close();
+      }
+    });
+
+    it('leaves an already-written file alone when the abort lands first', async () => {
+      const dir = await tempDir();
+      const output = join(dir, 'guide.xml');
+      const controller = new AbortController();
+      controller.abort(new Error('cancelled'));
+
+      await expect(
+        writeOutput(output, ['<tv></tv>'], { signal: controller.signal }),
+      ).rejects.toThrow();
+
+      expect(await readdir(dir)).toEqual([]);
+    });
+  });
+
   it('leaves the previous file untouched when the source fails part way', async () => {
     const dir = await tempDir();
     const output = join(dir, 'guide.xml');

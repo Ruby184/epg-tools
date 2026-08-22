@@ -32,6 +32,9 @@ import type { ConfigSource, XmltvGrabberOptions } from './types.js';
 // underscore suffix. It croaks on anything else, so catch it at startup.
 const VERSION = /^\d+(\.\d+){0,2}(_\d*)?$/;
 
+/** Cancelled — 128 + SIGINT, what a shell reports for a process it stops. */
+const EXIT_CANCELLED = 130;
+
 /** The name the grabber was invoked as — what its config file is keyed by. */
 function grabberNameOf(options: XmltvGrabberOptions): string {
   return options.grabberName ?? path.basename(process.argv[1] ?? 'tv_grab');
@@ -80,6 +83,14 @@ export async function runXmltvGrabber(
   try {
     return await execute(source, options, stdout, stderr, cleanups);
   } catch (error) {
+    // Anything the cancel itself raised — an aborted prompt, a write that
+    // stopped, a request dropped in flight — is the interruption rather than a
+    // failure to describe, and every one of them arrives here as an AbortError.
+    if (options.signal?.aborted) {
+      await writeLines(stderr, 'cancelled');
+      return EXIT_CANCELLED;
+    }
+
     // An output that cannot be written is the same kind of news as any other
     // failure a capability reports: one line, and a code.
     const failure =
@@ -169,7 +180,10 @@ async function execute(
 
   // --output redirects stdout wholesale in the reference, so it applies to the
   // configuration documents a capability may print as well as to the guide.
-  const emit = (text: string): Promise<void> => writeOutput(values.output ?? stdout, [text]);
+  const emit = (text: string): Promise<void> =>
+    writeOutput(values.output ?? stdout, [text], {
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
 
   const configLoadedTasks: ConfigLoadedTask[] = [];
   const adjustTasks: AdjustTask[] = [];
@@ -204,6 +218,7 @@ async function execute(
     },
     ...(log ? { log } : {}),
     ...(options.stdin ? { stdin: options.stdin } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
   };
 
   // One pass over the capabilities: each either claims the run here, or hooks
@@ -298,10 +313,12 @@ async function execute(
   if (options.signal?.aborted) {
     queueLine(stderr, 'cancelled');
 
-    return 130;
+    return EXIT_CANCELLED;
   }
 
-  await writeOutput(values.output ?? stdout, guideStream(selected, runOptions));
+  await writeOutput(values.output ?? stdout, guideStream(selected, runOptions), {
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
 
   // Partial data is reported as a failure, as the reference grabbers do, and
   // outranks any advisory code a capability asked for.

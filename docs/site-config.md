@@ -470,6 +470,11 @@ one clean response at a time, ten in a row per step — a retreat that is quicke
 than the recovery. At the default concurrency of 1 there is nothing to halve, so
 it only does anything for a site configured to run several requests at once.
 
+A cancelled run reaches all of this: what is in flight aborts through the client
+it went out on, what is queued is dropped, and a rate-limit hold is abandoned
+rather than waited out. A site's own code is the one part that has to help — the
+`signal` on both contexts is there to be passed to whatever it waits on.
+
 All of it applies to **every** request a site makes through the queue, not just
 the planned ones: the fetch of a channel list that has to be fetched, and a
 follow-up request a parse makes with

@@ -164,9 +164,11 @@ describe('cancellation', () => {
 
     controller.abort(new Error('cancelled'));
 
-    await expect(runMerge(epgConfig, { now: NOW, signal: controller.signal })).rejects.toThrow(
-      'cancelled',
-    );
+    // Node's own convention for an aborted operation, which is what the
+    // output pipeline raises: an AbortError carrying the reason as its cause.
+    await expect(
+      runMerge(epgConfig, { now: NOW, signal: controller.signal }),
+    ).rejects.toMatchObject({ name: 'AbortError', cause: { message: 'cancelled' } });
 
     // The document is written beside its file and renamed only when finished,
     // so an abandoned one leaves nothing at all.

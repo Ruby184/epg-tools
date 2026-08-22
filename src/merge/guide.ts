@@ -385,5 +385,7 @@ export async function writeGuide(
 ): Promise<void> {
   const { output, ...guideOptions } = options;
 
-  await writeOutput(output, generateGuide(guideOptions));
+  await writeOutput(output, generateGuide(guideOptions), {
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
 }

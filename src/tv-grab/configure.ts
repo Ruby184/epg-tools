@@ -50,8 +50,14 @@ function isTty(stream: Readable): boolean {
   return (stream as Readable & { isTTY?: boolean }).isTTY === true;
 }
 
-/** A prompter over a stream pair, hiding echo for secrets. */
-export function createPrompter(input: Readable, output: Writable): Prompter {
+/**
+ * A prompter over a stream pair, hiding echo for secrets.
+ *
+ * `signal` is what makes a prompt answerable to a cancelled run: waiting for
+ * someone to type is the longest thing a grabber does, and the only one that
+ * ends when the person decides it does.
+ */
+export function createPrompter(input: Readable, output: Writable, signal?: AbortSignal): Prompter {
   const terminal = isTty(input);
   const echo = new MutableOutput(output);
   const rl = createInterface({ input, output: echo, terminal });
@@ -68,7 +74,7 @@ export function createPrompter(input: Readable, output: Writable): Prompter {
     }
 
     return Promise.race([
-      rl.question(text),
+      rl.question(text, { signal }),
       new Promise<string>((resolve) => rl.once('close', () => resolve(''))),
     ]);
   };

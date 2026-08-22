@@ -23,11 +23,14 @@ function isNotFound(error: unknown): boolean {
   );
 }
 
-async function writeFileAtomic(file: string, data: string): Promise<void> {
+async function writeFileAtomic(file: string, data: string, signal?: AbortSignal): Promise<void> {
   const tmp = `${file}.tmp-${randomBytes(6).toString('hex')}`;
 
   try {
-    await fs.writeFile(tmp, data, 'utf8');
+    // The write takes the signal; the rename does not, deliberately. It is the
+    // moment the entry becomes real, and half of it cannot happen — so once the
+    // data is down, finishing costs one syscall and leaves nothing behind.
+    await fs.writeFile(tmp, data, { encoding: 'utf8', signal });
     await fs.rename(tmp, file);
   } catch (error) {
     await fs.rm(tmp, { force: true });
@@ -73,11 +76,24 @@ function reviveProgramme(line: string): XmltvProgramme {
 export class FsCacheStore implements CacheStore {
   readonly #dir: string;
   readonly #format: CacheFormat;
+  readonly #signal: AbortSignal | undefined;
   #xmltv: Promise<XmltvModule> | undefined;
 
   constructor(options: FsCacheStoreOptions) {
     this.#dir = options.dir;
     this.#format = options.format ?? 'ndjson';
+    this.#signal = options.signal;
+  }
+
+  /**
+   * Reading options for `fs`: the encoding, and the signal when there is one.
+   *
+   * A store belongs to a run, so the signal lives here rather than on every
+   * method — which is also what keeps the `CacheStore` interface something
+   * anyone can implement with three arguments and no ceremony.
+   */
+  #readOptions(): { encoding: BufferEncoding; signal: AbortSignal | undefined } {
+    return { encoding: 'utf8', signal: this.#signal };
   }
 
   /** The xmltv module is loaded lazily so ndjson-only usage never needs it. */
@@ -99,7 +115,7 @@ export class FsCacheStore implements CacheStore {
     let content: string;
 
     try {
-      content = await fs.readFile(`${this.#entryBase(key)}.meta.json`, 'utf8');
+      content = await fs.readFile(`${this.#entryBase(key)}.meta.json`, this.#readOptions());
     } catch (error) {
       if (isNotFound(error)) {
         return undefined;
@@ -148,7 +164,7 @@ export class FsCacheStore implements CacheStore {
     let content: string;
 
     try {
-      content = await fs.readFile(`${base}.ndjson`, 'utf8');
+      content = await fs.readFile(`${base}.ndjson`, this.#readOptions());
     } catch (error) {
       if (isNotFound(error)) {
         return undefined;
@@ -169,7 +185,9 @@ export class FsCacheStore implements CacheStore {
 
     try {
       // A missing file surfaces as ENOENT on the first stream read.
-      for await (const event of parseXmltvStream(createReadStream(`${base}.xml`))) {
+      const reading = createReadStream(`${base}.xml`, { signal: this.#signal });
+
+      for await (const event of parseXmltvStream(reading)) {
         if (event.type === 'programme') {
           programmes.push(event.value);
         }
@@ -209,7 +227,11 @@ export class FsCacheStore implements CacheStore {
       staleFile = `${base}.ndjson`;
     }
 
-    await writeFileAtomic(`${base}.${this.#format === 'ndjson' ? 'ndjson' : 'xml'}`, data);
+    await writeFileAtomic(
+      `${base}.${this.#format === 'ndjson' ? 'ndjson' : 'xml'}`,
+      data,
+      this.#signal,
+    );
     // An entry must exist in a single format only.
     await fs.rm(staleFile, { force: true });
 
@@ -218,7 +240,7 @@ export class FsCacheStore implements CacheStore {
       programmeCount: programmes.length,
     };
 
-    await writeFileAtomic(`${base}.meta.json`, `${JSON.stringify(fullMeta)}\n`);
+    await writeFileAtomic(`${base}.meta.json`, `${JSON.stringify(fullMeta)}\n`, this.#signal);
   }
 
   async delete(key: ChannelDayKey): Promise<void> {
@@ -246,6 +268,11 @@ export class FsCacheStore implements CacheStore {
     }
 
     for (const site of sites) {
+      // Between sites, and between channels below: `readdir` and `rm` take no
+      // signal of their own, and a prune is a walk rather than one long
+      // operation — so this is where it stops, having removed whole days.
+      this.#signal?.throwIfAborted();
+
       if (!site.isDirectory()) {
         continue;
       }
@@ -254,6 +281,8 @@ export class FsCacheStore implements CacheStore {
       const channels = await fs.readdir(sitePath, { withFileTypes: true });
 
       for (const channel of channels) {
+        this.#signal?.throwIfAborted();
+
         if (!channel.isDirectory()) {
           continue;
         }

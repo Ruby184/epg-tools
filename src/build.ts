@@ -35,10 +35,11 @@ export interface RunOptions {
  * than a {@link ConfigSource}: it is the one entry point that returns
  * synchronously, and resolving may have to await.
  */
-export function createCacheStore(config: EpgConfig): FsCacheStore {
+export function createCacheStore(config: EpgConfig, signal?: AbortSignal): FsCacheStore {
   return new FsCacheStore({
     dir: config.cache?.dir ?? path.join(process.cwd(), '.epg-cache'),
     format: config.cache?.format ?? 'ndjson',
+    ...(signal ? { signal } : {}),
   });
 }
 
@@ -52,7 +53,7 @@ function startDayOf(options: RunOptions, now: Date): string {
 function guideOptions(config: EpgConfig, options: RunOptions, now: Date): BuildGuideOptions {
   return {
     sites: config.sites,
-    cache: createCacheStore(config),
+    cache: createCacheStore(config, options.signal),
     startDay: startDayOf(options, now),
     now,
     ...(config.days !== undefined ? { days: config.days } : {}),
@@ -75,7 +76,7 @@ export async function runGrab(
   options: RunOptions = {},
 ): Promise<GrabSummary> {
   const config = await resolveConfigSource(source);
-  const cache = createCacheStore(config);
+  const cache = createCacheStore(config, options.signal);
   const now = options.now ?? new Date();
   const startDay = startDayOf(options, now);
 

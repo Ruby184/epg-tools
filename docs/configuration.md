@@ -159,9 +159,28 @@ const summary = await build(config, { signal: controller.signal });
 
 A cancelled `grab` **resolves** with the partial summary rather than rejecting —
 what reached the cache is counted, and only what was actually interrupted is in
-`failed`. A cancelled `merge` **rejects** with the abort reason, because half a
-document is not a guide; `writeGuide` then discards the file it was building
-instead of moving it into place.
+`failed`. A cancelled `merge` **rejects**, because half a document is not a
+guide; `writeGuide` then discards the file it was building instead of moving it
+into place.
+
+The signal reaches every wait long enough to be worth interrupting, the way
+Node's own `fs` and stream APIs take one:
+
+| where | what stops |
+|---|---|
+| requests | in flight through the site's client, queued ones dropped |
+| the rate-limit hold after a `429` | the wait is abandoned, nothing is resent |
+| cache reads and writes | a write stops **before** its rename, so an entry is either there in full or not at all |
+| `epg prune` | between days — whole days removed, never half of one |
+| parsing a guide | between chunks, and the file descriptor closes with it |
+| writing a guide | between elements, and the part-written file is discarded |
+| a socket output | the connection is given up on, rather than waiting to be read from |
+| `--configure` prompts | the question stops waiting for an answer |
+
+Two shapes of rejection come out of that, both standard: an aborted `fs` or
+stream operation raises an `AbortError` carrying the reason as its `cause`,
+while our own checks use `signal.throwIfAborted()` and so raise the reason
+itself. Neither matters to the CLI, which asks `signal.aborted`.
 
 ### Output, and sockets
 

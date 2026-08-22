@@ -109,6 +109,11 @@ export interface CapabilityContext<V = unknown> {
   addStage(stage: ConfigStage): void;
   /** Standard input, for a capability that prompts. */
   stdin?: NodeJS.ReadableStream;
+  /**
+   * The run's cancellation, when it has one — for a capability that waits on
+   * something: a prompt, a request, a file.
+   */
+  signal?: AbortSignal;
   /** Resolve the grabber's `EpgConfig` from a configuration. */
   resolveConfig(conf: GrabberConf): Promise<EpgConfig>;
   /**

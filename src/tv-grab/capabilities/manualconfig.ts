@@ -31,7 +31,11 @@ export const manualConfigCapability = defineCapability({
     // Waits for the load, rather than reading the file itself, only to find
     // out whether there is something to overwrite.
     ctx.onConfigLoaded(async (existing) => {
-      const prompter = createPrompter((ctx.stdin ?? process.stdin) as Readable, ctx.stderr);
+      const prompter = createPrompter(
+        (ctx.stdin ?? process.stdin) as Readable,
+        ctx.stderr,
+        ctx.signal,
+      );
 
       try {
         if (existing !== undefined && Object.keys(existing).length > 0 && prompter.interactive) {
