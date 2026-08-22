@@ -1,7 +1,7 @@
-import { randomBytes } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { writeFileAtomic } from '../core/atomic.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import type {
   CacheEntryMeta,
@@ -21,21 +21,6 @@ function isNotFound(error: unknown): boolean {
     error !== null &&
     (error as NodeJS.ErrnoException).code === 'ENOENT'
   );
-}
-
-async function writeFileAtomic(file: string, data: string, signal?: AbortSignal): Promise<void> {
-  const tmp = `${file}.tmp-${randomBytes(6).toString('hex')}`;
-
-  try {
-    // The write takes the signal; the rename does not, deliberately. It is the
-    // moment the entry becomes real, and half of it cannot happen — so once the
-    // data is down, finishing costs one syscall and leaves nothing behind.
-    await fs.writeFile(tmp, data, { encoding: 'utf8', signal });
-    await fs.rename(tmp, file);
-  } catch (error) {
-    await fs.rm(tmp, { force: true });
-    throw error;
-  }
 }
 
 /** Revive Date fields of a programme parsed from an ndjson line. */
@@ -77,6 +62,13 @@ export class FsCacheStore implements CacheStore {
   readonly #dir: string;
   readonly #format: CacheFormat;
   readonly #signal: AbortSignal | undefined;
+  /**
+   * Channel directories this store has already made. A grab writes every day of
+   * a channel in turn, so without this each of them asks the filesystem to make
+   * a directory that has been there since the first — 7,000 entries is a
+   * quarter of a second of learning what we already knew.
+   */
+  readonly #ensured = new Set<string>();
   #xmltv: Promise<XmltvModule> | undefined;
 
   constructor(options: FsCacheStoreOptions) {
@@ -104,6 +96,16 @@ export class FsCacheStore implements CacheStore {
 
   #channelDir(key: ChannelDayKey): string {
     return path.join(this.#dir, encodeURIComponent(key.site), encodeURIComponent(key.channelId));
+  }
+
+  /** The channel's directory, made once per store however many days it holds. */
+  async #ensureDir(dir: string): Promise<void> {
+    if (this.#ensured.has(dir)) {
+      return;
+    }
+
+    await fs.mkdir(dir, { recursive: true });
+    this.#ensured.add(dir);
   }
 
   /** Path prefix of an entry, without the file extension. */
@@ -208,7 +210,7 @@ export class FsCacheStore implements CacheStore {
     programmes: XmltvProgramme[],
     meta?: Partial<CacheEntryMeta>,
   ): Promise<void> {
-    await fs.mkdir(this.#channelDir(key), { recursive: true });
+    await this.#ensureDir(this.#channelDir(key));
 
     const base = this.#entryBase(key);
     let data: string;
@@ -292,6 +294,9 @@ export class FsCacheStore implements CacheStore {
 
         if ((await fs.readdir(channelPath)).length === 0) {
           await fs.rmdir(channelPath);
+          // It is not there any more, so a later write to this channel has to
+          // make it again.
+          this.#ensured.delete(channelPath);
         }
       }
 

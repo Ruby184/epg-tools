@@ -170,6 +170,27 @@ describe('FsCacheStore', () => {
 
   const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
 
+  it('makes a channel directory once, and again after a prune took it away', async () => {
+    const store = new FsCacheStore({ dir });
+    const channelDir = path.join(dir, 'example.com', 'one');
+
+    // Every day of a channel in turn — the shape of a grab.
+    for (const day of ['2026-07-01', '2026-07-02', '2026-07-03']) {
+      await store.write({ ...key, day }, [programme()]);
+    }
+
+    expect((await fs.readdir(channelDir)).length).toBe(6);
+
+    // A prune that empties the channel takes its directory with it, so the
+    // store must not go on believing it is there.
+    expect(await store.prune({ before: '2026-07-17' })).toBe(3);
+    await expect(fs.access(channelDir)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await store.write(key, [programme()]);
+
+    expect(await store.read(key)).toHaveLength(1);
+  });
+
   it('round-trips programmes through ndjson with Dates revived', async () => {
     const store = new FsCacheStore({ dir });
     const programmes = [

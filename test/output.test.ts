@@ -94,9 +94,11 @@ describe('writeOutput', () => {
         const controller = new AbortController();
         controller.abort(new Error('cancelled'));
 
+        // The socket carries the signal, so an abort arrives on the same
+        // listener a refused connection would.
         await expect(
           writeOutput(socketPath, ['<tv></tv>'], { signal: controller.signal }),
-        ).rejects.toThrow('cancelled');
+        ).rejects.toThrow(/Cannot write to socket .*: cancelled/);
       } finally {
         server.close();
       }
