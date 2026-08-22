@@ -45,6 +45,10 @@ function guideOptions(config: EpgConfig, options: RunOptions, now: Date): BuildG
     now,
     ...(config.days !== undefined ? { days: config.days } : {}),
     ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
+    // The same bound the grab gives its own local work, for the same resource:
+    // how many cache entries are open at once, and how many programme lists
+    // are alive while one is being written.
+    ...(config.localConcurrency !== undefined ? { readAhead: config.localConcurrency } : {}),
     ...(config.merge ? { merge: config.merge } : {}),
     ...(config.meta ? { meta: config.meta } : {}),
     ...(config.indent !== undefined ? { indent: config.indent } : {}),

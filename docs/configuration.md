@@ -48,7 +48,7 @@ hardcode — a username, a password, a region. See
 | `days` | `number` | `7` | How many days to grab and include in the guide. A site may override it. |
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
-| `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works). Bounds open files rather than pacing any source. |
+| `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source. |
 | `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge' }` | How several sites covering one channel are combined, and what counts as the same broadcast (`match`) — see [Merge strategies](#merge-strategies). |
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
@@ -226,6 +226,16 @@ appears once, and programmes come out in start order across the boundary (under
 `concat` too, which keeps both copies but no longer emits them out of order).
 The working set is two days of one channel — flat in the size of the guide,
 whichever way.
+
+Cache entries are read **ahead of the writer**, `localConcurrency` of them at a
+time (`readAhead` on `generateGuide` directly). A merge is otherwise all
+waiting: read a channel-day, write it, read the next — and since writing is
+quick and reading is not, a few hundred channels over a fortnight is thousands
+of round trips taken one at a time. Reading ahead overlaps them without giving
+up the order, and the window is what bounds the memory, so what is alive at once
+is those two days plus the entries already read. On a warm page cache it is
+worth around 1.3× on 1,400 channel-days, and more wherever a read costs more
+than a local SSD's — an SD card, a network share, a Raspberry Pi.
 
 ---
 

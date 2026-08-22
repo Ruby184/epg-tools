@@ -167,8 +167,11 @@ broadcast](./configuration.md#what-counts-as-the-same-broadcast).
 one source's list folded into a sorted accumulator, which is also how the guide
 carries a day across the boundary into the next.
 
-`generateGuide` takes `siteConcurrency` as well, bounding how many sites resolve
-a fetched channel list at once — `build` passes the config's own.
+`generateGuide` takes two bounds of its own, both of which `build` fills in from
+the config: `siteConcurrency`, how many sites resolve a fetched channel list at
+once, and `readAhead` (from `localConcurrency`, default 16), how many
+channel-days are read from the cache ahead of the writer. `readAhead: 1` reads
+strictly one at a time.
 
 ### `epg-tools/tv-grab`
 

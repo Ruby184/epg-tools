@@ -97,6 +97,18 @@ export interface BuildGuideOptions {
    * itself uses. Only sites whose `channels` is a function make a request here.
    */
   siteConcurrency?: number;
+  /**
+   * How many channel-days are read from the cache ahead of the writer.
+   * Defaults to 16.
+   *
+   * A merge otherwise reads one channel-day, writes it, reads the next — and
+   * since writing is quick and reading is not, a large guide spends its time on
+   * round trips taken one at a time. Reading ahead overlaps them; the window is
+   * what bounds the memory, so this is also how many programme lists may be
+   * alive at once (a channel-day is one read per covering site). `1` is the old
+   * strictly-serial behaviour.
+   */
+  readAhead?: number;
   now?: Date;
   /**
    * First day of the guide window as `YYYY-MM-DD`. Defaults to `now`'s day.

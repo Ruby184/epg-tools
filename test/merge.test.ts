@@ -803,6 +803,118 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     });
   });
 
+  describe('reading the cache ahead of the writer', () => {
+    /** A cache that records the order reads were started in, and their overlap. */
+    function tracingCache(): {
+      cache: CacheStore;
+      order: string[];
+      peak: () => number;
+    } {
+      const order: string[] = [];
+      let inFlight = 0;
+      let peak = 0;
+
+      return {
+        cache: {
+          ...createFakeCache(),
+          async read(key: ChannelDayKey): Promise<XmltvProgramme[] | undefined> {
+            order.push(`${key.channelId} ${key.day}`);
+            inFlight++;
+            peak = Math.max(peak, inFlight);
+            // A turn of the event loop, so an overlap is observable.
+            await new Promise((resolve) => setTimeout(resolve, 1));
+            inFlight--;
+
+            return [prog(key.channelId, `${key.day}T10:00:00Z`, `p-${key.channelId}-${key.day}`)];
+          },
+        },
+        order,
+        peak: () => peak,
+      };
+    }
+
+    const CHANNELS = ['A', 'B', 'C'];
+    const DAYS = ['2026-01-15', '2026-01-16', '2026-01-17', '2026-01-18'];
+    const site = makeSite(
+      'site-a.sk',
+      CHANNELS.map((id) => ({ xmltvId: id, siteId: `a-${id}` })),
+    );
+
+    it('overlaps reads, in the order the writer needs them', async () => {
+      const { cache, order, peak } = tracingCache();
+
+      const output = await generate({
+        sites: [site],
+        cache,
+        days: DAYS.length,
+        startDay: DAYS[0]!,
+        now: NOW,
+      });
+
+      // Every channel-day, each read once, in the order it is written.
+      expect(order).toEqual(CHANNELS.flatMap((id) => DAYS.map((day) => `${id} ${day}`)));
+      // And they overlapped: strictly serial reads are what this replaces.
+      expect(peak()).toBeGreaterThan(1);
+
+      // The guide itself is unaffected — same channels, in the same order.
+      expect([...output.matchAll(/channel="(\w+)"/g)].map(([, id]) => id)).toEqual(
+        CHANNELS.flatMap((id) => DAYS.map(() => id)),
+      );
+    });
+
+    it('holds no more than readAhead of them at once', async () => {
+      const { cache, peak } = tracingCache();
+
+      await generate({
+        sites: [site],
+        cache,
+        days: DAYS.length,
+        startDay: DAYS[0]!,
+        now: NOW,
+        readAhead: 2,
+      });
+
+      expect(peak()).toBe(2);
+    });
+
+    it('reads one at a time when told to', async () => {
+      const { cache, peak } = tracingCache();
+
+      await generate({
+        sites: [site],
+        cache,
+        days: DAYS.length,
+        startDay: DAYS[0]!,
+        now: NOW,
+        readAhead: 1,
+      });
+
+      expect(peak()).toBe(1);
+    });
+
+    it('surfaces a failed read rather than losing it in the window', async () => {
+      const cache = Object.assign(createFakeCache(), {
+        async read(key: ChannelDayKey): Promise<XmltvProgramme[] | undefined> {
+          if (key.channelId === 'B') {
+            throw new Error('cache entry is unreadable');
+          }
+
+          return [prog(key.channelId, `${key.day}T10:00:00Z`, 'p')];
+        },
+      });
+
+      await expect(
+        generate({
+          sites: [site],
+          cache,
+          days: DAYS.length,
+          startDay: DAYS[0]!,
+          now: NOW,
+        }),
+      ).rejects.toThrow('cache entry is unreadable');
+    });
+  });
+
   it('logs progress per channel', async () => {
     const messages: string[] = [];
 
