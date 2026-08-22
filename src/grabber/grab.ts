@@ -222,7 +222,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
    * and `rateLimit` are about being polite to that site, so cache work must not
    * be throttled by them, nor take a request's slot.
    */
-  const local = new PQueue({
+  const localWork = new PQueue({
     concurrency: Math.max(1, options.localConcurrency ?? DEFAULT_LOCAL_CONCURRENCY),
   });
 
@@ -267,14 +267,44 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // The queue and the client together: the signal rides on the instance, so
     // every call a site makes through it is abortable without the site having
     // to pass it on, and a slow-down the client meets stops the queue.
+    //
+    // A task of `requests` is one request to the source and nothing else — not
+    // the work its response is for. That is what its `concurrency`, `rateLimit`
+    // and backoff are about, and keeping it to that is what lets a `parseDay`
+    // ask for a request of its own.
     const {
-      queue: inner,
+      queue: requests,
       http,
       dispose,
     } = sitePacing(config, {
       ...(signal ? { signal } : {}),
       log,
     });
+
+    /**
+     * One planned request each, start to finish — so what this bounds is how
+     * many responses the site has in hand at once: fetched, and not yet parsed
+     * and written.
+     *
+     * The request queue used to bound that on its own, by holding a slot until
+     * the response's channel-days were written — which is also what made a
+     * request from inside `parseDay` impossible: the parse would have waited
+     * for the slot its own response had arrived through. So that slot now
+     * covers the fetch alone, and what a site may hold in memory is said here
+     * instead, where it is not also what paces the source. The same number
+     * either way, so a site keeps the footprint it had: one response per unit
+     * of concurrency, however wide a response is.
+     *
+     * Its tasks are the only ones here added without a signal, deliberately.
+     * p-queue drops a *waiting* task on abort but only rejects a *running*
+     * one's promise — the task itself carries on, off the books, so the queue
+     * reports idle with work still in it and a summary can be read before the
+     * work that belongs in it has finished. A task with no signal is never
+     * abandoned, which makes reaching idle mean what it says; cancelling is
+     * then the pipeline's own business, below, where it can say what a dropped
+     * channel-day amounts to.
+     */
+    const pipelines = new PQueue({ concurrency: Math.max(1, config.concurrency ?? 1) });
     const grabbedAt = now.toISOString();
 
     // Fetching the channel list is a request to the same source as the rest, so
@@ -282,26 +312,33 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // request after it, rather than the two landing back to back.
     // The signal it is handed is p-queue's, this task's own: what governs the
     // slot governs the work in it.
-    const channels = await enqueue(inner, ({ signal }) =>
+    const channels = await enqueue(requests, ({ signal }) =>
       resolveChannels(config, { http, ...(signal ? { signal } : {}) }),
     );
 
-    // Parse one channel-day out of the payload and cache it. Queued: `parseDay`
-    // is the site's own code and the write is a file, so a wide response must
-    // not put every one of its channel-days through both at once.
+    // Parse one channel-day out of the payload and cache it. Queued on
+    // `localWork`: `parseDay` is the site's own code and the write is a file, so
+    // a wide response must not put every one of its channel-days through both
+    // at once.
     //
     // Ahead of the sweep in the queue, because a response already in hand is
     // held in memory until it is written, while a staleness check only
     // discovers more work to do.
     const store = (channel: GrabberChannel, day: string, payload: unknown): Promise<void> =>
       enqueue(
-        local,
-        async () => {
+        localWork,
+        async ({ signal: taskSignal }) => {
           const parsed = await config.parseDay({
             channel,
             date: dayToDate(day),
             day,
             payload,
+            http,
+            ...(taskSignal ? { signal: taskSignal } : {}),
+            // A request of the parse's own goes through the site's queue, like
+            // the request being parsed did — ahead of the planned ones, so a
+            // channel-day in hand is finished rather than joined by another.
+            paced: (task) => enqueue(requests, task, { priority: 1 }),
             // Bound to the channel-day being parsed, so a parse repeats neither
             // the id nor the language on every programme it builds.
             programme: (start, title, options) =>
@@ -313,6 +350,13 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
                 ...options,
               }),
           });
+          // Cancelled while the parse was running. p-queue has let go of this
+          // task already — it rejected what `add` returned the moment the
+          // signal fired — so a write from here would land after the summary
+          // that should have accounted for it, and be counted into a total
+          // nobody is going to read.
+          taskSignal?.throwIfAborted();
+
           const programmes = parsed
             .map((entry) => ({ ...built(entry), channel: channel.xmltvId }))
             .sort((a, b) => a.start.getTime() - b.start.getTime());
@@ -332,15 +376,15 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       );
 
     // Which channel-days actually need fetching. The meta reads never leave the
-    // machine, so they go through the local queue rather than the request one —
-    // a whole grid of them at once would be a file descriptor storm — and a
-    // fresh one is accounted for here, exactly once, however the requests are
-    // grouped afterwards.
+    // machine, so they go through `localWork` rather than `requests` — a whole
+    // grid of them at once would be a file descriptor storm — and a fresh one
+    // is accounted for here, exactly once, however the requests are grouped
+    // afterwards.
     const collectStale = async (): Promise<Pair[]> => {
       const checked = await Promise.all(
         channels.flatMap((channel) =>
           window.map((day) =>
-            enqueue(local, async (): Promise<Pair | undefined> => {
+            enqueue(localWork, async (): Promise<Pair | undefined> => {
               const meta = await cache.getMeta({ site, channelId: channel.xmltvId, day });
 
               if (isStale(day, meta, policy, now)) {
@@ -450,51 +494,81 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       return context as RequestContextFor<BatchMode>;
     };
 
-    for (const request of plan(await collectStale())) {
-      // Nothing awaits this, and the task reports its own failures, so the only
-      // rejection to swallow is the abort dropping it from the queue.
-      void enqueue(inner, async ({ signal }) => {
-        let payload: unknown;
+    /**
+     * One planned request, start to finish: fetch it, then parse and write
+     * every channel-day it covered.
+     *
+     * Cancelling is handled here rather than by the queue this runs in, which
+     * is what lets the two outcomes differ: a request the cancel never let
+     * start is simply not made, while one interrupted in flight leaves the
+     * channel-days it was for short, and says so.
+     */
+    const pipeline = async (request: Request): Promise<void> => {
+      if (signal?.aborted) {
+        return;
+      }
 
-        try {
-          payload = await config.request(contextFor(request, signal));
-        } catch (error) {
-          // A failed request fails every channel-day it was covering.
-          for (const { channel, day } of request.pairs) {
-            failed.push({ site, channelId: channel.xmltvId, day, error });
-          }
+      let payload: unknown;
 
-          log(`[${site}] ${describe(request)}: ${errorMessage(error)}`);
-          return;
+      try {
+        // The request queue's slot covers this and nothing else, so a parse
+        // below is free to ask for one of its own. What the request is handed
+        // is that task's signal, not the run's — what governs the slot governs
+        // the work in it.
+        payload = await enqueue(requests, ({ signal: taskSignal }) =>
+          config.request(contextFor(request, taskSignal)),
+        );
+        // The run's own, and a different question: was this cancelled while it
+        // was in flight? p-queue's task signal governs the slot, not the work
+        // in it, so stopping is ours to do — and what it stops here is a
+        // response already paid for, which is news.
+        signal?.throwIfAborted();
+      } catch (error) {
+        // A failed request fails every channel-day it was covering.
+        for (const { channel, day } of request.pairs) {
+          failed.push({ site, channelId: channel.xmltvId, day, error });
         }
 
-        // Parsing and caching are per channel-day, so one bad slice does not
-        // sink the rest of the response.
-        await Promise.all(
-          request.pairs.map(async ({ channel, day }) => {
-            try {
-              await store(channel, day, payload);
-            } catch (error) {
-              failed.push({ site, channelId: channel.xmltvId, day, error });
-              log(`[${site}] ${channel.xmltvId} ${day}: ${errorMessage(error)}`);
-            }
-          }),
-        );
-      }).catch(() => {});
+        log(`[${site}] ${describe(request)}: ${errorMessage(error)}`);
+        return;
+      }
+
+      // Parsing and caching are per channel-day, so one bad slice does not
+      // sink the rest of the response.
+      await Promise.all(
+        request.pairs.map(async ({ channel, day }) => {
+          try {
+            await store(channel, day, payload);
+          } catch (error) {
+            failed.push({ site, channelId: channel.xmltvId, day, error });
+            log(`[${site}] ${channel.xmltvId} ${day}: ${errorMessage(error)}`);
+          }
+        }),
+      );
+    };
+
+    for (const request of plan(await collectStale())) {
+      // Nothing awaits this, and a pipeline reports its own failures, so there
+      // is no rejection to swallow: a cancelled run leaves each of these to
+      // return without doing anything.
+      void pipelines.add(() => pipeline(request));
     }
 
     try {
-      await inner.onIdle();
+      // Everything this site does happens inside one of those pipelines — the
+      // fetch, the parse, the write, and any request a parse made of its own —
+      // and none of them is ever abandoned, so this is the site being done.
+      await pipelines.onIdle();
     } finally {
       dispose();
     }
   };
 
-  const outer = new PQueue({ concurrency: Math.max(1, options.siteConcurrency ?? configs.length) });
+  const sites = new PQueue({ concurrency: Math.max(1, options.siteConcurrency ?? configs.length) });
 
   await Promise.all(
     configs.map((config) =>
-      enqueue(outer, async () => {
+      enqueue(sites, async () => {
         try {
           await runSite(config);
         } catch (error) {

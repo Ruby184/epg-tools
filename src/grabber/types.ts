@@ -256,6 +256,20 @@ export interface SiteBackoff {
   adapt?: boolean;
 }
 
+/**
+ * Run one request through the site's own queue — what {@link ParseContext.paced}
+ * hands a parse that needs a second request.
+ *
+ * The callback is the request, not its result: the queue has to own the *making*
+ * of it for the site's `concurrency`, `rateLimit` and backoff to mean anything.
+ * Which is also why the wait is out here rather than inside the client — a
+ * request that sat out a rate-limit window inside `ky` would be counted against
+ * its `timeout` and aborted for taking a turn it was told to wait for.
+ */
+export type PacedRequest = <T>(
+  task: (options: { signal?: AbortSignal | undefined }) => Promise<T>,
+) => Promise<T>;
+
 export interface ParseContext<TRaw, TData = unknown> {
   /** The channel this call is parsing, as the site declared it. */
   channel: GrabberChannel<TData>;
@@ -294,6 +308,43 @@ export interface ParseContext<TRaw, TData = unknown> {
    * programme object.
    */
   programme(start: DateInput, title: string, options?: ProgrammeOptions): ProgrammeBuilder;
+  /**
+   * The site's ky instance, the very one {@link SiteConfig.request} was handed:
+   * same prefix, headers, retry, proxy and abort signal.
+   *
+   * A parse that needs a second request — a detail page per programme, a
+   * synopsis behind its own endpoint — asks for it here instead of building a
+   * client of its own. Send it through {@link paced} to have the site's queue
+   * pace it.
+   */
+  http: KyInstance;
+  /**
+   * As on a request context: already applied to {@link http}, and here for work
+   * that does not go through it.
+   */
+  signal?: AbortSignal;
+  /**
+   * Make a request through the site's request queue, so a parse is as polite as
+   * the grab around it: the site's `concurrency` counts it, its `rateLimit`
+   * spaces it, and a `429` anywhere holds it with everything else.
+   *
+   * ```ts
+   * async parseDay({ payload, programme, http, paced }) {
+   *   return Promise.all(payload.items.map(async (item) => {
+   *     const detail = await paced(({ signal }) =>
+   *       http.get(`detail/${item.id}`, { signal }).json<Detail>());
+   *
+   *     return programme(new Date(item.start), item.title).desc(detail.synopsis);
+   *   }));
+   * }
+   * ```
+   *
+   * Called with a signal of the queued task's own, following the run's, for
+   * anything inside that does not go through {@link http}. Requests made
+   * straight through `http` still work and still abort with the run — they are
+   * simply not queued, so nothing spaces them.
+   */
+  paced: PacedRequest;
 }
 
 /**

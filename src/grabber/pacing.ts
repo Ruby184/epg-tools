@@ -56,7 +56,14 @@ export function retryAfterMs(
 }
 
 export interface SitePacing {
-  /** The site's request queue: its concurrency, spacing and rate limit. */
+  /**
+   * The site's request queue: its concurrency, spacing and rate limit.
+   *
+   * A task of it is one request and no more — not the work the response is
+   * for. Anything a site does with a response holds nothing here, which is
+   * what lets a `parseDay` ask for a request of its own without waiting on the
+   * slot its own response arrived through.
+   */
   queue: PQueue;
   /** Its HTTP client, which reports a slow-down to the queue. */
   http: KyInstance;

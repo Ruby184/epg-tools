@@ -127,6 +127,9 @@ What a `parseDay` call is given:
 | `day` | `string` | The day being parsed, as `YYYY-MM-DD`. |
 | `date` | `Date` | The same day as UTC midnight. |
 | `programme` | `(start, title, options?) => ProgrammeBuilder` | A [builder bound to this channel-day](#building-programmes). |
+| `http` | `KyInstance` | The site's client — the very instance `request` was handed. See [a parse that needs another request](#a-parse-that-needs-another-request). |
+| `paced` | `<T>(task) => Promise<T>` | Run a request through the site's queue, so its `concurrency`, `rateLimit` and backoff apply to it. |
+| `signal` | `AbortSignal \| undefined` | Already applied to `http`; here for work that does not go through it. |
 
 ```ts
 const example = defineSiteConfig({
@@ -153,6 +156,43 @@ and the list is sorted by `start`.
 
 A failed `request` fails every channel-day it covered; one channel-day's
 `parseDay` error only drops that channel-day.
+
+### A parse that needs another request
+
+Plenty of sources put the schedule in one response and the description of each
+programme behind its own, so `parseDay` gets the same `http` the request had,
+and `paced` to send a request through the site's queue:
+
+```ts
+async parseDay({ payload, programme, http, paced }) {
+  return Promise.all(payload.items.map(async (item) => {
+    const detail = await paced(({ signal }) =>
+      http.get(`detail/${item.id}`, { signal }).json<Detail>());
+
+    return programme(new Date(item.start), item.title)
+      .stop(new Date(item.end))
+      .desc(detail.synopsis);
+  }));
+}
+```
+
+`paced` is what makes such a request as polite as the grab around it: the
+site's `concurrency` counts it, its `rateLimit` spaces it, and a `429` it meets
+holds the site like any other. It queues **ahead** of the planned requests, so
+a channel-day already in hand is finished rather than joined by another. What
+it takes is the request rather than its result, because the queue has to own
+the making of it — which is also why the wait is out here rather than inside
+the client: a request that sat out a rate-limit window inside `ky` would have
+that wait counted against its `timeout` and be aborted for taking the turn it
+was told to wait for.
+
+A request straight through `http` works too and still aborts with the run — it
+is simply not queued, so nothing paces it. Requests a `request` makes itself
+share the one slot it is already holding, which is the other reason a
+per-programme fan-out belongs here rather than there.
+
+How many responses a site holds while parsing them is its `concurrency`: one
+per unit, so a site set to fetch two at a time never has a third in memory.
 
 ### Building programmes
 
@@ -365,8 +405,9 @@ Node 24 also understands `NODE_USE_ENV_PROXY=1` with `HTTP_PROXY`/`HTTPS_PROXY`
 
 ## Rate limits and backoff
 
-`concurrency` says how many requests a site may have in flight; `rateLimit`
-says how often it may send them, in the terms the source itself states:
+`concurrency` says how many requests a site may have in flight — and, with
+that, how many responses it holds while parsing them; `rateLimit` says how
+often it may send them, in the terms the source itself states:
 
 ```ts
 rateLimit: { requests: 20, perMs: 60_000 },   // 20 a minute
@@ -398,6 +439,13 @@ are left alone, and `ky`'s own per-request retry then does its usual job on top.
 one clean response at a time, ten in a row per step — a retreat that is quicker
 than the recovery. At the default concurrency of 1 there is nothing to halve, so
 it only does anything for a site configured to run several requests at once.
+
+All of it applies to **every** request a site makes through the queue, not just
+the planned ones: the fetch of a channel list that has to be fetched, and a
+follow-up request a parse makes with
+[`paced`](#a-parse-that-needs-another-request). A queue task is one request and
+nothing more — parsing and writing hold no slot — which is what lets a parse
+ask for one while the response it is parsing has already let its own go.
 Pass `backoff: false` to leave the whole business to `ky`.
 
 Both are per site, like everything else here: one source's rate limit never

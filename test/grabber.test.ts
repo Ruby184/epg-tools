@@ -501,6 +501,168 @@ describe('grab', () => {
     expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(25);
   });
 
+  it("hands parseDay the site's client, and the run's signal", async () => {
+    const cache = new MemoryCache();
+    const controller = new AbortController();
+    let seen: { sameClient: boolean; signal: AbortSignal | undefined } | undefined;
+    let client: unknown;
+
+    const config = makeConfig({
+      ky: { prefix: 'https://example.test' },
+      async request({ http }) {
+        client = http;
+        return {};
+      },
+      parseDay({ http, signal, day }) {
+        seen = { sameClient: http === client, signal };
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    await grab([config], { cache, now: NOW, signal: controller.signal });
+
+    // The very instance the request used — same prefix, headers, retry, proxy
+    // and baked-in signal — rather than one the site had to build again.
+    expect(seen?.sameClient).toBe(true);
+    expect(seen?.signal?.aborted).toBe(false);
+    controller.abort(new Error('done with it'));
+    expect(seen?.signal?.aborted).toBe(true);
+  });
+
+  it('paces a request a parse makes in the site queue, like any other', async () => {
+    const cache = new MemoryCache();
+    const at: { what: string; when: number }[] = [];
+
+    const config = makeConfig({
+      days: 2,
+      rateLimit: { requests: 1, perMs: 30 },
+      async request({ day }) {
+        at.push({ what: `request ${day}`, when: Date.now() });
+        return {};
+      },
+      async parseDay({ day, paced }) {
+        await paced(async () => {
+          at.push({ what: `detail ${day}`, when: Date.now() });
+        });
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    expect(summary.fetched).toBe(2);
+    // A parse's own request is a request to the same source, so the site's
+    // spacing applies to it — and it goes ahead of the next planned day, so a
+    // channel-day in hand is finished rather than joined by another.
+    expect(at.map((entry) => entry.what)).toEqual([
+      `request ${TODAY}`,
+      `detail ${TODAY}`,
+      `request ${TOMORROW}`,
+      `detail ${TOMORROW}`,
+    ]);
+
+    for (let i = 1; i < at.length; i++) {
+      expect(at[i]!.when - at[i - 1]!.when).toBeGreaterThanOrEqual(25);
+    }
+  });
+
+  it('holds the whole site when a request a parse made is answered with 429', async () => {
+    let hits = 0;
+    const server = createServer((_request, response) => {
+      response.writeHead(++hits === 1 ? 429 : 200, {
+        'content-type': 'application/json',
+        ...(hits === 1 ? { 'retry-after': '0' } : {}),
+      });
+      response.end('{}');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      const cache = new MemoryCache();
+      const logs: string[] = [];
+      const config = makeConfig({
+        days: 2,
+        backoff: { fallbackMs: 40, maxMs: 40 },
+        async parseDay({ day, paced, http }) {
+          await paced(({ signal }) =>
+            http
+              .get(`http://127.0.0.1:${port}/detail`, { retry: 0, ...(signal ? { signal } : {}) })
+              .json()
+              .catch(() => ({})),
+          );
+
+          return [programme(`${day}T06:00:00.000Z`)];
+        },
+      });
+
+      await grab([config], { cache, now: NOW, logger: (message) => logs.push(message) });
+
+      // The client reports a slow-down to the queue whoever asked for it, so a
+      // parse cannot talk a site past a limit its requests are respecting.
+      expect(logs.some((message) => message.includes('HTTP 429: holding requests'))).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("holds one response at a time per unit of a site's concurrency", async () => {
+    const cache = new MemoryCache();
+    let inHand = 0;
+    let peak = 0;
+
+    const config = makeConfig({
+      days: 6,
+      async request() {
+        return {};
+      },
+      async parseDay({ day }) {
+        inHand++;
+        peak = Math.max(peak, inHand);
+        // Long enough that a site racing ahead would have fetched the rest.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        inHand--;
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    expect(summary.fetched).toBe(6);
+    // The request slot no longer spans the parse, so this is what keeps a site
+    // from fetching six responses and holding them while one is parsed.
+    expect(peak).toBe(1);
+  });
+
+  it('drops a request a parse queued when the run is cancelled', async () => {
+    const cache = new MemoryCache();
+    const controller = new AbortController();
+    let details = 0;
+
+    const config = makeConfig({
+      days: 4,
+      concurrency: 2,
+      async parseDay({ day, paced }) {
+        controller.abort(new Error('run cancelled'));
+
+        await paced(async () => {
+          details++;
+        }).catch(() => {});
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW, signal: controller.signal });
+
+    // Queued behind the abort, so it is dropped rather than sent — and the
+    // parse sees the rejection rather than hanging on a queue that has stopped.
+    expect(details).toBe(0);
+    expect(summary.fetched).toBe(0);
+  });
+
   it('bounds cache work and parsing at localConcurrency, across sites', async () => {
     // A cache whose every operation takes a turn of the event loop, so the
     // overlap is observable rather than instantaneous.
@@ -542,7 +704,7 @@ describe('grab', () => {
     expect(cache.max).toBe(3);
   });
 
-  it('runs two sites in parallel under the outer queue', async () => {
+  it('runs two sites in parallel under the site queue', async () => {
     const cache = new MemoryCache();
     let inFlight = 0;
     let maxInFlight = 0;
