@@ -22,7 +22,7 @@ import { stat } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import path from 'node:path';
 import { Writable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
+import { finished, pipeline } from 'node:stream/promises';
 import { atomicFile } from './atomic.js';
 
 /** An output that cannot be written: no socket there, or nobody listening. */
@@ -34,7 +34,12 @@ export class OutputError extends Error {
 export type OutputTarget = string | Writable;
 
 export interface OutputSink {
-  /** Where the document goes. */
+  /**
+   * Where the document goes — and whoever takes it owns its errors. A stream
+   * opened with a signal that has already fired arrives destroyed, so the
+   * `error` it is about to emit needs somewhere to go. {@link writeOutput} has
+   * `pipeline` see to that.
+   */
   stream: Writable;
   /** Whether writing may close it — false for a stream we were handed. */
   end: boolean;
@@ -158,12 +163,20 @@ export async function writeOutput(
     // thought to ask, and a write is exactly as long as what it is writing.
     await pipeline(source, sink.stream, { end: sink.end, signal: options.signal });
   } catch (error) {
-    // A failing source rejects the moment it fails, while the stream is still
-    // tearing down — and tearing down is what takes the temp file away.
-    // Waiting for it is the difference between "the write failed" and "the
-    // write failed and may still have left something behind".
+    // A failing or cancelled write rejects the moment it fails, while the
+    // stream is still tearing down — and tearing down is what takes the temp
+    // file away. Waiting for it is the difference between "the write failed"
+    // and "the write failed and may still have left something behind".
+    //
+    // `finished` rather than `once(stream, 'close')`: that one rejects on
+    // `error`, and a stream torn down by a failure or an abort emits one
+    // *before* it closes, so the wait was abandoned exactly when it mattered —
+    // whenever the error happened to land after the line rather than before it.
+    // A race, and so a temp file left behind now and then rather than every
+    // time. This settles after `close` either way, and `cleanup` leaves none of
+    // its listeners on a stream that is already done with.
     if (sink.end && !sink.stream.closed) {
-      await once(sink.stream, 'close').catch(() => {});
+      await finished(sink.stream, { cleanup: true }).catch(() => {});
     }
 
     throw error;

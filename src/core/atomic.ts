@@ -108,6 +108,22 @@ export function atomicFile(file: string, signal?: AbortSignal): fs.WriteStream {
     fs: {
       ...fs,
       open(filePath, flags, mode, callback) {
+        // Over before this was reached, which is what an abort landing early
+        // looks like: a stream closed before it ever took a descriptor never
+        // calls `close` below, so a file made now would be made for nobody and
+        // left for nobody to remove. The way to leave nothing behind is to make
+        // nothing — and nothing is waiting to hear about it, which is the one
+        // reason this returns without answering the callback: `closed` means the
+        // destroy that emitted it has finished.
+        //
+        // An abort *during* the work below needs none of this. A stream that
+        // has begun opening is one Node waits for before it finishes destroying
+        // — so the descriptor becomes the stream's, `close` is called, and the
+        // discard there is what undoes it.
+        if (stream.closed) {
+          return;
+        }
+
         fs.mkdir(dir, { recursive: true }, (error, firstCreated) => {
           if (error) {
             callback(error, -1);
@@ -115,6 +131,7 @@ export function atomicFile(file: string, signal?: AbortSignal): fs.WriteStream {
           }
 
           created = firstCreated;
+
           fs.open(filePath, flags, mode, callback);
         });
       },

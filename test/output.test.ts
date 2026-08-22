@@ -34,6 +34,31 @@ describe('writeOutput', () => {
     expect(await readdir(dir)).toEqual([]);
   });
 
+  it('makes nothing at all when the abort beats the open', async () => {
+    const dir = await tempDir();
+    const controller = new AbortController();
+    controller.abort(new Error('cancelled'));
+
+    // Destroyed before it can take a descriptor, so `close` comes before the
+    // open hook has even been entered — the ordering that used to leave a
+    // 0-byte temp file behind for nobody, because the open went on to make one
+    // after the stream was gone. Now the open is refused instead, so there is
+    // nothing to clean up and nothing to wait for.
+    const sink = await openOutput(join(dir, 'nested', 'guide.xml'), {
+      signal: controller.signal,
+    });
+    // A stream handed over is the caller's to listen to, and this one is
+    // destroyed on arrival — `writeOutput` has `pipeline` do it.
+    sink.stream.on('error', () => {});
+
+    expect(sink.stream.closed).toBe(true);
+    // Long enough that the open would have made its file by now if it were
+    // going to — it has already been skipped for the same reason.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(await readdir(dir)).toEqual([]);
+  });
+
   describe('cancelling', () => {
     /** A source as long as the guide it stands for, which is the point. */
     async function* endless(): AsyncGenerator<string> {
