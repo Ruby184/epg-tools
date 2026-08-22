@@ -1,8 +1,10 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { build, guideStream, runGrab, runMerge } from '../src/build.js';
+import { FsCacheStore } from '../src/cache/main.js';
 import { defineConfig, type EpgConfig } from '../src/config.js';
 import type { SiteConfig } from '../src/grabber/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
@@ -120,6 +122,88 @@ describe('offset', () => {
     expect(fetchedDays).toEqual(['2026-07-19']);
     expect(xml).toContain('start="20260719060000');
     expect(xml).not.toContain('start="20260717');
+  });
+});
+
+describe('cancellation', () => {
+  it('writes no guide when the grab was cancelled, and keeps what it cached', async () => {
+    const dir = await tempDir();
+    const controller = new AbortController();
+    const fetched: string[] = [];
+    const cancelling: SiteConfig<unknown> = {
+      ...site(fetched),
+      channels: [
+        { xmltvId: 'one.example', siteId: '1', name: 'One' },
+        { xmltvId: 'two.example', siteId: '2', name: 'Two' },
+      ],
+      async request({ channel, day }) {
+        fetched.push(channel.xmltvId);
+        controller.abort(new Error('cancelled'));
+        return { day };
+      },
+    };
+    const epgConfig = config(dir, { sites: [cancelling], days: 1 });
+
+    const summary = await build(epgConfig, { now: NOW, signal: controller.signal });
+
+    // The channel-day in flight when the cancel landed is reported, and the one
+    // still queued was never asked for.
+    expect(fetched).toEqual(['one.example']);
+    expect(summary.failed).toHaveLength(1);
+    // Half a window is not what the guide in place should be replaced with.
+    expect(existsSync(epgConfig.output)).toBe(false);
+  });
+
+  it('stops a merge between channel-days rather than writing half a guide', async () => {
+    const dir = await tempDir();
+    const controller = new AbortController();
+    const epgConfig = config(dir, { days: 1 });
+
+    await runGrab(epgConfig, { now: NOW });
+    expect(existsSync(join(dir, 'cache'))).toBe(true);
+
+    controller.abort(new Error('cancelled'));
+
+    await expect(runMerge(epgConfig, { now: NOW, signal: controller.signal })).rejects.toThrow(
+      'cancelled',
+    );
+
+    // The document is written beside its file and renamed only when finished,
+    // so an abandoned one leaves nothing at all.
+    expect(existsSync(epgConfig.output)).toBe(false);
+    expect((await readdir(dir)).filter((name) => name.startsWith('guide.xml'))).toEqual([]);
+  });
+
+  it('leaves the cache unpruned when a run is cancelled', async () => {
+    const dir = await tempDir();
+    const controller = new AbortController();
+    const cache = new FsCacheStore({ dir: join(dir, 'cache') });
+    const stale = { site: 'example.com', channelId: 'one.example', day: YESTERDAY };
+
+    await cache.write(stale, [
+      {
+        channel: 'one.example',
+        start: new Date(`${YESTERDAY}T06:00:00.000Z`),
+        title: [{ value: 'old' }],
+      },
+    ]);
+
+    const cancelling: SiteConfig<unknown> = {
+      ...site([]),
+      async request({ day }) {
+        controller.abort(new Error('cancelled'));
+        return { day };
+      },
+    };
+
+    await runGrab(config(dir, { sites: [cancelling], days: 1 }), {
+      now: NOW,
+      signal: controller.signal,
+    });
+
+    // Pruning a window the grab never finished filling would take days it might
+    // still have wanted.
+    expect(await cache.getMeta(stale)).toBeDefined();
   });
 });
 

@@ -268,6 +268,7 @@ async function execute(
     ...(options.now ? { now: options.now } : {}),
     // Per-channel-day chatter is debug-level; the summary is not.
     ...(values.debug && log ? { logger: log } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
   };
 
   let failed = 0;
@@ -289,6 +290,15 @@ async function execute(
       summary.empty > 0 ? `${summary.fetched} (${summary.empty} empty)` : `${summary.fetched}`;
 
     log?.(`grabbed ${grabbed}, from cache ${summary.fromCache}, failed ${failed}`);
+  }
+
+  // A cancelled run writes nothing: the reference grabbers are read by a
+  // consumer that takes whatever arrives on stdout as the whole guide, and half
+  // a document would be taken for one.
+  if (options.signal?.aborted) {
+    queueLine(stderr, 'cancelled');
+
+    return 130;
   }
 
   await writeOutput(values.output ?? stdout, guideStream(selected, runOptions));

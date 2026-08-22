@@ -55,4 +55,11 @@ export interface XmltvGrabberOptions {
   stderr?: Writable;
   /** Defaults to `process.stdin`. */
   stdin?: Readable;
+  /**
+   * Cancel the run — `SIGINT` or `SIGTERM` in the generated shim, which is what
+   * a service manager stopping a grabber sends. The grab keeps what reached the
+   * cache and no document is written, since half of one is not a guide the
+   * caller can use.
+   */
+  signal?: AbortSignal;
 }

@@ -120,6 +120,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   const resolved = (
     await resolveSites(options.sites, {
       ...(options.siteConcurrency !== undefined ? { concurrency: options.siteConcurrency } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
     })
   ).map((config) => ({ config, channels: config.channels as GrabberChannel[] }));
 
@@ -315,6 +316,12 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       Math.max(1, options.readAhead ?? DEFAULT_READ_AHEAD),
       readChannelDay,
     )) {
+      // Between channel-days, which is as often as this has anything to say:
+      // a cancelled merge stops here rather than finishing a document nobody
+      // is going to keep. The reads already in the window settle into their
+      // slots and are dropped with it.
+      options.signal?.throwIfAborted();
+
       if (listStrategy === 'merge') {
         for (const list of lists) {
           mergeInto(pending, list, match);

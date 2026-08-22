@@ -111,9 +111,18 @@ sudo -u hts tv_grab_sk_example --configure   # → /home/hts/.xmltv/tv_grab_sk_e
 
 The XMLTV document is the only thing on stdout; progress and errors go to
 stderr. Exit codes are 0 on success, 1 for a bad command line, a missing
-configuration, or partial data (a channel-day that failed to grab). New
-channels are reported but do not change the exit code unless you ask for it
-with `--channel-updates signal`, which uses 2 (see below).
+configuration, or partial data (a channel-day that failed to grab), and 130 when
+the grabber was stopped by a signal. New channels are reported but do not change
+the exit code unless you ask for it with `--channel-updates signal`, which uses
+2 (see below).
+
+`SIGINT` and `SIGTERM` — what a service manager sends to stop a job — cancel the
+run: the channel-days already grabbed stay in the cache for the next run, and
+**no document is written at all**, since a consumer takes whatever arrives on
+stdout as the whole guide and half of one would be taken for one. A second
+signal exits immediately, which is the answer when a site's own code is deaf to
+the first. The generated shim wires both; a hand-written caller passes its own
+`signal` to `runXmltvGrabber`.
 
 Two deliberate differences from `XMLTV::Options`: `--days` falls back to your
 config's value rather than the reference's hardcoded 5, and `--cache` names the

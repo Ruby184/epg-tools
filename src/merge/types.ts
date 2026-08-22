@@ -179,6 +179,16 @@ export interface BuildGuideOptions {
    * strictly-serial behaviour.
    */
   readAhead?: number;
+  /**
+   * Cancel the merge. Checked as each channel-day comes out of the cache, and
+   * carried into the channel-list requests a site's `channels` function makes.
+   *
+   * The generator rejects with the abort reason rather than stopping quietly:
+   * half a document is not a guide, and whoever is writing it needs to know not
+   * to keep it — which is what makes `writeGuide` discard the file it was
+   * building instead of moving it into place.
+   */
+  signal?: AbortSignal;
   now?: Date;
   /**
    * First day of the guide window as `YYYY-MM-DD`. Defaults to `now`'s day.

@@ -112,12 +112,24 @@ export function grabberShim(options: ShimOptions): string {
     import(${JSON.stringify(options.config)}),
   ]);
 
+  // Stopped by a service manager, or by Ctrl-C: keep what reached the cache,
+  // write no half a guide, and answer a second signal by going straight away.
+  const controller = new AbortController();
+  const stop = () => {
+    if (controller.signal.aborted) process.exit(130);
+    controller.abort(new Error('interrupted'));
+  };
+
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+
   process.exitCode = await runXmltvGrabber(config.default, {
     description: ${JSON.stringify(options.description)},
     version: ${JSON.stringify(options.version)},
     // Fixed, so the configuration stays ~/.xmltv/${options.name}.conf however
     // this file is named or symlinked on the way here.
     grabberName: ${JSON.stringify(options.name)},
+    signal: controller.signal,
   });
 })();
 `;

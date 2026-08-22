@@ -1798,6 +1798,38 @@ describe('--list-channels', () => {
 });
 
 describe('grabbing', () => {
+  it('exits 130 and writes nothing when the run is cancelled', async () => {
+    const dir = await tempDir();
+    const configFile = await configured(dir);
+    const controller = new AbortController();
+    const output = join(dir, 'guide.xml');
+    const stdout = new Sink();
+    const stderr = new Sink();
+
+    const cancelling: SiteConfig<unknown> = {
+      ...site('one.example.tv'),
+      async request({ day }) {
+        controller.abort(new Error('SIGTERM received'));
+        return { day };
+      },
+    };
+
+    const code = await runXmltvGrabber(config(dir, { sites: [cancelling] }), {
+      ...META,
+      argv: ['--config-file', configFile, '--output', output],
+      stdout,
+      stderr,
+      signal: controller.signal,
+    });
+
+    expect(code).toBe(130);
+    expect(stderr.text).toContain('cancelled');
+    // A consumer reads whatever arrives as the whole guide, so half a document
+    // would be taken for one.
+    expect(stdout.text).toBe('');
+    await expect(stat(output)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('writes the guide into a socket, as tvheadend listens for it', async () => {
     const dir = await tempDir();
     const configFile = await configured(dir);

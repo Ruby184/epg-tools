@@ -54,6 +54,13 @@ const EXIT_USAGE = 2;
 /** The run failed, or finished with data missing. */
 const EXIT_FAILED = 1;
 
+/**
+ * Cancelled — what a shell reports for a process killed by `SIGINT` (128 + 2),
+ * so a script reading `$?` sees the interruption for what it is rather than as
+ * a failed grab.
+ */
+const EXIT_CANCELLED = 130;
+
 const CONFIG_CANDIDATES = ['epg.config.ts', 'epg.config.js', 'epg.config.mjs'];
 
 const COMMANDS = ['build', 'grab', 'merge', 'prune', 'init-grabber'];
@@ -63,6 +70,12 @@ export interface CliOptions {
   stdout?: Writable;
   /** Defaults to `process.stderr` — failures. */
   stderr?: Writable;
+  /**
+   * Cancel the command. The bin fires this on `SIGINT` and `SIGTERM`; nothing
+   * here listens for a signal itself, which is what keeps a command something a
+   * test can run.
+   */
+  signal?: AbortSignal;
 }
 
 /** Anything the user can be told about and can fix. Not for programming errors. */
@@ -185,8 +198,15 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
   const stderr = options.stderr ?? process.stderr;
 
   try {
-    return await execute(argv, stdout, stderr);
+    return await execute(argv, stdout, stderr, options.signal);
   } catch (error) {
+    // Whatever the interruption surfaced as — a merge's own abort, a request
+    // dropped mid-flight — a cancelled run is not a failure to describe.
+    if (options.signal?.aborted) {
+      await writeLines(stderr, 'Cancelled.');
+      return EXIT_CANCELLED;
+    }
+
     if (error instanceof OptionError || error instanceof UsageError) {
       // What was typed was wrong, so the usage goes with the message.
       await writeFlushed(stderr, `${error.message}\n\n${USAGE}`);
@@ -215,7 +235,12 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
   }
 }
 
-async function execute(argv: string[], stdout: Writable, stderr: Writable): Promise<number> {
+async function execute(
+  argv: string[],
+  stdout: Writable,
+  stderr: Writable,
+  signal: AbortSignal | undefined,
+): Promise<number> {
   const { values, positionals } = parseOptions(
     argv,
     {
@@ -277,16 +302,40 @@ async function execute(argv: string[], stdout: Writable, stderr: Writable): Prom
   const runOptions = {
     ...(log ? { logger: log } : {}),
     ...(values.offset !== undefined ? { offset: values.offset } : {}),
+    ...(signal ? { signal } : {}),
+  };
+
+  /**
+   * What a cancelled grab amounts to: it resolves with what it managed rather
+   * than throwing, so the interruption has to be noticed here — and it outranks
+   * the failures, which are mostly requests the cancel itself dropped.
+   */
+  const cancelled = async (summary: GrabSummary): Promise<number> => {
+    await writeLines(
+      stderr,
+      `Cancelled. ${summary.fetched} channel-day(s) reached the cache; no guide was written.`,
+    );
+
+    return EXIT_CANCELLED;
   };
 
   switch (command) {
     case 'build': {
-      const code = await report(await build(config, runOptions), log, stderr);
+      const summary = await build(config, runOptions);
+
+      if (signal?.aborted) {
+        return cancelled(summary);
+      }
+
+      const code = await report(summary, log, stderr);
       log?.(`Guide written to ${config.output}`);
       return code;
     }
-    case 'grab':
-      return await report(await runGrab(config, runOptions), log, stderr);
+    case 'grab': {
+      const summary = await runGrab(config, runOptions);
+
+      return signal?.aborted ? cancelled(summary) : await report(summary, log, stderr);
+    }
     case 'merge': {
       await runMerge(config, runOptions);
       log?.(`Guide written to ${config.output}`);

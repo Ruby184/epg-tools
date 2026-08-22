@@ -63,10 +63,13 @@ async function plainConfig(dir: string, options: { fail?: boolean } = {}): Promi
   );
 }
 
-async function run(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+async function run(
+  argv: string[],
+  signal?: AbortSignal,
+): Promise<{ code: number; stdout: string; stderr: string }> {
   const stdout = new Sink();
   const stderr = new Sink();
-  const code = await runCli(argv, { stdout, stderr });
+  const code = await runCli(argv, { stdout, stderr, ...(signal ? { signal } : {}) });
 
   return { code, stdout: stdout.text, stderr: stderr.text };
 }
@@ -133,6 +136,53 @@ describe('epg', () => {
     expect(code).toBe(0);
     expect(stderr).toBe('');
     expect(stdout).toContain('Grab done: 1 fetched (1 empty), 0 from cache, 0 failed');
+  });
+
+  it('exits 130 without a guide when the run is cancelled', async () => {
+    const dir = await tempDir();
+    const controller = new AbortController();
+    const config = await configFile(
+      dir,
+      `export default {
+        sites: [{
+          site: 'example.tv',
+          channels: [
+            { xmltvId: 'one.example.tv', siteId: '1' },
+            { xmltvId: 'two.example.tv', siteId: '2' },
+          ],
+          async request({ channel }) {
+            if (channel.xmltvId === 'one.example.tv') globalThis.cancelTheRun();
+            return {};
+          },
+          parseDay: ({ channel, day }) => [{
+            channel: channel.xmltvId,
+            start: new Date(day + 'T06:00:00.000Z'),
+            title: [{ value: 'Show' }],
+          }],
+        }],
+        days: 1,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+    );
+
+    // A config file is a module of its own, so it says *when* to cancel and the
+    // test does the cancelling — which is the bin's job in a real run.
+    Object.assign(globalThis, { cancelTheRun: () => controller.abort(new Error('SIGINT')) });
+
+    const { code, stdout, stderr } = await run(
+      ['build', '--config', config, '--quiet'],
+      controller.signal,
+    );
+
+    expect(code).toBe(130);
+    expect(stdout).toBe('');
+    // What it managed, and what it did not do — rather than the requests the
+    // cancel itself dropped, reported one by one as failures.
+    expect(stderr).toContain('Cancelled.');
+    expect(stderr).toContain('no guide was written');
+    expect(stderr).not.toContain('FAILED');
+    await expect(stat(join(dir, 'guide.xml'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('says nothing under --quiet, and still writes the guide', async () => {

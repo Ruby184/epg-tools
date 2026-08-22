@@ -9,6 +9,7 @@ this page is about the run as a whole — what one *site* looks like is
 - [`EpgConfig` reference](#epgconfig-reference)
 - [Cache reference](#cache-reference)
 - [CLI reference](#cli-reference)
+- [Cancelling a run](#cancelling-a-run)
 - [How caching works](#how-caching-works)
 - [Merge strategies](#merge-strategies)
 
@@ -120,8 +121,47 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--description`, `--grabber-version`, `--force` | `init-grabber` only — see [XMLTV grabber](./tv-grab.md) |
 
 It exits **0** on success, **1** when the run failed or the guide is short a
-channel-day, and **2** for anything you typed wrong — an unknown option,
-command, or `--before` value, each printed with the usage.
+channel-day, **2** for anything you typed wrong — an unknown option, command, or
+`--before` value, each printed with the usage — and **130** when it was
+[cancelled](#cancelling-a-run).
+
+### Cancelling a run
+
+`Ctrl-C` (or a `SIGTERM` from whatever manages the job) stops the run rather
+than killing it:
+
+```console
+$ epg build
+^C
+Cancelled. 34 channel-day(s) reached the cache; no guide was written.
+$ echo $?
+130
+```
+
+Nothing more is asked of any source, whatever was in flight is aborted through
+the client it went out on, and **the channel-days that already landed stay in
+the cache** — so the next run carries on from there rather than starting over.
+No guide is written: half a window is not what should replace a complete guide,
+and the file in place is left alone. The post-grab prune is skipped too, since a
+window this run never finished filling may still want the days it would remove.
+
+Press again and it exits immediately. That is the answer when a site's own code
+is deaf to the signal — the wind-down waits for whatever it left running, and
+the second press does not.
+
+Programmatically it is the same signal in `RunOptions`:
+
+```ts
+const controller = new AbortController();
+
+const summary = await build(config, { signal: controller.signal });
+```
+
+A cancelled `grab` **resolves** with the partial summary rather than rejecting —
+what reached the cache is counted, and only what was actually interrupted is in
+`failed`. A cancelled `merge` **rejects** with the abort reason, because half a
+document is not a guide; `writeGuide` then discards the file it was building
+instead of moving it into place.
 
 ### Output, and sockets
 

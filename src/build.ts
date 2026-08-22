@@ -10,6 +10,18 @@ import { resolveConfigSource, type ConfigSource, type EpgConfig } from './config
 export interface RunOptions {
   now?: Date;
   /**
+   * Cancel the run.
+   *
+   * A grab stops asking for anything more and resolves with the partial summary
+   * rather than rejecting: what reached the cache is in it, and only what was
+   * actually interrupted counts as failed. A merge stops between channel-days
+   * and rejects with the abort reason, so the guide it was part-way through
+   * writing is discarded rather than replacing a complete one — the output is
+   * written beside the file it is for and renamed only when the document is
+   * finished.
+   */
+  signal?: AbortSignal;
+  /**
    * Shift the window by this many days relative to `now` (may be negative).
    * Defaults to 0 — i.e. the window starts today. `now` itself is untouched,
    * so staleness and the `grabbedAt` stamp keep using the real current time.
@@ -53,6 +65,7 @@ function guideOptions(config: EpgConfig, options: RunOptions, now: Date): BuildG
     ...(config.meta ? { meta: config.meta } : {}),
     ...(config.indent !== undefined ? { indent: config.indent } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
   };
 }
 
@@ -75,9 +88,12 @@ export async function runGrab(
     ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
     now,
     ...(options.logger ? { logger: options.logger } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
   });
 
-  if (config.cache?.prune !== false) {
+  // Nothing more is asked of the cache once the run is off: pruning a window
+  // the grab never finished filling would take days it might still have wanted.
+  if (config.cache?.prune !== false && options.signal?.aborted !== true) {
     // Never prune inside the window we just grabbed: a negative offset puts
     // the window start before today, and those days must survive.
     const today = toDayString(now);
@@ -114,7 +130,14 @@ export async function* guideStream(
   yield* generateGuide(guideOptions(config, options, options.now ?? new Date()));
 }
 
-/** Grab into the cache, then generate the merged guide. */
+/**
+ * Grab into the cache, then generate the merged guide.
+ *
+ * A cancelled run stops after the grab: the summary says what reached the
+ * cache, and no guide is written. Half a window is not what the guide in place
+ * should be replaced with, and the next run continues from what this one
+ * cached.
+ */
 export async function build(source: ConfigSource, options: RunOptions = {}): Promise<GrabSummary> {
   // Resolved once and passed on: a factory may read the environment or fetch,
   // and the grab and the merge that follows it must agree on one answer.
@@ -129,12 +152,15 @@ export async function build(source: ConfigSource, options: RunOptions = {}): Pro
     ...config,
     sites: await resolveSites(config.sites, {
       ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
     }),
   };
 
   const summary = await runGrab(resolved, { ...options, now });
 
-  await runMerge(resolved, { ...options, now });
+  if (options.signal?.aborted !== true) {
+    await runMerge(resolved, { ...options, now });
+  }
 
   return summary;
 }
