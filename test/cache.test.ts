@@ -8,7 +8,7 @@ import {
   FsXmltvCacheStore,
   isStale,
 } from '../src/cache/main.js';
-import type { StalenessPolicy } from '../src/cache/main.js';
+import type { CacheEntryMeta, StalenessPolicy } from '../src/cache/main.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 
 function programme(overrides: Partial<XmltvProgramme> = {}): XmltvProgramme {
@@ -131,8 +131,11 @@ describe('FsNdjsonCacheStore cancellation', () => {
     const store = new FsNdjsonCacheStore({ dir, signal: controller.signal });
     controller.abort(new Error('cancelled'));
 
+    // `readFile` carries the signal, so an aborted read raises Node's own
+    // `AbortError`. A staleness check opens the entry and reads the front of it,
+    // and neither of those takes a signal — so it asks, and raises the reason.
     await expect(store.read(key)).rejects.toMatchObject({ name: 'AbortError' });
-    await expect(store.getMeta(key)).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(store.getMeta(key)).rejects.toThrow('cancelled');
   });
 
   it('stops a prune between days, keeping what it has already removed', async () => {
@@ -177,7 +180,8 @@ describe('FsNdjsonCacheStore', () => {
       await store.write({ ...key, day }, [programme()]);
     }
 
-    expect((await fs.readdir(channelDir)).length).toBe(6);
+    // One file per channel-day, meta and all.
+    expect((await fs.readdir(channelDir)).length).toBe(3);
 
     // A prune that empties the channel takes its directory with it, so the
     // store must not go on believing it is there.
@@ -220,7 +224,7 @@ describe('FsNdjsonCacheStore', () => {
     expect(read).toEqual(programmes);
   });
 
-  it('round-trips metadata through the sidecar file', async () => {
+  it('round-trips metadata through the entry itself', async () => {
     const store = new FsNdjsonCacheStore({ dir });
 
     await store.write(key, [programme()], { grabbedAt: '2026-07-17T08:00:00.000Z' });
@@ -251,27 +255,36 @@ describe('FsNdjsonCacheStore', () => {
     expect(await store.read(key)).toBeUndefined();
   });
 
-  it('treats a corrupt meta sidecar as missing and deletes the entry', async () => {
+  it('treats an entry whose meta line is corrupt as missing, and removes it', async () => {
     const store = new FsNdjsonCacheStore({ dir });
+    const file = path.join(dir, 'example.com', 'one', '2026-07-17.ndjson');
 
-    await store.write(key, [programme()]);
-    const base = path.join(dir, 'example.com', 'one', '2026-07-17');
-    await fs.writeFile(`${base}.meta.json`, '{not json', 'utf8');
+    for (const head of ['{not json', '{"something":"else"}', 'no newline at all']) {
+      await store.write(key, [programme()]);
+      const body = (await fs.readFile(file, 'utf8')).split('\n').slice(1).join('\n');
+      await fs.writeFile(file, `${head}\n${body}`, 'utf8');
 
-    expect(await store.getMeta(key)).toBeUndefined();
-    expect(await store.read(key)).toBeUndefined();
-    await expect(fs.access(`${base}.ndjson`)).rejects.toMatchObject({ code: 'ENOENT' });
+      // An entry that cannot say when it was grabbed is one nothing can be
+      // decided about, so it goes and the day is grabbed again.
+      expect(await store.getMeta(key), head).toBeUndefined();
+      await expect(fs.access(file)).rejects.toMatchObject({ code: 'ENOENT' });
+    }
   });
 
-  it('treats a meta sidecar with a wrong shape as corrupt', async () => {
+  it('reads the meta of an entry whose preamble outruns the head', async () => {
     const store = new FsNdjsonCacheStore({ dir });
+    const file = path.join(dir, 'example.com', 'one', '2026-07-17.ndjson');
 
     await store.write(key, [programme()]);
-    const base = path.join(dir, 'example.com', 'one', '2026-07-17');
-    await fs.writeFile(`${base}.meta.json`, '{"something":"else"}', 'utf8');
 
-    expect(await store.getMeta(key)).toBeUndefined();
-    await expect(fs.access(`${base}.ndjson`)).rejects.toMatchObject({ code: 'ENOENT' });
+    // A meta line longer than the head a staleness check reads, which is a
+    // reason to look at the whole entry rather than to throw it away.
+    const [meta, ...body] = (await fs.readFile(file, 'utf8')).split('\n');
+    const padded = JSON.stringify({ ...JSON.parse(meta!), note: 'x'.repeat(600) });
+    await fs.writeFile(file, [padded, ...body].join('\n'), 'utf8');
+
+    expect(await store.getMeta(key)).toMatchObject({ programmeCount: 1 });
+    await expect(fs.access(file)).resolves.toBeUndefined();
   });
 
   it('sanitizes site and channel path segments', async () => {
@@ -290,7 +303,7 @@ describe('FsNdjsonCacheStore', () => {
     expect(await store.read(trickyKey)).toHaveLength(1);
   });
 
-  it('deletes an entry including its sidecar', async () => {
+  it('deletes an entry, meta and all', async () => {
     const store = new FsNdjsonCacheStore({ dir });
 
     await store.write(key, [programme()]);
@@ -408,6 +421,105 @@ describe('FsXmltvCacheStore', () => {
 
   const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
   const base = () => path.join(dir, 'example.com', 'one', '2026-07-17');
+
+  it('gives up on an entry whose root element is not <tv>', async () => {
+    const store = new FsXmltvCacheStore({ dir });
+
+    await store.write(key, [programme()]);
+    await fs.writeFile(`${base()}.xml`, '<?xml version="1.0"?><guide><programme/></guide>', 'utf8');
+
+    // The scanner says so by throwing, which here is an entry to grab again
+    // rather than a failure to report.
+    expect(await store.getMeta(key)).toBeUndefined();
+    await expect(fs.access(`${base()}.xml`)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('carries its meta in an instruction, and stays a valid document', async () => {
+    const store = new FsXmltvCacheStore({ dir });
+
+    await store.write(key, [programme(), programme({ title: [{ value: 'Second' }] })], {
+      grabbedAt: '2026-07-17T08:00:00.000Z',
+    });
+
+    const document = await fs.readFile(`${base()}.xml`, 'utf8');
+
+    // The root element says when, as XMLTV does; the count has no attribute the
+    // DTD would allow, so the whole meta goes where XML puts things meant for
+    // one reader.
+    expect(document).toContain('<tv date="20260717080000 +0000">');
+    expect(document).toContain(
+      '<?epg-cache {"grabbedAt":"2026-07-17T08:00:00.000Z","programmeCount":2}?>',
+    );
+    expect(await store.getMeta(key)).toEqual({
+      grabbedAt: '2026-07-17T08:00:00.000Z',
+      programmeCount: 2,
+    });
+  });
+
+  it('escapes `>` in its meta so no field can truncate the instruction', async () => {
+    const { parseXmltvString } = await import('../src/xmltv/main.js');
+
+    // `?>` ends an instruction and XML has no escape for it, so the JSON has to
+    // carry the `>` in a form XML cannot see. Today's meta is two fields that
+    // cannot hold one; the guard is for the first field that can. Reached
+    // through `entryData` because `write` builds the meta itself.
+    class Exposed extends FsXmltvCacheStore {
+      data(meta: CacheEntryMeta): string {
+        return this.entryData([programme()], meta);
+      }
+    }
+
+    const meta = {
+      grabbedAt: '2026-07-17T08:00:00.000Z',
+      programmeCount: 1,
+      note: 'what?> now',
+    } as CacheEntryMeta;
+
+    const document = new Exposed({ dir }).data(meta);
+
+    expect(document).not.toContain('what?>');
+    expect(document).toContain('what?\\u003e now');
+
+    // Still one instruction holding the whole meta, and it reads back intact.
+    const [instruction] = parseXmltvString(document).processingInstructions;
+
+    expect(instruction).toMatchObject({ target: 'epg-cache', position: 'root' });
+    expect(JSON.parse(instruction!.data)).toEqual(meta);
+  });
+
+  it('will not take its meta from a prolog instruction', async () => {
+    const store = new FsXmltvCacheStore({ dir });
+
+    await store.write(key, [programme()], { grabbedAt: '2026-07-17T08:00:00.000Z' });
+
+    // The same instruction, moved ahead of the root — and the root replaced with
+    // something that is not a guide at all. A prolog one is parsed before the
+    // root is, so trusting it would mean trusting this file.
+    await fs.writeFile(
+      `${base()}.xml`,
+      '<?xml version="1.0"?><?epg-cache {"grabbedAt":"2026-07-17T08:00:00.000Z",' +
+        '"programmeCount":9}?><guide><programme/></guide>',
+      'utf8',
+    );
+
+    expect(await store.getMeta(key)).toBeUndefined();
+  });
+
+  it('steps over an instruction meant for another reader', async () => {
+    const store = new FsXmltvCacheStore({ dir });
+
+    await store.write(key, [programme()], { grabbedAt: '2026-07-17T08:00:00.000Z' });
+
+    const document = await fs.readFile(`${base()}.xml`, 'utf8');
+    // Someone else's instruction, ahead of this store's own.
+    await fs.writeFile(
+      `${base()}.xml`,
+      document.replace('<?epg-cache', '<?other-reader hello?><?epg-cache'),
+      'utf8',
+    );
+
+    expect(await store.getMeta(key)).toMatchObject({ programmeCount: 1 });
+  });
 
   it('round-trips programmes through xmltv format', async () => {
     const store = new FsXmltvCacheStore({ dir });

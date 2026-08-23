@@ -10,6 +10,7 @@
 import { formatXmltvDate, getXmltvOffset, parseXmltvDate } from '../xmltv/date.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import { FsCacheStore } from './fs-store.js';
+import type { CacheEntryMeta } from './types.js';
 
 /**
  * The date-valued fields of a programme. `previouslyShown.start` is the one a
@@ -22,15 +23,55 @@ export class FsNdjsonCacheStore extends FsCacheStore {
     return 'ndjson';
   }
 
-  protected override entryData(programmes: XmltvProgramme[]): string {
-    return programmes.map((programme) => this.#storedLine(programme)).join('\n');
+  /**
+   * The meta on the first line, then one programme per line after it. The
+   * newline belongs to the meta rather than to the join: a day with nothing on
+   * is an entry of meta alone, and it still has to be a whole line to read.
+   */
+  protected override entryData(programmes: XmltvProgramme[], meta: CacheEntryMeta): string {
+    const lines = programmes.map((programme) => this.#storedLine(programme));
+
+    return `${JSON.stringify(meta)}\n${lines.join('\n')}`;
   }
 
   protected override parseEntry(content: string): XmltvProgramme[] {
     return content
       .split('\n')
+      .slice(1)
       .filter((line) => line.trim() !== '')
       .map((line) => this.#reviveProgramme(line));
+  }
+
+  protected override async parseMeta(
+    chunks: AsyncIterable<string>,
+  ): Promise<CacheEntryMeta | undefined> {
+    let head = '';
+
+    for await (const chunk of chunks) {
+      head += chunk;
+
+      const end = head.indexOf('\n');
+
+      // The first line as soon as there is a whole one, however many chunks it
+      // took — and no chunk after it, which is what taking them one at a time
+      // is for. An entry with nothing after its meta still ends in one.
+      if (end !== -1) {
+        return this.#meta(head.slice(0, end));
+      }
+    }
+  }
+
+  /** One meta line, or nothing when it is not one. */
+  #meta(line: string): CacheEntryMeta | undefined {
+    try {
+      const meta = JSON.parse(line) as Partial<CacheEntryMeta>;
+
+      return typeof meta.grabbedAt === 'string' && typeof meta.programmeCount === 'number'
+        ? (meta as CacheEntryMeta)
+        : undefined;
+    } catch {
+      // Not a line of JSON, so not a meta.
+    }
   }
 
   /**

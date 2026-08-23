@@ -2,14 +2,15 @@
  * The filesystem side of a cache, without an opinion about what an entry looks
  * like inside.
  *
- * Layout: `<dir>/<site>/<channelId>/<day>.<ext>`, plus a sidecar
- * `<day>.meta.json` holding {@link CacheEntryMeta}. Site and channel path
- * segments are sanitized with `encodeURIComponent`.
+ * Layout: `<dir>/<site>/<channelId>/<day>.<ext>`, one file per channel-day
+ * holding its own {@link CacheEntryMeta} as well as its programmes. Site and
+ * channel path segments are sanitized with `encodeURIComponent`.
  *
  * What a store keeps and what it keeps it *as* are separate problems, so the
  * second one belongs to a subclass: `FsNdjsonCacheStore` and `FsXmltvCacheStore` say
- * what one entry is, and everything else — the layout, the sidecar,
- * cancellation, deleting, pruning — is the same either way and lives here.
+ * what one entry is — including where its meta goes — and everything else, the
+ * layout and cancellation and deleting and pruning, is the same either way and
+ * lives here.
  * Which is also what keeps the xmltv module out of a run that does not use it:
  * the store that needs it is the one that imports it.
  */
@@ -20,59 +21,15 @@ import { writeFileAtomic } from '../core/atomic.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import type { CacheEntryMeta, CacheStore, ChannelDayKey, FsCacheStoreOptions } from './types.js';
 
-function isNotFound(error: unknown): boolean {
-  return code(error) === 'ENOENT';
-}
-
-function code(error: unknown): string | undefined {
-  return typeof error === 'object' && error !== null
-    ? (error as NodeJS.ErrnoException).code
-    : undefined;
-}
-
-/**
- * Remove a directory if it is empty, without asking first.
- *
- * Asking is the race: a grab in another process writes the day it is grabbing a
- * moment after the answer comes back and before the removal goes out, and a
- * prune that checked then fails on what it was told was safe. `rmdir` already
- * refuses a directory with anything in it — POSIX allows either `ENOTEMPTY` or
- * `EEXIST` for that — so the refusal *is* the check, and a directory somebody
- * else removed first (`ENOENT`) is equally fine by us.
- */
-async function removeIfEmpty(dir: string): Promise<void> {
-  try {
-    await fs.rmdir(dir);
-  } catch (error) {
-    if (!['ENOTEMPTY', 'EEXIST', 'ENOENT'].includes(code(error) ?? '')) {
-      throw error;
-    }
-  }
-}
-
-/**
- * Run `work` over `items`, `limit` of them at a time.
- *
- * A prune is thousands of small operations that only wait on the disk, so doing
- * them one after another spends the whole time waiting — while doing them all at
- * once is the file descriptor storm the rest of this package is careful to
- * avoid. Node's own file operations run on a threadpool of four by default, so
- * there is little to gain past a handful in flight.
- */
-async function inParallel<T>(items: T[], limit: number, work: (item: T) => Promise<void>) {
-  let next = 0;
-
-  const worker = async (): Promise<void> => {
-    while (next < items.length) {
-      await work(items[next++]!);
-    }
-  };
-
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-}
-
 /** How much of a prune's directory walk is in flight at once. */
 const PRUNE_CONCURRENCY = 8;
+
+/**
+ * How much of an entry is read at a time while looking for its meta. A
+ * granularity rather than a limit: whoever is reading takes another chunk only
+ * if it needs one, and any meta this package writes fits in the first.
+ */
+const READ_CHUNK = 512;
 
 export abstract class FsCacheStore implements CacheStore {
   protected readonly dir: string;
@@ -94,13 +51,25 @@ export abstract class FsCacheStore implements CacheStore {
   protected abstract get extension(): string;
 
   /**
-   * What one entry holds — written atomically, and with its sidecar, here. The
-   * meta comes along for a format with somewhere to put it.
+   * What one entry holds — written atomically, here. An entry carries its own
+   * meta, so a format has to have somewhere to put it.
    */
   protected abstract entryData(programmes: XmltvProgramme[], meta: CacheEntryMeta): string;
 
   /** The programmes one entry held. The file is read out here. */
   protected abstract parseEntry(content: string): XmltvProgramme[];
+
+  /**
+   * The meta an entry begins with, read from the front of it — or nothing, when
+   * the entry does not begin with one it can make sense of.
+   *
+   * What the staleness sweep asks for, thousands of times a run and mostly
+   * about entries it then leaves alone — so it is given the entry to pull from
+   * rather than the whole of it to read. Taking one chunk and stopping is the
+   * ordinary case; taking more is what makes the front of an entry however long
+   * it needs to be.
+   */
+  protected abstract parseMeta(chunks: AsyncIterable<string>): Promise<CacheEntryMeta | undefined>;
 
   /**
    * Reading options for `fs`: the encoding, and the signal when there is one.
@@ -111,6 +80,88 @@ export abstract class FsCacheStore implements CacheStore {
    */
   protected readOptions(): { encoding: BufferEncoding; signal: AbortSignal | undefined } {
     return { encoding: 'utf8', signal: this.signal };
+  }
+
+  /** Whether an `fs` call failed because what it was pointed at is not there. */
+  #isNotFound(error: unknown): boolean {
+    return this.#code(error) === 'ENOENT';
+  }
+
+  #code(error: unknown): string | undefined {
+    return typeof error === 'object' && error !== null
+      ? (error as NodeJS.ErrnoException).code
+      : undefined;
+  }
+
+  /**
+   * Remove a directory if it is empty, without asking first.
+   *
+   * Asking is the race: a grab in another process writes the day it is grabbing
+   * a moment after the answer comes back and before the removal goes out, and a
+   * prune that checked then fails on what it was told was safe. `rmdir` already
+   * refuses a directory with anything in it — POSIX allows either `ENOTEMPTY` or
+   * `EEXIST` for that — so the refusal *is* the check, and a directory somebody
+   * else removed first (`ENOENT`) is equally fine by us.
+   */
+  async #removeIfEmpty(dir: string): Promise<void> {
+    try {
+      await fs.rmdir(dir);
+    } catch (error) {
+      if (!['ENOTEMPTY', 'EEXIST', 'ENOENT'].includes(this.#code(error) ?? '')) {
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Run `work` over `items`, `limit` of them at a time.
+   *
+   * A prune is thousands of small operations that only wait on the disk, so
+   * doing them one after another spends the whole time waiting — while doing
+   * them all at once is the file descriptor storm the rest of this package is
+   * careful to avoid. Node's own file operations run on a threadpool of four by
+   * default, so there is little to gain past a handful in flight.
+   */
+  async #inParallel<T>(items: T[], limit: number, work: (item: T) => Promise<void>): Promise<void> {
+    let next = 0;
+
+    const worker = async (): Promise<void> => {
+      while (next < items.length) {
+        await work(items[next++]!);
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  }
+
+  /**
+   * An open file as text, a chunk at a time and none of it before it is asked
+   * for.
+   *
+   * Node has readier tools for this — a `ReadStream` iterates chunks too — but a
+   * stream is a heavy object to build per file, and this is the hottest thing a
+   * cache does: 2,000 of these cost 178ms against a stream's 262ms, and against
+   * 236ms for reading whole entries that only the front of is wanted.
+   *
+   * The decoder is what makes chunking at arbitrary byte counts safe: a
+   * character split across two reads is held until the rest of it arrives,
+   * rather than becoming a replacement one.
+   */
+  async *#chunksOf(handle: fs.FileHandle): AsyncGenerator<string> {
+    const buffer = Buffer.allocUnsafe(READ_CHUNK);
+    const decoder = new TextDecoder();
+    let position = 0;
+
+    while (true) {
+      const { bytesRead } = await handle.read(buffer, 0, READ_CHUNK, position);
+
+      if (bytesRead === 0) {
+        return;
+      }
+
+      position += bytesRead;
+      yield decoder.decode(buffer.subarray(0, bytesRead), { stream: true });
+    }
   }
 
   #channelDir(key: ChannelDayKey): string {
@@ -127,45 +178,51 @@ export abstract class FsCacheStore implements CacheStore {
     this.#ensured.add(dir);
   }
 
-  /** Path prefix of an entry, without the file extension. */
-  #entryBase(key: ChannelDayKey): string {
-    return path.join(this.#channelDir(key), key.day);
+  /** The file one channel-day is kept in. */
+  #entryFilePath(key: ChannelDayKey): string {
+    return path.join(this.#channelDir(key), `${key.day}.${this.extension}`);
   }
 
   async getMeta(key: ChannelDayKey): Promise<CacheEntryMeta | undefined> {
-    let content: string;
+    // Asked outright, since neither `open` nor a read from a handle takes a
+    // signal of its own the way `readFile` does.
+    this.signal?.throwIfAborted();
+
+    const file = this.#entryFilePath(key);
+    let handle;
 
     try {
-      content = await fs.readFile(`${this.#entryBase(key)}.meta.json`, this.readOptions());
+      handle = await fs.open(file, 'r');
     } catch (error) {
-      if (isNotFound(error)) {
+      if (this.#isNotFound(error)) {
         return;
       }
 
       throw error;
     }
 
+    let meta: CacheEntryMeta | undefined;
+
     try {
-      const meta = JSON.parse(content) as Partial<CacheEntryMeta>;
+      meta = await this.parseMeta(this.#chunksOf(handle));
+    } finally {
+      await handle.close();
+    }
 
-      if (typeof meta.grabbedAt !== 'string' || typeof meta.programmeCount !== 'number') {
-        throw new TypeError('invalid cache meta shape');
-      }
-
-      return meta as CacheEntryMeta;
-    } catch {
-      // Corrupt sidecar: treat the whole entry as missing and remove it.
+    if (meta === undefined) {
+      // An entry that cannot say when it was grabbed is one nothing here can
+      // decide about, so it goes and the day is grabbed again.
       await this.delete(key);
     }
+
+    return meta;
   }
 
   async read(key: ChannelDayKey): Promise<XmltvProgramme[] | undefined> {
     try {
-      return this.parseEntry(
-        await fs.readFile(`${this.#entryBase(key)}.${this.extension}`, this.readOptions()),
-      );
+      return this.parseEntry(await fs.readFile(this.#entryFilePath(key), this.readOptions()));
     } catch (error) {
-      if (isNotFound(error)) {
+      if (this.#isNotFound(error)) {
         return;
       }
 
@@ -180,27 +237,21 @@ export abstract class FsCacheStore implements CacheStore {
   ): Promise<void> {
     await this.#ensureDir(this.#channelDir(key));
 
-    const base = this.#entryBase(key);
-    const fullMeta: CacheEntryMeta = {
-      grabbedAt: meta?.grabbedAt ?? new Date().toISOString(),
-      programmeCount: programmes.length,
-    };
-
+    // One file, so an entry is either there with its meta or not there at all:
+    // two writes left a window where it had already been written and could not
+    // yet be told apart from one that had never been grabbed.
     await writeFileAtomic(
-      `${base}.${this.extension}`,
-      this.entryData(programmes, fullMeta),
+      this.#entryFilePath(key),
+      this.entryData(programmes, {
+        grabbedAt: meta?.grabbedAt ?? new Date().toISOString(),
+        programmeCount: programmes.length,
+      }),
       this.signal,
     );
-    await writeFileAtomic(`${base}.meta.json`, `${JSON.stringify(fullMeta)}\n`, this.signal);
   }
 
   async delete(key: ChannelDayKey): Promise<void> {
-    const base = this.#entryBase(key);
-
-    await Promise.all([
-      fs.rm(`${base}.${this.extension}`, { force: true }),
-      fs.rm(`${base}.meta.json`, { force: true }),
-    ]);
+    await fs.rm(this.#entryFilePath(key), { force: true });
   }
 
   async prune(options: { before: string }): Promise<number> {
@@ -210,17 +261,17 @@ export abstract class FsCacheStore implements CacheStore {
     try {
       sites = await fs.readdir(this.dir, { withFileTypes: true });
     } catch (error) {
-      if (isNotFound(error)) {
+      if (this.#isNotFound(error)) {
         return 0;
       }
 
       throw error;
     }
 
-    // This store's own entry files and the sidecars beside them. Built here
-    // rather than in the constructor, where a subclass has yet to say what its
-    // extension is, and a prune is once a run either way.
-    const entryFile = new RegExp(`^(\\d{4}-\\d{2}-\\d{2})\\.(?:${this.extension}|meta\\.json)$`);
+    // This store's own entry files. Built here rather than in the constructor,
+    // where a subclass has yet to say what its extension is, and a prune is
+    // once a run either way.
+    const entryFile = new RegExp(`^(\\d{4}-\\d{2}-\\d{2})\\.${this.extension}$`);
 
     for (const site of sites.filter((entry) => entry.isDirectory())) {
       // Between sites, and between channels below: `readdir` and `rm` take no
@@ -231,7 +282,7 @@ export abstract class FsCacheStore implements CacheStore {
       const sitePath = path.join(this.dir, site.name);
       const channels = await fs.readdir(sitePath, { withFileTypes: true });
 
-      await inParallel(
+      await this.#inParallel(
         channels.filter((entry) => entry.isDirectory()),
         PRUNE_CONCURRENCY,
         async (channel) => {
@@ -245,14 +296,14 @@ export abstract class FsCacheStore implements CacheStore {
 
           removed += pruned;
 
-          await removeIfEmpty(channelPath);
+          await this.#removeIfEmpty(channelPath);
           // Whether it went or not, this store no longer knows: a write to this
           // channel makes sure of the directory again.
           this.#ensured.delete(channelPath);
         },
       );
 
-      await removeIfEmpty(sitePath);
+      await this.#removeIfEmpty(sitePath);
     }
 
     return removed;
@@ -275,14 +326,9 @@ export abstract class FsCacheStore implements CacheStore {
     // A day's files together, and the days a few at a time: the entries of one
     // channel are the smallest pieces here, and waiting for each in turn is
     // most of what a prune used to spend its time on.
-    await inParallel([...staleDays], PRUNE_CONCURRENCY, async (day) => {
-      const base = path.join(channelPath, day);
-
-      await Promise.all([
-        fs.rm(`${base}.${this.extension}`, { force: true }),
-        fs.rm(`${base}.meta.json`, { force: true }),
-      ]);
-    });
+    await this.#inParallel([...staleDays], PRUNE_CONCURRENCY, async (day) =>
+      fs.rm(path.join(channelPath, `${day}.${this.extension}`), { force: true }),
+    );
 
     return staleDays.size;
   }

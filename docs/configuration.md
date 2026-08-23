@@ -88,7 +88,7 @@ Non-DTD attributes go in `extraAttributes` and are emitted verbatim.
 | field | type | default | what it is |
 |---|---|---|---|
 | `dir` | `string` | `.epg-cache` in the working directory | Cache root. **Make it absolute** if the config is also used by a [grabber](./tv-grab.md), which runs from wherever it is called. |
-| `format` | `'ndjson' \| 'xmltv'` | `'ndjson'` | What one entry is. `ndjson` writes `<day>.ndjson`, one JSON programme per line, with dates in XMLTV form (`20260807203000 +0200`) so the offset the source wrote them in and how precise it was both survive it; `xmltv` writes `<day>.xml`, one small indented document per channel-day, carrying its grab time as the root element's `date` — pick it when something other than this package reads the cache. A store reads **its own** format only, so switching means starting the cache again. |
+| `format` | `'ndjson' \| 'xmltv'` | `'ndjson'` | What one entry is — **one file** per channel-day, its own meta included. `ndjson` writes `<day>.ndjson`: a meta line (`grabbedAt`, `programmeCount`), then one JSON programme per line, with dates in XMLTV form (`20260807203000 +0200`) so the offset the source wrote them in and how precise it was both survive. `xmltv` writes `<day>.xml`, one small indented document — its root element carrying `date` as XMLTV means it, and its meta in a [processing instruction](./xmltv.md#processing-instructions), so an entry validates against the DTD like any other guide. Pick it when something other than this package reads the cache. A store reads **its own** format only, so switching means starting the cache again. |
 | `staleness` | `Partial<StalenessPolicy>` | `{ alwaysRefetchDays: 1, maxAgeDays: 7, emptyMaxAgeDays: 1 }` | When a cached day is refetched. `alwaysRefetchDays: 1` means today only, `2` today and tomorrow, `0` never force-refetch. `maxAgeDays` busts anything grabbed longer ago than that, and `emptyMaxAgeDays` does the same for an entry that came back with **no programmes** — a source that was briefly broken is asked again the next day instead of leaving a hole for a week, while a channel that genuinely has nothing on costs one request a day rather than one per run. `0` refetches an empty day on any later run; a value as large as `maxAgeDays` turns the distinction off. |
 | `prune` | `boolean` | `true` | Remove cached days older than today after a successful grab. |
 
@@ -201,9 +201,10 @@ never removes a day inside the window. Negative values work in both the
 
 ## How caching works
 
-Each `site + channel + day` is one cache entry
-(`<dir>/<site>/<channel>/<day>.ndjson` + a small meta sidecar recording when it
-was grabbed). On every run a channel-day is refetched only when:
+Each `site + channel + day` is one cache entry — one file,
+`<dir>/<site>/<channel>/<day>.ndjson`, beginning with when it was grabbed and
+how much it holds. A staleness check reads that much of it and no more. On every
+run a channel-day is refetched only when:
 
 - it is not cached yet (e.g. day 14 after a day passed), or
 - it is within `alwaysRefetchDays` from today (near-term EPG changes often), or
