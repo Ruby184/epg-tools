@@ -16,7 +16,6 @@ import {
   parseXmltvString,
   serializeDocumentFooter,
   serializeDocumentHeader,
-  serializeProcessingInstruction,
   serializeProgramme,
 } from '../xmltv/main.js';
 import type { SerializeOptions } from '../xmltv/main.js';
@@ -50,14 +49,18 @@ export class FsXmltvCacheStore extends FsCacheStore {
   protected override entryData(programmes: XmltvProgramme[], meta: CacheEntryMeta): string {
     // The same pieces `writeXmltvStream` puts a whole guide together from, which
     // is what makes an entry a document the rest of the package — and anything
-    // else pointed at it — can read. The instruction sits just inside the root,
-    // where a reader that does not know the target passes over it, and where
-    // `parseMeta` requires it to be.
+    // else pointed at it — can read. The header places the instruction: `root`
+    // puts it just inside the element, where a reader that does not know the
+    // target passes over it, and where `parseMeta` requires it to be.
     return [
-      serializeDocumentHeader({ date: new Date(meta.grabbedAt) }, FORMATTING),
-      serializeProcessingInstruction(
-        { target: META_TARGET, data: this.#encodeMeta(meta), position: 'root' },
-        FORMATTING,
+      serializeDocumentHeader(
+        { date: new Date(meta.grabbedAt) },
+        {
+          ...FORMATTING,
+          processingInstructions: [
+            { target: META_TARGET, data: this.#encodeMeta(meta), position: 'root' },
+          ],
+        },
       ),
       ...programmes.map((programme) => serializeProgramme(programme, FORMATTING)),
       serializeDocumentFooter(FORMATTING),

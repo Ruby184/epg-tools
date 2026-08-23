@@ -49,15 +49,14 @@ export interface SerializeOptions {
 }
 
 /**
- * What the document boundaries take on top of the formatting: the processing
- * instructions that belong outside the root element.
+ * What the two ends of a document take on top of the formatting: the processing
+ * instructions, all of them, at either end.
  *
- * Both ends accept the document's whole list and take only the part that is
- * theirs — {@link serializeDocumentHeader} the `prolog` ones,
- * {@link serializeDocumentFooter} the `epilog` ones — so assembling a document
- * by hand means passing the same list to both and letting each place its own.
- * The `root` ones belong between them, written in order with the channels and
- * programmes.
+ * Each end takes only the part that is its own — {@link serializeDocumentHeader}
+ * the `prolog` ones before the root and the `root` ones just inside it,
+ * {@link serializeDocumentFooter} the `epilog` ones after the close tag — so
+ * assembling a document by hand is passing the same list to both and letting
+ * each place what belongs to it. Nothing in between has to know about them.
  */
 export interface DocumentBoundaryOptions extends SerializeOptions {
   processingInstructions?: Iterable<XmltvProcessingInstruction>;
@@ -579,11 +578,12 @@ function instructionsAt(
 }
 
 /**
- * Serialize the document prelude — `<?xml?>`, `<!DOCTYPE>`, any `prolog`
- * processing instructions, and the open `<tv …>` tag with the root attributes
- * from `meta`. Same call shape as {@link serializeChannel} /
- * {@link serializeProgramme}; pair it with {@link serializeDocumentFooter} to
- * assemble a document by hand.
+ * Serialize everything a document has before its first channel or programme —
+ * `<?xml?>`, `<!DOCTYPE>`, the `prolog` processing instructions, the open
+ * `<tv …>` tag with the root attributes from `meta`, and then the `root`
+ * instructions that sit at the head of its content. Same call shape as
+ * {@link serializeChannel} / {@link serializeProgramme}; pair it with
+ * {@link serializeDocumentFooter} to assemble a document by hand.
  *
  * Prolog instructions go after the DOCTYPE and before the root, which is both
  * where XML allows them and as close to the root as the grammar gets. Nothing
@@ -608,7 +608,8 @@ export function serializeDocumentHeader(
       ['generator-info-name', meta?.generatorInfoName],
       ['generator-info-url', meta?.generatorInfoUrl],
       ...extraAttrPairs(meta?.extraAttributes),
-    ])}>${f.nl}`
+    ])}>${f.nl}` +
+    instructionsAt(options?.processingInstructions, 'root', options)
   );
 }
 
@@ -706,9 +707,6 @@ export async function* writeXmltvStream(
 
   async function* parts(): AsyncGenerator<string> {
     yield serializeDocumentHeader(input.meta, boundary);
-
-    if (instructions) yield instructionsAt(instructions, 'root', options);
-
     for await (const channel of input.channels) yield serializeChannel(channel, options);
     for await (const programme of input.programmes) yield serializeProgramme(programme, options);
     yield serializeDocumentFooter(boundary);
@@ -836,17 +834,11 @@ export class XmltvSerializeStream extends Transform {
 
     this.#started = true;
 
-    const held = this.#beforeHeader.splice(0);
-
-    // Event meta is the base; the constructor `meta` option overrides it.
-    return (
-      serializeDocumentHeader(
-        { ...this.#eventMeta, ...this.#options?.meta },
-        {
-          ...this.#options,
-          processingInstructions: held,
-        },
-      ) + instructionsAt(held, 'root', this.#options)
+    // Event meta is the base; the constructor `meta` option overrides it. The
+    // header places the held instructions itself, on both sides of the root tag.
+    return serializeDocumentHeader(
+      { ...this.#eventMeta, ...this.#options?.meta },
+      { ...this.#options, processingInstructions: this.#beforeHeader.splice(0) },
     );
   }
 
@@ -911,11 +903,12 @@ export class XmltvSerializeStream extends Transform {
   override _flush(callback: TransformCallback): void {
     // `#prelude()` covers the header when no channel/programme was ever written.
     const prelude = this.#prelude();
+
     const footer = serializeDocumentFooter({
       ...this.#options,
       processingInstructions: this.#afterFooter.splice(0),
     });
 
-    callback(null, `${prelude}${footer}`);
+    callback(null, prelude + footer);
   }
 }

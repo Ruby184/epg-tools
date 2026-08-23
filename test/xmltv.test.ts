@@ -1136,6 +1136,37 @@ describe('processing instructions', () => {
     ).rejects.toThrow(/prolog processing instruction must precede/);
   });
 
+  it('writes a root one that arrives after the content, where it arrived', async () => {
+    // The header places the ones held before it, so this is the only path for a
+    // root instruction that follows a programme — and it keeps the interleaving
+    // rather than gathering them at the head the way the list-taking writer
+    // must. Without it the event would fall through and never call back, which
+    // hangs the stream rather than dropping anything.
+    const source =
+      '<?xml version="1.0"?><tv date="20260717000000 +0000"><?first a?>' +
+      '<programme start="20260717200000 +0000" channel="c"><title>T</title></programme>' +
+      '<?last b?></tv>';
+    const chunks: string[] = [];
+
+    await pipeline(
+      Readable.from([source]),
+      new XmltvParseStream(),
+      new XmltvSerializeStream(),
+      async (out) => {
+        for await (const chunk of out) chunks.push(String(chunk));
+      },
+    );
+
+    const written = chunks.join('');
+
+    expect(written).toContain('<?first a?><programme');
+    expect(written).toContain('</programme><?last b?></tv>');
+    expect(parseXmltvString(written).processingInstructions).toEqual([
+      { target: 'first', data: 'a', position: 'root' },
+      { target: 'last', data: 'b', position: 'root' },
+    ]);
+  });
+
   it('writes an epilog one even when the document held nothing else', async () => {
     const chunks: string[] = [];
 

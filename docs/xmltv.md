@@ -244,9 +244,12 @@ lossless. You can produce them the same way: the
 | `serializeProgramme(programme, options?)` | one `<programme>` element |
 | `serializeDocumentHeader(meta?, options?)` | the XML declaration, doctype and opening `<tv>` |
 | `serializeDocumentFooter(options?)` | the closing `</tv>` |
+| `serializeProcessingInstruction(instruction, options?)` | one `<?target data?>` |
 
 The last four let you assemble a document by hand — header, your own elements
-in any order, footer — when neither the stream form nor the builders fit.
+in any order, footer — when neither the stream form nor the builders fit. Pass
+`processingInstructions` to the header and the footer and each writes the ones
+that belong to it, so nothing between them has to know about them.
 
 `SerializeOptions`:
 

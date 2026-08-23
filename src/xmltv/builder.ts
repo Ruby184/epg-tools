@@ -5,7 +5,6 @@ import {
   serializeChannel,
   serializeDocumentFooter,
   serializeDocumentHeader,
-  serializeProcessingInstruction,
   serializeProgramme,
   writeXmltvStream,
 } from './serialize.js';
@@ -946,8 +945,7 @@ export class XmltvDocumentBuilder extends ExtraAttributesBuilder {
    * whoever knows the target reads it, every other reader steps over it, and
    * the DTD constrains none of it. `data` goes out verbatim, so it may not
    * contain `?>` — XML ends an instruction there and offers no escape — and
-   * {@link serializeProcessingInstruction} throws rather than write one that
-   * would not read back.
+   * serializing throws rather than write one that would not read back.
    */
   processingInstruction(
     target: string,
@@ -1026,30 +1024,25 @@ export class XmltvDocumentBuilder extends ExtraAttributesBuilder {
     return Readable.from(writeXmltvStream(this.build(), options));
   }
 
-  /** The instructions added for `position`, in the order they were added. */
-  #instructionsAt(position: XmltvProcessingInstructionPosition): XmltvProcessingInstruction[] {
-    return this.#processingInstructions.filter((instruction) => instruction.position === position);
-  }
-
-  /** Those same instructions as parse events. */
+  /**
+   * The instructions added for `position` as parse events, in the order they
+   * were added — the only thing left that has to sort them by position, now
+   * that the document's two ends place their own.
+   */
   #instructionEvents(position: XmltvProcessingInstructionPosition): XmltvParseEvent[] {
-    return this.#instructionsAt(position).map((value): XmltvParseEvent => ({
-      type: 'processing-instruction',
-      value,
-    }));
+    return this.#processingInstructions
+      .filter((instruction) => instruction.position === position)
+      .map((value): XmltvParseEvent => ({ type: 'processing-instruction', value }));
   }
 
   /** The whole document serialized to an XML string. Compact by default; pass `{ indent }`. */
   toXml(options?: SerializeOptions): string {
-    // The boundaries take the whole list and each writes the part that is its
-    // own; the `root` ones belong here, between them.
+    // Both ends take the whole list and each writes the part that is its own,
+    // so there is nothing to place between them here.
     const boundary = { ...options, processingInstructions: this.#processingInstructions };
 
     return (
       serializeDocumentHeader(this.#meta, boundary) +
-      this.#instructionsAt('root')
-        .map((instruction) => serializeProcessingInstruction(instruction, options))
-        .join('') +
       this.#channels.map((channel) => serializeChannel(channel, options)).join('') +
       this.#programmes.map((programme) => serializeProgramme(programme, options)).join('') +
       serializeDocumentFooter(boundary)
