@@ -64,7 +64,7 @@ describe('writeOutput', () => {
     async function* endless(): AsyncGenerator<string> {
       yield '<tv>';
 
-      for (;;) {
+      while (true) {
         yield '<programme/>';
         await new Promise((resolve) => setImmediate(resolve));
       }
@@ -96,7 +96,7 @@ describe('writeOutput', () => {
       // itself, which is what the pipeline's own signal is for.
       const forever = {
         *[Symbol.iterator](): Generator<string> {
-          for (;;) {
+          while (true) {
             yield '<programme/>';
           }
         },
