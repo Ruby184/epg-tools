@@ -139,6 +139,37 @@ describe('FsNdjsonCacheStore cancellation', () => {
     await expect(store.getMeta(key)).rejects.toThrow('cancelled');
   });
 
+  it('stops reading an entry between chunks, not only before the first', async () => {
+    const controller = new AbortController();
+    let taken = 0;
+
+    // How many chunks the front of an entry is worth is `parseMeta`'s to decide,
+    // and a document whose root never arrives has it reading to the scan limit —
+    // so a cancelled run has to stop inside that loop, not merely before it.
+    class Counting extends FsNdjsonCacheStore {
+      protected override async parseMeta(
+        chunks: AsyncIterable<string>,
+      ): Promise<CacheEntryMeta | undefined> {
+        for await (const _chunk of chunks) {
+          taken++;
+          controller.abort(new Error('cancelled'));
+        }
+
+        return undefined;
+      }
+    }
+
+    // Entries big enough that their front is several chunks over.
+    const many = Array.from({ length: 200 }, () => programme());
+    await new FsNdjsonCacheStore({ dir }).write(key, many);
+
+    await expect(new Counting({ dir, signal: controller.signal }).getMeta(key)).rejects.toThrow(
+      'cancelled',
+    );
+    // The one it had already taken when the run was cancelled, and no more.
+    expect(taken).toBe(1);
+  });
+
   it('stops a prune between days, keeping what it has already removed', async () => {
     const seeding = new FsNdjsonCacheStore({ dir });
 

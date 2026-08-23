@@ -146,6 +146,12 @@ export abstract class FsCacheStore implements CacheStore {
     let position = 0;
 
     while (true) {
+      // Per chunk, not once before the first: `parseMeta` decides how many it
+      // takes, and a document whose root tag never arrives has it reading up to
+      // the scan limit. Neither `open` nor a read from a handle takes a signal
+      // of its own, so this is where a cancelled run stops reading.
+      this.signal?.throwIfAborted();
+
       const { bytesRead } = await handle.read(buffer, 0, READ_CHUNK, position);
 
       if (bytesRead === 0) {
