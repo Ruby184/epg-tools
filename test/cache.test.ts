@@ -194,6 +194,37 @@ describe('FsNdjsonCacheStore', () => {
     expect(await store.read(key)).toHaveLength(1);
   });
 
+  it.each(['..', '.'])(
+    'keeps an entry inside the cache when a key segment is %j',
+    async (segment) => {
+      // A channel id comes off a site's own channel list, which is not this
+      // package's to trust. `encodeURIComponent` neutralizes a separator but not a
+      // dot, and `.`/`..` are the filesystem's words for "here" and "one up".
+      const cache = path.join(dir, 'below', 'cache');
+      const store = new FsNdjsonCacheStore({ dir: cache });
+      const traversing = { site: segment, channelId: segment, day: '2026-07-17' };
+
+      await store.write(traversing, [programme()]);
+
+      // Nothing climbed out: the cache is still the only thing under `below`.
+      expect(await fs.readdir(path.join(dir, 'below'))).toEqual(['cache']);
+      expect(await store.read(traversing)).toHaveLength(1);
+    },
+  );
+
+  it('leaves an ordinary site and channel where they already were', async () => {
+    // The encoding only touches a segment that is nothing but dots, so no cache
+    // written before it is invalidated by it.
+    await new FsNdjsonCacheStore({ dir }).write(
+      { site: 'example.com', channelId: 'one.tv', day: '2026-07-17' },
+      [programme()],
+    );
+
+    await expect(
+      fs.access(path.join(dir, 'example.com', 'one.tv', '2026-07-17.ndjson')),
+    ).resolves.toBeUndefined();
+  });
+
   it.each([
     ['the channel directory', 'example.com'],
     // `mkdir -p` makes the whole path back, so how much went does not matter.

@@ -157,8 +157,30 @@ export abstract class FsCacheStore implements CacheStore {
     }
   }
 
+  /**
+   * One segment of a key's path, made safe to join.
+   *
+   * `encodeURIComponent` deals with separators — a `/` becomes `%2F` and stays
+   * one segment — but it leaves a dot alone, because a dot is legal in both a
+   * URI and a filename. `.` and `..` are the exceptions: they are the
+   * filesystem's own words for "here" and "one level up", so a channel id of
+   * `..` off a site's channel list would put an entry above the cache directory
+   * and one of `.` would put it beside the sites rather than under one. Encoded,
+   * they are ordinary names the kernel reads as themselves and `path.join` does
+   * not resolve away.
+   *
+   * Only a segment that is nothing but dots is rewritten, so every ordinary
+   * `example.com` keeps the path it already has and no cache is invalidated by
+   * this.
+   */
+  #segment(value: string): string {
+    const encoded = encodeURIComponent(value);
+
+    return /^\.+$/.test(encoded) ? encoded.replaceAll('.', '%2E') : encoded;
+  }
+
   #channelDir(key: ChannelDayKey): string {
-    return path.join(this.dir, encodeURIComponent(key.site), encodeURIComponent(key.channelId));
+    return path.join(this.dir, this.#segment(key.site), this.#segment(key.channelId));
   }
 
   /** The file one channel-day is kept in. */
