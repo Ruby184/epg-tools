@@ -27,9 +27,17 @@ const PRUNE_CONCURRENCY = 8;
 /**
  * How much of an entry is read at a time while looking for its meta. A
  * granularity rather than a limit: whoever is reading takes another chunk only
- * if it needs one, and any meta this package writes fits in the first.
+ * if it needs one, and any meta this package writes fits in the first — an
+ * ndjson entry's meta line ends by byte 60, an xmltv entry's instruction by
+ * byte 180, so this is an order of magnitude of room for either to grow.
+ *
+ * One read costs the same syscall whatever it asks for, and 2,000 `getMeta`
+ * calls measure the same at 512, 2,048 and 4,096 bytes — so the size is chosen
+ * for headroom rather than speed. Not 4,096 itself: that is the first size Node
+ * will not carve out of its shared buffer pool (`Buffer.poolSize >>> 1`), which
+ * buys an allocation per read for nothing.
  */
-const READ_CHUNK = 512;
+const READ_CHUNK = 2048;
 
 export abstract class FsCacheStore implements CacheStore {
   protected readonly dir: string;
