@@ -34,13 +34,6 @@ const READ_CHUNK = 512;
 export abstract class FsCacheStore implements CacheStore {
   protected readonly dir: string;
   protected readonly signal: AbortSignal | undefined;
-  /**
-   * Channel directories this store has already made. A grab writes every day of
-   * a channel in turn, so without this each of them asks the filesystem to make
-   * a directory that has been there since the first — 7,000 entries is a
-   * quarter of a second of learning what we already knew.
-   */
-  readonly #ensured = new Set<string>();
 
   constructor(options: FsCacheStoreOptions) {
     this.dir = options.dir;
@@ -168,16 +161,6 @@ export abstract class FsCacheStore implements CacheStore {
     return path.join(this.dir, encodeURIComponent(key.site), encodeURIComponent(key.channelId));
   }
 
-  /** The channel's directory, made once per store however many days it holds. */
-  async #ensureDir(dir: string): Promise<void> {
-    if (this.#ensured.has(dir)) {
-      return;
-    }
-
-    await fs.mkdir(dir, { recursive: true });
-    this.#ensured.add(dir);
-  }
-
   /** The file one channel-day is kept in. */
   #entryFilePath(key: ChannelDayKey): string {
     return path.join(this.#channelDir(key), `${key.day}.${this.extension}`);
@@ -235,19 +218,36 @@ export abstract class FsCacheStore implements CacheStore {
     programmes: XmltvProgramme[],
     meta?: Partial<CacheEntryMeta>,
   ): Promise<void> {
-    await this.#ensureDir(this.#channelDir(key));
-
+    const file = this.#entryFilePath(key);
     // One file, so an entry is either there with its meta or not there at all:
     // two writes left a window where it had already been written and could not
     // yet be told apart from one that had never been grabbed.
-    await writeFileAtomic(
-      this.#entryFilePath(key),
-      this.entryData(programmes, {
-        grabbedAt: meta?.grabbedAt ?? new Date().toISOString(),
-        programmeCount: programmes.length,
-      }),
-      this.signal,
-    );
+    const data = this.entryData(programmes, {
+      grabbedAt: meta?.grabbedAt ?? new Date().toISOString(),
+      programmeCount: programmes.length,
+    });
+
+    try {
+      await writeFileAtomic(file, data, this.signal);
+    } catch (error) {
+      if (!this.#isNotFound(error)) {
+        throw error;
+      }
+
+      // Written before the directory is made sure of, rather than after, which
+      // is what keeps a grab from asking for a directory that has been there
+      // since its first day — 7,000 entries is a quarter of a second of
+      // learning what we already knew. A missing path component is the only
+      // thing `ENOENT` can mean here, so the recovery is to make it and write
+      // again: the same answer whether this is the channel's first day or
+      // another process took the directory away since its last.
+      //
+      // Asked before making anything, so that a write cancelled in the moment
+      // between the two leaves no directory behind either.
+      this.signal?.throwIfAborted();
+      await fs.mkdir(this.#channelDir(key), { recursive: true });
+      await writeFileAtomic(file, data, this.signal);
+    }
   }
 
   async delete(key: ChannelDayKey): Promise<void> {
@@ -297,9 +297,6 @@ export abstract class FsCacheStore implements CacheStore {
           removed += pruned;
 
           await this.#removeIfEmpty(channelPath);
-          // Whether it went or not, this store no longer knows: a write to this
-          // channel makes sure of the directory again.
-          this.#ensured.delete(channelPath);
         },
       );
 

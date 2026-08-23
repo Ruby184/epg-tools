@@ -118,10 +118,11 @@ describe('FsNdjsonCacheStore cancellation', () => {
     controller.abort(new Error('cancelled'));
 
     await expect(store.write(key, [programme()])).rejects.toMatchObject({ name: 'AbortError' });
-    // The directory is made without a signal — `mkdir` takes none, and an empty
-    // one costs nothing — but the entry is written beside its own path first, so
-    // a refused write leaves neither it nor a temp file behind.
-    expect(await fs.readdir(path.join(dir, 'example.com', 'one'))).toEqual([]);
+    // Nothing whatever: a write goes out before the directory is made sure of,
+    // and the directory is only made when the write says it is missing — so a
+    // refused write leaves no entry, no temp file, and no path made to hold
+    // either.
+    expect(await fs.readdir(dir)).toEqual([]);
   });
 
   it('refuses a read', async () => {
@@ -171,7 +172,7 @@ describe('FsNdjsonCacheStore', () => {
 
   const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
 
-  it('makes a channel directory once, and again after a prune took it away', async () => {
+  it('writes every day of a channel, and again after a prune took the directory', async () => {
     const store = new FsNdjsonCacheStore({ dir });
     const channelDir = path.join(dir, 'example.com', 'one');
 
@@ -183,10 +184,31 @@ describe('FsNdjsonCacheStore', () => {
     // One file per channel-day, meta and all.
     expect((await fs.readdir(channelDir)).length).toBe(3);
 
-    // A prune that empties the channel takes its directory with it, so the
-    // store must not go on believing it is there.
+    // A prune that empties the channel takes its directory with it, and the
+    // next write has to find that out and make it again.
     expect(await store.prune({ before: '2026-07-17' })).toBe(3);
     await expect(fs.access(channelDir)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await store.write(key, [programme()]);
+
+    expect(await store.read(key)).toHaveLength(1);
+  });
+
+  it.each([
+    ['the channel directory', 'example.com'],
+    // `mkdir -p` makes the whole path back, so how much went does not matter.
+    ['the whole cache', '.'],
+  ])('makes the path again when something outside this run removed %s', async (_what, target) => {
+    const store = new FsNdjsonCacheStore({ dir });
+
+    await store.write(key, [programme()]);
+    expect(await store.read(key)).toHaveLength(1);
+
+    // Another grab's prune, a `rm -rf`, a tmp reaper: a cache directory is not
+    // this process's to go on assuming anything about, and the write is where
+    // it finds out.
+    await fs.rm(path.join(dir, target), { recursive: true, force: true });
+    expect(await store.read(key)).toBeUndefined();
 
     await store.write(key, [programme()]);
 
