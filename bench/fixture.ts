@@ -1,5 +1,9 @@
 import { parseXmltvDate, writeXmltvStream } from '../src/xmltv/main.js';
-import type { XmltvChannel, XmltvProgramme } from '../src/xmltv/types.js';
+import type {
+  XmltvChannel,
+  XmltvProcessingInstruction,
+  XmltvProgramme,
+} from '../src/xmltv/types.js';
 
 export interface Guide {
   channels: XmltvChannel[];
@@ -134,11 +138,25 @@ export function makeGuide(channelCount: number, days: number, programmesPerDay: 
   return { channels, programmes };
 }
 
-export async function guideToXml(guide: Guide): Promise<string> {
+/**
+ * One instruction at each of the three top-level positions — enough to price
+ * the feature, since what it costs is per instruction and there are never many.
+ */
+export const INSTRUCTIONS: XmltvProcessingInstruction[] = [
+  { target: 'xml-stylesheet', data: 'type="text/xsl" href="guide.xsl"', position: 'prolog' },
+  { target: 'epg-cache', data: '{"grabbedAt":"2026-07-17T00:00:00.000Z"}', position: 'root' },
+  { target: 'epg-bench', data: 'done', position: 'epilog' },
+];
+
+export async function guideToXml(
+  guide: Guide,
+  processingInstructions?: XmltvProcessingInstruction[],
+): Promise<string> {
   let xml = '';
 
   for await (const chunk of writeXmltvStream({
     meta: { generatorInfoName: 'epg-tools-bench' },
+    ...(processingInstructions ? { processingInstructions } : {}),
     channels: guide.channels,
     programmes: guide.programmes,
   })) {

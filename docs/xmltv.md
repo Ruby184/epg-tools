@@ -46,8 +46,11 @@ for await (const event of parseXmltvFile('guide.xml')) {
 }
 ```
 
-An event is `{ type, value }` with `type` one of `meta`, `channel`, `programme`
-or `warning`. `meta` arrives first and carries the root `<tv>` attributes.
+An event is `{ type, value }` with `type` one of `meta`, `channel`, `programme`,
+`processing-instruction` or `warning`. `meta` carries the root `<tv>` attributes
+and arrives first — unless the document opens with a
+[processing instruction](#processing-instructions), which is genuinely there
+before the root is.
 
 `parseXmltvString` is the synchronous whole-document form other XMLTV parsers
 offer — the same shape as `@iptv/xmltv`'s `parseXmltv`, but it also hands back
@@ -60,6 +63,86 @@ const { meta, channels, programmes, warnings } = parseXmltvString(xml);
 ```
 
 It is exported from `epg-tools/xmltv` only, not from the package root.
+
+### Processing instructions
+
+XML's own way of addressing one reader: `<?target data?>`, ignored by everything
+that does not know the target and constrained by no DTD. The parser yields each
+one as it comes (never the XML declaration, which only looks like one), and
+`parseXmltvString` collects them in document order:
+
+```ts
+const { processingInstructions } = parseXmltvString(xml);
+// [{ target: 'epg-cache', data: '{"grabbedAt":"…"}', position: 'root' }]
+```
+
+Writing them back is the same shape: `writeXmltvStream` takes
+`processingInstructions` beside its channels and programmes,
+`XmltvSerializeStream` accepts `{ type: 'processing-instruction', value }` events
+— so a parse piped into a serialize keeps them — `XmltvDocumentBuilder` has
+`.processingInstruction(target, data?, position?)`, and
+`serializeProcessingInstruction` writes a single one.
+
+Only the top level: one inside a `<programme>` or a `<channel>` is skipped like a
+comment, since there is nothing in the parsed element to hang it on.
+
+#### Position
+
+`position` is where one sits relative to the root element. The parser reports
+where it found it and the serializer puts it back there, so a document survives
+a round trip unchanged:
+
+| `position` | Where it goes |
+| --- | --- |
+| `'prolog'` | Before `<tv>`, after the DOCTYPE |
+| `'root'` | Inside `<tv>`, among the channels and programmes |
+| `'epilog'` | After `</tv>` |
+
+It is **required**, because it is the whole of where the instruction goes: one
+placed by a default rather than by intent is one that comes back out of a parse
+somewhere other than where it went in. `.processingInstruction()` on the builder
+defaults it to `'root'`, which is the place to be brief about the common case.
+
+```ts
+new XmltvDocumentBuilder()
+  .processingInstruction('xml-stylesheet', 'type="text/xsl" href="guide.xsl"', 'prolog')
+  .processingInstruction('epg-cache', '{"programmeCount":1}')
+  .toXml({ indent: 2 });
+```
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE tv SYSTEM "xmltv.dtd">
+<?xml-stylesheet type="text/xsl" href="guide.xsl"?>
+<tv>
+  <?epg-cache {"programmeCount":1}?>
+</tv>
+```
+
+The one place an instruction cannot go is ahead of the XML declaration, which
+nothing may precede. That is also why `writeXmltvStream` takes them as a plain
+`Iterable` rather than streaming them like the channels: a prolog one has to be
+in hand before the header goes out. `XmltvSerializeStream` holds the ones that
+arrive before the header for the same reason, and throws if a `prolog` one shows
+up after the root has already been written.
+
+#### `?>` cannot be escaped
+
+`data` goes out verbatim, because XML recognizes no markup and no entity inside
+an instruction — nothing is decoded on the way in either. The consequence is that
+`?>` **cannot appear in `data` at all**: XML ends the instruction at the first
+one and offers no escape for it, so `serializeProcessingInstruction` throws
+rather than write a document that reads back as a truncated instruction followed
+by stray text.
+
+A caller that owns its payload encodes around it instead. The cache store's meta
+is JSON, so it writes every `>` as a unicode escape: JSON gives the character
+back on parse, and XML never sees a `>` to end an instruction on — the same trick
+as embedding JSON in a `<script>` tag without tripping over `</script>`.
+
+This is how a cache entry in [xmltv format](./configuration.md#cache-reference)
+records what the DTD has no attribute for: it stays a document any other reader
+accepts, and `xmllint --dtdvalid` agrees.
 
 ### Cancelling
 

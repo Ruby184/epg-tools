@@ -17,6 +17,7 @@ import {
   serializeProgramme,
   serializeDocumentHeader,
   serializeDocumentFooter,
+  serializeProcessingInstruction,
   writeXmltvStream,
   parseXmltvFile,
   parseXmltvStream,
@@ -984,12 +985,277 @@ describe('warnings', () => {
   });
 });
 
+describe('processing instructions', () => {
+  const withInstructions =
+    '<?xml version="1.0"?><?epg-cache {"n":1}?><!DOCTYPE tv SYSTEM "xmltv.dtd">' +
+    '<tv date="20260717000000 +0000"><?renderer skip?>' +
+    '<programme start="20260717200000 +0000" channel="c"><title>T</title></programme></tv>' +
+    '<?trailer done?>';
+
+  it('surfaces them, in order and in place, and never the xml declaration', () => {
+    const doc = parseXmltvString(withInstructions);
+
+    expect(doc.processingInstructions).toEqual([
+      { target: 'epg-cache', data: '{"n":1}', position: 'prolog' },
+      { target: 'renderer', data: 'skip', position: 'root' },
+      { target: 'trailer', data: 'done', position: 'epilog' },
+    ]);
+    // Which changes nothing about the document they were carried in.
+    expect(doc.programmes).toHaveLength(1);
+    expect(doc.warnings).toEqual([]);
+  });
+
+  it('yields one as an event, before what follows it', async () => {
+    const types: string[] = [];
+
+    for await (const event of parseXmltvStream(rechunk(withInstructions, 7))) {
+      types.push(event.type);
+    }
+
+    expect(types).toEqual([
+      'processing-instruction',
+      'meta',
+      'processing-instruction',
+      'programme',
+      'processing-instruction',
+    ]);
+  });
+
+  it('reads a self-closing root as closed, so what follows it is epilog', () => {
+    expect(parseXmltvString('<tv/><?after x?>').processingInstructions).toEqual([
+      { target: 'after', data: 'x', position: 'epilog' },
+    ]);
+  });
+
+  it('does not mistake a close tag that merely starts with tv for the root', () => {
+    expect(
+      parseXmltvString('<tv><tvguide></tvguide><?still-inside x?></tv>').processingInstructions,
+    ).toEqual([{ target: 'still-inside', data: 'x', position: 'root' }]);
+  });
+
+  it('takes one with no data at all', () => {
+    expect(parseXmltvString('<?bare?><tv></tv>').processingInstructions).toEqual([
+      { target: 'bare', data: '', position: 'prolog' },
+    ]);
+  });
+
+  it('keeps the data verbatim, decoding nothing and trimming no tail', () => {
+    // No markup and no entity is recognized inside an instruction, so `data` is
+    // whatever stood there — only the separator after the target is dropped.
+    expect(parseXmltvString('<tv><?t   &amp;<b> a   ?></tv>').processingInstructions).toEqual([
+      { target: 't', data: '&amp;<b> a   ', position: 'root' },
+    ]);
+  });
+
+  it('writes each one where its position says', async () => {
+    const xml = await collect(
+      writeXmltvStream({
+        meta: { generatorInfoName: 'epg-tools' },
+        processingInstructions: [
+          { target: 'before', data: '1', position: 'prolog' },
+          { target: 'inside', data: '2', position: 'root' },
+          { target: 'after', data: '3', position: 'epilog' },
+          // A second root one, to show they keep their order among themselves.
+          { target: 'inside-too', data: '4', position: 'root' },
+        ],
+        channels: [],
+        programmes: [
+          { channel: 'c', start: new Date('2026-07-17T20:00:00Z'), title: [{ value: 'T' }] },
+        ],
+      }),
+    );
+
+    expect(xml).toBe(
+      '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE tv SYSTEM "xmltv.dtd">' +
+        '<?before 1?><tv generator-info-name="epg-tools"><?inside 2?><?inside-too 4?>' +
+        '<programme start="20260717200000 +0000" channel="c"><title>T</title></programme>' +
+        '</tv><?after 3?>',
+    );
+
+    // And back out again, in the same places, which is the point of positions.
+    expect(parseXmltvString(xml).processingInstructions).toEqual([
+      { target: 'before', data: '1', position: 'prolog' },
+      { target: 'inside', data: '2', position: 'root' },
+      { target: 'inside-too', data: '4', position: 'root' },
+      { target: 'after', data: '3', position: 'epilog' },
+    ]);
+  });
+
+  it.each([
+    ['in the prolog', '<?epg-cache {"n":2}?><tv date="20260717000000 +0000">', '</tv>', 'prolog'],
+    ['inside the root', '<tv date="20260717000000 +0000"><?epg-cache {"n":2}?>', '</tv>', 'root'],
+    ['in the epilog', '<tv date="20260717000000 +0000">', '</tv><?epg-cache {"n":2}?>', 'epilog'],
+  ] as const)(
+    'survives a parse piped into a serialize, %s',
+    async (_where, opening, closing, position) => {
+      const source = `<?xml version="1.0"?>${opening}<programme start="20260717200000 +0000" channel="c"><title>T</title></programme>${closing}`;
+      const chunks: string[] = [];
+
+      await pipeline(
+        Readable.from([source]),
+        new XmltvParseStream(),
+        new XmltvSerializeStream(),
+        async (out) => {
+          for await (const chunk of out) chunks.push(String(chunk));
+        },
+      );
+
+      const written = chunks.join('');
+
+      expect(written).toContain('<?epg-cache {"n":2}?>');
+      // The root's own attributes survived it either way.
+      expect(written).toContain('date="20260717000000 +0000"');
+      // And it came back out where it went in, not merely somewhere.
+      expect(parseXmltvString(written).processingInstructions).toEqual([
+        { target: 'epg-cache', data: '{"n":2}', position },
+      ]);
+    },
+  );
+
+  it('refuses a prolog instruction that arrives too late to write', async () => {
+    const stream = new XmltvSerializeStream();
+
+    await expect(
+      pipeline(
+        Readable.from([
+          { type: 'meta', value: {} },
+          {
+            type: 'programme',
+            value: { channel: 'c', start: new Date(), title: [{ value: 'T' }] },
+          },
+          {
+            type: 'processing-instruction',
+            value: { target: 'late', data: '', position: 'prolog' },
+          },
+        ]),
+        stream,
+        async (out) => {
+          for await (const chunk of out) void chunk;
+        },
+      ),
+    ).rejects.toThrow(/prolog processing instruction must precede/);
+  });
+
+  it('writes an epilog one even when the document held nothing else', async () => {
+    const chunks: string[] = [];
+
+    await pipeline(
+      Readable.from([
+        {
+          type: 'processing-instruction',
+          value: { target: 'only', data: 'x', position: 'epilog' },
+        },
+      ]),
+      new XmltvSerializeStream(),
+      async (out) => {
+        for await (const chunk of out) chunks.push(String(chunk));
+      },
+    );
+
+    expect(chunks.join('')).toContain('</tv><?only x?>');
+  });
+
+  it('writes one back, with and without indentation', () => {
+    const instruction = { target: 'epg-cache', data: '{"n":1}', position: 'root' } as const;
+
+    expect(serializeProcessingInstruction(instruction)).toBe('<?epg-cache {"n":1}?>');
+    // Indented like the channels and programmes it sits among, not flush left.
+    expect(serializeProcessingInstruction(instruction, { indent: 2 })).toBe(
+      '  <?epg-cache {"n":1}?>\n',
+    );
+    expect(serializeProcessingInstruction(instruction, { indent: '\t' })).toBe(
+      '\t<?epg-cache {"n":1}?>\n',
+    );
+    expect(serializeProcessingInstruction({ target: 'bare', data: '', position: 'root' })).toBe(
+      '<?bare?>',
+    );
+  });
+
+  it('indents to the same column as the programmes it sits among', () => {
+    const xml = [
+      serializeDocumentHeader({}, { indent: 2 }),
+      serializeProcessingInstruction(
+        { target: 'epg-cache', data: '{}', position: 'root' },
+        { indent: 2 },
+      ),
+      serializeProgramme(
+        { channel: 'c', start: new Date('2026-07-17T20:00:00Z'), title: [{ value: 'T' }] },
+        { indent: 2 },
+      ),
+      serializeDocumentFooter({ indent: 2 }),
+    ].join('');
+
+    expect(xml).toContain('<tv>\n  <?epg-cache {}?>\n  <programme');
+  });
+
+  describe('refuses what XML cannot carry', () => {
+    // There is no escape for `?>` inside a processing instruction — the grammar
+    // excludes the sequence and entities are not recognized in there — so the
+    // only honest answer is to refuse it rather than emit a document that reads
+    // back as a truncated instruction followed by stray text.
+    it('throws on `?>` in the data', () => {
+      expect(() =>
+        serializeProcessingInstruction({
+          target: 'epg-cache',
+          data: '{"note":"what?>"}',
+          position: 'root',
+        }),
+      ).toThrow(/cannot appear in a processing instruction/);
+    });
+
+    it.each([
+      ['empty', ''],
+      ['whitespace', 'has space'],
+      ['a closing angle bracket', 'a>b'],
+      ['a question mark', 'a?b'],
+      ['a slash', 'a/b'],
+      ['an ampersand', 'a&b'],
+      ['a quote', 'a"b'],
+      ['an equals sign', 'a=b'],
+    ])('throws on a target containing %s', (_what, target) => {
+      expect(() => serializeProcessingInstruction({ target, data: 'x', position: 'root' })).toThrow(
+        /Invalid processing instruction target/,
+      );
+    });
+
+    it.each(['xml', 'XML', 'Xml'])('throws on the reserved target %s', (target) => {
+      expect(() =>
+        serializeProcessingInstruction({ target, data: 'version="1.0"', position: 'root' }),
+      ).toThrow(/reserved for the XML declaration/);
+    });
+
+    it('takes a target that is merely unusual', () => {
+      expect(
+        serializeProcessingInstruction({
+          target: 'xml-stylesheet',
+          data: 'href="a"',
+          position: 'root',
+        }),
+      ).toBe('<?xml-stylesheet href="a"?>');
+      expect(
+        serializeProcessingInstruction({ target: 'epg-cache.v2', data: '{}', position: 'root' }),
+      ).toBe('<?epg-cache.v2 {}?>');
+    });
+
+    it('carries a `>` that is not part of a `?>` straight through', () => {
+      const instruction = {
+        target: 'epg-cache',
+        data: '{"title":"2 > 1"}',
+        position: 'root' as const,
+      };
+      const xml = `<tv>${serializeProcessingInstruction(instruction)}</tv>`;
+
+      expect(parseXmltvString(xml).processingInstructions).toEqual([instruction]);
+    });
+  });
+});
+
 describe('cancelling', () => {
   /** A document as long as the reader's patience, which is the case that matters. */
   function* endlessXml(): Generator<string> {
     yield '<tv>';
 
-    for (;;) {
+    while (true) {
       yield '<programme start="20260717200000 +0000" channel="c"><title>T</title></programme>';
     }
   }
@@ -1001,7 +1267,7 @@ describe('cancelling', () => {
   };
 
   async function* endlessProgrammes(): AsyncGenerator<typeof oneProgramme> {
-    for (;;) {
+    while (true) {
       yield oneProgramme;
       await new Promise((resolve) => setImmediate(resolve));
     }
@@ -1787,7 +2053,13 @@ describe('degenerate and empty inputs', () => {
   ])('yields an empty document without warnings or throwing: %s', (_label, xml) => {
     const doc = parseXmltvString(xml);
 
-    expect(doc).toEqual({ meta: {}, channels: [], programmes: [], warnings: [] });
+    expect(doc).toEqual({
+      meta: {},
+      processingInstructions: [],
+      channels: [],
+      programmes: [],
+      warnings: [],
+    });
   });
 
   it('throws only when the root <tv> is the wrong element, not when it is merely absent', async () => {

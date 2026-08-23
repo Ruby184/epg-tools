@@ -139,18 +139,29 @@ export async function* parseXmltvFile(
  * once, use `parseXmltvStream` instead.
  */
 export function parseXmltvString(xml: string, options?: XmltvParseOptions): XmltvDocument {
-  const doc: XmltvDocument = { meta: {}, channels: [], programmes: [], warnings: [] };
+  const doc: XmltvDocument = {
+    meta: {},
+    processingInstructions: [],
+    channels: [],
+    programmes: [],
+    warnings: [],
+  };
 
+  // Ordered by how often a guide produces each: a document is overwhelmingly
+  // programmes, and the three that happen once or not at all come last.
   for (const event of new XmltvScanner(options).consume(xml, true)) {
     switch (event.type) {
-      case 'meta':
-        doc.meta = event.value;
+      case 'programme':
+        doc.programmes.push(event.value);
         break;
       case 'channel':
         doc.channels.push(event.value);
         break;
-      case 'programme':
-        doc.programmes.push(event.value);
+      case 'meta':
+        doc.meta = event.value;
+        break;
+      case 'processing-instruction':
+        doc.processingInstructions.push(event.value);
         break;
       case 'warning':
         doc.warnings.push(event.value);

@@ -1,3 +1,5 @@
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { describe, expect, it } from 'vitest';
 import {
   ChannelBuilder,
@@ -5,6 +7,7 @@ import {
   getXmltvPrecision,
   ProgrammeBuilder,
   XmltvDocumentBuilder,
+  XmltvSerializeStream,
   parseXmltvDate,
   parseXmltvString,
   serializeChannel,
@@ -633,6 +636,66 @@ describe('XmltvDocumentBuilder', () => {
     expect(events[0]).toEqual({ type: 'meta', value: { generatorInfoName: 'epg-tools' } });
     expect(events[1]).toMatchObject({ type: 'channel', value: { id: 'one.tv' } });
     expect(events[2]).toMatchObject({ type: 'programme', value: { channel: 'one.tv' } });
+  });
+
+  it('carries processing instructions through every way out', async () => {
+    const builder = new XmltvDocumentBuilder()
+      .generatorInfo('epg-tools')
+      .processingInstruction('epg-cache', '{"n":1}')
+      .processingInstruction('renderer')
+      .processingInstruction('stylesheet', 'href="a"', 'prolog')
+      .processingInstruction('trailer', 'done', 'epilog')
+      .programme({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' });
+
+    const root = [
+      { target: 'epg-cache', data: '{"n":1}', position: 'root' },
+      { target: 'renderer', data: '', position: 'root' },
+    ];
+    const prolog = { target: 'stylesheet', data: 'href="a"', position: 'prolog' };
+    const epilog = { target: 'trailer', data: 'done', position: 'epilog' };
+
+    // build() hands the whole list to the streaming serializer, as added...
+    expect(builder.build().processingInstructions).toEqual([...root, prolog, epilog]);
+
+    // ...toEvents() puts them in document order instead, which is the order a
+    // parse of this same document emits: the prolog one ahead of the `meta` it
+    // precedes, the epilog one after everything.
+    expect(builder.toEvents()).toEqual([
+      { type: 'processing-instruction', value: prolog },
+      { type: 'meta', value: { generatorInfoName: 'epg-tools' } },
+      { type: 'processing-instruction', value: root[0] },
+      { type: 'processing-instruction', value: root[1] },
+      { type: 'programme', value: expect.objectContaining({ channel: 'one.tv' }) },
+      { type: 'processing-instruction', value: epilog },
+    ]);
+
+    // ...and every serialized form places each one and reads it back there.
+    const inDocumentOrder = [prolog, ...root, epilog];
+    const xml = builder.toXml();
+
+    expect(xml).toBe(await collect(builder.build()));
+    expect(parseXmltvString(xml).processingInstructions).toEqual(inDocumentOrder);
+    expect(parseXmltvString(builder.toXml({ indent: 2 })).processingInstructions).toEqual(
+      inDocumentOrder,
+    );
+  });
+
+  it('round-trips its own events through the serialize stream', async () => {
+    const builder = new XmltvDocumentBuilder()
+      .generatorInfo('epg-tools')
+      .processingInstruction('stylesheet', 'href="a"', 'prolog')
+      .processingInstruction('epg-cache', '{"n":1}')
+      .processingInstruction('trailer', 'done', 'epilog')
+      .programme({ channel: 'one.tv', start: '20260717200000 +0000', title: 'News' });
+
+    const chunks: string[] = [];
+
+    await pipeline(Readable.from(builder.toEvents()), new XmltvSerializeStream(), async (out) => {
+      for await (const chunk of out) chunks.push(String(chunk));
+    });
+
+    // The events go back in and out the same document the builder writes itself.
+    expect(chunks.join('')).toBe(builder.toXml());
   });
 
   it('serializes to an XML string via toXml, matching the stream output', async () => {

@@ -6,6 +6,8 @@ import { pipeline } from 'node:stream/promises';
 import { escapeXml } from './escape.js';
 import { formatXmltvDate } from './date.js';
 import type {
+  XmltvProcessingInstruction,
+  XmltvProcessingInstructionPosition,
   AnyIterable,
   XmltvActor,
   XmltvAudio,
@@ -44,6 +46,21 @@ export interface SerializeOptions {
    * stream `highWaterMark` (16 KiB before Node 22, 64 KiB since).
    */
   highWaterMark?: number;
+}
+
+/**
+ * What the document boundaries take on top of the formatting: the processing
+ * instructions that belong outside the root element.
+ *
+ * Both ends accept the document's whole list and take only the part that is
+ * theirs — {@link serializeDocumentHeader} the `prolog` ones,
+ * {@link serializeDocumentFooter} the `epilog` ones — so assembling a document
+ * by hand means passing the same list to both and letting each place its own.
+ * The `root` ones belong between them, written in order with the channels and
+ * programmes.
+ */
+export interface DocumentBoundaryOptions extends SerializeOptions {
+  processingInstructions?: Iterable<XmltvProcessingInstruction>;
 }
 
 /**
@@ -520,6 +537,17 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
 
 export interface XmltvStreamInput {
   meta?: XmltvDocumentMeta;
+  /**
+   * Processing instructions, each written where its `position` says — before the
+   * root, among the channels and programmes, or after the close tag — and in the
+   * order given within each of those.
+   *
+   * A plain `Iterable`, unlike the channels and programmes: a prolog one has to
+   * be written before the root opens, so the list is read once up front rather
+   * than streamed. That is what it is for — a handful of things a document says
+   * about itself, not content.
+   */
+  processingInstructions?: Iterable<XmltvProcessingInstruction>;
   channels: AnyIterable<XmltvChannel>;
   programmes: AnyIterable<XmltvProgramme>;
 }
@@ -533,21 +561,45 @@ export interface XmltvStreamInput {
  */
 const DEFAULT_HIGH_WATER_MARK = getDefaultHighWaterMark(false);
 
+/** The instructions from `list` that belong at `position`, serialized in order. */
+function instructionsAt(
+  list: Iterable<XmltvProcessingInstruction> | undefined,
+  position: XmltvProcessingInstructionPosition,
+  options: SerializeOptions | undefined,
+): string {
+  let out = '';
+
+  for (const instruction of list ?? []) {
+    if (instruction.position === position) {
+      out += serializeProcessingInstruction(instruction, options);
+    }
+  }
+
+  return out;
+}
+
 /**
- * Serialize the document prelude — `<?xml?>`, `<!DOCTYPE>` and the open
- * `<tv …>` tag with the root attributes from `meta`. Same call shape as
- * {@link serializeChannel} / {@link serializeProgramme}; pair it with
- * {@link serializeDocumentFooter} to assemble a document by hand.
+ * Serialize the document prelude — `<?xml?>`, `<!DOCTYPE>`, any `prolog`
+ * processing instructions, and the open `<tv …>` tag with the root attributes
+ * from `meta`. Same call shape as {@link serializeChannel} /
+ * {@link serializeProgramme}; pair it with {@link serializeDocumentFooter} to
+ * assemble a document by hand.
+ *
+ * Prolog instructions go after the DOCTYPE and before the root, which is both
+ * where XML allows them and as close to the root as the grammar gets. Nothing
+ * may precede the XML declaration, so that is the one place in a document an
+ * instruction cannot go.
  */
 export function serializeDocumentHeader(
   meta?: XmltvDocumentMeta,
-  options?: SerializeOptions,
+  options?: DocumentBoundaryOptions,
 ): string {
   const f = makeFmt(options);
 
   return (
     `<?xml version="1.0" encoding="UTF-8"?>${f.nl}` +
     `<!DOCTYPE tv SYSTEM "xmltv.dtd">${f.nl}` +
+    instructionsAt(options?.processingInstructions, 'prolog', options) +
     `<tv${attrs([
       ['date', meta?.date ? formatXmltvDate(meta.date) : undefined],
       ['source-info-name', meta?.sourceInfoName],
@@ -560,9 +612,75 @@ export function serializeDocumentHeader(
   );
 }
 
-/** Serialize the document epilogue — the closing `</tv>` tag. */
-export function serializeDocumentFooter(options?: SerializeOptions): string {
-  return `</tv>${makeFmt(options).nl}`;
+/**
+ * Rejects a target that would not come back out the way it went in: empty, or
+ * carrying a character that ends the instruction or starts something else.
+ * Short of the full XML `Name` production — which would need Unicode tables for
+ * no gain here — but exact about every character that breaks a document.
+ */
+const BAD_PI_TARGET = /^$|[\s<>&'"/=?]/;
+
+/** Ends a processing instruction, so nothing inside one may contain it. */
+const PI_CLOSE = '?>';
+
+/**
+ * A processing instruction — `<?target data?>` — and the newline after it when
+ * the document is being pretty-printed.
+ *
+ * What the DTD cannot be told about can go here instead: it is XML's own way of
+ * addressing one reader past all the others, and a document carrying one is
+ * still a valid XMLTV document to anything that does not know the target.
+ *
+ * Throws on anything that would not survive being written. `?>` in `data` is
+ * the one worth knowing about: XML ends an instruction at the first one and
+ * recognizes no escape inside it, so the sequence cannot be represented at all
+ * — a writer that let it through would emit a document this very parser reads
+ * back as a truncated instruction followed by stray text. Callers that own
+ * their payload encode around it instead — JSON, for one, has an escape for
+ * `>` that XML cannot see, which is how {@link FsXmltvCacheStore} keeps a
+ * programme title from ever ending the instruction that describes it.
+ */
+export function serializeProcessingInstruction(
+  instruction: XmltvProcessingInstruction,
+  options?: SerializeOptions,
+): string {
+  if (BAD_PI_TARGET.test(instruction.target)) {
+    throw new TypeError(
+      `Invalid processing instruction target ${JSON.stringify(instruction.target)}: must be non-empty and free of whitespace and <>&'"/=?`,
+    );
+  }
+
+  // Reserved for the XML declaration and its kin, which this is not.
+  if (/^xml$/i.test(instruction.target)) {
+    throw new TypeError(
+      `Invalid processing instruction target ${JSON.stringify(instruction.target)}: reserved for the XML declaration`,
+    );
+  }
+
+  if (instruction.data.includes(PI_CLOSE)) {
+    throw new TypeError(
+      `Invalid processing instruction data for target ${JSON.stringify(instruction.target)}: "${PI_CLOSE}" cannot appear in a processing instruction and XML has no way to escape it`,
+    );
+  }
+
+  const f = makeFmt(options);
+  const data = instruction.data === '' ? '' : ` ${instruction.data}`;
+  // Only a `root` one sits among the channels and programmes and shares their
+  // indentation; the other two are at the document's own level, like `<tv>`.
+  const pad = instruction.position === 'root' ? f.unit : '';
+
+  return `${pad}<?${instruction.target}${data}?>${f.nl}`;
+}
+
+/**
+ * Serialize the document epilogue — the closing `</tv>` tag, then any `epilog`
+ * processing instructions.
+ */
+export function serializeDocumentFooter(options?: DocumentBoundaryOptions): string {
+  return (
+    `</tv>${makeFmt(options).nl}` +
+    instructionsAt(options?.processingInstructions, 'epilog', options)
+  );
 }
 
 /**
@@ -577,11 +695,23 @@ export async function* writeXmltvStream(
 ): AsyncGenerator<string> {
   const highWaterMark = options?.highWaterMark ?? DEFAULT_HIGH_WATER_MARK;
 
+  // Read once and kept: the prolog ones are needed before the header goes out
+  // and the epilog ones after the footer, and the list may be a generator that
+  // only gives them up the first time. Nothing is read, allocated or yielded for
+  // the guide that has none, which is nearly every guide.
+  const instructions = input.processingInstructions ? [...input.processingInstructions] : undefined;
+  const boundary: DocumentBoundaryOptions | WriteOptions | undefined = instructions
+    ? { ...options, processingInstructions: instructions }
+    : options;
+
   async function* parts(): AsyncGenerator<string> {
-    yield serializeDocumentHeader(input.meta, options);
+    yield serializeDocumentHeader(input.meta, boundary);
+
+    if (instructions) yield instructionsAt(instructions, 'root', options);
+
     for await (const channel of input.channels) yield serializeChannel(channel, options);
     for await (const programme of input.programmes) yield serializeProgramme(programme, options);
-    yield serializeDocumentFooter(options);
+    yield serializeDocumentFooter(boundary);
   }
 
   let pending = '';
@@ -671,6 +801,18 @@ export class XmltvSerializeStream extends Transform {
   readonly #options: SerializeStreamOptions | undefined;
   /** Base root attributes accumulated from `meta` events (constructor wins). */
   #eventMeta: XmltvDocumentMeta | undefined;
+  /**
+   * Instructions that arrived before the header went out — a parse yields the
+   * prolog ones before its `meta`, and the header cannot be written until the
+   * `meta` is in hand. Held until it can be, then each takes its place: the
+   * prolog ones within the header, the rest immediately after it.
+   */
+  readonly #beforeHeader: XmltvProcessingInstruction[] = [];
+  /**
+   * Instructions for after the close tag, held until `_flush` — the only moment
+   * there is an "after the close tag" to write them at.
+   */
+  readonly #afterFooter: XmltvProcessingInstruction[] = [];
   #started = false;
 
   constructor(options?: SerializeStreamOptions) {
@@ -693,8 +835,19 @@ export class XmltvSerializeStream extends Transform {
     }
 
     this.#started = true;
+
+    const held = this.#beforeHeader.splice(0);
+
     // Event meta is the base; the constructor `meta` option overrides it.
-    return serializeDocumentHeader({ ...this.#eventMeta, ...this.#options?.meta }, this.#options);
+    return (
+      serializeDocumentHeader(
+        { ...this.#eventMeta, ...this.#options?.meta },
+        {
+          ...this.#options,
+          processingInstructions: held,
+        },
+      ) + instructionsAt(held, 'root', this.#options)
+    );
   }
 
   override _transform(
@@ -713,6 +866,31 @@ export class XmltvSerializeStream extends Transform {
 
           this.#eventMeta = { ...this.#eventMeta, ...event.value };
           return callback();
+        case 'processing-instruction': {
+          const { position } = event.value;
+
+          // There is no "after the close tag" until the document ends.
+          if (position === 'epilog') {
+            this.#afterFooter.push(event.value);
+            return callback();
+          }
+
+          // Held rather than written when the header has not gone out yet:
+          // writing it here would make the `meta` that follows too late to use,
+          // and a prolog one belongs inside the header in any case.
+          if (!this.#started) {
+            this.#beforeHeader.push(event.value);
+            return callback();
+          }
+
+          if (position === 'prolog') {
+            throw new Error(
+              'XmltvSerializeStream: a prolog processing instruction must precede the first channel or programme',
+            );
+          }
+
+          return callback(null, serializeProcessingInstruction(event.value, this.#options));
+        }
         case 'channel':
           return callback(null, this.#prelude() + serializeChannel(event.value, this.#options));
         case 'programme':
@@ -732,6 +910,12 @@ export class XmltvSerializeStream extends Transform {
 
   override _flush(callback: TransformCallback): void {
     // `#prelude()` covers the header when no channel/programme was ever written.
-    callback(null, `${this.#prelude()}${serializeDocumentFooter(this.#options)}`);
+    const prelude = this.#prelude();
+    const footer = serializeDocumentFooter({
+      ...this.#options,
+      processingInstructions: this.#afterFooter.splice(0),
+    });
+
+    callback(null, `${prelude}${footer}`);
   }
 }

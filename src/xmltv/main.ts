@@ -25,11 +25,17 @@ export {
   serializeProgramme,
   serializeDocumentHeader,
   serializeDocumentFooter,
+  serializeProcessingInstruction,
   writeXmltvStream,
   writeXmltvToFile,
   XmltvSerializeStream,
 } from './serialize.js';
-export type { XmltvStreamInput, SerializeOptions, SerializeStreamOptions } from './serialize.js';
+export type {
+  XmltvStreamInput,
+  SerializeOptions,
+  SerializeStreamOptions,
+  DocumentBoundaryOptions,
+} from './serialize.js';
 export { parseXmltvStream, parseXmltvFile, parseXmltvString, XmltvParseStream } from './parse.js';
 export { ChannelBuilder, ProgrammeBuilder, XmltvDocumentBuilder } from './builder.js';
 export type {

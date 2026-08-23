@@ -5,6 +5,7 @@ import {
   serializeChannel,
   serializeDocumentFooter,
   serializeDocumentHeader,
+  serializeProcessingInstruction,
   serializeProgramme,
   writeXmltvStream,
 } from './serialize.js';
@@ -26,6 +27,8 @@ import type {
   XmltvPerson,
   XmltvPersonValue,
   XmltvPreviouslyShown,
+  XmltvProcessingInstruction,
+  XmltvProcessingInstructionPosition,
   XmltvProgramme,
   XmltvRating,
   XmltvReview,
@@ -902,6 +905,7 @@ class BoundProgrammeBuilder extends ProgrammeBuilder {
  */
 export class XmltvDocumentBuilder extends ExtraAttributesBuilder {
   #meta: XmltvDocumentMeta = {};
+  readonly #processingInstructions: XmltvProcessingInstruction[] = [];
   readonly #channels: XmltvChannel[] = [];
   readonly #programmes: XmltvProgramme[] = [];
 
@@ -931,6 +935,27 @@ export class XmltvDocumentBuilder extends ExtraAttributesBuilder {
     return this.meta(
       url ? { generatorInfoName: name, generatorInfoUrl: url } : { generatorInfoName: name },
     );
+  }
+
+  /**
+   * Adds a processing instruction — `<?target data?>` — written where
+   * `position` says (`root`, just inside `<tv>`, by default), in the order
+   * added.
+   *
+   * Where something that XMLTV has no element or attribute for can ride along:
+   * whoever knows the target reads it, every other reader steps over it, and
+   * the DTD constrains none of it. `data` goes out verbatim, so it may not
+   * contain `?>` — XML ends an instruction there and offers no escape — and
+   * {@link serializeProcessingInstruction} throws rather than write one that
+   * would not read back.
+   */
+  processingInstruction(
+    target: string,
+    data = '',
+    position: XmltvProcessingInstructionPosition = 'root',
+  ): this {
+    this.#processingInstructions.push({ target, data, position });
+    return this;
   }
 
   /** Adds a channel from its base fields, optionally configured via the callback. */
@@ -969,19 +994,30 @@ export class XmltvDocumentBuilder extends ExtraAttributesBuilder {
 
   /** The assembled document, ready for `writeXmltvStream` / `writeXmltvToFile`. */
   build(): XmltvStreamInput {
-    return { meta: this.#meta, channels: this.#channels, programmes: this.#programmes };
+    return {
+      meta: this.#meta,
+      processingInstructions: this.#processingInstructions,
+      channels: this.#channels,
+      programmes: this.#programmes,
+    };
   }
 
   /**
-   * The document as tagged `{ type, value }` events — `meta`, then each
-   * `channel`, then each `programme` — the shape {@link XmltvSerializeStream}
-   * consumes and the parser emits.
+   * The document as tagged `{ type, value }` events — the shape
+   * {@link XmltvSerializeStream} consumes and the parser emits, in the order a
+   * parse of this same document would emit them: the `prolog` instructions,
+   * `meta`, the `root` instructions, each `channel`, each `programme`, then the
+   * `epilog` instructions. A prolog one comes before `meta` because that is
+   * where it comes before the root it precedes.
    */
   toEvents(): XmltvParseEvent[] {
     return [
+      ...this.#instructionEvents('prolog'),
       { type: 'meta', value: this.#meta },
+      ...this.#instructionEvents('root'),
       ...this.#channels.map((value): XmltvParseEvent => ({ type: 'channel', value })),
       ...this.#programmes.map((value): XmltvParseEvent => ({ type: 'programme', value })),
+      ...this.#instructionEvents('epilog'),
     ];
   }
 
@@ -990,13 +1026,33 @@ export class XmltvDocumentBuilder extends ExtraAttributesBuilder {
     return Readable.from(writeXmltvStream(this.build(), options));
   }
 
+  /** The instructions added for `position`, in the order they were added. */
+  #instructionsAt(position: XmltvProcessingInstructionPosition): XmltvProcessingInstruction[] {
+    return this.#processingInstructions.filter((instruction) => instruction.position === position);
+  }
+
+  /** Those same instructions as parse events. */
+  #instructionEvents(position: XmltvProcessingInstructionPosition): XmltvParseEvent[] {
+    return this.#instructionsAt(position).map((value): XmltvParseEvent => ({
+      type: 'processing-instruction',
+      value,
+    }));
+  }
+
   /** The whole document serialized to an XML string. Compact by default; pass `{ indent }`. */
   toXml(options?: SerializeOptions): string {
+    // The boundaries take the whole list and each writes the part that is its
+    // own; the `root` ones belong here, between them.
+    const boundary = { ...options, processingInstructions: this.#processingInstructions };
+
     return (
-      serializeDocumentHeader(this.#meta, options) +
+      serializeDocumentHeader(this.#meta, boundary) +
+      this.#instructionsAt('root')
+        .map((instruction) => serializeProcessingInstruction(instruction, options))
+        .join('') +
       this.#channels.map((channel) => serializeChannel(channel, options)).join('') +
       this.#programmes.map((programme) => serializeProgramme(programme, options)).join('') +
-      serializeDocumentFooter(options)
+      serializeDocumentFooter(boundary)
     );
   }
 

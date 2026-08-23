@@ -39,6 +39,7 @@ import type {
   XmltvUrlValue,
   XmltvVideo,
   XmltvWarning,
+  XmltvProcessingInstruction,
 } from './types.js';
 
 const NEED_MORE: unique symbol = Symbol('xmltv-need-more');
@@ -56,6 +57,8 @@ const CDATA_OPEN = '<![CDATA[';
 const CDATA_CLOSE = ']]>';
 const PI_OPEN = '<?';
 const PI_CLOSE = '?>';
+/** The root's close tag; `</tv ` is tolerated the way the open tag tolerates it. */
+const ROOT_CLOSE = '</tv';
 
 /** Default cap on how much head is buffered while searching for the root tag. */
 const DEFAULT_ROOT_SCAN_LIMIT = 1_048_576;
@@ -132,6 +135,12 @@ export class XmltvScanner {
   #pos = 0;
 
   #rootFound = false;
+  /**
+   * Set once `</tv>` (or a self-closing root) has gone by, so that a processing
+   * instruction after it can be reported as an epilog one rather than as
+   * sitting inside a root that is no longer open.
+   */
+  #rootClosed = false;
   #tagName = '';
   /** Flat pairs: `[key0, value0, key1, value1, ...]`. */
   #tagAttrs: string[] | null = null;
@@ -405,6 +414,42 @@ export class XmltvScanner {
     }
 
     return NOT_SPECIAL;
+  }
+
+  /**
+   * A processing instruction's target, data and position, or nothing for the
+   * XML declaration — which is not one, however alike they look. `body` is
+   * always the complete text between `<?` and `?>`: the caller only gets here
+   * once it has found the close, so there is nothing here to wait for.
+   *
+   * The target ends at the first XML whitespace and the data is the rest,
+   * verbatim: no markup and no entity is recognized inside an instruction, so
+   * there is nothing to decode. The whitespace between the two is the
+   * separator rather than part of either, and is the only thing dropped.
+   */
+  #processingInstruction(body: string): XmltvProcessingInstruction | undefined {
+    let i = 0;
+
+    while (i < body.length && !WS_TABLE[body.charCodeAt(i)]) {
+      i++;
+    }
+
+    const target = body.slice(0, i);
+
+    // Reserved for the declaration and its kin, in whatever case it is written.
+    if (target === '' || /^xml$/i.test(target)) {
+      return;
+    }
+
+    while (i < body.length && WS_TABLE[body.charCodeAt(i)]) {
+      i++;
+    }
+
+    return {
+      target,
+      data: body.slice(i),
+      position: this.#rootClosed ? 'epilog' : this.#rootFound ? 'root' : 'prolog',
+    };
   }
 
   /**
@@ -2715,6 +2760,18 @@ export class XmltvScanner {
           return this.#advance(buf, lt, true);
         }
 
+        // Only the root's own close tag reaches this loop — a channel's or a
+        // programme's is consumed along with the element — so this is where the
+        // root stops being open, and anything after it is epilog. The name has
+        // to end there for it to be `tv` and not `tvguide`.
+        if (
+          this.#rootFound &&
+          buf.startsWith(ROOT_CLOSE, lt) &&
+          NAME_END_TABLE[buf.charCodeAt(lt + ROOT_CLOSE.length)]
+        ) {
+          this.#rootClosed = true;
+        }
+
         pos = end + 1;
         continue;
       }
@@ -2729,6 +2786,13 @@ export class XmltvScanner {
           }
 
           return this.#advance(buf, lt, true);
+        }
+
+        const instruction = this.#processingInstruction(buf.slice(lt + PI_OPEN.length, end));
+
+        // The XML declaration wears the same clothes and is not one of these.
+        if (instruction !== undefined) {
+          yield { type: 'processing-instruction', value: instruction };
         }
 
         pos = end + PI_CLOSE.length;
@@ -2752,6 +2816,9 @@ export class XmltvScanner {
         }
 
         this.#rootFound = true;
+        // `<tv/>` opens and closes the root in one tag, so it never reaches the
+        // close-tag branch above.
+        this.#rootClosed = this.#tagSelfClosing;
 
         const meta = this.#rootMeta(buf);
         yield* this.#takeWarnings();

@@ -240,9 +240,46 @@ export interface XmltvWarning {
   col: number;
 }
 
+/**
+ * Where a processing instruction sits relative to the root `<tv>` element —
+ * the three places XML allows one at the top level.
+ *
+ * `prolog` is before the root (after the XML declaration, which must come
+ * first), `root` is inside it among the channels and programmes, and `epilog`
+ * is after the closing tag. The parser reports where it found one and the
+ * serializer puts it back there.
+ */
+export type XmltvProcessingInstructionPosition = 'prolog' | 'root' | 'epilog';
+
+/**
+ * A processing instruction — `<?target data?>` — as XML's way of carrying
+ * something for one particular reader past every other one.
+ *
+ * Not part of XMLTV, and not constrained by its DTD, which is the point: a
+ * document can say something to whoever understands the target and stay a valid
+ * XMLTV document to everyone else. The XML declaration is not one of these.
+ *
+ * `data` is whatever stood between the target and the `?>`, verbatim: XML
+ * recognizes no markup and no entities in there, so nothing is decoded on the
+ * way in and nothing may be escaped on the way out.
+ */
+export interface XmltvProcessingInstruction {
+  target: string;
+  data: string;
+  /**
+   * Required, because it is the whole of where this goes: an instruction whose
+   * position went unsaid would be placed by a default rather than by intent,
+   * and a document that came from a parse would be written back somewhere else.
+   * {@link XmltvDocumentBuilder.processingInstruction} defaults it to `root`
+   * for the common case, which is the place to be brief about it.
+   */
+  position: XmltvProcessingInstructionPosition;
+}
+
 /** Event emitted by the streaming parser. */
 export type XmltvParseEvent =
   | { type: 'meta'; value: XmltvDocumentMeta }
+  | { type: 'processing-instruction'; value: XmltvProcessingInstruction }
   | { type: 'channel'; value: XmltvChannel }
   | { type: 'programme'; value: XmltvProgramme }
   | { type: 'warning'; value: XmltvWarning };
@@ -250,6 +287,8 @@ export type XmltvParseEvent =
 /** A fully materialized XMLTV document — the whole-document counterpart to `parseXmltvStream`. */
 export interface XmltvDocument {
   meta: XmltvDocumentMeta;
+  /** Processing instructions, in the order they appeared. */
+  processingInstructions: XmltvProcessingInstruction[];
   channels: XmltvChannel[];
   programmes: XmltvProgramme[];
   /** Non-fatal problems encountered while parsing; see {@link XmltvWarning}. */

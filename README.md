@@ -43,7 +43,7 @@ for await (const event of parseXmltvFile('guide.xml')) {
 }
 ```
 
-Events are `meta`, `channel`, `programme` and `warning` — a malformed guide never throws mid-stream, it just reports what it skipped and keeps going.
+Events are `meta`, `channel`, `programme`, `processing-instruction` and `warning` — a malformed guide never throws mid-stream, it just reports what it skipped and keeps going, and a top-level processing instruction is surfaced rather than dropped, with the position that puts it back where it was.
 
 Small guide and you'd rather have it all at once? `parseXmltvString` is the synchronous whole-document form:
 

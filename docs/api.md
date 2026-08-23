@@ -82,7 +82,8 @@ is smaller and what a machine consumer like tvheadend wants. Pass `indent` to
 pretty-print, mirroring `JSON.stringify`: a number of spaces or a string like
 `'\t'`. It is accepted by `writeXmltvStream`, `writeXmltvToFile`,
 `serializeChannel`, `serializeProgramme`, `serializeDocumentHeader` /
-`serializeDocumentFooter`, `generateGuide` / `writeGuide`, and `defineConfig`.
+`serializeDocumentFooter`, `serializeProcessingInstruction`, `generateGuide` /
+`writeGuide`, and `defineConfig`.
 
 ## Entry points
 
@@ -127,7 +128,7 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 [XMLTV parser, serializer and builders](./xmltv.md).
 
 - **Parse** — `parseXmltvFile`, `parseXmltvStream`, `parseXmltvString`*, `XmltvParseStream`*
-- **Serialize** — `writeXmltvStream`, `writeXmltvToFile`, `serializeChannel`, `serializeProgramme`, `serializeDocumentHeader`*, `serializeDocumentFooter`*, `XmltvSerializeStream`*
+- **Serialize** — `writeXmltvStream`, `writeXmltvToFile`, `serializeChannel`, `serializeProgramme`, `serializeDocumentHeader`*, `serializeDocumentFooter`*, `serializeProcessingInstruction`*, `XmltvSerializeStream`*
 - **Builders*** — `ProgrammeBuilder`, `ChannelBuilder`, `XmltvDocumentBuilder`
 - **Dates** — `parseXmltvDate`, `formatXmltvDate`, `xmltvDate`, `getXmltvOffset`, `setXmltvOffset`, `getXmltvPrecision`, `setXmltvPrecision`, `XMLTV_OFFSET`, `XMLTV_PRECISION`, `XmltvDateError`
 - **Other** — `escapeXml`
@@ -147,8 +148,8 @@ back.
 `new FsNdjsonCacheStore({ dir, signal? })` — the format is the class, and the
 signal belongs to the store rather than to each call, since a store belongs to
 one run. That is what keeps `CacheStore` a five-method interface anyone can
-implement. A write stops before its rename, so an entry is either there in full
-or not there at all, and a prune stops between days.
+implement. An entry is one file, so it is either there with its meta or not
+there at all; a write stops before its rename, and a prune stops between days.
 
 ### `epg-tools/grabber`
 
