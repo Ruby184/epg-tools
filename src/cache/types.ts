@@ -8,8 +8,8 @@ export interface ChannelDayKey {
   day: string;
 }
 
-/** On-disk representation of cached programmes. */
-export type CacheFormat = 'ndjson' | 'xmltv';
+/** A driver this package ships, by name — what a config can ask for. */
+export type CacheDriverName = 'ndjson' | 'xmltv';
 
 /** What a run needs to know about a cached entry to decide anything about it. */
 export interface CacheEntryMeta {

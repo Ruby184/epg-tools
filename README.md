@@ -96,7 +96,7 @@ export default defineConfig({
   // indent: 2,     // pretty-print the guide; omit for compact output (default)
   cache: {
     dir: '.epg-cache',
-    format: 'ndjson', // or 'xmltv'
+    driver: 'ndjson', // or 'xmltv', or a driver of your own
     staleness: {
       alwaysRefetchDays: 1, // always refetch today
       maxAgeDays: 7,        // bust anything grabbed more than 7 days ago

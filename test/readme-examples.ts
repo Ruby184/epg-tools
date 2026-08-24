@@ -335,7 +335,7 @@ export const configured = defineConfig({
   indent: 2,
   cache: {
     dir: '.epg-cache',
-    format: 'ndjson',
+    driver: 'ndjson',
     staleness: { alwaysRefetchDays: 1, maxAgeDays: 7 },
     prune: true,
   },

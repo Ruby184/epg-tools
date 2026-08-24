@@ -24,7 +24,7 @@ console.log(summary); // { fetched, fromCache, failed }
 | `runGrab(source, options?)` | Grab only — fills the cache, writes no guide. |
 | `runMerge(source, options?)` | Write the guide from the cache only. |
 | `guideStream(source, options?)` | The merged guide as an async generator of XML chunks. |
-| `createCacheStore(config)` | The cache a config describes: a `CacheManager` over the driver its `format` names. |
+| `createCacheStore(config)` | The cache a config describes: a `CacheManager` over the driver its `driver` names or builds. |
 
 `GrabSummary` counts `fetched` (channel-days that went to the network) and
 `fromCache` (skipped because the cache was fresh); `failed` is the **list** of
@@ -41,8 +41,16 @@ plain `EpgConfig` or a `defineConfig` factory still waiting for its answers —
 so the import above works whichever your config file is, exactly as the CLI
 does it. A build resolves the factory once and hands the result to both halves,
 so the grab and the merge that follows it cannot disagree. `createCacheStore`
-is the exception: it returns synchronously, so it takes a resolved `EpgConfig`
+is the exception: it takes a resolved `EpgConfig`
 (`resolveConfigSource(config)` if you have the other kind).
+
+Each of them lets go of its cache when it is done, however it ended — a driver
+may be holding a database handle for the length of a run. Holding one yourself,
+`close()` is the same thing, and `await using` is the tidier way to say it:
+
+```ts
+await using cache = await createCacheStore(config);
+```
 
 `RunOptions`:
 
@@ -115,7 +123,7 @@ want is to read or write XMLTV; and a handful of names live only on a subpath
 | Days | `toDayString`, `dayToDate`, `addDays`, `diffDays`, `dayRange` |
 | Options parsing | `parseOptions`, `OptionError` |
 | XMLTV | `escapeXml`, `serializeChannel`, `serializeProgramme`, `writeXmltvStream`, `writeXmltvToFile`, `parseXmltvStream`, `parseXmltvFile`, and every [date helper](./xmltv.md#dates) |
-| Cache | `CacheManager`, `CacheDriverBase`, `FsCacheDriver`, `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`, `isStale`, `DEFAULT_STALENESS` |
+| Cache | `CacheManager`, `CACHE_SCHEMA`, `CacheDriverBase`, `FsCacheDriver`, `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`, `MemoryCacheDriver`, `NoCacheDriver`, `isStale`, `DEFAULT_STALENESS` |
 | Grabber | `grab`, `defineSiteConfig`, `resolveChannels`, `resolveSites`, `channelElement`, `siteHttp`, `sitePacing`, `retryAfterMs` |
 | Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
 
@@ -137,11 +145,12 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 
 ### `epg-tools/cache`
 
-`CacheManager`, the drivers `FsNdjsonCacheDriver` and `FsXmltvCacheDriver` with
-the abstract `FsCacheDriver` and `CacheDriverBase` they build on, `CACHE_SCHEMA`,
-`isStale`, `DEFAULT_STALENESS`, and the `CacheStore` / `CacheDriver` /
+`CacheManager`, the drivers `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`,
+`MemoryCacheDriver` and `NoCacheDriver` with the abstract `FsCacheDriver` and
+`CacheDriverBase` they build on, `CACHE_SCHEMA`, `isStale`,
+`DEFAULT_STALENESS`, and the `CacheStore` / `CacheDriver` /
 `ChannelDayKey` / `CacheEntryMeta` / `StoredEntryMeta` / `StoredProgramme` /
-`StalenessPolicy` / `CacheFormat` types.
+`StalenessPolicy` / `CacheDriverName` types.
 
 A cache is two pieces. A **driver** answers for one store — a directory of
 files, a database, a bucket — and holds no policy of its own. The
@@ -201,6 +210,28 @@ new CacheManager({
 It is asked about every entry a run looks at — thousands of times — so it should
 decide from the meta it is given and nothing further. An entry the shape check
 already refused never reaches it.
+
+Two drivers need no store at all. **`MemoryCacheDriver`** keeps entries for the
+life of the process — for a test, or a run with nowhere to write — and holds
+records rather than your own objects, so a programme that would not survive a
+file does not quietly pass in memory either. **`NoCacheDriver`** keeps nothing,
+so every day reads as never grabbed; it is for `epg grab`, whose summary is the
+point, and not for `build`, which merges the guide *from* the cache and would
+write an empty one.
+
+A config names a driver or builds one, and whatever else yours takes is in scope
+where the function is written:
+
+```ts
+cache: {
+  dir: '.epg-cache',
+  driver: ({ dir, signal }) => new RedisCacheDriver({ url: process.env.REDIS_URL, dir, signal }),
+}
+```
+
+A `build` asks for its cache twice, once for the grab and once for the merge, so
+a factory that returns a *new* in-memory driver each time remembers nothing in
+between — return the same instance to share it.
 
 `new FsNdjsonCacheDriver({ dir, signal? })` — the format is the driver, and the
 signal belongs to it rather than to each call, since a driver belongs to one

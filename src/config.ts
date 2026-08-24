@@ -1,4 +1,9 @@
-import type { CacheFormat, StalenessPolicy } from './cache/types.js';
+import type {
+  CacheDriver,
+  CacheDriverName,
+  CacheManagerOptions,
+  StalenessPolicy,
+} from './cache/types.js';
 import {
   createConfigContext,
   defaultsReader,
@@ -11,14 +16,48 @@ import type { AnySiteConfig } from './grabber/types.js';
 import type { MergeOptions } from './merge/types.js';
 import type { XmltvDocumentMeta } from './xmltv/types.js';
 
+/**
+ * What builds the driver a run keeps its cache in.
+ *
+ * Given the directory the config settled on and the run's signal — a driver that
+ * keeps files needs the first, one that opens a database needs somewhere to put
+ * it, one that talks to something else can ignore both. Whatever else a driver
+ * of yours takes is in scope where you write the function, which is why there is
+ * no options bag here: a config file is TypeScript.
+ *
+ * It may await, for a connection to open or a schema to make sure of, and the
+ * run does so before asking the cache for anything.
+ */
+export type CacheDriverFactory = (options: {
+  dir: string;
+  signal?: AbortSignal;
+}) => CacheDriver | Promise<CacheDriver>;
+
 export interface EpgCacheConfig {
   /** Cache directory. Defaults to `.epg-cache` in the working directory. */
   dir?: string;
-  /** Format for newly written entries. Defaults to `ndjson`. */
-  format?: CacheFormat;
+  /**
+   * Where and how cached days are kept. Defaults to `'ndjson'`.
+   *
+   * A name for a driver this package ships — `'ndjson'` and `'xmltv'` are both
+   * files under {@link dir}, one per channel-day — or a
+   * {@link CacheDriverFactory} returning one of your own, which is how a cache
+   * ends up anywhere else: a database, a bucket, a key-value store two machines
+   * share. See [the cache API](../docs/api.md#epg-toolscache).
+   */
+  driver?: CacheDriverName | CacheDriverFactory;
   staleness?: Partial<StalenessPolicy>;
   /** Remove cached days older than today after a successful grab. Defaults to true. */
   prune?: boolean;
+  /**
+   * One more reason a cached entry is void, beyond the ones every cache has.
+   *
+   * The stored shape is already checked, so this is for what that cannot
+   * describe: a release whose grabbing changed rather than its storing, a site
+   * whose channel ids were renamed, a cache to be emptied gradually. Return
+   * `true` and the entry goes, so the day reads as never grabbed.
+   */
+  invalidate?: CacheManagerOptions['invalidate'];
 }
 
 export interface EpgConfig {

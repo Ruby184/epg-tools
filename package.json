@@ -99,6 +99,6 @@
     "*.{ts,mts,cts,js,mjs,cjs}": "oxlint --fix"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.4"
   }
 }

@@ -35,21 +35,50 @@ export interface RunOptions {
  * than a {@link ConfigSource}: it is the one entry point that returns
  * synchronously, and resolving may have to await.
  */
-export function createCacheStore(config: EpgConfig, signal?: AbortSignal): CacheManager {
+export async function createCacheStore(
+  config: EpgConfig,
+  signal?: AbortSignal,
+): Promise<CacheManager> {
   const options = {
     dir: config.cache?.dir ?? path.join(process.cwd(), '.epg-cache'),
     ...(signal ? { signal } : {}),
   };
+  const driver = config.cache?.driver;
 
-  // The format is the driver: one entry is one thing, and which thing it is
-  // decides how it is read as well as written. The manager in front of it is
-  // what the run actually talks to, and is the same whichever this is.
   return new CacheManager({
+    // A name is one of ours; anything else is a factory, and it is handed the
+    // same two things a driver of ours gets — where the cache lives and when to
+    // give up — since whatever else it needs is in scope where it was written.
     driver:
-      config.cache?.format === 'xmltv'
-        ? new FsXmltvCacheDriver(options)
-        : new FsNdjsonCacheDriver(options),
+      typeof driver === 'function'
+        ? await driver(options)
+        : driver === 'xmltv'
+          ? new FsXmltvCacheDriver(options)
+          : new FsNdjsonCacheDriver(options),
+    ...(config.cache?.invalidate ? { invalidate: config.cache.invalidate } : {}),
   });
+}
+
+/**
+ * Run `work` with the cache the config describes, and let go of it after.
+ *
+ * A driver may hold something open — a database handle, a connection — and a
+ * cache belongs to one run, so the run is what closes it. The `finally` is the
+ * point: a grab that threw, or one that was cancelled half way, has the same
+ * handle to give back as one that finished.
+ */
+async function withCache<T>(
+  config: EpgConfig,
+  signal: AbortSignal | undefined,
+  work: (cache: CacheManager) => Promise<T>,
+): Promise<T> {
+  const cache = await createCacheStore(config, signal);
+
+  try {
+    return await work(cache);
+  } finally {
+    await cache.close();
+  }
 }
 
 /** First day of the window implied by `now` + `offset`. */
@@ -59,10 +88,15 @@ function startDayOf(options: RunOptions, now: Date): string {
 }
 
 /** Shared option assembly for the two merge entry points. */
-function guideOptions(config: EpgConfig, options: RunOptions, now: Date): BuildGuideOptions {
+function guideOptions(
+  config: EpgConfig,
+  options: RunOptions,
+  now: Date,
+  cache: CacheManager,
+): BuildGuideOptions {
   return {
     sites: config.sites,
-    cache: createCacheStore(config, options.signal),
+    cache,
     startDay: startDayOf(options, now),
     now,
     ...(config.days !== undefined ? { days: config.days } : {}),
@@ -85,47 +119,53 @@ export async function runGrab(
   options: RunOptions = {},
 ): Promise<GrabSummary> {
   const config = await resolveConfigSource(source);
-  const cache = createCacheStore(config, options.signal);
   const now = options.now ?? new Date();
   const startDay = startDayOf(options, now);
 
-  const summary = await grab(config.sites, {
-    cache,
-    startDay,
-    ...(config.days !== undefined ? { days: config.days } : {}),
-    ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
-    ...(config.localConcurrency !== undefined ? { localConcurrency: config.localConcurrency } : {}),
-    ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
-    now,
-    ...(options.logger ? { logger: options.logger } : {}),
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
+  return withCache(config, options.signal, async (cache) => {
+    const summary = await grab(config.sites, {
+      cache,
+      startDay,
+      ...(config.days !== undefined ? { days: config.days } : {}),
+      ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
+      ...(config.localConcurrency !== undefined
+        ? { localConcurrency: config.localConcurrency }
+        : {}),
+      ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
+      now,
+      ...(options.logger ? { logger: options.logger } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
 
-  // Nothing more is asked of the cache once the run is off: pruning a window
-  // the grab never finished filling would take days it might still have wanted.
-  if (config.cache?.prune !== false && options.signal?.aborted !== true) {
-    // Never prune inside the window we just grabbed: a negative offset puts
-    // the window start before today, and those days must survive.
-    const today = toDayString(now);
-    const before = startDay < today ? startDay : today;
-    const removed = await cache.prune({ before });
+    // Nothing more is asked of the cache once the run is off: pruning a window
+    // the grab never finished filling would take days it might still have
+    // wanted.
+    if (config.cache?.prune !== false && options.signal?.aborted !== true) {
+      // Never prune inside the window we just grabbed: a negative offset puts
+      // the window start before today, and those days must survive.
+      const today = toDayString(now);
+      const before = startDay < today ? startDay : today;
+      const removed = await cache.prune({ before });
 
-    if (removed > 0) {
-      options.logger?.(`Pruned ${removed} cached day(s) older than ${before}`);
+      if (removed > 0) {
+        options.logger?.(`Pruned ${removed} cached day(s) older than ${before}`);
+      }
     }
-  }
 
-  return summary;
+    return summary;
+  });
 }
 
 /** Generate the merged XMLTV guide from the cache, without grabbing. */
 export async function runMerge(source: ConfigSource, options: RunOptions = {}): Promise<void> {
   const config = await resolveConfigSource(source);
 
-  await writeGuide({
-    ...guideOptions(config, options, options.now ?? new Date()),
-    output: config.output,
-  });
+  await withCache(config, options.signal, async (cache) =>
+    writeGuide({
+      ...guideOptions(config, options, options.now ?? new Date(), cache),
+      output: config.output,
+    }),
+  );
 }
 
 /**
@@ -137,7 +177,16 @@ export async function* guideStream(
   options: RunOptions = {},
 ): AsyncGenerator<string> {
   const config = await resolveConfigSource(source);
-  yield* generateGuide(guideOptions(config, options, options.now ?? new Date()));
+  const cache = await createCacheStore(config, options.signal);
+
+  try {
+    yield* generateGuide(guideOptions(config, options, options.now ?? new Date(), cache));
+  } finally {
+    // Whether the caller read the guide to its end or walked away half way
+    // through it: a generator's `finally` runs either way, and a driver holding
+    // a handle open is waiting for exactly this.
+    await cache.close();
+  }
 }
 
 /**

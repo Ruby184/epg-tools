@@ -47,7 +47,7 @@ import type {
  */
 export const CACHE_SCHEMA = 1;
 
-export class CacheManager implements CacheStore {
+export class CacheManager implements CacheStore, AsyncDisposable {
   readonly #driver: CacheDriver;
   readonly #invalidate: CacheManagerOptions['invalidate'];
 
@@ -111,6 +111,22 @@ export class CacheManager implements CacheStore {
 
   async close(): Promise<void> {
     await this.#driver.close?.();
+  }
+
+  /**
+   * The same as {@link close}, for `await using`.
+   *
+   * A cache belongs to one run, and a driver may be holding a database handle or
+   * a connection for the length of it — so the language's own way of saying
+   * "give this back when the block ends" is worth answering, and it runs on the
+   * way out of a throw as much as a return:
+   *
+   * ```ts
+   * await using cache = await createCacheStore(config);
+   * ```
+   */
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.close();
   }
 
   /**

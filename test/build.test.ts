@@ -3,8 +3,9 @@ import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { build, guideStream, runGrab, runMerge } from '../src/build.js';
+import { build, createCacheStore, guideStream, runGrab, runMerge } from '../src/build.js';
 import { CacheManager, FsNdjsonCacheDriver } from '../src/cache/main.js';
+import type { ChannelDayKey, StoredEntryMeta } from '../src/cache/main.js';
 import { defineConfig, type EpgConfig } from '../src/config.js';
 import type { SiteConfig } from '../src/grabber/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
@@ -372,5 +373,164 @@ describe('a configuration that still needs its answers', () => {
     );
 
     expect(peak).toBe(1);
+  });
+});
+
+describe('the cache a config describes', () => {
+  /** A driver that counts what a run asked of it, and whether it was let go of. */
+  class CountingDriver extends FsNdjsonCacheDriver {
+    writes = 0;
+    closed = 0;
+
+    override async write(
+      key: ChannelDayKey,
+      programmes: string[],
+      meta: StoredEntryMeta,
+    ): Promise<void> {
+      this.writes++;
+      await super.write(key, programmes, meta);
+    }
+
+    async close(): Promise<void> {
+      this.closed++;
+    }
+  }
+
+  it('builds the driver a factory returns, and tells it where and when', async () => {
+    const dir = await tempDir();
+    const seen: Array<{ dir: string; signal?: AbortSignal }> = [];
+    const controller = new AbortController();
+    const driver = new CountingDriver({ dir: join(dir, 'elsewhere') });
+
+    await runGrab(
+      config(dir, {
+        cache: {
+          dir: join(dir, 'cache'),
+          // Whatever else a driver of yours takes is in scope where the function
+          // is written, which is why nothing here is passed through for it.
+          driver: (options) => {
+            seen.push(options);
+
+            return driver;
+          },
+        },
+      }),
+      { now: NOW, signal: controller.signal },
+    );
+
+    expect(seen).toEqual([{ dir: join(dir, 'cache'), signal: controller.signal }]);
+    expect(driver.writes).toBe(1);
+    // Entries went where the driver put them, not where the config said.
+    expect(await readdir(join(dir, 'elsewhere'))).toEqual(['example.com']);
+  });
+
+  it('lets go of the cache however the run ended', async () => {
+    const dir = await tempDir();
+    const drivers: CountingDriver[] = [];
+    const withDriver = (overrides: Partial<EpgConfig> = {}): EpgConfig =>
+      config(dir, {
+        ...overrides,
+        cache: {
+          dir: join(dir, 'cache'),
+          driver: ({ dir: cacheDir, signal }) => {
+            const driver = new CountingDriver({ dir: cacheDir, ...(signal ? { signal } : {}) });
+            drivers.push(driver);
+
+            return driver;
+          },
+        },
+      });
+
+    await runGrab(withDriver(), { now: NOW });
+    await runMerge(withDriver(), { now: NOW });
+    await collect(guideStream(withDriver(), { now: NOW }));
+
+    // A grab, a merge, and a stream read to its end: three caches, each given
+    // back — a driver holding a database handle is waiting for exactly this.
+    expect(drivers.map((driver) => driver.closed)).toEqual([1, 1, 1]);
+
+    // And a run that threw: the `finally` is the whole point.
+    const failing = withDriver({
+      sites: [
+        {
+          ...site([]),
+          channels: () => {
+            throw new Error('no channel list');
+          },
+        },
+      ],
+    });
+
+    await expect(runMerge(failing, { now: NOW })).rejects.toThrow('no channel list');
+    expect(drivers).toHaveLength(4);
+    expect(drivers.at(-1)!.closed).toBe(1);
+  });
+
+  it('closes a guide stream that was walked away from half way', async () => {
+    const dir = await tempDir();
+    let driver: CountingDriver | undefined;
+    const epgConfig = config(dir, {
+      days: 2,
+      cache: {
+        dir: join(dir, 'cache'),
+        driver: ({ dir: cacheDir }) => (driver = new CountingDriver({ dir: cacheDir })),
+      },
+    });
+
+    await runGrab(epgConfig, { now: NOW });
+
+    const stream = guideStream(epgConfig, { now: NOW });
+    await stream.next();
+    await stream.return(undefined);
+
+    expect(driver!.closed).toBe(1);
+  });
+
+  it('asks the config invalidate about a cached entry', async () => {
+    const dir = await tempDir();
+    const fetchedDays: string[] = [];
+    const epgConfig = config(dir, { sites: [site(fetchedDays)] });
+
+    // Tomorrow rather than today, since today is inside `alwaysRefetchDays` and
+    // would be fetched again whatever the cache holds.
+    const run = { now: NOW, offset: 1 };
+
+    await runGrab(epgConfig, run);
+    expect(fetchedDays).toEqual([TOMORROW]);
+
+    // Fresh, so a second run serves it from the cache — until something says the
+    // entry is void.
+    await runGrab(epgConfig, run);
+    expect(fetchedDays).toEqual([TOMORROW]);
+
+    await runGrab(
+      {
+        ...epgConfig,
+        cache: { ...epgConfig.cache, invalidate: (meta) => meta.writtenBy === __PKG_VERSION__ },
+      },
+      run,
+    );
+
+    expect(fetchedDays).toEqual([TOMORROW, TOMORROW]);
+  });
+
+  it('is a resource `await using` can hold', async () => {
+    const dir = await tempDir();
+    let driver: CountingDriver | undefined;
+    const epgConfig = config(dir, {
+      cache: {
+        dir: join(dir, 'cache'),
+        driver: ({ dir: cacheDir }) => (driver = new CountingDriver({ dir: cacheDir })),
+      },
+    });
+
+    {
+      await using cache = await createCacheStore(epgConfig);
+
+      expect(await cache.prune({ before: TODAY })).toBe(0);
+      expect(driver!.closed).toBe(0);
+    }
+
+    expect(driver!.closed).toBe(1);
   });
 });

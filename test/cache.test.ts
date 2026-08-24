@@ -9,6 +9,8 @@ import {
   DEFAULT_STALENESS,
   FsNdjsonCacheDriver,
   FsXmltvCacheDriver,
+  MemoryCacheDriver,
+  NoCacheDriver,
   isStale,
 } from '../src/cache/main.js';
 import type {
@@ -899,5 +901,77 @@ describe('CacheManager', () => {
 
     // `close` is a driver's to have or not: a directory holds nothing open.
     await expect(cache(new FsNdjsonCacheDriver({ dir: '.' })).close()).resolves.toBeUndefined();
+  });
+});
+
+describe('MemoryCacheDriver', () => {
+  const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
+
+  it('round-trips programmes with their dates, as a stored cache does', async () => {
+    const driver = new MemoryCacheDriver();
+    const store = cache(driver);
+    const [original] = parseXmltvString(
+      '<?xml version="1.0"?><tv><programme start="20260807203000 +0200" channel="one.tv">' +
+        '<title>Film</title><date>2020</date></programme></tv>',
+    ).programmes;
+
+    await store.write(key, [original!]);
+    const [back] = (await store.read(key))!;
+
+    // Records rather than the caller's own objects, so a programme that would
+    // not survive a file does not quietly pass here either.
+    expect(getXmltvOffset(back!.start)).toBe(120);
+    expect(getXmltvPrecision(back!.date!)).toBe(4);
+    expect(await store.getMeta(key)).toMatchObject({ programmeCount: 1 });
+  });
+
+  it('deletes, prunes by day, and can be emptied outright', async () => {
+    const driver = new MemoryCacheDriver();
+    const store = cache(driver);
+
+    for (const day of ['2026-07-10', '2026-07-15', '2026-07-17']) {
+      await store.write({ ...key, day }, [programme()]);
+      await store.write({ ...key, channelId: 'two', day }, [programme()]);
+    }
+
+    expect(driver.size).toBe(6);
+    await store.delete({ ...key, day: '2026-07-17' });
+    expect(driver.size).toBe(5);
+
+    expect(await store.prune({ before: '2026-07-16' })).toBe(4);
+    expect(driver.size).toBe(1);
+    expect(await store.read({ ...key, channelId: 'two', day: '2026-07-17' })).toHaveLength(1);
+    expect(await store.read({ ...key, day: '2026-07-10' })).toBeUndefined();
+
+    driver.clear();
+    expect(driver.size).toBe(0);
+  });
+
+  it('keeps one site apart from another with the same channel and day', async () => {
+    const driver = new MemoryCacheDriver();
+    const store = cache(driver);
+
+    await store.write(key, [programme()]);
+    await store.write({ ...key, site: 'other.example' }, [programme(), programme()]);
+
+    expect(await store.getMeta(key)).toMatchObject({ programmeCount: 1 });
+    expect(await store.getMeta({ ...key, site: 'other.example' })).toMatchObject({
+      programmeCount: 2,
+    });
+  });
+});
+
+describe('NoCacheDriver', () => {
+  const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
+
+  it('keeps nothing, so every day reads as never grabbed', async () => {
+    const store = cache(new NoCacheDriver());
+
+    await store.write(key, [programme()]);
+
+    expect(await store.getMeta(key)).toBeUndefined();
+    expect(await store.read(key)).toBeUndefined();
+    expect(await store.prune({ before: '2026-07-17' })).toBe(0);
+    await expect(store.delete(key)).resolves.toBeUndefined();
   });
 });
