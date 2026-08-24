@@ -1,6 +1,11 @@
 import path from 'node:path';
-import { CacheManager, FsNdjsonCacheDriver, FsXmltvCacheDriver } from './cache/main.js';
-import type { CacheDriver } from './cache/main.js';
+import {
+  CacheManager,
+  FsNdjsonCacheDriver,
+  FsXmltvCacheDriver,
+  MemoryCacheDriver,
+} from './cache/main.js';
+import type { CacheDriver, CacheStore } from './cache/main.js';
 import { grab, resolveSites } from './grabber/main.js';
 import type { GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
@@ -28,6 +33,17 @@ export interface RunOptions {
    * finished.
    */
   signal?: AbortSignal;
+  /**
+   * The cache to use, rather than the one the config describes.
+   *
+   * For a caller that has one already — a test, a long-lived process running
+   * several builds, anything that would rather open a database once than once
+   * per run. It is the caller's: nothing here closes what it did not open.
+   *
+   * A {@link build} sets this for itself, which is what makes its grab and its
+   * merge share one store instead of asking the config twice.
+   */
+  cache?: CacheStore;
   /**
    * Shift the window by this many days relative to `now` (may be negative).
    * Defaults to 0 — i.e. the window starts today. `now` itself is untouched,
@@ -76,6 +92,8 @@ async function driverFor(
       return new FsNdjsonCacheDriver(options);
     case 'xmltv':
       return new FsXmltvCacheDriver(options);
+    case 'memory':
+      return new MemoryCacheDriver();
     case 'sqlite': {
       // Imported here and nowhere else: `node:sqlite` does not exist on every
       // runtime this package supports, so naming it is what loads it.
@@ -97,24 +115,44 @@ async function driverFor(
 }
 
 /**
- * Run `work` with the cache the config describes, and let go of it after.
+ * The cache for a run, and what to do with it when the run is over.
  *
  * A driver may hold something open — a database handle, a connection — and a
- * cache belongs to one run, so the run is what closes it. The `finally` is the
- * point: a grab that threw, or one that was cancelled half way, has the same
- * handle to give back as one that finished.
+ * cache made for one run is that run's to close. One handed in through
+ * {@link RunOptions.cache} is not: the caller opened it and may well use it
+ * again, which is exactly how a `build` gives its grab and its merge the same
+ * store.
+ */
+async function cacheFor(
+  config: EpgConfig,
+  options: RunOptions,
+): Promise<{ cache: CacheStore; release: () => Promise<void> }> {
+  if (options.cache !== undefined) {
+    return { cache: options.cache, release: async () => {} };
+  }
+
+  const cache = await createCacheStore(config, options.signal);
+
+  return { cache, release: () => cache.close() };
+}
+
+/**
+ * Run `work` with the run's cache, and let go of it after.
+ *
+ * The `finally` is the point: a grab that threw, or one cancelled half way, has
+ * the same handle to give back as one that finished.
  */
 async function withCache<T>(
   config: EpgConfig,
-  signal: AbortSignal | undefined,
-  work: (cache: CacheManager) => Promise<T>,
+  options: RunOptions,
+  work: (cache: CacheStore) => Promise<T>,
 ): Promise<T> {
-  const cache = await createCacheStore(config, signal);
+  const { cache, release } = await cacheFor(config, options);
 
   try {
     return await work(cache);
   } finally {
-    await cache.close();
+    await release();
   }
 }
 
@@ -129,7 +167,7 @@ function guideOptions(
   config: EpgConfig,
   options: RunOptions,
   now: Date,
-  cache: CacheManager,
+  cache: CacheStore,
 ): BuildGuideOptions {
   return {
     sites: config.sites,
@@ -159,7 +197,7 @@ export async function runGrab(
   const now = options.now ?? new Date();
   const startDay = startDayOf(options, now);
 
-  return withCache(config, options.signal, async (cache) => {
+  return withCache(config, options, async (cache) => {
     const summary = await grab(config.sites, {
       cache,
       startDay,
@@ -197,7 +235,7 @@ export async function runGrab(
 export async function runMerge(source: ConfigSource, options: RunOptions = {}): Promise<void> {
   const config = await resolveConfigSource(source);
 
-  await withCache(config, options.signal, async (cache) =>
+  await withCache(config, options, async (cache) =>
     writeGuide({
       ...guideOptions(config, options, options.now ?? new Date(), cache),
       output: config.output,
@@ -214,7 +252,7 @@ export async function* guideStream(
   options: RunOptions = {},
 ): AsyncGenerator<string> {
   const config = await resolveConfigSource(source);
-  const cache = await createCacheStore(config, options.signal);
+  const { cache, release } = await cacheFor(config, options);
 
   try {
     yield* generateGuide(guideOptions(config, options, options.now ?? new Date(), cache));
@@ -222,7 +260,7 @@ export async function* guideStream(
     // Whether the caller read the guide to its end or walked away half way
     // through it: a generator's `finally` runs either way, and a driver holding
     // a handle open is waiting for exactly this.
-    await cache.close();
+    await release();
   }
 }
 
@@ -252,11 +290,16 @@ export async function build(source: ConfigSource, options: RunOptions = {}): Pro
     }),
   };
 
-  const summary = await runGrab(resolved, { ...options, now });
+  // One cache for both halves, rather than each of them asking the config for
+  // its own: a driver that opens a database opens it once, and one that keeps
+  // entries in memory is still holding them when the merge comes to read.
+  return withCache(resolved, options, async (cache) => {
+    const summary = await runGrab(resolved, { ...options, now, cache });
 
-  if (options.signal?.aborted !== true) {
-    await runMerge(resolved, { ...options, now });
-  }
+    if (options.signal?.aborted !== true) {
+      await runMerge(resolved, { ...options, now, cache });
+    }
 
-  return summary;
+    return summary;
+  });
 }

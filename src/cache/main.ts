@@ -7,4 +7,4 @@ export { NoCacheDriver } from './no-cache-driver.js';
 export { FsNdjsonCacheDriver } from './ndjson-driver.js';
 export { FsXmltvCacheDriver } from './xmltv-driver.js';
 export type * from './types.js';
-export { DEFAULT_STALENESS } from './types.js';
+export { DEFAULT_STALENESS, CACHE_DRIVER_NAMES } from './types.js';

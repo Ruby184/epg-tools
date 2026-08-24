@@ -60,6 +60,7 @@ export {
   CacheDriverBase,
   isStale,
   DEFAULT_STALENESS,
+  CACHE_DRIVER_NAMES,
 } from './cache/main.js';
 export type * from './cache/types.js';
 

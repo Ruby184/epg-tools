@@ -59,6 +59,7 @@ await using cache = await createCacheStore(config);
 | `now` | `Date` | the current time | The reference for staleness and the `grabbedAt` stamp — and, unless `offset` says otherwise, the first day of the window. Pass one to make a run reproducible in a test. |
 | `offset` | `number` | `0` | Shift the window this many days from `now`'s day; may be negative. `now` itself is unchanged, so staleness and pruning keep using the real current time. |
 | `logger` | `(line: string) => void` | none | Progress, line by line. Omit for silence. |
+| `cache` | `CacheStore` | the one the config describes | Use this store instead. It stays the caller's — nothing here closes what it did not open — which is for a process running several builds, or a test with a store already in hand. |
 | `signal` | `AbortSignal` | none | Cancel the run — see [Cancelling a run](./configuration.md#cancelling-a-run). A grab resolves with the partial summary; a merge rejects, and the guide it was writing is discarded rather than replacing the one in place. `build` skips the merge entirely if the grab was cancelled. |
 
 ## Streaming a guide
@@ -233,9 +234,10 @@ cache: {
 }
 ```
 
-A `build` asks for its cache twice, once for the grab and once for the merge, so
-a factory that returns a *new* in-memory driver each time remembers nothing in
-between — return the same instance to share it.
+A `build` asks the config for one cache and hands it to both halves, so a driver
+that opens a database opens it once and `driver: 'memory'` is enough to build a
+whole guide without touching disk. Two commands cannot share that, though: `epg
+grab` and then `epg merge` are two processes, and the second finds nothing.
 
 `new FsNdjsonCacheDriver({ dir, signal? })` — the format is the driver, and the
 signal belongs to it rather than to each call, since a driver belongs to one

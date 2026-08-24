@@ -535,6 +535,76 @@ describe('the cache a config describes', () => {
   });
 });
 
+describe('a cache handed to a run', () => {
+  it("is used instead of the config's, and left open for its owner", async () => {
+    const dir = await tempDir();
+    const driver = new FsNdjsonCacheDriver({ dir: join(dir, 'mine') });
+    let closed = 0;
+    const cache = new CacheManager({ driver });
+    cache.close = async (): Promise<void> => {
+      closed++;
+    };
+
+    const epgConfig = config(dir, { cache: { dir: join(dir, 'ignored') } });
+
+    await runGrab(epgConfig, { now: NOW, cache });
+    await runMerge(epgConfig, { now: NOW, cache });
+    await collect(guideStream(epgConfig, { now: NOW, cache }));
+
+    // The config's own directory was never touched, and nothing closed a cache
+    // it did not open — a caller that opened a database may want it again.
+    await expect(readdir(join(dir, 'ignored'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readdir(join(dir, 'mine'))).toEqual(['example.com']);
+    expect(closed).toBe(0);
+  });
+
+  it('is asked for once by a build, and shared by its grab and its merge', async () => {
+    const dir = await tempDir();
+    let asked = 0;
+    const epgConfig = config(dir, {
+      days: 2,
+      cache: {
+        dir: join(dir, 'cache'),
+        driver: ({ dir: cacheDir }) => {
+          asked++;
+
+          return new FsNdjsonCacheDriver({ dir: cacheDir });
+        },
+      },
+    });
+
+    await build(epgConfig, { now: NOW });
+
+    expect(asked).toBe(1);
+    expect(await readFile(epgConfig.output, 'utf8')).toContain(`p-${TODAY}`);
+  });
+
+  it('builds a whole guide through a cache that only lives in memory', async () => {
+    const dir = await tempDir();
+    const fetchedDays: string[] = [];
+    const epgConfig = config(dir, {
+      days: 2,
+      sites: [site(fetchedDays)],
+      cache: { dir: join(dir, 'cache'), driver: 'memory' },
+    });
+
+    await build(epgConfig, { now: NOW });
+
+    // The merge read what the grab had just written, because a build shares one
+    // cache — and nothing was left on disk to read it from again.
+    const guide = await readFile(epgConfig.output, 'utf8');
+
+    expect(guide).toContain(`p-${TODAY}`);
+    expect(guide).toContain(`p-${TOMORROW}`);
+    expect(fetchedDays).toEqual([TODAY, TOMORROW]);
+    expect(existsSync(join(dir, 'cache'))).toBe(false);
+
+    // And a second build grabs the lot again, since nothing remembers it.
+    await build(epgConfig, { now: NOW });
+    expect(fetchedDays).toEqual([TODAY, TOMORROW, TODAY, TOMORROW]);
+  });
+});
+
 describe('naming a driver a config does not have', () => {
   it('fails rather than quietly using the default', async () => {
     const dir = await tempDir();

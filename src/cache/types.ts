@@ -14,8 +14,15 @@ export interface ChannelDayKey {
  * `'sqlite'` is loaded only when named, since `node:sqlite` is not on every
  * runtime this package supports: Node 22.5 behind `--experimental-sqlite`, and
  * unflagged from Node 24.
+ *
+ * `'memory'` remembers nothing past the process, which is what a `build` needs
+ * it to remember: its grab and its merge share one cache, so the guide is
+ * written from what was just grabbed. Two commands cannot share it — `epg grab`
+ * and then `epg merge` would find nothing — and neither can two processes.
  */
-export type CacheDriverName = 'ndjson' | 'xmltv' | 'sqlite';
+export const CACHE_DRIVER_NAMES = ['ndjson', 'xmltv', 'sqlite', 'memory'] as const;
+
+export type CacheDriverName = (typeof CACHE_DRIVER_NAMES)[number];
 
 /** What a run needs to know about a cached entry to decide anything about it. */
 export interface CacheEntryMeta {
