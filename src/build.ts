@@ -1,11 +1,18 @@
 import path from 'node:path';
 import { CacheManager, FsNdjsonCacheDriver, FsXmltvCacheDriver } from './cache/main.js';
+import type { CacheDriver } from './cache/main.js';
 import { grab, resolveSites } from './grabber/main.js';
 import type { GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
 import type { BuildGuideOptions } from './merge/types.js';
 import { addDays, toDayString } from './core/days.js';
-import { resolveConfigSource, type ConfigSource, type EpgConfig } from './config.js';
+import { GrabberError } from './core/error.js';
+import {
+  resolveConfigSource,
+  type ConfigSource,
+  type EpgCacheConfig,
+  type EpgConfig,
+} from './config.js';
 
 export interface RunOptions {
   now?: Date;
@@ -46,17 +53,47 @@ export async function createCacheStore(
   const driver = config.cache?.driver;
 
   return new CacheManager({
-    // A name is one of ours; anything else is a factory, and it is handed the
-    // same two things a driver of ours gets — where the cache lives and when to
-    // give up — since whatever else it needs is in scope where it was written.
-    driver:
-      typeof driver === 'function'
-        ? await driver(options)
-        : driver === 'xmltv'
-          ? new FsXmltvCacheDriver(options)
-          : new FsNdjsonCacheDriver(options),
+    driver: await driverFor(options, driver),
     ...(config.cache?.invalidate ? { invalidate: config.cache.invalidate } : {}),
   });
+}
+
+/**
+ * A name is one of ours; anything else is a factory, and it is handed the same
+ * two things a driver of ours gets — where the cache lives and when to give up —
+ * since whatever else it needs is in scope where it was written.
+ */
+async function driverFor(
+  options: { dir: string; signal?: AbortSignal },
+  driver: EpgCacheConfig['driver'] = 'ndjson',
+): Promise<CacheDriver> {
+  if (typeof driver === 'function') {
+    return driver(options);
+  }
+
+  switch (driver) {
+    case 'ndjson':
+      return new FsNdjsonCacheDriver(options);
+    case 'xmltv':
+      return new FsXmltvCacheDriver(options);
+    case 'sqlite': {
+      // Imported here and nowhere else: `node:sqlite` does not exist on every
+      // runtime this package supports, so naming it is what loads it.
+      const { SqliteCacheDriver } = await import('./cache/sqlite-driver.js');
+
+      return new SqliteCacheDriver(options);
+    }
+    default: {
+      // Unreachable from TypeScript, which is what the `never` says: every name
+      // has a case above, and adding one to `CacheDriverName` without a case
+      // here fails to compile. A config written in JavaScript can still ask for
+      // a driver that does not exist, and is told so rather than quietly given
+      // the default — a cache in the wrong shape is a run's worth of requests.
+      const named: never = driver;
+
+      throw new GrabberError(`Unknown cache driver: ${String(named)}`);
+    }
+  }
 }
 
 /**

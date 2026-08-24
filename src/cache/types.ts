@@ -8,8 +8,14 @@ export interface ChannelDayKey {
   day: string;
 }
 
-/** A driver this package ships, by name — what a config can ask for. */
-export type CacheDriverName = 'ndjson' | 'xmltv';
+/**
+ * A driver this package ships, by name — what a config can ask for.
+ *
+ * `'sqlite'` is loaded only when named, since `node:sqlite` is not on every
+ * runtime this package supports: Node 22.5 behind `--experimental-sqlite`, and
+ * unflagged from Node 24.
+ */
+export type CacheDriverName = 'ndjson' | 'xmltv' | 'sqlite';
 
 /** What a run needs to know about a cached entry to decide anything about it. */
 export interface CacheEntryMeta {

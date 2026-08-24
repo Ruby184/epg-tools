@@ -975,3 +975,148 @@ describe('NoCacheDriver', () => {
     await expect(store.delete(key)).resolves.toBeUndefined();
   });
 });
+
+/**
+ * `node:sqlite` is not on every runtime this package supports, so the driver is
+ * a separate entry point — and its tests only run where the module exists.
+ */
+const sqlite = await import('../src/cache/sqlite-driver.js').catch(() => undefined);
+
+describe.skipIf(sqlite === undefined)('SqliteCacheDriver', () => {
+  const SqliteCacheDriver = sqlite!.SqliteCacheDriver;
+  const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'epg-cache-sqlite-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('keeps the cache in one file under the cache directory', async () => {
+    const store = cache(new SqliteCacheDriver({ dir: path.join(dir, 'made', 'on', 'demand') }));
+
+    await store.write(key, [programme()]);
+
+    // The directory is made if it is not there — SQLite will not do it — and the
+    // whole cache is that one file, plus whatever WAL it keeps beside it.
+    expect((await fs.readdir(path.join(dir, 'made', 'on', 'demand'))).sort()).toContain(
+      'cache.sqlite',
+    );
+    await store.close();
+  });
+
+  it('round-trips programmes with their dates, and reads a meta without them', async () => {
+    await using store = cache(new SqliteCacheDriver({ dir }));
+    const [original] = parseXmltvString(
+      '<?xml version="1.0"?><tv><programme start="20260807203000 +0200" channel="one.tv">' +
+        '<title>Film</title><date>2020</date></programme></tv>',
+    ).programmes;
+
+    await store.write(key, [original!, programme()], { grabbedAt: '2026-07-17T08:00:00.000Z' });
+
+    expect(await store.getMeta(key)).toEqual(
+      stamped({ grabbedAt: '2026-07-17T08:00:00.000Z', programmeCount: 2 }),
+    );
+
+    const [back] = (await store.read(key))!;
+
+    expect(getXmltvOffset(back!.start)).toBe(120);
+    expect(getXmltvPrecision(back!.date!)).toBe(4);
+  });
+
+  it('keeps one row per channel-day, however often it is written', async () => {
+    await using store = cache(new SqliteCacheDriver({ dir }));
+
+    await store.write(key, [programme()]);
+    await store.write(key, [programme(), programme()]);
+    await store.write(key, [programme({ title: [{ value: 'Later' }] })]);
+
+    const read = await store.read(key);
+
+    expect(read).toHaveLength(1);
+    expect(read![0]!.title[0]!.value).toBe('Later');
+    expect(await store.getMeta(key)).toMatchObject({ programmeCount: 1 });
+  });
+
+  it('deletes one entry and prunes a whole day range in one statement', async () => {
+    await using store = cache(new SqliteCacheDriver({ dir }));
+
+    for (const day of ['2026-07-10', '2026-07-15', '2026-07-17']) {
+      for (const channelId of ['one', 'two']) {
+        await store.write({ ...key, channelId, day }, [programme()]);
+      }
+    }
+
+    await store.delete({ ...key, day: '2026-07-17' });
+    expect(await store.read({ ...key, day: '2026-07-17' })).toBeUndefined();
+    expect(await store.read({ ...key, channelId: 'two', day: '2026-07-17' })).toHaveLength(1);
+
+    expect(await store.prune({ before: '2026-07-16' })).toBe(4);
+    expect(await store.read({ ...key, day: '2026-07-15' })).toBeUndefined();
+    expect(await store.read({ ...key, channelId: 'two', day: '2026-07-17' })).toHaveLength(1);
+  });
+
+  it('gives up on the programmes of a row whose payload is not records', async () => {
+    const file = path.join(dir, 'cache.sqlite');
+    const first = new SqliteCacheDriver({ dir });
+
+    await cache(first).write(key, [programme(), programme()]);
+    await first.close();
+
+    // Nothing here writes a row in that state, so it takes the database itself:
+    // a restore of half a file, a hand-edited row, a bug in something else
+    // sharing the cache.
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(file);
+    db.exec("UPDATE entries SET programmes = 'not json at all'");
+    db.close();
+
+    await using store = cache(new SqliteCacheDriver({ dir }));
+
+    // The meta is still good, and it is what the manager judges an entry by — so
+    // the entry stays, and a count disagreeing with what came back is what makes
+    // the day worth grabbing again.
+    expect(await store.getMeta(key)).toMatchObject({ programmeCount: 2 });
+    expect(await store.read(key)).toEqual([]);
+  });
+
+  it('refuses what it is asked once the run is cancelled', async () => {
+    const controller = new AbortController();
+    const store = cache(new SqliteCacheDriver({ dir, signal: controller.signal }));
+
+    await store.write(key, [programme()]);
+    controller.abort(new Error('cancelled'));
+
+    // A statement against a local file is not worth interrupting half way, so
+    // this is asked before each one rather than inside any.
+    await expect(store.read(key)).rejects.toThrow('cancelled');
+    await expect(store.getMeta(key)).rejects.toThrow('cancelled');
+    await expect(store.prune({ before: '2026-07-17' })).rejects.toThrow('cancelled');
+    await store.close();
+  });
+
+  it('starts the table again when its version is not the one this code writes', async () => {
+    const file = path.join(dir, 'cache.sqlite');
+    const first = new SqliteCacheDriver({ dir });
+
+    await cache(first).write(key, [programme()]);
+    await first.close();
+
+    // A column layout this code does not know is not something re-grabbing a day
+    // could fix — the statements would not run — so the table goes and is made
+    // again, and the days are grabbed once more.
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(file);
+    db.exec('PRAGMA user_version = 99');
+    db.close();
+
+    await using store = cache(new SqliteCacheDriver({ dir }));
+
+    expect(await store.getMeta(key)).toBeUndefined();
+    await store.write(key, [programme()]);
+    expect(await store.read(key)).toHaveLength(1);
+  });
+});

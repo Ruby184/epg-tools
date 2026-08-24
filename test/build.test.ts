@@ -534,3 +534,38 @@ describe('the cache a config describes', () => {
     expect(driver!.closed).toBe(1);
   });
 });
+
+describe('naming a driver a config does not have', () => {
+  it('fails rather than quietly using the default', async () => {
+    const dir = await tempDir();
+    const epgConfig = config(dir, {
+      // A config written in JavaScript can say this; TypeScript cannot.
+      cache: { dir: join(dir, 'cache'), driver: 'postgres' as 'ndjson' },
+    });
+
+    await expect(createCacheStore(epgConfig)).rejects.toThrow('Unknown cache driver: postgres');
+  });
+
+  it('keeps its entries in one SQLite file when asked for by name', async () => {
+    const dir = await tempDir();
+    const fetchedDays: string[] = [];
+    const epgConfig = config(dir, {
+      sites: [site(fetchedDays)],
+      cache: { dir: join(dir, 'cache'), driver: 'sqlite' },
+    });
+
+    await runGrab(epgConfig, { now: NOW });
+    await runMerge(epgConfig, { now: NOW });
+
+    // One file for the whole cache, rather than a directory per channel.
+    expect((await readdir(join(dir, 'cache'))).filter((name) => !name.includes('-'))).toEqual([
+      'cache.sqlite',
+    ]);
+    expect(await readFile(epgConfig.output, 'utf8')).toContain('p-2026-07-17');
+    expect(fetchedDays).toEqual([TODAY]);
+
+    // And the guide comes from the cache on a second merge, with no grab.
+    await runMerge(epgConfig, { now: NOW });
+    expect(fetchedDays).toEqual([TODAY]);
+  });
+});

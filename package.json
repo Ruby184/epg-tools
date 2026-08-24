@@ -43,6 +43,10 @@
       "types": "./dist/cache/main.d.ts",
       "import": "./dist/cache/main.js"
     },
+    "./cache/sqlite": {
+      "types": "./dist/cache/sqlite.d.ts",
+      "import": "./dist/cache/sqlite.js"
+    },
     "./grabber": {
       "types": "./dist/grabber/main.d.ts",
       "import": "./dist/grabber/main.js"

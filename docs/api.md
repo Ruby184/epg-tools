@@ -211,6 +211,8 @@ It is asked about every entry a run looks at — thousands of times — so it sh
 decide from the meta it is given and nothing further. An entry the shape check
 already refused never reaches it.
 
+### Drivers that need no store
+
 Two drivers need no store at all. **`MemoryCacheDriver`** keeps entries for the
 life of the process — for a test, or a run with nowhere to write — and holds
 records rather than your own objects, so a programme that would not survive a
@@ -219,8 +221,8 @@ so every day reads as never grabbed; it is for `epg grab`, whose summary is the
 point, and not for `build`, which merges the guide *from* the cache and would
 write an empty one.
 
-A config names a driver or builds one, and whatever else yours takes is in scope
-where the function is written:
+A config names a driver — `'ndjson'`, `'xmltv'`, `'sqlite'` — or builds one, and
+whatever else yours takes is in scope where the function is written:
 
 ```ts
 cache: {
@@ -237,6 +239,33 @@ between — return the same instance to share it.
 signal belongs to it rather than to each call, since a driver belongs to one
 run. An entry is one file, so it is either there with its meta or not there at
 all; a write stops before its rename, and a prune stops between days.
+
+### `epg-tools/cache/sqlite`
+
+`SqliteCacheDriver` — the whole cache in one file, which is what a directory of
+files is worst at: a fortnight of 5,000 channels is 70,000 inodes to walk, back
+up or copy into an image, and one `readdir` per channel to prune. Here a prune is
+one statement the database plans itself. What you give up is reading a day's
+listings with `cat`.
+
+```ts
+import { SqliteCacheDriver } from 'epg-tools/cache/sqlite';
+```
+
+Its own entry point because `node:sqlite` is not on every runtime this package
+supports — Node 22.5 behind `--experimental-sqlite`, unflagged from Node 24 — and
+nothing loads the module until something asks for it. `cache: { driver:
+'sqlite' }` is the short way to ask, and puts `cache.sqlite` in the cache
+directory; `new SqliteCacheDriver({ dir, file?, signal? })` is the long way, where
+`file` names the database yourself (`':memory:'` included).
+
+One row per channel-day: the meta columns, and the programmes as JSON. A rowid
+table with a covering index over the meta, so the staleness sweep — the thing a
+run does for every channel-day — is answered without touching the payload beside
+it: 7,000 of them cost 80ms rather than 310ms, and reading 7,000 whole entries
+670ms rather than 880ms. WAL, so a merge reading is not held up by a grab
+writing, and `synchronous = NORMAL`, because a day lost to a power cut is a day
+grabbed again.
 
 ### `epg-tools/grabber`
 

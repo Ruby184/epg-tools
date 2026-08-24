@@ -11,6 +11,7 @@ export default defineConfig({
     main: 'src/main.ts',
     'xmltv/main': 'src/xmltv/main.ts',
     'cache/main': 'src/cache/main.ts',
+    'cache/sqlite': 'src/cache/sqlite-driver.ts',
     'grabber/main': 'src/grabber/main.ts',
     'merge/main': 'src/merge/main.ts',
     'tv-grab/main': 'src/tv-grab/main.ts',
