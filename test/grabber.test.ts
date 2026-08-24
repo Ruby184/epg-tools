@@ -15,6 +15,7 @@ import type {
 const NOW = new Date('2026-07-17T12:00:00.000Z');
 const TODAY = '2026-07-17';
 const TOMORROW = '2026-07-18';
+const DAY_AFTER = '2026-07-19';
 
 class MemoryCache implements CacheStore {
   entries = new Map<string, { programmes: XmltvProgramme[]; meta: CacheEntryMeta }>();
@@ -479,26 +480,42 @@ describe('grab', () => {
 
   it('paces a fetched channel list in the site queue, like any other request', async () => {
     const cache = new MemoryCache();
-    const at: number[] = [];
+    const at: string[] = [];
 
     const config = makeConfig({
-      rateLimit: { requests: 1, perMs: 30 },
+      days: 3,
+      rateLimit: { requests: 1, perMs: 20 },
       channels: () => {
-        at.push(Date.now());
+        at.push('channels');
         return [channel('one')];
       },
-      async request() {
-        at.push(Date.now());
+      async request({ day }) {
+        at.push(`request ${day}`);
         return {};
       },
     });
 
+    const startedAt = Date.now();
     await grab([config], { cache, now: NOW });
+    const elapsed = Date.now() - startedAt;
 
     // Asking the source for its channels is a request to it too, so the site's
-    // own spacing applies between that and the first day fetched.
-    expect(at).toHaveLength(2);
-    expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(25);
+    // own spacing applies between that and the days that follow.
+    expect(at).toEqual([
+      'channels',
+      `request ${TODAY}`,
+      `request ${TOMORROW}`,
+      `request ${DAY_AFTER}`,
+    ]);
+
+    // The whole run rather than the gap between two of them, which is what
+    // makes this a bound and not a race. A rate-limited queue cannot start its
+    // nth task before n-1 windows have passed since it opened, and it opened no
+    // earlier than `startedAt` — so four requests at one per 20ms take at least
+    // 60ms however the event loop behaves. Comparing two adjacent timestamps
+    // instead measures zero whenever a stall leaves several windows expired at
+    // once and the queue catches up inside one tick.
+    expect(elapsed).toBeGreaterThanOrEqual(55);
   });
 
   it("hands parseDay the site's client, and the run's signal", async () => {
