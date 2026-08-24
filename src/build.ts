@@ -62,10 +62,7 @@ export async function createCacheStore(
   config: EpgConfig,
   signal?: AbortSignal,
 ): Promise<CacheManager> {
-  const options = {
-    dir: config.cache?.dir ?? path.join(process.cwd(), '.epg-cache'),
-    ...(signal ? { signal } : {}),
-  };
+  const options = { dir: config.cache?.dir ?? path.join(process.cwd(), '.epg-cache'), signal };
   const driver = config.cache?.driver;
 
   return new CacheManager({
@@ -80,7 +77,7 @@ export async function createCacheStore(
  * since whatever else it needs is in scope where it was written.
  */
 async function driverFor(
-  options: { dir: string; signal?: AbortSignal },
+  options: { dir: string; signal?: AbortSignal | undefined },
   driver: EpgCacheConfig['driver'] = 'ndjson',
 ): Promise<CacheDriver> {
   if (typeof driver === 'function') {

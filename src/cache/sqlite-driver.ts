@@ -125,7 +125,7 @@ export interface SqliteCacheDriverOptions {
    * Asked at the start of each call, since a statement against a local file is
    * not something there would be any point interrupting half way through.
    */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
 }
 
 export class SqliteCacheDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {

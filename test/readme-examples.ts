@@ -9,7 +9,22 @@
  * below name the page each group of examples comes from.
  */
 
-import { build, defineConfig, defineSiteConfig, guideStream } from '../src/main.js';
+import {
+  build,
+  CacheDriverBase,
+  defineConfig,
+  defineSiteConfig,
+  guideStream,
+} from '../src/main.js';
+import type {
+  CacheDriver,
+  CacheDriverFactory,
+  ChannelDayKey,
+  FoundEntry,
+  FoundMeta,
+  StoredEntryMeta,
+  StoredProgramme,
+} from '../src/main.js';
 import { envReader } from '../src/core/answers.js';
 import {
   parseXmltvFile,
@@ -347,6 +362,76 @@ export const configured = defineConfig({
     sourceInfoUrl: 'https://example.tv',
     sourceDataUrl: 'https://api.example.tv/epg',
   },
+});
+
+// --- docs/api.md: A driver of your own -------------------------------------
+
+/**
+ * The store behind the example driver. A real one is a client — Redis,
+ * Postgres, a bucket — and stands in here as a `Map`, since what the
+ * documentation is promising is the shape of the driver rather than the client.
+ */
+const rows = new Map<string, { meta: StoredEntryMeta; programmes: StoredProgramme[] }>();
+
+class KeyValueCacheDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
+  readonly #prefix: string;
+
+  constructor(options: { prefix: string; signal?: AbortSignal | undefined }) {
+    super();
+    this.#prefix = options.prefix;
+  }
+
+  #id(key: ChannelDayKey): string {
+    return `${this.#prefix}:${key.site}:${key.channelId}:${key.day}`;
+  }
+
+  async readMeta(key: ChannelDayKey): Promise<FoundMeta | undefined> {
+    const row = rows.get(this.#id(key));
+
+    return row && { meta: row.meta };
+  }
+
+  async read(key: ChannelDayKey): Promise<FoundEntry<StoredProgramme> | undefined> {
+    return rows.get(this.#id(key));
+  }
+
+  async write(
+    key: ChannelDayKey,
+    programmes: StoredProgramme[],
+    meta: StoredEntryMeta,
+  ): Promise<void> {
+    rows.set(this.#id(key), { meta, programmes });
+  }
+
+  async delete(key: ChannelDayKey): Promise<void> {
+    rows.delete(this.#id(key));
+  }
+
+  async prune(options: { before: string }): Promise<number> {
+    let removed = 0;
+
+    for (const id of rows.keys()) {
+      if (id.slice(id.lastIndexOf(':') + 1) < options.before) {
+        rows.delete(id);
+        removed++;
+      }
+    }
+
+    return removed;
+  }
+
+  async close(): Promise<void> {}
+}
+
+/** The builder the documentation recommends exporting, rather than the class. */
+export function keyValueCache(options: { prefix?: string }): CacheDriverFactory {
+  return async ({ signal }) => new KeyValueCacheDriver({ prefix: options.prefix ?? 'epg', signal });
+}
+
+export const cachedElsewhere = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  cache: { driver: keyValueCache({ prefix: 'epg' }) },
 });
 
 // --- docs/api.md: Running a build ------------------------------------------

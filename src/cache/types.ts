@@ -235,8 +235,13 @@ export interface FsCacheDriverOptions {
    * implement with three arguments and no ceremony. A write is stopped before
    * its rename, never during it, so an entry is either there in full or not
    * there at all; a prune stops between days.
+   *
+   * Written to admit `undefined` explicitly, as Node's own `Abortable` is: a
+   * caller passing on a signal it may not have would otherwise have to spread
+   * the option in conditionally, which is a wart to inflict on everyone writing
+   * a driver.
    */
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
 }
 
 export interface CacheManagerOptions {

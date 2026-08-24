@@ -1,5 +1,6 @@
 export { defineConfig, resolveConfigSource } from './config.js';
 export type {
+  CacheDriverFactory,
   ConfigFactory,
   ConfigSource,
   DefineConfigOptions,

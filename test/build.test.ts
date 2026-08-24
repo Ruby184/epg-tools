@@ -398,7 +398,7 @@ describe('the cache a config describes', () => {
 
   it('builds the driver a factory returns, and tells it where and when', async () => {
     const dir = await tempDir();
-    const seen: Array<{ dir: string; signal?: AbortSignal }> = [];
+    const seen: Array<{ dir: string; signal?: AbortSignal | undefined }> = [];
     const controller = new AbortController();
     const driver = new CountingDriver({ dir: join(dir, 'elsewhere') });
 
@@ -432,8 +432,8 @@ describe('the cache a config describes', () => {
         ...overrides,
         cache: {
           dir: join(dir, 'cache'),
-          driver: ({ dir: cacheDir, signal }) => {
-            const driver = new CountingDriver({ dir: cacheDir, ...(signal ? { signal } : {}) });
+          driver: (options) => {
+            const driver = new CountingDriver(options);
             drivers.push(driver);
 
             return driver;

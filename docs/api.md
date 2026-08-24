@@ -235,8 +235,11 @@ so every day reads as never grabbed; it is for `epg grab`, whose summary is the
 point, and not for `build`, which merges the guide *from* the cache and would
 write an empty one.
 
-A config names a driver — `'ndjson'`, `'xmltv'`, `'sqlite'` — or builds one, and
-whatever else yours takes is in scope where the function is written:
+A config names a driver — `'ndjson'`, `'xmltv'`, `'sqlite'` — or builds one. The
+function gets the directory the config settled on and the run's signal, and
+whatever else yours takes is in scope where the function is written, which is why
+there is no options bag: a config file is TypeScript, and a closure carries more
+than a bag could.
 
 ```ts
 cache: {
@@ -244,6 +247,36 @@ cache: {
   driver: ({ dir, signal }) => new RedisCacheDriver({ url: process.env.REDIS_URL, dir, signal }),
 }
 ```
+
+Shipping a driver for other people to use? Export a **builder** — a function
+taking your options and returning the factory — rather than the driver class, and
+a config never has to know how the two halves fit together:
+
+```ts
+// redis-cache.ts
+import type { CacheDriverFactory } from 'epg-tools';
+
+export function redisCache(options: { url: string; prefix?: string }): CacheDriverFactory {
+  return async ({ signal }) => {
+    const client = await createClient({ url: options.url }).connect();
+
+    return new RedisCacheDriver({ client, prefix: options.prefix ?? 'epg', signal });
+  };
+}
+
+// epg.config.ts
+export default defineConfig({
+  sites,
+  output: 'public/epg.xml',
+  cache: { driver: redisCache({ url: process.env.REDIS_URL! }) },
+});
+```
+
+That is also where anything asynchronous belongs — a connection to open, a schema
+to make sure of — since the factory may return a promise and the run awaits it
+before asking the cache for anything. Which is why a driver needs no `initialize`
+of its own to go with `close`: nothing is ever handed a driver that is not ready,
+because it was built by something that could wait.
 
 A `build` asks the config for one cache and hands it to both halves, so a driver
 that opens a database opens it once and `driver: 'memory'` is enough to build a

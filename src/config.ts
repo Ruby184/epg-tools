@@ -30,7 +30,7 @@ import type { XmltvDocumentMeta } from './xmltv/types.js';
  */
 export type CacheDriverFactory = (options: {
   dir: string;
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
 }) => CacheDriver | Promise<CacheDriver>;
 
 export interface EpgCacheConfig {
