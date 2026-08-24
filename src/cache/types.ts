@@ -147,6 +147,19 @@ export interface CacheDriver<TStored = unknown> {
 
 export interface StalenessPolicy {
   /**
+   * Refetch every channel-day in the window, whatever the cache holds.
+   *
+   * What `--refresh` asks for: a guide built from listings fetched now, rather
+   * than from whatever was fresh enough to keep. It is the cache's *reading*
+   * that is turned off, not its writing — the days still land in it, so the run
+   * after this one has them.
+   *
+   * Ahead of every other field here, including {@link alwaysRefetchDays}, which
+   * only reaches forward from today: a window shifted into the past with
+   * `--offset -2` is refetched by this and would not be by that.
+   */
+  refetchAll: boolean;
+  /**
    * Number of days from "today" (inclusive) that are always refetched,
    * regardless of cache state. `1` = refetch today only, `2` = today and
    * tomorrow, `0` = never force-refetch.
@@ -169,6 +182,7 @@ export interface StalenessPolicy {
 }
 
 export const DEFAULT_STALENESS: StalenessPolicy = {
+  refetchAll: false,
   alwaysRefetchDays: 1,
   maxAgeDays: 7,
   emptyMaxAgeDays: 1,

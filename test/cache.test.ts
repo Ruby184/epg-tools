@@ -1143,3 +1143,23 @@ describe.skipIf(sqlite === undefined)('SqliteCacheDriver', () => {
     expect(await store.read(key)).toHaveLength(1);
   });
 });
+
+describe('isStale with refetchAll', () => {
+  const now = new Date('2026-07-17T12:00:00.000Z');
+  const policy: StalenessPolicy = { ...DEFAULT_STALENESS, refetchAll: true };
+  const fresh = { grabbedAt: '2026-07-17T11:00:00.000Z', programmeCount: 3 };
+
+  it('refetches a day however fresh the entry is', () => {
+    expect(isStale('2026-07-20', fresh, DEFAULT_STALENESS, now)).toBe(false);
+    expect(isStale('2026-07-20', fresh, policy, now)).toBe(true);
+  });
+
+  it('reaches days behind today, which alwaysRefetchDays does not', () => {
+    // A window shifted into the past with `--offset -2`: the refetch window only
+    // ever reaches forward, so this is the difference between the two.
+    const wide: StalenessPolicy = { ...DEFAULT_STALENESS, alwaysRefetchDays: 30 };
+
+    expect(isStale('2026-07-15', fresh, wide, now)).toBe(false);
+    expect(isStale('2026-07-15', fresh, policy, now)).toBe(true);
+  });
+});

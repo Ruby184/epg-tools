@@ -13,6 +13,8 @@ import { access } from 'node:fs/promises';
 import type { Writable } from 'node:stream';
 import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../config.js';
 import { build, createCacheStore, runGrab, runMerge } from '../build.js';
+import { CACHE_DRIVER_NAMES } from '../cache/main.js';
+import type { CacheDriverName } from '../cache/main.js';
 import { GrabberError } from '../core/error.js';
 import { OptionError, parseOptions } from '../core/options.js';
 import { dayToDate, toDayString } from '../core/days.js';
@@ -35,6 +37,9 @@ Options:
       --offset <n>      Start the window n days from today (may be negative)
   -o, --output <path>   Override the output file, or a Unix socket to write into
       --cache-dir <dir> Override the cache directory
+      --cache-driver <name>  Override where cached days are kept: ndjson, xmltv,
+                        sqlite or memory
+      --refresh         Refetch every day in the window, ignoring what is cached
       --before <day>    prune only: remove days before YYYY-MM-DD (default: today)
   -q, --quiet           Suppress progress output
   -v, --version         Print this package's version
@@ -47,6 +52,36 @@ init-grabber options:
                         version, else 0.1.0)
       --force           Replace an existing file
 `;
+
+/**
+ * A cache driver this package ships, by name.
+ *
+ * Only a name: a config can point at a driver of its own by passing a function,
+ * which is not something a command line can do.
+ */
+function cacheDriverName(raw: string, flag: string): CacheDriverName {
+  if (!(CACHE_DRIVER_NAMES as readonly string[]).includes(raw)) {
+    throw new OptionError(
+      `Invalid ${flag} value: ${raw} (expected ${CACHE_DRIVER_NAMES.join(', ')})`,
+    );
+  }
+
+  return raw as CacheDriverName;
+}
+
+/**
+ * A `YYYY-MM-DD` day, and a real one.
+ *
+ * The shape alone would accept `2026-99-99`, which as a string comparison
+ * cutoff would prune far more than was asked for.
+ */
+function dayString(raw: string, flag: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw) || !isRealDay(raw)) {
+    throw new OptionError(`Invalid ${flag} value: ${raw} (expected YYYY-MM-DD)`);
+  }
+
+  return raw;
+}
 
 /** Something the user typed: the usage goes with it, as the grabber does. */
 const EXIT_USAGE = 2;
@@ -247,9 +282,13 @@ async function execute(
       config: { type: 'string', short: 'c' },
       days: { type: 'number', short: 'd', min: 1 },
       offset: { type: 'number' },
-      output: { type: 'string', short: 'o' },
-      'cache-dir': { type: 'string' },
-      before: { type: 'string' },
+      // Resolved as they are read, so what reaches the config is already
+      // absolute — a grabber runs from wherever it was called.
+      output: { type: 'string', short: 'o', transform: (raw) => path.resolve(raw) },
+      'cache-dir': { type: 'string', transform: (raw) => path.resolve(raw) },
+      'cache-driver': { type: 'string', transform: cacheDriverName },
+      refresh: { type: 'boolean' },
+      before: { type: 'string', transform: dayString },
       quiet: { type: 'boolean', short: 'q' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
@@ -291,11 +330,24 @@ async function execute(
   }
 
   if (values.output !== undefined) {
-    config = { ...config, output: path.resolve(values.output) };
+    config = { ...config, output: values.output };
   }
 
   if (values['cache-dir'] !== undefined) {
-    config = { ...config, cache: { ...config.cache, dir: path.resolve(values['cache-dir']) } };
+    config = { ...config, cache: { ...config.cache, dir: values['cache-dir'] } };
+  }
+
+  if (values['cache-driver'] !== undefined) {
+    config = { ...config, cache: { ...config.cache, driver: values['cache-driver'] } };
+  }
+
+  if (values.refresh) {
+    // The reading of the cache is what this turns off, not the writing: the days
+    // still land in it for the run after this one.
+    config = {
+      ...config,
+      cache: { ...config.cache, staleness: { ...config.cache?.staleness, refetchAll: true } },
+    };
   }
 
   const log = values.quiet ? undefined : (message: string) => queueLine(stdout, message);
@@ -343,12 +395,6 @@ async function execute(
     }
     default: {
       const before = values.before ?? toDayString(new Date());
-
-      // The regex alone would accept "2026-99-99", which as a string
-      // comparison cutoff would prune far too much — verify it is a real day.
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(before) || !isRealDay(before)) {
-        throw new UsageError(`Invalid --before value: ${before} (expected YYYY-MM-DD)`);
-      }
 
       await using cache = await createCacheStore(config, signal);
       const removed = await cache.prune({ before });

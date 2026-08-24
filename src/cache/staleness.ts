@@ -7,6 +7,7 @@ const DAY_MS = 86_400_000;
  * Decide whether a cached channel-day entry must be refetched.
  *
  * An entry is stale when:
+ * - the policy says to refetch the whole window, or
  * - it is not cached at all (`meta` is `undefined`), or
  * - the day falls within the policy's always-refetch window, i.e.
  *   `0 <= diffDays(day, today) < alwaysRefetchDays`, or
@@ -21,7 +22,9 @@ export function isStale(
   policy: StalenessPolicy,
   now: Date,
 ): boolean {
-  if (meta === undefined) {
+  // Ahead of the entry itself: a run asked to refetch everything is not asking
+  // about this entry at all.
+  if (policy.refetchAll || meta === undefined) {
     return true;
   }
 

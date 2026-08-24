@@ -138,6 +138,8 @@ into place, so a reader never sees half a guide.
 | `--offset <n>` | start the window n days from today; may be negative |
 | `-o, --output <path>` | override the output file, or a Unix socket to stream into |
 | `--cache-dir <dir>` | override the cache directory |
+| `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
+| `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
 | `-q, --quiet` | no progress on stdout; failures still go to stderr |
 | `-v, --version` | print the package name and version |

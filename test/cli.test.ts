@@ -235,6 +235,87 @@ describe('epg', () => {
     expect(guide.match(/<programme/g)).toHaveLength(2);
   });
 
+  it('keeps the whole cache in memory for --cache-driver memory', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+
+    const { code } = await run([
+      'build',
+      '--config',
+      config,
+      '--quiet',
+      '--cache-driver',
+      'memory',
+    ]);
+
+    expect(code).toBe(0);
+    // A guide from listings that were never written down: the grab and the merge
+    // of one build share the cache, and nothing outlives them.
+    expect(await readFile(join(dir, 'guide.xml'), 'utf8')).toContain('<programme');
+    await expect(stat(join(dir, 'cache'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('refuses a cache driver it does not have, with the usage', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+
+    const { code, stderr } = await run(['build', '--config', config, '--cache-driver', 'postgres']);
+
+    expect(code).toBe(2);
+    expect(stderr).toContain('Invalid --cache-driver value: postgres');
+    expect(stderr).toContain('ndjson, xmltv, sqlite, memory');
+  });
+
+  it('refetches the window for --refresh, and still caches what it fetched', async () => {
+    const dir = await tempDir();
+    const asked = join(dir, 'asked.txt');
+    // The site records every request, so what came from the network and what
+    // came from the cache can be told apart across runs.
+    const config = await configFile(
+      dir,
+      `import { appendFileSync } from 'node:fs';
+
+      export default {
+        sites: [{
+          site: 'example.tv',
+          channels: [{ xmltvId: 'one.example.tv', siteId: '1', name: 'One' }],
+          async request({ day }) {
+            appendFileSync(${JSON.stringify(asked)}, day + '\\n');
+            return { day };
+          },
+          parseDay: ({ channel, day }) => [{
+            channel: channel.xmltvId,
+            start: new Date(day + 'T06:00:00.000Z'),
+            title: [{ value: 'Show' }],
+          }],
+        }],
+        days: 2,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))}, prune: false },
+      };`,
+    );
+    const days = async (): Promise<string[]> => (await readFile(asked, 'utf8')).trim().split('\n');
+
+    // `--offset 1` puts the window past today, which is the only part of it
+    // `alwaysRefetchDays` would have refetched by itself.
+    const args = ['build', '--config', config, '--quiet', '--offset', '1'];
+
+    expect((await run(args)).code).toBe(0);
+    expect(await days()).toHaveLength(2);
+
+    // Fresh, so a second run asks for nothing.
+    expect((await run(args)).code).toBe(0);
+    expect(await days()).toHaveLength(2);
+
+    expect((await run([...args, '--refresh'])).code).toBe(0);
+    expect(await days()).toHaveLength(4);
+
+    // And what it fetched was cached, so the run after it asks for nothing
+    // again — the reading is what `--refresh` turns off, not the writing.
+    expect((await run(args)).code).toBe(0);
+    expect(await days()).toHaveLength(4);
+  });
+
   it('reports a missing config file as one line, not a stack', async () => {
     const dir = await tempDir();
 
