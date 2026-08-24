@@ -8,7 +8,7 @@
 Memory-efficient EPG toolkit for building [XMLTV](https://github.com/XMLTV/xmltv) guides:
 
 - **Grabber** — define multiple site configs, fetched in parallel with [p-queue](https://github.com/sindresorhus/p-queue) and [ky](https://github.com/sindresorhus/ky)
-- **Day cache** — every `site + channel + day` is cached on disk; building a 14-day guide only fetches the days that are missing or stale
+- **Day cache** — every `site + channel + day` is cached; building a 14-day guide only fetches the days that are missing or stale. Files of ndjson or XMLTV, one SQLite file, memory, or a driver of your own
 - **Streaming XMLTV** — a dependency-free, XMLTV-specialized streaming parser (tokenizer technique inspired by [txml](https://github.com/TobiasNickel/tXml), fused directly with the typed model) plus a streaming serializer, so merging many sources never loads a whole guide into memory — and parsing is faster than any whole-document XMLTV parser we measured (2.3× `@iptv/xmltv`, 11× `fast-xml-parser`, 13× `epg-parser`; see [Benchmarks](#benchmarks))
 - **Complete DTD coverage** — every element and attribute of the official [xmltv.dtd](https://github.com/XMLTV/xmltv/blob/master/xmltv.dtd) round-trips (`video`, `audio`, PDC/VPS starts, showview/videoplus, clumpidx, `url system=`, credit persons with inline `image`/`url`, …); output is validated against the official DTD in the test suite
 - **Provider extensions preserved** — non-DTD attributes and elements round-trip instead of being dropped, so consumers like [tvheadend's XPath-based grabber](https://github.com/tvheadend/tvheadend/blob/master/docs/class/epggrabber_modules.md#xmltv-xpath-examples-and-notes) can extract them: `uniqueID` on `<programme>`, `eit` codes on `<category>`, `<crid><series>…</series></crid>`, `<live/>`, `<lcn>`
@@ -96,7 +96,7 @@ export default defineConfig({
   // indent: 2,     // pretty-print the guide; omit for compact output (default)
   cache: {
     dir: '.epg-cache',
-    driver: 'ndjson', // or 'xmltv', or a driver of your own
+    driver: 'ndjson', // or 'xmltv', 'sqlite', or a driver of your own
     staleness: {
       alwaysRefetchDays: 1, // always refetch today
       maxAgeDays: 7,        // bust anything grabbed more than 7 days ago
