@@ -3,13 +3,42 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  CacheDriverBase,
+  CacheManager,
   DEFAULT_STALENESS,
-  FsNdjsonCacheStore,
-  FsXmltvCacheStore,
+  FsNdjsonCacheDriver,
+  FsXmltvCacheDriver,
   isStale,
 } from '../src/cache/main.js';
-import type { CacheEntryMeta, StalenessPolicy } from '../src/cache/main.js';
+import type {
+  CacheDriver,
+  CacheEntryMeta,
+  ChannelDayKey,
+  FoundEntry,
+  FoundMeta,
+  FsCacheDriverOptions,
+  StalenessPolicy,
+  StoredProgramme,
+} from '../src/cache/main.js';
+import { getXmltvOffset, getXmltvPrecision, parseXmltvString } from '../src/xmltv/main.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
+
+/**
+ * The cache as a run sees it: a driver with the manager in front of it, which is
+ * where the meta an entry carries is stamped, and where what it says is judged.
+ * Tests that are about one driver's own storage reach for the driver instead.
+ */
+function cache(driver: CacheDriver): CacheManager {
+  return new CacheManager({ driver });
+}
+
+function ndjson(options: FsCacheDriverOptions): CacheManager {
+  return cache(new FsNdjsonCacheDriver(options));
+}
+
+function xmltv(options: FsCacheDriverOptions): CacheManager {
+  return cache(new FsXmltvCacheDriver(options));
+}
 
 function programme(overrides: Partial<XmltvProgramme> = {}): XmltvProgramme {
   return {
@@ -98,7 +127,7 @@ describe('isStale', () => {
   });
 });
 
-describe('FsNdjsonCacheStore cancellation', () => {
+describe('a cache of ndjson files, cancelled', () => {
   let dir: string;
 
   beforeEach(async () => {
@@ -113,7 +142,7 @@ describe('FsNdjsonCacheStore cancellation', () => {
 
   it('refuses a write, leaving no entry and no temp file behind', async () => {
     const controller = new AbortController();
-    const store = new FsNdjsonCacheStore({ dir, signal: controller.signal });
+    const store = ndjson({ dir, signal: controller.signal });
 
     controller.abort(new Error('cancelled'));
 
@@ -127,9 +156,9 @@ describe('FsNdjsonCacheStore cancellation', () => {
 
   it('refuses a read', async () => {
     const controller = new AbortController();
-    await new FsNdjsonCacheStore({ dir }).write(key, [programme()]);
+    await ndjson({ dir }).write(key, [programme()]);
 
-    const store = new FsNdjsonCacheStore({ dir, signal: controller.signal });
+    const store = ndjson({ dir, signal: controller.signal });
     controller.abort(new Error('cancelled'));
 
     // `readFile` carries the signal, so an aborted read raises Node's own
@@ -146,10 +175,10 @@ describe('FsNdjsonCacheStore cancellation', () => {
     // How many chunks the front of an entry is worth is `parseMeta`'s to decide,
     // and a document whose root never arrives has it reading to the scan limit —
     // so a cancelled run has to stop inside that loop, not merely before it.
-    class Counting extends FsNdjsonCacheStore {
+    class Counting extends FsNdjsonCacheDriver {
       protected override async parseMeta(
         chunks: AsyncIterable<string>,
-      ): Promise<CacheEntryMeta | undefined> {
+      ): Promise<Partial<CacheEntryMeta> | undefined> {
         for await (const _chunk of chunks) {
           taken++;
           controller.abort(new Error('cancelled'));
@@ -161,24 +190,24 @@ describe('FsNdjsonCacheStore cancellation', () => {
 
     // Entries big enough that their front is several chunks over.
     const many = Array.from({ length: 200 }, () => programme());
-    await new FsNdjsonCacheStore({ dir }).write(key, many);
+    await ndjson({ dir }).write(key, many);
 
-    await expect(new Counting({ dir, signal: controller.signal }).getMeta(key)).rejects.toThrow(
-      'cancelled',
-    );
+    await expect(
+      cache(new Counting({ dir, signal: controller.signal })).getMeta(key),
+    ).rejects.toThrow('cancelled');
     // The one it had already taken when the run was cancelled, and no more.
     expect(taken).toBe(1);
   });
 
   it('stops a prune between days, keeping what it has already removed', async () => {
-    const seeding = new FsNdjsonCacheStore({ dir });
+    const seeding = ndjson({ dir });
 
     for (const site of ['a.example', 'b.example', 'c.example']) {
       await seeding.write({ site, channelId: 'one', day: '2026-07-01' }, [programme()]);
     }
 
     const controller = new AbortController();
-    const store = new FsNdjsonCacheStore({ dir, signal: controller.signal });
+    const store = ndjson({ dir, signal: controller.signal });
     controller.abort(new Error('cancelled'));
 
     // A prune is a walk, so this is where it can stop — having removed whole
@@ -190,7 +219,7 @@ describe('FsNdjsonCacheStore cancellation', () => {
   });
 });
 
-describe('FsNdjsonCacheStore', () => {
+describe('a cache of ndjson files', () => {
   let dir: string;
 
   beforeEach(async () => {
@@ -204,7 +233,7 @@ describe('FsNdjsonCacheStore', () => {
   const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
 
   it('writes every day of a channel, and again after a prune took the directory', async () => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
     const channelDir = path.join(dir, 'example.com', 'one');
 
     // Every day of a channel in turn — the shape of a grab.
@@ -231,8 +260,8 @@ describe('FsNdjsonCacheStore', () => {
       // A channel id comes off a site's own channel list, which is not this
       // package's to trust. `encodeURIComponent` neutralizes a separator but not a
       // dot, and `.`/`..` are the filesystem's words for "here" and "one up".
-      const cache = path.join(dir, 'below', 'cache');
-      const store = new FsNdjsonCacheStore({ dir: cache });
+      const cacheDir = path.join(dir, 'below', 'cache');
+      const store = ndjson({ dir: cacheDir });
       const traversing = { site: segment, channelId: segment, day: '2026-07-17' };
 
       await store.write(traversing, [programme()]);
@@ -246,10 +275,9 @@ describe('FsNdjsonCacheStore', () => {
   it('leaves an ordinary site and channel where they already were', async () => {
     // The encoding only touches a segment that is nothing but dots, so no cache
     // written before it is invalidated by it.
-    await new FsNdjsonCacheStore({ dir }).write(
-      { site: 'example.com', channelId: 'one.tv', day: '2026-07-17' },
-      [programme()],
-    );
+    await ndjson({ dir }).write({ site: 'example.com', channelId: 'one.tv', day: '2026-07-17' }, [
+      programme(),
+    ]);
 
     await expect(
       fs.access(path.join(dir, 'example.com', 'one.tv', '2026-07-17.ndjson')),
@@ -261,7 +289,7 @@ describe('FsNdjsonCacheStore', () => {
     // `mkdir -p` makes the whole path back, so how much went does not matter.
     ['the whole cache', '.'],
   ])('makes the path again when something outside this run removed %s', async (_what, target) => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
 
     await store.write(key, [programme()]);
     expect(await store.read(key)).toHaveLength(1);
@@ -278,7 +306,7 @@ describe('FsNdjsonCacheStore', () => {
   });
 
   it('round-trips programmes through ndjson with Dates revived', async () => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
     const programmes = [
       programme(),
       programme({
@@ -309,7 +337,7 @@ describe('FsNdjsonCacheStore', () => {
   });
 
   it('round-trips metadata through the entry itself', async () => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
 
     await store.write(key, [programme()], { grabbedAt: '2026-07-17T08:00:00.000Z' });
 
@@ -320,7 +348,7 @@ describe('FsNdjsonCacheStore', () => {
   });
 
   it('defaults grabbedAt to now when meta is omitted', async () => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
     const before = Date.now();
 
     await store.write(key, []);
@@ -333,14 +361,14 @@ describe('FsNdjsonCacheStore', () => {
   });
 
   it('returns undefined for uncached entries', async () => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
 
     expect(await store.getMeta(key)).toBeUndefined();
     expect(await store.read(key)).toBeUndefined();
   });
 
   it('treats an entry whose meta line is corrupt as missing, and removes it', async () => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
     const file = path.join(dir, 'example.com', 'one', '2026-07-17.ndjson');
 
     for (const head of ['{not json', '{"something":"else"}', 'no newline at all']) {
@@ -356,7 +384,7 @@ describe('FsNdjsonCacheStore', () => {
   });
 
   it('reads the meta of an entry whose preamble outruns the head', async () => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
     const file = path.join(dir, 'example.com', 'one', '2026-07-17.ndjson');
 
     await store.write(key, [programme()]);
@@ -372,7 +400,7 @@ describe('FsNdjsonCacheStore', () => {
   });
 
   it('sanitizes site and channel path segments', async () => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
     const trickyKey = { site: 'a/b', channelId: 'c:1/..', day: '2026-07-17' };
 
     await store.write(trickyKey, [programme()]);
@@ -388,7 +416,7 @@ describe('FsNdjsonCacheStore', () => {
   });
 
   it('deletes an entry, meta and all', async () => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
 
     await store.write(key, [programme()]);
     await store.delete(key);
@@ -408,8 +436,8 @@ describe('FsNdjsonCacheStore', () => {
       '<previously-shown start="20200101120000 +0200"/></programme></tv>';
     const original = parseXmltvString(source).programmes[0]!;
 
-    for (const Store of [FsNdjsonCacheStore, FsXmltvCacheStore]) {
-      const store = new Store({ dir: path.join(dir, Store.name) });
+    for (const Driver of [FsNdjsonCacheDriver, FsXmltvCacheDriver]) {
+      const store = cache(new Driver({ dir: path.join(dir, Driver.name) }));
       await store.write(key, [original]);
       const [back] = (await store.read(key))!;
 
@@ -426,7 +454,7 @@ describe('FsNdjsonCacheStore', () => {
   });
 
   it('revives every date a programme can carry', async () => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
     // Every date-valued field in the model, so a seventh one added to
     // `XmltvProgramme` without being taught to the store fails here rather than
     // coming back a string and throwing at the serializer — which is how the
@@ -453,7 +481,7 @@ describe('FsNdjsonCacheStore', () => {
   });
 
   it('prunes entries older than the cutoff and removes empty directories', async () => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
 
     await store.write({ site: 's1', channelId: 'c1', day: '2026-07-10' }, [programme()]);
     await store.write({ site: 's1', channelId: 'c1', day: '2026-07-15' }, [programme()]);
@@ -471,7 +499,7 @@ describe('FsNdjsonCacheStore', () => {
   });
 
   it('leaves a directory that is not empty, without failing over it', async () => {
-    const store = new FsNdjsonCacheStore({ dir });
+    const store = ndjson({ dir });
 
     await store.write({ site: 's1', channelId: 'c1', day: '2026-07-10' }, [programme()]);
     // Something that is not an entry, so the day goes and the directory cannot.
@@ -486,13 +514,13 @@ describe('FsNdjsonCacheStore', () => {
   });
 
   it('prune on a missing cache root returns 0', async () => {
-    const store = new FsNdjsonCacheStore({ dir: path.join(dir, 'does-not-exist') });
+    const store = ndjson({ dir: path.join(dir, 'does-not-exist') });
 
     expect(await store.prune({ before: '2026-07-16' })).toBe(0);
   });
 });
 
-describe('FsXmltvCacheStore', () => {
+describe('a cache of xmltv files', () => {
   let dir: string;
 
   beforeEach(async () => {
@@ -507,7 +535,7 @@ describe('FsXmltvCacheStore', () => {
   const base = () => path.join(dir, 'example.com', 'one', '2026-07-17');
 
   it('gives up on an entry whose root element is not <tv>', async () => {
-    const store = new FsXmltvCacheStore({ dir });
+    const store = xmltv({ dir });
 
     await store.write(key, [programme()]);
     await fs.writeFile(`${base()}.xml`, '<?xml version="1.0"?><guide><programme/></guide>', 'utf8');
@@ -519,7 +547,7 @@ describe('FsXmltvCacheStore', () => {
   });
 
   it('carries its meta in an instruction, and stays a valid document', async () => {
-    const store = new FsXmltvCacheStore({ dir });
+    const store = xmltv({ dir });
 
     await store.write(key, [programme(), programme({ title: [{ value: 'Second' }] })], {
       grabbedAt: '2026-07-17T08:00:00.000Z',
@@ -547,7 +575,7 @@ describe('FsXmltvCacheStore', () => {
     // carry the `>` in a form XML cannot see. Today's meta is two fields that
     // cannot hold one; the guard is for the first field that can. Reached
     // through `entryData` because `write` builds the meta itself.
-    class Exposed extends FsXmltvCacheStore {
+    class Exposed extends FsXmltvCacheDriver {
       data(meta: CacheEntryMeta): string {
         return this.entryData([programme()], meta);
       }
@@ -572,7 +600,7 @@ describe('FsXmltvCacheStore', () => {
   });
 
   it('will not take its meta from a prolog instruction', async () => {
-    const store = new FsXmltvCacheStore({ dir });
+    const store = xmltv({ dir });
 
     await store.write(key, [programme()], { grabbedAt: '2026-07-17T08:00:00.000Z' });
 
@@ -590,7 +618,7 @@ describe('FsXmltvCacheStore', () => {
   });
 
   it('steps over an instruction meant for another reader', async () => {
-    const store = new FsXmltvCacheStore({ dir });
+    const store = xmltv({ dir });
 
     await store.write(key, [programme()], { grabbedAt: '2026-07-17T08:00:00.000Z' });
 
@@ -606,7 +634,7 @@ describe('FsXmltvCacheStore', () => {
   });
 
   it('round-trips programmes through xmltv format', async () => {
-    const store = new FsXmltvCacheStore({ dir });
+    const store = xmltv({ dir });
     const programmes = [
       programme(),
       programme({ start: new Date('2026-07-17T19:00:00.000Z'), title: [{ value: 'Late Show' }] }),
@@ -630,5 +658,155 @@ describe('FsXmltvCacheStore', () => {
       grabbedAt: '2026-07-17T08:00:00.000Z',
       programmeCount: 2,
     });
+  });
+});
+
+describe('CacheManager', () => {
+  const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
+
+  /**
+   * A driver of the ordinary kind: it keeps JSON somewhere and says nothing
+   * about dates, which is what makes it the one to test the manager with — and
+   * what a driver written outside this package looks like. What it holds is
+   * exactly what it was given, so a test can look at it.
+   */
+  class MemoryCacheDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
+    readonly entries = new Map<string, { meta: CacheEntryMeta; programmes: StoredProgramme[] }>();
+    deletes: string[] = [];
+    closed = 0;
+
+    #id(key: ChannelDayKey): string {
+      return `${key.site}|${key.channelId}|${key.day}`;
+    }
+
+    /** What the store holds for a key, for a test to read or to spoil. */
+    stored(key: ChannelDayKey): { meta: CacheEntryMeta; programmes: StoredProgramme[] } {
+      return this.entries.get(this.#id(key))!;
+    }
+
+    async readMeta(key: ChannelDayKey): Promise<FoundMeta | undefined> {
+      const entry = this.entries.get(this.#id(key));
+
+      return entry && { meta: entry.meta };
+    }
+
+    async read(key: ChannelDayKey): Promise<FoundEntry<StoredProgramme> | undefined> {
+      return this.entries.get(this.#id(key));
+    }
+
+    async write(
+      key: ChannelDayKey,
+      programmes: StoredProgramme[],
+      meta: CacheEntryMeta,
+    ): Promise<void> {
+      this.entries.set(this.#id(key), { meta, programmes });
+    }
+
+    async delete(key: ChannelDayKey): Promise<void> {
+      this.deletes.push(this.#id(key));
+      this.entries.delete(this.#id(key));
+    }
+
+    async prune(): Promise<number> {
+      return 0;
+    }
+
+    async close(): Promise<void> {
+      this.closed++;
+    }
+  }
+
+  it('gives an inherited driver dates it can store, and Dates back', async () => {
+    const driver = new MemoryCacheDriver();
+    const store = cache(driver);
+    const [original] = parseXmltvString(
+      '<?xml version="1.0"?><tv><programme start="20260807203000 +0200" channel="one.tv">' +
+        '<title>Film</title><date>2020</date></programme></tv>',
+    ).programmes;
+
+    await store.write(key, [original!]);
+
+    // Nothing the driver holds is a `Date`: neither the offset nor the precision
+    // would have survived `JSON.stringify`, so the record keeps the XMLTV form.
+    const [record] = driver.stored(key).programmes;
+
+    expect(record!.start).toBe('20260807203000 +0200');
+    expect(record!.date).toBe('2020');
+    expect(JSON.parse(JSON.stringify(record))).toEqual(record);
+
+    // And what the store holds is what comes back, both of them intact.
+    const [back] = (await store.read(key))!;
+
+    expect(back!.start).toBeInstanceOf(Date);
+    expect(getXmltvOffset(back!.start)).toBe(120);
+    expect(back!.date).toBeInstanceOf(Date);
+    expect(getXmltvPrecision(back!.date!)).toBe(4);
+  });
+
+  it('leaves the caller their own programmes, unconverted', async () => {
+    const mine = programme({ previouslyShown: { start: new Date('2019-05-05T10:00:00.000Z') } });
+
+    await cache(new MemoryCacheDriver()).write(key, [mine]);
+
+    // A record is a copy: a caller that goes on using its programmes after
+    // caching them must not find their dates turned into strings underneath.
+    expect(mine.start).toBeInstanceOf(Date);
+    expect(mine.previouslyShown!.start).toBeInstanceOf(Date);
+  });
+
+  it('counts the programmes itself rather than believing the caller', async () => {
+    const driver = new MemoryCacheDriver();
+
+    await cache(driver).write(key, [programme(), programme()], {
+      grabbedAt: '2026-07-17T08:00:00.000Z',
+      programmeCount: 99,
+    });
+
+    // The count is what a staleness check reads instead of the programmes, so it
+    // has to be the programmes. `grabbedAt` is the caller's to say.
+    expect(driver.stored(key).meta).toEqual({
+      grabbedAt: '2026-07-17T08:00:00.000Z',
+      programmeCount: 2,
+    });
+  });
+
+  it('removes an entry that cannot answer for itself, and only that', async () => {
+    const driver = new MemoryCacheDriver();
+    const store = cache(driver);
+
+    await store.write(key, [programme()]);
+    // Whatever was last written there: an older version's meta, a half-finished
+    // write, somebody with an editor.
+    driver.stored(key).meta = { grabbedAt: '2026-07-17T08:00:00.000Z' } as CacheEntryMeta;
+
+    expect(await store.getMeta(key)).toBeUndefined();
+    expect(driver.deletes).toEqual(['example.com|one|2026-07-17']);
+
+    // A day never grabbed is the common case by far, and nothing to remove — a
+    // manager that could not tell the two apart would be asking the store to
+    // delete a thousand entries a run that were never there.
+    expect(await store.getMeta({ ...key, day: '2026-07-18' })).toBeUndefined();
+    expect(driver.deletes).toHaveLength(1);
+  });
+
+  it('will not serve an entry whose meta it would not trust', async () => {
+    const driver = new MemoryCacheDriver();
+    const store = cache(driver);
+
+    await store.write(key, [programme()]);
+    driver.stored(key).meta = undefined as unknown as CacheEntryMeta;
+
+    expect(await store.read(key)).toBeUndefined();
+    expect(driver.deletes).toEqual(['example.com|one|2026-07-17']);
+  });
+
+  it('closes the driver it was given, and manages without one that cannot', async () => {
+    const driver = new MemoryCacheDriver();
+
+    await cache(driver).close();
+    expect(driver.closed).toBe(1);
+
+    // `close` is a driver's to have or not: a directory holds nothing open.
+    await expect(cache(new FsNdjsonCacheDriver({ dir: '.' })).close()).resolves.toBeUndefined();
   });
 });

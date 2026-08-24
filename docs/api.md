@@ -24,7 +24,7 @@ console.log(summary); // { fetched, fromCache, failed }
 | `runGrab(source, options?)` | Grab only — fills the cache, writes no guide. |
 | `runMerge(source, options?)` | Write the guide from the cache only. |
 | `guideStream(source, options?)` | The merged guide as an async generator of XML chunks. |
-| `createCacheStore(config)` | The cache store a config describes — the class its `format` names. |
+| `createCacheStore(config)` | The cache a config describes: a `CacheManager` over the driver its `format` names. |
 
 `GrabSummary` counts `fetched` (channel-days that went to the network) and
 `fromCache` (skipped because the cache was fresh); `failed` is the **list** of
@@ -90,7 +90,7 @@ pretty-print, mirroring `JSON.stringify`: a number of spaces or a string like
 ```ts
 import { build, defineConfig, defineSiteConfig } from 'epg-tools';
 import { parseXmltvFile, writeXmltvStream } from 'epg-tools/xmltv';
-import { FsNdjsonCacheStore, isStale } from 'epg-tools/cache';
+import { CacheManager, FsNdjsonCacheDriver, isStale } from 'epg-tools/cache';
 import { grab, resolveChannels, siteHttp } from 'epg-tools/grabber';
 import { generateGuide, writeGuide, mergeProgrammes } from 'epg-tools/merge';
 import { runXmltvGrabber, defineCapability } from 'epg-tools/tv-grab';
@@ -115,7 +115,7 @@ want is to read or write XMLTV; and a handful of names live only on a subpath
 | Days | `toDayString`, `dayToDate`, `addDays`, `diffDays`, `dayRange` |
 | Options parsing | `parseOptions`, `OptionError` |
 | XMLTV | `escapeXml`, `serializeChannel`, `serializeProgramme`, `writeXmltvStream`, `writeXmltvToFile`, `parseXmltvStream`, `parseXmltvFile`, and every [date helper](./xmltv.md#dates) |
-| Cache | `FsCacheStore`, `FsNdjsonCacheStore`, `FsXmltvCacheStore`, `isStale`, `DEFAULT_STALENESS` |
+| Cache | `CacheManager`, `CacheDriverBase`, `FsCacheDriver`, `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`, `isStale`, `DEFAULT_STALENESS` |
 | Grabber | `grab`, `defineSiteConfig`, `resolveChannels`, `resolveSites`, `channelElement`, `siteHttp`, `sitePacing`, `retryAfterMs` |
 | Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
 
@@ -137,19 +137,44 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 
 ### `epg-tools/cache`
 
-`FsNdjsonCacheStore`, `FsXmltvCacheStore`, the abstract `FsCacheStore` they
-share, `isStale`, `DEFAULT_STALENESS`, and the `CacheStore` / `ChannelDayKey` /
-`CacheEntryMeta` / `StalenessPolicy` / `CacheFormat` types. Implement
-`CacheStore` yourself to keep entries somewhere other than the filesystem, or
-extend `FsCacheStore` to keep them on disk as something else — it asks a subclass
-only what one entry *is*: an extension, a string to write, and how to read one
-back.
+`CacheManager`, the drivers `FsNdjsonCacheDriver` and `FsXmltvCacheDriver` with
+the abstract `FsCacheDriver` and `CacheDriverBase` they build on, `isStale`,
+`DEFAULT_STALENESS`, and the `CacheStore` / `CacheDriver` / `ChannelDayKey` /
+`CacheEntryMeta` / `StoredProgramme` / `StalenessPolicy` / `CacheFormat` types.
 
-`new FsNdjsonCacheStore({ dir, signal? })` — the format is the class, and the
-signal belongs to the store rather than to each call, since a store belongs to
-one run. That is what keeps `CacheStore` a five-method interface anyone can
-implement. An entry is one file, so it is either there with its meta or not
-there at all; a write stops before its rename, and a prune stops between days.
+A cache is two pieces. A **driver** answers for one store — a directory of
+files, a database, a bucket — and holds no policy of its own. The
+**`CacheManager`** in front of it is what a run talks to (it is a `CacheStore`,
+which is what `grab` and `generateGuide` take), and it owns everything that must
+be true of every driver alike: the meta an entry carries, stamped on the way in
+and judged on the way out, and what to do with an entry that cannot answer for
+itself — it goes, so the day reads as never grabbed and the next run fetches it.
+
+```ts
+const cache = new CacheManager({ driver: new FsNdjsonCacheDriver({ dir }) });
+```
+
+A driver is a small thing to write: `readMeta`, `read`, `write`, `delete`,
+`prune`, `toStored` / `fromStored`, and `close` if it holds something open. It
+reads and writes programmes in whatever form it keeps them — `TStored`, which
+only it knows about — and the manager is what calls `toStored` / `fromStored`, at
+the two moments a programme crosses into the store and back, so no driver has to
+remember to. `read` and `readMeta` return `undefined` when there is no entry, and
+`{ meta }` — possibly an undefined meta — when there is one that says nothing
+readable; the manager tells those apart and only removes the second.
+
+Start from **`CacheDriverBase`** and the storing is already answered. It offers
+two overridable pairs, because they are two questions:
+
+| pair | default | override to |
+|---|---|---|
+| `toRecord` / `fromRecord` | a plain object whose dates are XMLTV strings, so neither the offset the source wrote them in nor how precise it was is lost through `JSON.stringify` | keep fewer fields, or ones of your own |
+| `toStored` / `fromStored` | that record | say what the store actually holds — the ndjson driver makes it a line of JSON, the xmltv driver hands the programme through untouched, since a document already carries the offset and precision a record has to spell out |
+
+`new FsNdjsonCacheDriver({ dir, signal? })` — the format is the driver, and the
+signal belongs to it rather than to each call, since a driver belongs to one
+run. An entry is one file, so it is either there with its meta or not there at
+all; a write stops before its rename, and a prune stops between days.
 
 ### `epg-tools/grabber`
 

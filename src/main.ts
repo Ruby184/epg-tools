@@ -53,9 +53,11 @@ export type {
 export type * from './xmltv/types.js';
 
 export {
-  FsCacheStore,
-  FsNdjsonCacheStore,
-  FsXmltvCacheStore,
+  CacheManager,
+  FsCacheDriver,
+  FsNdjsonCacheDriver,
+  FsXmltvCacheDriver,
+  CacheDriverBase,
   isStale,
   DEFAULT_STALENESS,
 } from './cache/main.js';

@@ -7,8 +7,10 @@
  * by a person. Which is also why it is written indented, and why an entry is a
  * document that validates against the DTD like any other.
  *
- * Dates need nothing special here. The XMLTV form is where their offset and
- * precision came from, so writing them back out keeps both.
+ * It takes programmes rather than records, since XMLTV is where a date's offset
+ * and precision came from in the first place: converting them to strings on the
+ * way in and back on the way out would be two passes over every date to arrive
+ * where it started.
  */
 
 import {
@@ -20,8 +22,8 @@ import {
 } from '../xmltv/main.js';
 import type { SerializeOptions } from '../xmltv/main.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
-import type { CacheEntryMeta } from './types.js';
-import { FsCacheStore } from './fs-store.js';
+import { FsCacheDriver } from './fs-driver.js';
+import type { CacheEntryMeta, FoundEntry } from './types.js';
 
 const FORMATTING: SerializeOptions = { indent: 2 };
 
@@ -41,9 +43,22 @@ const FORMATTING: SerializeOptions = { indent: 2 };
  */
 const META_TARGET = 'epg-cache';
 
-export class FsXmltvCacheStore extends FsCacheStore {
+export class FsXmltvCacheDriver extends FsCacheDriver<XmltvProgramme> {
   protected override get extension(): string {
     return 'xml';
+  }
+
+  /**
+   * Programmes, kept as they are. A document already says everything one of
+   * them does — an offset, a precision — so there is nothing for the record
+   * codec to preserve that XMLTV does not.
+   */
+  override toStored(programme: XmltvProgramme): XmltvProgramme {
+    return programme;
+  }
+
+  override fromStored(stored: XmltvProgramme): XmltvProgramme {
+    return stored;
   }
 
   protected override entryData(programmes: XmltvProgramme[], meta: CacheEntryMeta): string {
@@ -73,7 +88,7 @@ export class FsXmltvCacheStore extends FsCacheStore {
    *
    * `?>` ends a processing instruction and XML offers no way to escape it there,
    * so a literal `>` in the data is one stray `?` away from truncating the
-   * entry's own meta. Today's meta is two fields that cannot hold one, but the
+   * entry's own meta. Today's meta is a few fields that cannot hold one, but the
    * next field worth recording may well be a title or a URL.
    *
    * JSON's own escapes are the way out, because XML cannot see them: the escaped
@@ -85,15 +100,21 @@ export class FsXmltvCacheStore extends FsCacheStore {
     return JSON.stringify(meta).replaceAll('>', '\\u003e');
   }
 
-  protected override parseEntry(content: string): XmltvProgramme[] {
+  protected override parseEntry(content: string): FoundEntry<XmltvProgramme> {
     // Whole-document rather than streaming: an entry is one channel-day, and
-    // the machinery a stream needs costs more per file than the file holds.
-    return parseXmltvString(content).programmes;
+    // the machinery a stream needs costs more per file than the file holds. The
+    // instructions come back with the programmes, so the meta is already here.
+    const { programmes, processingInstructions } = parseXmltvString(content);
+    const held = processingInstructions.find(
+      (instruction) => instruction.position === 'root' && instruction.target === META_TARGET,
+    );
+
+    return { meta: held && this.#meta(held.data), programmes };
   }
 
   protected override async parseMeta(
     chunks: AsyncIterable<string>,
-  ): Promise<CacheEntryMeta | undefined> {
+  ): Promise<Partial<CacheEntryMeta> | undefined> {
     try {
       // The parser over the chunks, which is what it is for. The instruction
       // precedes every programme, so this reads a couple of events and stops —
@@ -126,14 +147,10 @@ export class FsXmltvCacheStore extends FsCacheStore {
     }
   }
 
-  /** What the instruction holds, when it holds a meta. */
-  #meta(data: string): CacheEntryMeta | undefined {
+  /** What the instruction holds, as far as JSON goes. */
+  #meta(data: string): Partial<CacheEntryMeta> | undefined {
     try {
-      const meta = JSON.parse(data) as Partial<CacheEntryMeta>;
-
-      return typeof meta.grabbedAt === 'string' && typeof meta.programmeCount === 'number'
-        ? (meta as CacheEntryMeta)
-        : undefined;
+      return JSON.parse(data) as Partial<CacheEntryMeta>;
     } catch {
       // Not JSON, so not a meta.
     }

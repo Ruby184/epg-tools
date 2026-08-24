@@ -3,23 +3,34 @@
  * like inside.
  *
  * Layout: `<dir>/<site>/<channelId>/<day>.<ext>`, one file per channel-day
- * holding its own {@link CacheEntryMeta} as well as its programmes. Site and
- * channel path segments are sanitized with `encodeURIComponent`.
+ * holding its own meta as well as its programmes. Site and channel path
+ * segments are sanitized with `encodeURIComponent`.
  *
- * What a store keeps and what it keeps it *as* are separate problems, so the
- * second one belongs to a subclass: `FsNdjsonCacheStore` and `FsXmltvCacheStore` say
- * what one entry is — including where its meta goes — and everything else, the
- * layout and cancellation and deleting and pruning, is the same either way and
- * lives here.
- * Which is also what keeps the xmltv module out of a run that does not use it:
- * the store that needs it is the one that imports it.
+ * Where a driver puts entries and what it keeps them *as* are separate
+ * problems, so the second one belongs to a subclass: `FsNdjsonCacheDriver` and
+ * `FsXmltvCacheDriver` say what one entry is — including where its meta goes —
+ * and everything else, the layout and cancellation and deleting and pruning, is
+ * the same either way and lives here. Which is also what keeps the xmltv module
+ * out of a run that does not use it: the driver that needs it is the one that
+ * imports it.
+ *
+ * Neither of them stamps or checks a meta: what one is worth is the
+ * {@link CacheManager}'s judgement, made the same way for every driver there is.
  */
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { writeFileAtomic } from '../core/atomic.js';
-import type { XmltvProgramme } from '../xmltv/types.js';
-import type { CacheEntryMeta, CacheStore, ChannelDayKey, FsCacheStoreOptions } from './types.js';
+import { CacheDriverBase } from './driver.js';
+import type {
+  CacheDriver,
+  CacheEntryMeta,
+  ChannelDayKey,
+  FoundEntry,
+  FoundMeta,
+  FsCacheDriverOptions,
+  StoredProgramme,
+} from './types.js';
 
 /** How much of a prune's directory walk is in flight at once. */
 const PRUNE_CONCURRENCY = 8;
@@ -39,11 +50,15 @@ const PRUNE_CONCURRENCY = 8;
  */
 const READ_CHUNK = 2048;
 
-export abstract class FsCacheStore implements CacheStore {
+export abstract class FsCacheDriver<TStored = StoredProgramme>
+  extends CacheDriverBase<TStored>
+  implements CacheDriver<TStored>
+{
   protected readonly dir: string;
   protected readonly signal: AbortSignal | undefined;
 
-  constructor(options: FsCacheStoreOptions) {
+  constructor(options: FsCacheDriverOptions) {
+    super();
     this.dir = options.dir;
     this.signal = options.signal;
   }
@@ -55,10 +70,15 @@ export abstract class FsCacheStore implements CacheStore {
    * What one entry holds — written atomically, here. An entry carries its own
    * meta, so a format has to have somewhere to put it.
    */
-  protected abstract entryData(programmes: XmltvProgramme[], meta: CacheEntryMeta): string;
+  protected abstract entryData(programmes: TStored[], meta: CacheEntryMeta): string;
 
-  /** The programmes one entry held. The file is read out here. */
-  protected abstract parseEntry(content: string): XmltvProgramme[];
+  /**
+   * What one entry held: its programmes, and what it says about itself. The file
+   * is read out here, and the meta comes along because the read has it in hand
+   * — a second pass to find something already in front of us would be work for
+   * nothing.
+   */
+  protected abstract parseEntry(content: string): FoundEntry<TStored>;
 
   /**
    * The meta an entry begins with, read from the front of it — or nothing, when
@@ -70,7 +90,9 @@ export abstract class FsCacheStore implements CacheStore {
    * ordinary case; taking more is what makes the front of an entry however long
    * it needs to be.
    */
-  protected abstract parseMeta(chunks: AsyncIterable<string>): Promise<CacheEntryMeta | undefined>;
+  protected abstract parseMeta(
+    chunks: AsyncIterable<string>,
+  ): Promise<Partial<CacheEntryMeta> | undefined>;
 
   /**
    * Reading options for `fs`: the encoding, and the signal when there is one.
@@ -202,7 +224,7 @@ export abstract class FsCacheStore implements CacheStore {
     return path.join(this.#channelDir(key), `${key.day}.${this.extension}`);
   }
 
-  async getMeta(key: ChannelDayKey): Promise<CacheEntryMeta | undefined> {
+  async readMeta(key: ChannelDayKey): Promise<FoundMeta | undefined> {
     // Asked outright, since neither `open` nor a read from a handle takes a
     // signal of its own the way `readFile` does.
     this.signal?.throwIfAborted();
@@ -220,24 +242,17 @@ export abstract class FsCacheStore implements CacheStore {
       throw error;
     }
 
-    let meta: CacheEntryMeta | undefined;
-
     try {
-      meta = await this.parseMeta(this.#chunksOf(handle));
+      // The file is there, whatever its front turns out to say — which is the
+      // difference the wrapper carries: an entry nobody can read is one to
+      // remove, a day never grabbed is one to grab.
+      return { meta: await this.parseMeta(this.#chunksOf(handle)) };
     } finally {
       await handle.close();
     }
-
-    if (meta === undefined) {
-      // An entry that cannot say when it was grabbed is one nothing here can
-      // decide about, so it goes and the day is grabbed again.
-      await this.delete(key);
-    }
-
-    return meta;
   }
 
-  async read(key: ChannelDayKey): Promise<XmltvProgramme[] | undefined> {
+  async read(key: ChannelDayKey): Promise<FoundEntry<TStored> | undefined> {
     try {
       return this.parseEntry(await fs.readFile(this.#entryFilePath(key), this.readOptions()));
     } catch (error) {
@@ -249,19 +264,12 @@ export abstract class FsCacheStore implements CacheStore {
     }
   }
 
-  async write(
-    key: ChannelDayKey,
-    programmes: XmltvProgramme[],
-    meta?: Partial<CacheEntryMeta>,
-  ): Promise<void> {
+  async write(key: ChannelDayKey, programmes: TStored[], meta: CacheEntryMeta): Promise<void> {
     const file = this.#entryFilePath(key);
     // One file, so an entry is either there with its meta or not there at all:
     // two writes left a window where it had already been written and could not
     // yet be told apart from one that had never been grabbed.
-    const data = this.entryData(programmes, {
-      grabbedAt: meta?.grabbedAt ?? new Date().toISOString(),
-      programmeCount: programmes.length,
-    });
+    const data = this.entryData(programmes, meta);
 
     try {
       await writeFileAtomic(file, data, this.signal);
@@ -304,7 +312,7 @@ export abstract class FsCacheStore implements CacheStore {
       throw error;
     }
 
-    // This store's own entry files. Built here rather than in the constructor,
+    // This driver's own entry files. Built here rather than in the constructor,
     // where a subclass has yet to say what its extension is, and a prune is
     // once a run either way.
     const entryFile = new RegExp(`^(\\d{4}-\\d{2}-\\d{2})\\.${this.extension}$`);

@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { FsCacheStore, FsNdjsonCacheStore, FsXmltvCacheStore } from './cache/main.js';
+import { CacheManager, FsNdjsonCacheDriver, FsXmltvCacheDriver } from './cache/main.js';
 import { grab, resolveSites } from './grabber/main.js';
 import type { GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
@@ -35,17 +35,21 @@ export interface RunOptions {
  * than a {@link ConfigSource}: it is the one entry point that returns
  * synchronously, and resolving may have to await.
  */
-export function createCacheStore(config: EpgConfig, signal?: AbortSignal): FsCacheStore {
+export function createCacheStore(config: EpgConfig, signal?: AbortSignal): CacheManager {
   const options = {
     dir: config.cache?.dir ?? path.join(process.cwd(), '.epg-cache'),
     ...(signal ? { signal } : {}),
   };
 
-  // The format is the class: one entry is one thing, and which thing it is
-  // decides how it is read as well as written.
-  return config.cache?.format === 'xmltv'
-    ? new FsXmltvCacheStore(options)
-    : new FsNdjsonCacheStore(options);
+  // The format is the driver: one entry is one thing, and which thing it is
+  // decides how it is read as well as written. The manager in front of it is
+  // what the run actually talks to, and is the same whichever this is.
+  return new CacheManager({
+    driver:
+      config.cache?.format === 'xmltv'
+        ? new FsXmltvCacheDriver(options)
+        : new FsNdjsonCacheDriver(options),
+  });
 }
 
 /** First day of the window implied by `now` + `offset`. */
