@@ -901,14 +901,18 @@ export class XmltvSerializeStream extends Transform {
   }
 
   override _flush(callback: TransformCallback): void {
-    // `#prelude()` covers the header when no channel/programme was ever written.
-    const prelude = this.#prelude();
+    try {
+      // `#prelude()` covers the header when no channel/programme was ever written.
+      const prelude = this.#prelude();
 
-    const footer = serializeDocumentFooter({
-      ...this.#options,
-      processingInstructions: this.#afterFooter.splice(0),
-    });
+      const footer = serializeDocumentFooter({
+        ...this.#options,
+        processingInstructions: this.#afterFooter.splice(0),
+      });
 
-    callback(null, prelude + footer);
+      callback(null, prelude + footer);
+    } catch (error) {
+      callback(error as Error);
+    }
   }
 }

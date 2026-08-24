@@ -2251,6 +2251,39 @@ describe('node stream transforms', () => {
     expect(parseXmltvString(xml).channels).toEqual([channels[0]]);
   });
 
+  it('errors the stream on a held instruction it cannot write at the end', async () => {
+    // Both held positions are written when the document ends: a prolog one when
+    // the root finally opens, an epilog one after the footer. So an instruction
+    // nobody could have refused on arrival is refused here — and refusing has to
+    // reach the stream as an error rather than as a throw out of `_flush`, which
+    // no caller is in a position to catch.
+    for (const instruction of [
+      { target: 'xml', data: 'version="1.0"', position: 'prolog' as const },
+      { target: 'ok', data: 'ends here ?>', position: 'epilog' as const },
+    ]) {
+      const serialize = new XmltvSerializeStream();
+      Readable.from([
+        { type: 'processing-instruction', value: instruction },
+        { type: 'channel', value: channels[0]! },
+      ]).pipe(serialize);
+
+      await expect(collect(serialize), instruction.target).rejects.toThrow(
+        /Invalid processing instruction/,
+      );
+    }
+  });
+
+  it('errors the stream when nothing but a bad prolog instruction was written', async () => {
+    // Nothing opened the root, so `_flush` is where the header is written — and
+    // the only place this instruction could be refused.
+    const serialize = new XmltvSerializeStream();
+    Readable.from([
+      { type: 'processing-instruction', value: { target: 'a b', data: '', position: 'prolog' } },
+    ]).pipe(serialize);
+
+    await expect(collect(serialize)).rejects.toThrow(/Invalid processing instruction target "a b"/);
+  });
+
   it('round-trips a document through a parse -> serialize Node pipeline', async () => {
     const source = await readFile(join(import.meta.dirname, 'fixtures', 'epg-parser-basic.xml'));
 
