@@ -29,13 +29,31 @@ import type {
   CacheManagerOptions,
   CacheStore,
   ChannelDayKey,
+  StoredEntryMeta,
 } from './types.js';
+
+/**
+ * The stored shape this code writes, and the only one it reads.
+ *
+ * Bump it whenever an entry stops meaning what it did — a field a staleness
+ * check needs, a date written differently, programmes kept somewhere else in the
+ * file. Every entry a previous number wrote is then void, and the days are
+ * grabbed again, which is the whole of what a cache has to do about it. Nothing
+ * migrates: a day of listings costs one request, and code to carry an old entry
+ * forward would cost more than that forever.
+ *
+ * 1 — an entry holds its own meta: `grabbedAt`, `programmeCount`, and these
+ *     two versions.
+ */
+export const CACHE_SCHEMA = 1;
 
 export class CacheManager implements CacheStore {
   readonly #driver: CacheDriver;
+  readonly #invalidate: CacheManagerOptions['invalidate'];
 
   constructor(options: CacheManagerOptions) {
     this.#driver = options.driver;
+    this.#invalidate = options.invalidate;
   }
 
   /** The store underneath, for anything that has to ask it something directly. */
@@ -43,7 +61,7 @@ export class CacheManager implements CacheStore {
     return this.#driver;
   }
 
-  async getMeta(key: ChannelDayKey): Promise<CacheEntryMeta | undefined> {
+  async getMeta(key: ChannelDayKey): Promise<StoredEntryMeta | undefined> {
     const found = await this.#driver.readMeta(key);
 
     return found === undefined ? undefined : this.#verified(key, found.meta);
@@ -65,11 +83,15 @@ export class CacheManager implements CacheStore {
     programmes: XmltvProgramme[],
     meta?: Partial<CacheEntryMeta>,
   ): Promise<void> {
-    const stamped: CacheEntryMeta = {
+    const stamped: StoredEntryMeta = {
       grabbedAt: meta?.grabbedAt ?? new Date().toISOString(),
       // Counted here rather than taken on trust: the count is what a staleness
       // check reads instead of the programmes, so it has to be the programmes.
       programmeCount: programmes.length,
+      // What this entry is and who wrote it, so that reading it back is never a
+      // guess. The caller says neither: they are facts about the writing.
+      schema: CACHE_SCHEMA,
+      writtenBy: __PKG_VERSION__,
     };
 
     await this.#driver.write(
@@ -102,18 +124,31 @@ export class CacheManager implements CacheStore {
    */
   async #verified(
     key: ChannelDayKey,
-    meta: Partial<CacheEntryMeta> | undefined,
-  ): Promise<CacheEntryMeta | undefined> {
+    meta: Partial<StoredEntryMeta> | undefined,
+  ): Promise<StoredEntryMeta | undefined> {
     if (
       meta === undefined ||
       typeof meta.grabbedAt !== 'string' ||
-      typeof meta.programmeCount !== 'number'
+      typeof meta.programmeCount !== 'number' ||
+      typeof meta.writtenBy !== 'string' ||
+      // A shape this code does not write is one it cannot read as it was meant,
+      // whether the entry is older than this version or newer than it: a cache
+      // shared with something that has moved on is not ours to interpret.
+      meta.schema !== CACHE_SCHEMA
     ) {
       await this.#driver.delete(key);
 
       return;
     }
 
-    return meta as CacheEntryMeta;
+    const stored = meta as StoredEntryMeta;
+
+    if (this.#invalidate?.(stored, key) === true) {
+      await this.#driver.delete(key);
+
+      return;
+    }
+
+    return stored;
   }
 }

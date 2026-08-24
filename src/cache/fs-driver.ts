@@ -24,11 +24,11 @@ import { writeFileAtomic } from '../core/atomic.js';
 import { CacheDriverBase } from './driver.js';
 import type {
   CacheDriver,
-  CacheEntryMeta,
   ChannelDayKey,
   FoundEntry,
   FoundMeta,
   FsCacheDriverOptions,
+  StoredEntryMeta,
   StoredProgramme,
 } from './types.js';
 
@@ -70,7 +70,7 @@ export abstract class FsCacheDriver<TStored = StoredProgramme>
    * What one entry holds — written atomically, here. An entry carries its own
    * meta, so a format has to have somewhere to put it.
    */
-  protected abstract entryData(programmes: TStored[], meta: CacheEntryMeta): string;
+  protected abstract entryData(programmes: TStored[], meta: StoredEntryMeta): string;
 
   /**
    * What one entry held: its programmes, and what it says about itself. The file
@@ -92,7 +92,7 @@ export abstract class FsCacheDriver<TStored = StoredProgramme>
    */
   protected abstract parseMeta(
     chunks: AsyncIterable<string>,
-  ): Promise<Partial<CacheEntryMeta> | undefined>;
+  ): Promise<Partial<StoredEntryMeta> | undefined>;
 
   /**
    * Reading options for `fs`: the encoding, and the signal when there is one.
@@ -264,7 +264,7 @@ export abstract class FsCacheDriver<TStored = StoredProgramme>
     }
   }
 
-  async write(key: ChannelDayKey, programmes: TStored[], meta: CacheEntryMeta): Promise<void> {
+  async write(key: ChannelDayKey, programmes: TStored[], meta: StoredEntryMeta): Promise<void> {
     const file = this.#entryFilePath(key);
     // One file, so an entry is either there with its meta or not there at all:
     // two writes left a window where it had already been written and could not

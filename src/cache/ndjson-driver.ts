@@ -9,7 +9,7 @@
 
 import type { XmltvProgramme } from '../xmltv/types.js';
 import { FsCacheDriver } from './fs-driver.js';
-import type { CacheEntryMeta, FoundEntry, StoredProgramme } from './types.js';
+import type { FoundEntry, StoredEntryMeta, StoredProgramme } from './types.js';
 
 export class FsNdjsonCacheDriver extends FsCacheDriver<string> {
   protected override get extension(): string {
@@ -29,7 +29,7 @@ export class FsNdjsonCacheDriver extends FsCacheDriver<string> {
    * newline belongs to the meta rather than to the join: a day with nothing on
    * is an entry of meta alone, and it still has to be a whole line to read.
    */
-  protected override entryData(lines: string[], meta: CacheEntryMeta): string {
+  protected override entryData(lines: string[], meta: StoredEntryMeta): string {
     return `${JSON.stringify(meta)}\n${lines.join('\n')}`;
   }
 
@@ -46,7 +46,7 @@ export class FsNdjsonCacheDriver extends FsCacheDriver<string> {
 
   protected override async parseMeta(
     chunks: AsyncIterable<string>,
-  ): Promise<Partial<CacheEntryMeta> | undefined> {
+  ): Promise<Partial<StoredEntryMeta> | undefined> {
     let head = '';
 
     for await (const chunk of chunks) {
@@ -64,9 +64,9 @@ export class FsNdjsonCacheDriver extends FsCacheDriver<string> {
   }
 
   /** One meta line as far as JSON goes; what it holds is judged above. */
-  #meta(line: string): Partial<CacheEntryMeta> | undefined {
+  #meta(line: string): Partial<StoredEntryMeta> | undefined {
     try {
-      return JSON.parse(line) as Partial<CacheEntryMeta>;
+      return JSON.parse(line) as Partial<StoredEntryMeta>;
     } catch {
       // Not a line of JSON, so not a meta.
     }

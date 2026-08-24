@@ -11,10 +11,36 @@ export interface ChannelDayKey {
 /** On-disk representation of cached programmes. */
 export type CacheFormat = 'ndjson' | 'xmltv';
 
+/** What a run needs to know about a cached entry to decide anything about it. */
 export interface CacheEntryMeta {
   /** ISO timestamp of when this entry was grabbed. */
   grabbedAt: string;
   programmeCount: number;
+}
+
+/**
+ * What an entry records about itself, which is that and two versions.
+ *
+ * A cache outlives the code that wrote it. It survives an upgrade, sits in a
+ * container image, gets copied between machines — so an entry has to be able to
+ * say what it is, rather than being read on the assumption that whatever wrote
+ * it agreed with whatever is reading it. Two fields, because there are two
+ * questions with different answers:
+ *
+ * - {@link schema} is the shape, and it is the one that decides. A mismatch
+ *   either way means an entry this code cannot read as it was meant, so it is
+ *   void and the day is grabbed again — which is all a cache ever has to do
+ *   about it, being by definition something that can be thrown away.
+ * - {@link writtenBy} is who wrote it, and decides nothing on its own. It is
+ *   what `getMeta` can tell you when you are looking at a cache and wondering,
+ *   and what an `invalidate` hook has to judge by when a release turns out to
+ *   have changed something the schema number does not describe.
+ */
+export interface StoredEntryMeta extends CacheEntryMeta {
+  /** Version of the stored shape — `CACHE_SCHEMA` as this code writes it. */
+  schema: number;
+  /** The package version that wrote this entry. */
+  writtenBy: string;
 }
 
 export interface CacheStore {
@@ -38,8 +64,7 @@ export interface CacheStore {
  * One programme as a driver that stores JSON keeps it: a plain object whose
  * dates are XMLTV strings rather than `Date`s, so neither the offset the source
  * wrote them in nor how precise it was is lost on the way through
- * `JSON.stringify`. Made and read back by
- * {@link ../records.js#storedProgramme | the record codec}.
+ * `JSON.stringify`. Made and read back by {@link CacheDriverBase}'s record pair.
  */
 export type StoredProgramme = Record<string, unknown>;
 
@@ -60,7 +85,7 @@ export type StoredProgramme = Record<string, unknown>;
  * one place the judgement is made the same way for every driver.
  */
 export interface FoundMeta {
-  meta: Partial<CacheEntryMeta> | undefined;
+  meta: Partial<StoredEntryMeta> | undefined;
 }
 
 /** An entry as a driver found it: what it says about itself, and its programmes. */
@@ -99,7 +124,7 @@ export interface CacheDriver<TStored = unknown> {
    */
   readMeta(key: ChannelDayKey): Promise<FoundMeta | undefined>;
   read(key: ChannelDayKey): Promise<FoundEntry<TStored> | undefined>;
-  write(key: ChannelDayKey, programmes: TStored[], meta: CacheEntryMeta): Promise<void>;
+  write(key: ChannelDayKey, programmes: TStored[], meta: StoredEntryMeta): Promise<void>;
   delete(key: ChannelDayKey): Promise<void>;
   /** Remove entries for days before `before` (`YYYY-MM-DD`). Returns removed count. */
   prune(options: { before: string }): Promise<number>;
@@ -154,4 +179,20 @@ export interface FsCacheDriverOptions {
 export interface CacheManagerOptions {
   /** Where the entries live. */
   driver: CacheDriver;
+  /**
+   * One more reason an entry is void, beyond the ones every cache has.
+   *
+   * The shape is already checked, and a {@link StoredEntryMeta.schema} this code
+   * does not write is already refused — that covers a stored form that changed.
+   * This is for everything else: a release whose grabbing changed rather than
+   * its storing, so entries {@link StoredEntryMeta.writtenBy | written by}
+   * anything before it are worth dropping; a site whose ids were renamed; a
+   * cache to be emptied gradually rather than at once.
+   *
+   * Returning `true` removes the entry, and the day then reads as never
+   * grabbed, so the next run fetches it. Called for every entry a run looks at,
+   * which is thousands of times — so it should decide from the meta it is given
+   * and nothing further.
+   */
+  invalidate?: (meta: StoredEntryMeta, key: ChannelDayKey) => boolean;
 }

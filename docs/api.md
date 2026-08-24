@@ -138,9 +138,10 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 ### `epg-tools/cache`
 
 `CacheManager`, the drivers `FsNdjsonCacheDriver` and `FsXmltvCacheDriver` with
-the abstract `FsCacheDriver` and `CacheDriverBase` they build on, `isStale`,
-`DEFAULT_STALENESS`, and the `CacheStore` / `CacheDriver` / `ChannelDayKey` /
-`CacheEntryMeta` / `StoredProgramme` / `StalenessPolicy` / `CacheFormat` types.
+the abstract `FsCacheDriver` and `CacheDriverBase` they build on, `CACHE_SCHEMA`,
+`isStale`, `DEFAULT_STALENESS`, and the `CacheStore` / `CacheDriver` /
+`ChannelDayKey` / `CacheEntryMeta` / `StoredEntryMeta` / `StoredProgramme` /
+`StalenessPolicy` / `CacheFormat` types.
 
 A cache is two pieces. A **driver** answers for one store — a directory of
 files, a database, a bucket — and holds no policy of its own. The
@@ -170,6 +171,36 @@ two overridable pairs, because they are two questions:
 |---|---|---|
 | `toRecord` / `fromRecord` | a plain object whose dates are XMLTV strings, so neither the offset the source wrote them in nor how precise it was is lost through `JSON.stringify` | keep fewer fields, or ones of your own |
 | `toStored` / `fromStored` | that record | say what the store actually holds — the ndjson driver makes it a line of JSON, the xmltv driver hands the programme through untouched, since a document already carries the offset and precision a record has to spell out |
+
+### What an entry says about itself
+
+Every entry records a `StoredEntryMeta`: `grabbedAt` and `programmeCount`, which
+are what a staleness check reads, plus two versions. A cache outlives the code
+that wrote it — it survives an upgrade, sits in an image, gets copied between
+machines — so an entry says what it is rather than being read on the assumption
+that whatever wrote it agreed with whatever is reading it.
+
+| field | is | decides |
+|---|---|---|
+| `schema` | the stored shape, `CACHE_SCHEMA` as this version writes it | everything. A mismatch **either way** — older or newer — voids the entry, and the day is grabbed again. Nothing migrates: a day of listings costs one request, while code to carry an old entry forward costs something forever. |
+| `writtenBy` | the package version that wrote it | nothing on its own. It is what `getMeta` can tell you when you are looking at a cache and wondering, and what `invalidate` judges by. |
+
+`invalidate(meta, key) => boolean` on `CacheManager` is the one more reason an
+entry can be void, for what the schema number does not describe — a release whose
+*grabbing* changed rather than its storing, a site whose ids were renamed, a
+cache to be emptied gradually. Return `true` and the entry goes, so the day reads
+as never grabbed:
+
+```ts
+new CacheManager({
+  driver: new FsNdjsonCacheDriver({ dir }),
+  invalidate: (meta) => meta.writtenBy < '0.4.0',
+});
+```
+
+It is asked about every entry a run looks at — thousands of times — so it should
+decide from the meta it is given and nothing further. An entry the shape check
+already refused never reaches it.
 
 `new FsNdjsonCacheDriver({ dir, signal? })` — the format is the driver, and the
 signal belongs to it rather than to each call, since a driver belongs to one

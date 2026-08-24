@@ -23,7 +23,7 @@ import {
 import type { SerializeOptions } from '../xmltv/main.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import { FsCacheDriver } from './fs-driver.js';
-import type { CacheEntryMeta, FoundEntry } from './types.js';
+import type { FoundEntry, StoredEntryMeta } from './types.js';
 
 const FORMATTING: SerializeOptions = { indent: 2 };
 
@@ -61,7 +61,7 @@ export class FsXmltvCacheDriver extends FsCacheDriver<XmltvProgramme> {
     return stored;
   }
 
-  protected override entryData(programmes: XmltvProgramme[], meta: CacheEntryMeta): string {
+  protected override entryData(programmes: XmltvProgramme[], meta: StoredEntryMeta): string {
     // The same pieces `writeXmltvStream` puts a whole guide together from, which
     // is what makes an entry a document the rest of the package — and anything
     // else pointed at it — can read. The header places the instruction: `root`
@@ -96,7 +96,7 @@ export class FsXmltvCacheDriver extends FsCacheDriver<XmltvProgramme> {
    * character back unchanged. The same trick as embedding JSON in a `<script>`
    * tag, where a literal `</script>` would end the element early.
    */
-  #encodeMeta(meta: CacheEntryMeta): string {
+  #encodeMeta(meta: StoredEntryMeta): string {
     return JSON.stringify(meta).replaceAll('>', '\\u003e');
   }
 
@@ -114,7 +114,7 @@ export class FsXmltvCacheDriver extends FsCacheDriver<XmltvProgramme> {
 
   protected override async parseMeta(
     chunks: AsyncIterable<string>,
-  ): Promise<Partial<CacheEntryMeta> | undefined> {
+  ): Promise<Partial<StoredEntryMeta> | undefined> {
     try {
       // The parser over the chunks, which is what it is for. The instruction
       // precedes every programme, so this reads a couple of events and stops —
@@ -148,9 +148,9 @@ export class FsXmltvCacheDriver extends FsCacheDriver<XmltvProgramme> {
   }
 
   /** What the instruction holds, as far as JSON goes. */
-  #meta(data: string): Partial<CacheEntryMeta> | undefined {
+  #meta(data: string): Partial<StoredEntryMeta> | undefined {
     try {
-      return JSON.parse(data) as Partial<CacheEntryMeta>;
+      return JSON.parse(data) as Partial<StoredEntryMeta>;
     } catch {
       // Not JSON, so not a meta.
     }

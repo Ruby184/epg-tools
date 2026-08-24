@@ -3,6 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  CACHE_SCHEMA,
   CacheDriverBase,
   CacheManager,
   DEFAULT_STALENESS,
@@ -18,6 +19,7 @@ import type {
   FoundMeta,
   FsCacheDriverOptions,
   StalenessPolicy,
+  StoredEntryMeta,
   StoredProgramme,
 } from '../src/cache/main.js';
 import { getXmltvOffset, getXmltvPrecision, parseXmltvString } from '../src/xmltv/main.js';
@@ -38,6 +40,11 @@ function ndjson(options: FsCacheDriverOptions): CacheManager {
 
 function xmltv(options: FsCacheDriverOptions): CacheManager {
   return cache(new FsXmltvCacheDriver(options));
+}
+
+/** What the manager stamps onto an entry written now, over what a test says. */
+function stamped(meta: CacheEntryMeta): StoredEntryMeta {
+  return { ...meta, schema: CACHE_SCHEMA, writtenBy: __PKG_VERSION__ };
 }
 
 function programme(overrides: Partial<XmltvProgramme> = {}): XmltvProgramme {
@@ -341,10 +348,9 @@ describe('a cache of ndjson files', () => {
 
     await store.write(key, [programme()], { grabbedAt: '2026-07-17T08:00:00.000Z' });
 
-    expect(await store.getMeta(key)).toEqual({
-      grabbedAt: '2026-07-17T08:00:00.000Z',
-      programmeCount: 1,
-    });
+    expect(await store.getMeta(key)).toEqual(
+      stamped({ grabbedAt: '2026-07-17T08:00:00.000Z', programmeCount: 1 }),
+    );
   });
 
   it('defaults grabbedAt to now when meta is omitted', async () => {
@@ -560,23 +566,23 @@ describe('a cache of xmltv files', () => {
     // one reader.
     expect(document).toContain('<tv date="20260717080000 +0000">');
     expect(document).toContain(
-      '<?epg-cache {"grabbedAt":"2026-07-17T08:00:00.000Z","programmeCount":2}?>',
+      `<?epg-cache {"grabbedAt":"2026-07-17T08:00:00.000Z","programmeCount":2,` +
+        `"schema":${CACHE_SCHEMA},"writtenBy":"${__PKG_VERSION__}"}?>`,
     );
-    expect(await store.getMeta(key)).toEqual({
-      grabbedAt: '2026-07-17T08:00:00.000Z',
-      programmeCount: 2,
-    });
+    expect(await store.getMeta(key)).toEqual(
+      stamped({ grabbedAt: '2026-07-17T08:00:00.000Z', programmeCount: 2 }),
+    );
   });
 
   it('escapes `>` in its meta so no field can truncate the instruction', async () => {
     const { parseXmltvString } = await import('../src/xmltv/main.js');
 
     // `?>` ends an instruction and XML has no escape for it, so the JSON has to
-    // carry the `>` in a form XML cannot see. Today's meta is two fields that
+    // carry the `>` in a form XML cannot see. Today's meta is four fields that
     // cannot hold one; the guard is for the first field that can. Reached
     // through `entryData` because `write` builds the meta itself.
     class Exposed extends FsXmltvCacheDriver {
-      data(meta: CacheEntryMeta): string {
+      data(meta: StoredEntryMeta): string {
         return this.entryData([programme()], meta);
       }
     }
@@ -584,8 +590,10 @@ describe('a cache of xmltv files', () => {
     const meta = {
       grabbedAt: '2026-07-17T08:00:00.000Z',
       programmeCount: 1,
+      schema: CACHE_SCHEMA,
+      writtenBy: __PKG_VERSION__,
       note: 'what?> now',
-    } as CacheEntryMeta;
+    } as StoredEntryMeta;
 
     const document = new Exposed({ dir }).data(meta);
 
@@ -654,10 +662,9 @@ describe('a cache of xmltv files', () => {
     expect(read![0]!.stop!.getTime()).toBe(Date.parse('2026-07-17T19:00:00.000Z'));
     expect(read![0]!.title[0]!.value).toBe('Evening News');
     expect(read![1]!.title[0]!.value).toBe('Late Show');
-    expect(await store.getMeta(key)).toEqual({
-      grabbedAt: '2026-07-17T08:00:00.000Z',
-      programmeCount: 2,
-    });
+    expect(await store.getMeta(key)).toEqual(
+      stamped({ grabbedAt: '2026-07-17T08:00:00.000Z', programmeCount: 2 }),
+    );
   });
 });
 
@@ -671,7 +678,7 @@ describe('CacheManager', () => {
    * exactly what it was given, so a test can look at it.
    */
   class MemoryCacheDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
-    readonly entries = new Map<string, { meta: CacheEntryMeta; programmes: StoredProgramme[] }>();
+    readonly entries = new Map<string, { meta: StoredEntryMeta; programmes: StoredProgramme[] }>();
     deletes: string[] = [];
     closed = 0;
 
@@ -680,7 +687,7 @@ describe('CacheManager', () => {
     }
 
     /** What the store holds for a key, for a test to read or to spoil. */
-    stored(key: ChannelDayKey): { meta: CacheEntryMeta; programmes: StoredProgramme[] } {
+    stored(key: ChannelDayKey): { meta: StoredEntryMeta; programmes: StoredProgramme[] } {
       return this.entries.get(this.#id(key))!;
     }
 
@@ -697,7 +704,7 @@ describe('CacheManager', () => {
     async write(
       key: ChannelDayKey,
       programmes: StoredProgramme[],
-      meta: CacheEntryMeta,
+      meta: StoredEntryMeta,
     ): Promise<void> {
       this.entries.set(this.#id(key), { meta, programmes });
     }
@@ -764,10 +771,9 @@ describe('CacheManager', () => {
 
     // The count is what a staleness check reads instead of the programmes, so it
     // has to be the programmes. `grabbedAt` is the caller's to say.
-    expect(driver.stored(key).meta).toEqual({
-      grabbedAt: '2026-07-17T08:00:00.000Z',
-      programmeCount: 2,
-    });
+    expect(driver.stored(key).meta).toEqual(
+      stamped({ grabbedAt: '2026-07-17T08:00:00.000Z', programmeCount: 2 }),
+    );
   });
 
   it('removes an entry that cannot answer for itself, and only that', async () => {
@@ -777,7 +783,7 @@ describe('CacheManager', () => {
     await store.write(key, [programme()]);
     // Whatever was last written there: an older version's meta, a half-finished
     // write, somebody with an editor.
-    driver.stored(key).meta = { grabbedAt: '2026-07-17T08:00:00.000Z' } as CacheEntryMeta;
+    driver.stored(key).meta = { grabbedAt: '2026-07-17T08:00:00.000Z' } as StoredEntryMeta;
 
     expect(await store.getMeta(key)).toBeUndefined();
     expect(driver.deletes).toEqual(['example.com|one|2026-07-17']);
@@ -794,10 +800,95 @@ describe('CacheManager', () => {
     const store = cache(driver);
 
     await store.write(key, [programme()]);
-    driver.stored(key).meta = undefined as unknown as CacheEntryMeta;
+    driver.stored(key).meta = undefined as unknown as StoredEntryMeta;
 
     expect(await store.read(key)).toBeUndefined();
     expect(driver.deletes).toEqual(['example.com|one|2026-07-17']);
+  });
+
+  it('stamps what the entry is and who wrote it', async () => {
+    const driver = new MemoryCacheDriver();
+
+    await cache(driver).write(key, [programme()]);
+
+    // Neither is the caller's to say: they are facts about the writing, and what
+    // makes reading the entry back later a decision rather than a guess.
+    expect(driver.stored(key).meta).toMatchObject({
+      schema: CACHE_SCHEMA,
+      writtenBy: __PKG_VERSION__,
+    });
+  });
+
+  it('voids an entry whose schema is not the one this code writes', async () => {
+    const driver = new MemoryCacheDriver();
+    const store = cache(driver);
+
+    for (const schema of [CACHE_SCHEMA - 1, CACHE_SCHEMA + 1, undefined]) {
+      await store.write(key, [programme()]);
+      driver.stored(key).meta.schema = schema as number;
+
+      // Older or newer makes no difference: a shape this code does not write is
+      // one it cannot read as it was meant, and a day of listings costs one
+      // request to grab again.
+      expect(await store.getMeta(key), String(schema)).toBeUndefined();
+      expect(driver.entries.has('example.com|one|2026-07-17')).toBe(false);
+    }
+  });
+
+  it('voids an entry that does not say who wrote it', async () => {
+    const driver = new MemoryCacheDriver();
+    const store = cache(driver);
+
+    await store.write(key, [programme()]);
+    driver.stored(key).meta.writtenBy = undefined as unknown as string;
+
+    expect(await store.getMeta(key)).toBeUndefined();
+  });
+
+  it('asks invalidate about an entry it would otherwise have kept', async () => {
+    const driver = new MemoryCacheDriver();
+    const asked: Array<[string, string]> = [];
+    const store = new CacheManager({
+      driver,
+      // What the schema number cannot express: a release whose grabbing changed
+      // rather than its storing, so anything written before it is worth dropping.
+      invalidate: (meta, key) => {
+        asked.push([meta.writtenBy, key.day]);
+
+        return meta.writtenBy !== '9.9.9';
+      },
+    });
+
+    await store.write(key, [programme()]);
+
+    expect(await store.getMeta(key)).toBeUndefined();
+    expect(await store.read(key)).toBeUndefined();
+    expect(asked).toEqual([[__PKG_VERSION__, '2026-07-17']]);
+    // Removed, so the day reads as never grabbed and the next run fetches it —
+    // and nothing asks again about an entry that is no longer there.
+    expect(driver.deletes).toEqual(['example.com|one|2026-07-17']);
+  });
+
+  it('keeps an entry invalidate approves of, and never sees a broken one', async () => {
+    const driver = new MemoryCacheDriver();
+    const seen: number[] = [];
+    const store = new CacheManager({
+      driver,
+      invalidate: (meta) => {
+        seen.push(meta.schema);
+
+        return false;
+      },
+    });
+
+    await store.write(key, [programme()]);
+    expect(await store.getMeta(key)).toMatchObject({ programmeCount: 1 });
+
+    // An entry the shape check already refused is not one a hook is asked
+    // about: there is nothing there for it to judge.
+    driver.stored(key).meta.schema = CACHE_SCHEMA + 1;
+    expect(await store.getMeta(key)).toBeUndefined();
+    expect(seen).toEqual([CACHE_SCHEMA]);
   });
 
   it('closes the driver it was given, and manages without one that cannot', async () => {
