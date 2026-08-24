@@ -7,10 +7,20 @@
  * memory.
  *
  * It keeps records, the ordinary stored form, rather than the programmes it was
- * handed. Not to save anything — nothing here is serialized — but so that a test
- * against this driver is a test of the same round trip a file or a database
- * makes, dates and all. Holding the caller's own objects would let a programme
- * whose dates cannot survive storage pass in memory and fail on disk.
+ * handed — and unlike the xmltv driver, which overrides that pair away, this one
+ * has a reason to pay for it. Nothing here is serialized, so nothing needs
+ * preserving: what the conversion buys is a *copy*. A driver that stored the
+ * caller's own objects would hand the same ones back to every reader, so a
+ * `transform` that edits a programme in place, or anything holding what `read`
+ * returned, would be editing the cache — and only ever under this driver. Every
+ * other one gives back something parsed out of a file or a row, which is a copy
+ * by construction; going through records is how this one says the same.
+ *
+ * It is not a test of whether a programme would survive real storage, though.
+ * The record pair converts the date fields it knows, and no `JSON.stringify`
+ * happens here — so a `Date` hiding somewhere the pair does not look survives as
+ * a `Date`, where a file would have made it an ISO string. For that, test
+ * against a driver that serializes.
  *
  * Note what per-process means for `build`: its grab and its merge each ask the
  * config for a cache, so a driver made fresh by each of them remembers nothing

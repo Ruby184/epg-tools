@@ -918,11 +918,34 @@ describe('MemoryCacheDriver', () => {
     await store.write(key, [original!]);
     const [back] = (await store.read(key))!;
 
-    // Records rather than the caller's own objects, so a programme that would
-    // not survive a file does not quietly pass here either.
+    // Records rather than `Date`s, and the two things a `Date` carries beside
+    // its instant come back with it.
     expect(getXmltvOffset(back!.start)).toBe(120);
     expect(getXmltvPrecision(back!.date!)).toBe(4);
     expect(await store.getMeta(key)).toMatchObject({ programmeCount: 1 });
+  });
+
+  it('hands out a copy, so what a reader does cannot reach the cache', async () => {
+    const store = cache(new MemoryCacheDriver());
+    const mine = programme();
+
+    await store.write(key, [mine]);
+
+    const [first] = (await store.read(key))!;
+    const [second] = (await store.read(key))!;
+
+    // Not the object that was written, and not the same object twice: every
+    // other driver gives back something parsed out of a file or a row, and this
+    // one says the same by going through records. So a `transform` that edits a
+    // programme in place — or anything holding what a read returned — is not
+    // quietly editing the cache.
+    expect(first).not.toBe(mine);
+    expect(first).not.toBe(second);
+    expect(first).toEqual(mine);
+
+    first!.title = [{ value: 'Rewritten' }];
+
+    expect((await store.read(key))![0]!.title[0]!.value).toBe('Evening News');
   });
 
   it('deletes, prunes by day, and can be emptied outright', async () => {

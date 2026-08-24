@@ -214,9 +214,11 @@ already refused never reaches it.
 ### Drivers that need no store
 
 Two drivers need no store at all. **`MemoryCacheDriver`** keeps entries for the
-life of the process — for a test, or a run with nowhere to write — and holds
-records rather than your own objects, so a programme that would not survive a
-file does not quietly pass in memory either. **`NoCacheDriver`** keeps nothing,
+life of the process — for a test, or a run with nowhere to write. It converts to
+records like any JSON-shaped driver, not to preserve anything (nothing here is
+serialized) but so that `read` hands back a copy: every other driver returns
+something parsed out of a file or a row, and a driver holding your own objects
+would let a `transform` edit the cache in place. **`NoCacheDriver`** keeps nothing,
 so every day reads as never grabbed; it is for `epg grab`, whose summary is the
 point, and not for `build`, which merges the guide *from* the cache and would
 write an empty one.
