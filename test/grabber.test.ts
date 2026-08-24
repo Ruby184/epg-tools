@@ -32,8 +32,26 @@ class MemoryCache implements CacheStore {
     return this.entries.get(this.keyOf(key));
   }
 
+  /** What each batch was asked for, so a test can say how many there were. */
+  batches: ChannelDayKey[][] = [];
+
   async getMeta(key: ChannelDayKey): Promise<CacheEntryMeta | undefined> {
     return this.entries.get(this.keyOf(key))?.meta;
+  }
+
+  async getMetas(keys: readonly ChannelDayKey[]): Promise<Array<CacheEntryMeta | undefined>> {
+    this.batches.push([...keys]);
+
+    // One after another, as a real store does: a batch is one piece of work,
+    // and answering it with a `Promise.all` would multiply whatever bound the
+    // caller had chosen by the size of the batch.
+    const metas: Array<CacheEntryMeta | undefined> = [];
+
+    for (const key of keys) {
+      metas.push(await this.getMeta(key));
+    }
+
+    return metas;
   }
 
   async read(key: ChannelDayKey): Promise<XmltvProgramme[] | undefined> {
@@ -57,6 +75,8 @@ class MemoryCache implements CacheStore {
   async delete(key: ChannelDayKey): Promise<void> {
     this.entries.delete(this.keyOf(key));
   }
+
+  async close(): Promise<void> {}
 
   async prune({ before }: { before: string }): Promise<number> {
     let removed = 0;
@@ -684,6 +704,49 @@ describe('grab', () => {
     expect(summary.fetched).toBe(0);
   });
 
+  it("asks the cache about a channel's whole window at once", async () => {
+    const cache = new MemoryCache();
+    const config = makeConfig({ days: 3, channels: [channel('one'), channel('two')] });
+
+    await grab([config], { cache, now: NOW });
+
+    // One question per channel rather than one per channel-day: the answer for a
+    // single day is worth almost nothing on its own, and a store that can settle
+    // a window in one round trip only gets to if it is asked that way.
+    expect(cache.batches.map((batch) => batch.map((key) => `${key.channelId} ${key.day}`))).toEqual(
+      [
+        [`one ${TODAY}`, `one ${TOMORROW}`, `one ${DAY_AFTER}`],
+        [`two ${TODAY}`, `two ${TOMORROW}`, `two ${DAY_AFTER}`],
+      ],
+    );
+  });
+
+  it('still fetches only the days a batched answer says are stale', async () => {
+    const cache = new MemoryCache();
+    const fetched: string[] = [];
+    const config = makeConfig({
+      days: 3,
+      async request({ day }) {
+        fetched.push(day);
+        return {};
+      },
+    });
+
+    // Fresh in the middle of the window, and inside neither the always-refetch
+    // window nor the age limit.
+    cache.seed(
+      { site: 'example.com', channelId: 'one.example', day: TOMORROW },
+      { grabbedAt: NOW.toISOString(), programmeCount: 2 },
+      [programme(`${TOMORROW}T06:00:00.000Z`)],
+    );
+
+    const summary = await grab([config], { cache, now: NOW });
+
+    expect(fetched).toEqual([TODAY, DAY_AFTER]);
+    expect(summary.fromCache).toBe(1);
+    expect(summary.fetched).toBe(2);
+  });
+
   it('bounds cache work and parsing at localConcurrency, across sites', async () => {
     // A cache whose every operation takes a turn of the event loop, so the
     // overlap is observable rather than instantaneous.
@@ -717,8 +780,8 @@ describe('grab', () => {
       }),
     );
 
-    // 2 sites × 3 channels × 4 days = 24 sweep reads and 24 writes, all of
-    // which the old unbounded Promise.all would have started at once.
+    // 2 sites × 3 channels × 4 days: six sweeps of four days and 24 writes, all
+    // of which the old unbounded Promise.all would have started at once.
     const summary = await grab(sites, { cache, now: NOW, localConcurrency: 3 });
 
     expect(summary.fetched).toBe(24);

@@ -59,6 +59,21 @@ export interface StoredEntryMeta extends CacheEntryMeta {
 export interface CacheStore {
   /** Metadata for an entry, or `undefined` when not cached. */
   getMeta(key: ChannelDayKey): Promise<CacheEntryMeta | undefined>;
+  /**
+   * The same for several keys at once, in the order they were asked for.
+   *
+   * What a grab asks a whole channel's window with, so a store that can settle
+   * one in a single question does. Whether it can is the *driver's* business —
+   * {@link CacheDriver.readMetas} is the optional half of this — and a store
+   * answers either way, by asking for each in turn if that is all it can do.
+   *
+   * One batch is one piece of work, and an implementation must keep it that
+   * way: the caller has already decided how many of these to have in flight,
+   * and a store that answers a batch of fourteen by starting fourteen reads at
+   * once multiplies that bound by fourteen — which for a cache of files is the
+   * descriptor storm the bound exists to prevent.
+   */
+  getMetas(keys: readonly ChannelDayKey[]): Promise<Array<CacheEntryMeta | undefined>>;
   /** Cached programmes, or `undefined` when not cached. */
   read(key: ChannelDayKey): Promise<XmltvProgramme[] | undefined>;
   write(
@@ -69,8 +84,14 @@ export interface CacheStore {
   delete(key: ChannelDayKey): Promise<void>;
   /** Remove entries for days before `before` (`YYYY-MM-DD`). Returns removed count. */
   prune(options: { before: string }): Promise<number>;
-  /** Let go of whatever the store holds open. Nothing is asked of it after. */
-  close?(): Promise<void>;
+  /**
+   * Let go of whatever the store holds open. Nothing is asked of it after.
+   *
+   * Required here, unlike on a driver, because a run closes the cache it opened
+   * without knowing what is underneath — and a store with nothing to release
+   * says so in one line rather than making every caller ask whether it can.
+   */
+  close(): Promise<void>;
 }
 
 /**
@@ -136,6 +157,21 @@ export interface CacheDriver<TStored = unknown> {
    * reading what it does not need.
    */
   readMeta(key: ChannelDayKey): Promise<FoundMeta | undefined>;
+  /**
+   * The same for several keys at once, in the order they were asked for.
+   *
+   * A run asks about every channel-day of its window before it fetches
+   * anything, so this is the one thing a cache is asked thousands of times in a
+   * row. For a store where each answer is a round trip — a database, anything
+   * across a network — asking once for a channel's whole window instead of
+   * fourteen times is the difference between a fast sweep and a slow one.
+   *
+   * {@link CacheDriverBase} implements it by asking {@link readMeta} for each
+   * key in turn, so a driver only overrides it if its store can do better.
+   * Optional here, so a driver written from scratch need not have it: the
+   * manager asks one at a time when it is missing.
+   */
+  readMetas?(keys: readonly ChannelDayKey[]): Promise<Array<FoundMeta | undefined>>;
   read(key: ChannelDayKey): Promise<FoundEntry<TStored> | undefined>;
   write(key: ChannelDayKey, programmes: TStored[], meta: StoredEntryMeta): Promise<void>;
   delete(key: ChannelDayKey): Promise<void>;

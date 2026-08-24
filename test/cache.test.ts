@@ -677,9 +677,9 @@ describe('CacheManager', () => {
    * A driver of the ordinary kind: it keeps JSON somewhere and says nothing
    * about dates, which is what makes it the one to test the manager with — and
    * what a driver written outside this package looks like. What it holds is
-   * exactly what it was given, so a test can look at it.
+   * exactly what it was given, so a test can read it, or spoil it.
    */
-  class MemoryCacheDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
+  class RecordingDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
     readonly entries = new Map<string, { meta: StoredEntryMeta; programmes: StoredProgramme[] }>();
     deletes: string[] = [];
     closed = 0;
@@ -726,7 +726,7 @@ describe('CacheManager', () => {
   }
 
   it('gives an inherited driver dates it can store, and Dates back', async () => {
-    const driver = new MemoryCacheDriver();
+    const driver = new RecordingDriver();
     const store = cache(driver);
     const [original] = parseXmltvString(
       '<?xml version="1.0"?><tv><programme start="20260807203000 +0200" channel="one.tv">' +
@@ -755,7 +755,7 @@ describe('CacheManager', () => {
   it('leaves the caller their own programmes, unconverted', async () => {
     const mine = programme({ previouslyShown: { start: new Date('2019-05-05T10:00:00.000Z') } });
 
-    await cache(new MemoryCacheDriver()).write(key, [mine]);
+    await cache(new RecordingDriver()).write(key, [mine]);
 
     // A record is a copy: a caller that goes on using its programmes after
     // caching them must not find their dates turned into strings underneath.
@@ -764,7 +764,7 @@ describe('CacheManager', () => {
   });
 
   it('counts the programmes itself rather than believing the caller', async () => {
-    const driver = new MemoryCacheDriver();
+    const driver = new RecordingDriver();
 
     await cache(driver).write(key, [programme(), programme()], {
       grabbedAt: '2026-07-17T08:00:00.000Z',
@@ -779,7 +779,7 @@ describe('CacheManager', () => {
   });
 
   it('removes an entry that cannot answer for itself, and only that', async () => {
-    const driver = new MemoryCacheDriver();
+    const driver = new RecordingDriver();
     const store = cache(driver);
 
     await store.write(key, [programme()]);
@@ -798,7 +798,7 @@ describe('CacheManager', () => {
   });
 
   it('will not serve an entry whose meta it would not trust', async () => {
-    const driver = new MemoryCacheDriver();
+    const driver = new RecordingDriver();
     const store = cache(driver);
 
     await store.write(key, [programme()]);
@@ -809,7 +809,7 @@ describe('CacheManager', () => {
   });
 
   it('stamps what the entry is and who wrote it', async () => {
-    const driver = new MemoryCacheDriver();
+    const driver = new RecordingDriver();
 
     await cache(driver).write(key, [programme()]);
 
@@ -822,7 +822,7 @@ describe('CacheManager', () => {
   });
 
   it('voids an entry whose schema is not the one this code writes', async () => {
-    const driver = new MemoryCacheDriver();
+    const driver = new RecordingDriver();
     const store = cache(driver);
 
     for (const schema of [CACHE_SCHEMA - 1, CACHE_SCHEMA + 1, undefined]) {
@@ -838,7 +838,7 @@ describe('CacheManager', () => {
   });
 
   it('voids an entry that does not say who wrote it', async () => {
-    const driver = new MemoryCacheDriver();
+    const driver = new RecordingDriver();
     const store = cache(driver);
 
     await store.write(key, [programme()]);
@@ -848,7 +848,7 @@ describe('CacheManager', () => {
   });
 
   it('asks invalidate about an entry it would otherwise have kept', async () => {
-    const driver = new MemoryCacheDriver();
+    const driver = new RecordingDriver();
     const asked: Array<[string, string]> = [];
     const store = new CacheManager({
       driver,
@@ -872,7 +872,7 @@ describe('CacheManager', () => {
   });
 
   it('keeps an entry invalidate approves of, and never sees a broken one', async () => {
-    const driver = new MemoryCacheDriver();
+    const driver = new RecordingDriver();
     const seen: number[] = [];
     const store = new CacheManager({
       driver,
@@ -893,8 +893,84 @@ describe('CacheManager', () => {
     expect(seen).toEqual([CACHE_SCHEMA]);
   });
 
+  it('asks a driver for a whole batch at once when it can take one', async () => {
+    class BatchingDriver extends RecordingDriver {
+      batches: number[] = [];
+
+      async readMetas(keys: readonly ChannelDayKey[]): Promise<Array<FoundMeta | undefined>> {
+        this.batches.push(keys.length);
+
+        // One question of the store, which is the whole point of the method.
+        return keys
+          .map((one) => this.entries.get(`${one.site}|${one.channelId}|${one.day}`))
+          .map((entry) => entry && { meta: entry.meta });
+      }
+    }
+
+    const driver = new BatchingDriver();
+    const store = cache(driver);
+    const days = ['2026-07-17', '2026-07-18', '2026-07-19'];
+
+    await store.write({ ...key, day: days[0]! }, [programme()]);
+    await store.write({ ...key, day: days[2]! }, [programme(), programme()]);
+
+    const metas = await store.getMetas(days.map((day) => ({ ...key, day })));
+
+    // In the order they were asked for, with a gap where the day was never
+    // grabbed — a store answers in whatever order suits it.
+    expect(metas.map((meta) => meta?.programmeCount)).toEqual([1, undefined, 2]);
+    expect(driver.batches).toEqual([3]);
+  });
+
+  it('asks a driver without one for each key in turn, and only in turn', async () => {
+    const driver = new RecordingDriver();
+    const store = cache(driver);
+    const asked: string[] = [];
+    let inFlight = 0;
+    let most = 0;
+
+    driver.readMeta = async (one: ChannelDayKey): Promise<FoundMeta | undefined> => {
+      inFlight++;
+      most = Math.max(most, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight--;
+      asked.push(one.day);
+
+      return { meta: stamped({ grabbedAt: '2026-07-17T08:00:00.000Z', programmeCount: 1 }) };
+    };
+
+    await store.getMetas(
+      ['2026-07-17', '2026-07-18', '2026-07-19'].map((day) => ({ ...key, day })),
+    );
+
+    // One at a time: the caller has already decided how many of these to have
+    // in flight, and a batch that fanned out would multiply that by its size —
+    // for a cache of files, the descriptor storm the bound is there to prevent.
+    expect(asked).toEqual(['2026-07-17', '2026-07-18', '2026-07-19']);
+    expect(most).toBe(1);
+  });
+
+  it('judges every entry of a batch as it judges one on its own', async () => {
+    const driver = new RecordingDriver();
+    const store = cache(driver);
+    const days = ['2026-07-17', '2026-07-18'];
+
+    for (const day of days) {
+      await store.write({ ...key, day }, [programme()]);
+    }
+
+    // A shape this code does not write: void, and removed, which is what makes
+    // the day read as never grabbed.
+    driver.stored({ ...key, day: days[1]! }).meta.schema = CACHE_SCHEMA + 1;
+
+    const metas = await store.getMetas(days.map((day) => ({ ...key, day })));
+
+    expect(metas.map((meta) => meta?.programmeCount)).toEqual([1, undefined]);
+    expect(driver.deletes).toEqual([`example.com|one|${days[1]!}`]);
+  });
+
   it('closes the driver it was given, and manages without one that cannot', async () => {
-    const driver = new MemoryCacheDriver();
+    const driver = new RecordingDriver();
 
     await cache(driver).close();
     expect(driver.closed).toBe(1);
@@ -1104,6 +1180,40 @@ describe.skipIf(sqlite === undefined)('SqliteCacheDriver', () => {
     // the day worth grabbing again.
     expect(await store.getMeta(key)).toMatchObject({ programmeCount: 2 });
     expect(await store.read(key)).toEqual([]);
+  });
+
+  it('answers a batch of metas in one statement, in the order asked', async () => {
+    await using store = cache(new SqliteCacheDriver({ dir }));
+    const days = ['2026-07-15', '2026-07-16', '2026-07-17'];
+
+    await store.write({ ...key, day: days[0]! }, [programme()]);
+    await store.write({ ...key, day: days[2]! }, [programme(), programme()]);
+    // Another channel's day, which the batch must not pick up for this one.
+    await store.write({ ...key, channelId: 'two', day: days[1]! }, [programme()]);
+
+    const metas = await store.getMetas(days.map((day) => ({ ...key, day })));
+
+    expect(metas.map((meta) => meta?.programmeCount)).toEqual([1, undefined, 2]);
+
+    // A batch of keys nothing has ever been written for, and one of none.
+    expect(
+      await store.getMetas([
+        { ...key, day: '2026-01-01' },
+        { ...key, channelId: 'three', day: days[0]! },
+      ]),
+    ).toEqual([undefined, undefined]);
+    expect(await store.getMetas([])).toEqual([]);
+  });
+
+  it('refuses a batch once the run is cancelled', async () => {
+    const controller = new AbortController();
+    const store = cache(new SqliteCacheDriver({ dir, signal: controller.signal }));
+
+    await store.write(key, [programme()]);
+    controller.abort(new Error('cancelled'));
+
+    await expect(store.getMetas([key])).rejects.toThrow('cancelled');
+    await store.close();
   });
 
   it('refuses what it is asked once the run is cancelled', async () => {

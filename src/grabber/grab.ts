@@ -380,25 +380,42 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // grid of them at once would be a file descriptor storm — and a fresh one
     // is accounted for here, exactly once, however the requests are grouped
     // afterwards.
+    //
+    // A channel's whole window is one piece of local work rather than one per
+    // day, because the answer for a day is worth almost nothing on its own: a
+    // store that can settle a window in one question — a database, or anything
+    // across a network — then does, and one that cannot is asked day by day
+    // inside the same slot.
+    //
+    // Which keeps the descriptors where they were, since the store asks in turn
+    // rather than all at once: `localConcurrency` slots, one open file each. It
+    // does change what a slot holds. A site with fewer channels than the bound
+    // now fills fewer of them and reads its window in sequence — 14 reads of
+    // roughly 0.1ms rather than 14 at a time — which is worth a millisecond and
+    // change per channel against thousands of round trips saved for a store
+    // that has to make them.
     const collectStale = async (): Promise<Pair[]> => {
       const checked = await Promise.all(
-        channels.flatMap((channel) =>
-          window.map((day) =>
-            enqueue(localWork, async (): Promise<Pair | undefined> => {
-              const meta = await cache.getMeta({ site, channelId: channel.xmltvId, day });
+        channels.map((channel) =>
+          enqueue(localWork, async (): Promise<Pair[]> => {
+            const keys = window.map((day) => ({ site, channelId: channel.xmltvId, day }));
+            const metas = await cache.getMetas(keys);
 
-              if (isStale(day, meta, policy, now)) {
-                return { channel, day };
+            return window.flatMap((day, index) => {
+              if (isStale(day, metas[index], policy, now)) {
+                return [{ channel, day }];
               }
 
               fromCache++;
               log(`[${site}] ${channel.xmltvId} ${day}: fresh in cache, skipping`);
-            }),
-          ),
+
+              return [];
+            });
+          }),
         ),
       );
 
-      return checked.filter((pair): pair is Pair => pair !== undefined);
+      return checked.flat();
     };
 
     // Cut the stale channel-days into requests: the window into runs of at most

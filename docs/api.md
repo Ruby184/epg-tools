@@ -166,13 +166,24 @@ const cache = new CacheManager({ driver: new FsNdjsonCacheDriver({ dir }) });
 ```
 
 A driver is a small thing to write: `readMeta`, `read`, `write`, `delete`,
-`prune`, `toStored` / `fromStored`, and `close` if it holds something open. It
-reads and writes programmes in whatever form it keeps them — `TStored`, which
-only it knows about — and the manager is what calls `toStored` / `fromStored`, at
-the two moments a programme crosses into the store and back, so no driver has to
-remember to. `read` and `readMeta` return `undefined` when there is no entry, and
-`{ meta }` — possibly an undefined meta — when there is one that says nothing
-readable; the manager tells those apart and only removes the second.
+`prune`, `toStored` / `fromStored`, and — if it has them to offer — `readMetas`
+and `close`. It reads and writes programmes in whatever form it keeps them —
+`TStored`, which only it knows about — and the manager is what calls `toStored` /
+`fromStored`, at the two moments a programme crosses into the store and back, so
+no driver has to remember to. `read` and `readMeta` return `undefined` when there
+is no entry, and `{ meta }` — possibly an undefined meta — when there is one that
+says nothing readable; the manager tells those apart and only removes the second.
+
+`readMetas(keys)` is the optional one worth knowing about. A grab asks about
+every channel-day of its window before fetching anything, a channel's window at
+a time, so a store that can settle fourteen days in one question says so here —
+`SqliteCacheDriver` does, in one statement, and a 500-channel fortnight then
+sweeps in 65ms rather than 115ms. A driver without it is asked one key at a time
+by the manager, which is what `CacheStore.getMetas` promises whatever is
+underneath: **one batch is one piece of work**, so an implementation must not
+answer fourteen keys by starting fourteen reads at once — the caller has already
+decided how many of these to have in flight, and for a cache of files that bound
+is what keeps the descriptors down.
 
 Start from **`CacheDriverBase`** and the storing is already answered. It offers
 two overridable pairs, because they are two questions:

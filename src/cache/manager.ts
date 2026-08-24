@@ -29,6 +29,7 @@ import type {
   CacheManagerOptions,
   CacheStore,
   ChannelDayKey,
+  FoundMeta,
   StoredEntryMeta,
 } from './types.js';
 
@@ -65,6 +66,42 @@ export class CacheManager implements CacheStore, AsyncDisposable {
     const found = await this.#driver.readMeta(key);
 
     return found === undefined ? undefined : this.#verified(key, found.meta);
+  }
+
+  /**
+   * The metas of several keys, in the order they were asked for.
+   *
+   * What a grab uses to settle a whole channel's window at once. Whether that
+   * is one question or many is the driver's business: a store that can answer a
+   * batch says so with `readMetas`, and one that cannot is asked for each in
+   * turn — here rather than in a driver, so no driver has to write the loop.
+   *
+   * One after another, not all at once: a driver reading files has a limit on
+   * how many it may have open, and the caller has already decided how many of
+   * these calls to run in parallel.
+   */
+  async getMetas(keys: readonly ChannelDayKey[]): Promise<Array<StoredEntryMeta | undefined>> {
+    const driver = this.#driver;
+    const found: Array<FoundMeta | undefined> = [];
+
+    if (driver.readMetas !== undefined) {
+      found.push(...(await driver.readMetas(keys)));
+    } else {
+      for (const key of keys) {
+        found.push(await driver.readMeta(key));
+      }
+    }
+
+    // Judged the same way one at a time is, which includes removing an entry
+    // that cannot answer for itself — so a batch is a shortcut in how the store
+    // is asked, and in nothing else.
+    return Promise.all(
+      keys.map(async (key, index) => {
+        const entry = found[index];
+
+        return entry === undefined ? undefined : this.#verified(key, entry.meta);
+      }),
+    );
   }
 
   async read(key: ChannelDayKey): Promise<XmltvProgramme[] | undefined> {

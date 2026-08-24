@@ -43,6 +43,9 @@ function createFakeCache(entries: Record<string, XmltvProgramme[]> = {}): CacheS
         ? { grabbedAt: '2026-01-15T00:00:00.000Z', programmeCount: programmes.length }
         : undefined;
     },
+    async getMetas(keys) {
+      return Promise.all(keys.map((key) => this.getMeta(key)));
+    },
     async read(key) {
       return map.get(keyOf(key));
     },
@@ -55,6 +58,7 @@ function createFakeCache(entries: Record<string, XmltvProgramme[]> = {}): CacheS
     async prune() {
       return 0;
     },
+    async close() {},
   };
 }
 
