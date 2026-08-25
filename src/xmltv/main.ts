@@ -18,8 +18,10 @@ export type {
   WithXmltvPrecision,
   XmltvDate,
   XmltvDateOptions,
+  XmltvTimezoneOffset,
   XmltvTimezoneOffsets,
 } from './date.js';
+export { xmltvZone, xmltvZoneOffset, zonedXmltvDate, setXmltvZone } from './zone.js';
 export {
   serializeChannel,
   serializeProgramme,

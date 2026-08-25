@@ -412,6 +412,56 @@ A named zone other than `GMT`/`UTC`/`UT`/`Z` needs a `timezones` mapping,
 either here or in the [parse options](#parse-options) — an unmapped one throws
 rather than being silently read as UTC.
 
+### Named zones
+
+Sources publish wall-clock times: `2026-07-17 20:00` means eight in the evening
+where the broadcaster is, and the offset that turns those digits into an instant
+is the one thing the string does not say. `new Date('2026-07-17T20:00')` reads
+them in *this machine's* zone — which is the bug worth naming, because a grabber
+that works on your laptop shifts every programme by an hour or two in a container
+set to UTC, and by a different amount either side of the night the clocks change.
+
+The zone database is already in the runtime, so this costs an import and nothing
+else:
+
+| function | what it does |
+|---|---|
+| `zonedXmltvDate(local, timeZone)` | A wall clock in an IANA zone as a `Date` that knows its offset. Takes the XMLTV digit form or the ISO-ish one, truncated anywhere from the year down; refuses one that already carries an offset. |
+| `xmltvZone(timeZone)` | What to put in a `timezones` map for an abbreviation that names a place rather than an offset. |
+| `setXmltvZone(date, timeZone)` | Leave an instant alone and say which zone to read it in — for a source that gives epoch or UTC times but should still read locally. |
+| `xmltvZoneOffset(timeZone, at?)` | The zone's offset in minutes at an instant, `120` for `+0200`. |
+
+```ts
+import { zonedXmltvDate, xmltvZone, setXmltvZone, parseXmltvDate } from 'epg-tools/xmltv';
+
+zonedXmltvDate('2026-07-17 20:00', 'Europe/Bratislava'); // 18:00Z, written +0200
+zonedXmltvDate('20261225183000', 'Europe/Bratislava'); // 17:30Z, written +0100
+
+// A source that stamps every datetime `CET` means a place, not an offset: the
+// same three letters are +0200 in July and +0100 in December.
+parseXmltvDate('20260717200000 CET', { CET: xmltvZone('Europe/Bratislava') });
+
+// A source that gives an instant, where the guide should still read locally.
+setXmltvZone(new Date(epochSeconds * 1000), 'Europe/Bratislava');
+```
+
+The two nights a year that are not like the others:
+
+- **The clocks go back**, so an hour comes round twice. `02:30` is taken as the
+  first of them — a guide is read forwards, and a programme that night is the one
+  before the change.
+- **The clocks go forward**, so an hour never happens. `zonedXmltvDate` moves
+  such a time past the gap, `02:30` becoming `03:30`, which keeps the night in
+  order and every gap between programmes the length the source gave it. Through
+  `parseXmltvDate` the digits are kept as they came and the offset from before
+  the change is used instead — a parser cannot move the clock it was handed —
+  so `20260329023000 CET` and `202603290330 +0200` are the same instant written
+  two ways, and a guide built from either merges the same.
+
+Offsets are remembered a day at a time, so asking the runtime is rare: a
+conversion costs about 2–3µs, against 23µs when every one of them was a fresh
+`Intl` lookup.
+
 ---
 
 [← README](../README.md) · [Site configuration](./site-config.md) · [Configuration & CLI](./configuration.md) · [XMLTV grabber](./tv-grab.md) · [Programmatic API](./api.md)

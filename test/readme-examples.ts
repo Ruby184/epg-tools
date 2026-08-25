@@ -29,6 +29,9 @@ import { envReader } from '../src/core/answers.js';
 import {
   parseXmltvFile,
   parseXmltvString,
+  setXmltvZone,
+  xmltvZone,
+  zonedXmltvDate,
   writeXmltvStream,
   formatXmltvDate,
   parseXmltvDate,
@@ -518,3 +521,22 @@ export const roundTripped = (): string => {
   const d = parseXmltvDate('20260717 +0200'); // day precision, +02:00 preserved
   return `${formatXmltvDate(d)} ${formatXmltvDate(xmltvDate(d, { precision: 14 }))}`;
 };
+
+// --- docs/site-config.md: Building programmes (a source's wall clock) -------
+export const localStart = (
+  programme: (start: Date, title: string) => ProgrammeBuilder,
+  item: { start: string; title: string },
+): ProgrammeBuilder => programme(zonedXmltvDate(item.start, 'Europe/Bratislava'), item.title);
+
+// --- docs/xmltv.md: Named zones ---------------------------------------------
+export const zoned = (epochSeconds: number): Date[] => [
+  zonedXmltvDate('2026-07-17 20:00', 'Europe/Bratislava'), // 18:00Z, written +0200
+  zonedXmltvDate('20261225183000', 'Europe/Bratislava'), // 17:30Z, written +0100
+
+  // A source that stamps every datetime `CET` means a place, not an offset: the
+  // same three letters are +0200 in July and +0100 in December.
+  parseXmltvDate('20260717200000 CET', { CET: xmltvZone('Europe/Bratislava') }),
+
+  // A source that gives an instant, where the guide should still read locally.
+  setXmltvZone(new Date(epochSeconds * 1000), 'Europe/Bratislava'),
+];

@@ -209,14 +209,34 @@ function isSpace(code: number): boolean {
 const UTC_ZONES = new Set(['UTC', 'GMT', 'UT', 'Z']);
 
 /**
- * A map from a named timezone abbreviation to its UTC offset in minutes, e.g.
- * `{ BST: 60, CET: 60, CEST: 120, EST: -300 }`. Keys must be UPPERCASE — the
- * abbreviation in the value is uppercased before lookup. Passed to
- * {@link parseXmltvDate} (and via `timezones` in the parse options) to resolve
- * the ambiguous named zones the DTD allows but that have no single correct
- * offset.
+ * What a named timezone is worth: a fixed offset in minutes, or a function
+ * working one out from the moment it is asked about.
+ *
+ * The fixed form is right for an abbreviation that names one offset and only
+ * one — `CEST` is always `+0200`. It is wrong for the ones that name a *place*,
+ * which is most of what sources actually write: a guide stamped `CET` in July
+ * means `+0200`, and the same guide in January means `+0100`. Hence the
+ * function, which is handed the wall-clock time the digits spell out — as though
+ * they were UTC, since what they are in is the very thing being asked — and
+ * answers with the offset that applies to it.
+ *
+ * `xmltvZone` from `epg-tools/xmltv` builds one of these from an IANA zone
+ * name, which is the answer for nearly every real case:
+ *
+ * ```ts
+ * parseXmltvDate('20260717200000 CET', { CET: xmltvZone('Europe/Bratislava') });
+ * ```
  */
-export type XmltvTimezoneOffsets = Record<string, number>;
+export type XmltvTimezoneOffset = number | ((wall: Date) => number);
+
+/**
+ * A map from a named timezone abbreviation to what it resolves to, e.g.
+ * `{ BST: 60, CEST: 120, CET: xmltvZone('Europe/Prague') }`. Keys must be
+ * UPPERCASE — the abbreviation in the value is uppercased before lookup. Passed
+ * to {@link parseXmltvDate} (and via `timezones` in the parse options) to
+ * resolve the named zones the DTD allows but that have no single correct offset.
+ */
+export type XmltvTimezoneOffsets = Record<string, XmltvTimezoneOffset>;
 
 function digits(value: string, from: number, to: number): number {
   let out = 0;
@@ -230,6 +250,18 @@ function digits(value: string, from: number, to: number): number {
 
 /** Days per month (index 0 = January); February handled via {@link isLeapYear}. */
 const MONTH_DAYS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * How long a month is, February's leap day included.
+ *
+ * Exported for the zone helper next door, which validates the same fields for
+ * the same reason: `Date.UTC` rolls anything out of range into a different,
+ * valid-looking instant rather than saying so. Not part of the package's API —
+ * `xmltv/main.ts` does not re-export it.
+ */
+export function daysInMonth(year: number, month: number): number {
+  return month === 2 && isLeapYear(year) ? 29 : MONTH_DAYS[month - 1]!;
+}
 
 function isLeapYear(year: number): boolean {
   return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
@@ -334,7 +366,7 @@ export function parseXmltvDate(value: string, timezones?: XmltvTimezoneOffsets):
     throw new XmltvDateError(value, 'month must be in 01–12', start + 4);
   }
   // Upper bound folds the month's real length in (so Feb 30 is caught here too).
-  const maxDay = month === 2 && isLeapYear(year) ? 29 : MONTH_DAYS[month - 1]!;
+  const maxDay = daysInMonth(year, month);
 
   if (day < 1 || day > maxDay) {
     throw new XmltvDateError(
@@ -407,7 +439,18 @@ export function parseXmltvDate(value: string, timezones?: XmltvTimezoneOffsets):
       const mapped = timezones?.[zone];
 
       if (mapped !== undefined) {
-        offset = mapped;
+        // A function is asked about this datetime rather than the zone in
+        // general: `date` is the wall clock the digits spell out, which is all
+        // anyone can know before the offset it is in has been settled.
+        offset = typeof mapped === 'function' ? mapped(date) : mapped;
+
+        if (!Number.isInteger(offset) || Math.abs(offset) > 23 * 60 + 59) {
+          throw new XmltvDateError(
+            value,
+            `timezone "${zone}" resolved to ${offset}, which is not an offset in minutes`,
+            offsetStart,
+          );
+        }
       } else if (!UTC_ZONES.has(zone)) {
         throw new XmltvDateError(
           value,

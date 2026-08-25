@@ -12,6 +12,10 @@ import {
   getXmltvPrecision,
   parseXmltvDate,
   xmltvDate,
+  xmltvZone,
+  xmltvZoneOffset,
+  zonedXmltvDate,
+  setXmltvZone,
   XmltvDateError,
   serializeChannel,
   serializeProgramme,
@@ -2304,5 +2308,186 @@ describe('node stream transforms', () => {
     const roundTripped = parseXmltvString(xml);
     expect(roundTripped.channels).toEqual(original.channels);
     expect(roundTripped.programmes).toEqual(original.programmes);
+  });
+});
+
+describe('named time zones', () => {
+  const bratislava = 'Europe/Bratislava';
+
+  describe('zonedXmltvDate', () => {
+    it("reads a wall clock in the zone it was written in, not the machine's", () => {
+      const summer = zonedXmltvDate('2026-07-17 20:00', bratislava);
+      const winter = zonedXmltvDate('2026-12-25 18:30', bratislava);
+
+      // The instant is what the guide is merged by; the offset is what it is
+      // written with. Both come from the zone rather than from `TZ`.
+      expect(summer.toISOString()).toBe('2026-07-17T18:00:00.000Z');
+      expect(getXmltvOffset(summer)).toBe(120);
+      expect(formatXmltvDate(summer)).toBe('202607172000 +0200');
+
+      expect(winter.toISOString()).toBe('2026-12-25T17:30:00.000Z');
+      expect(getXmltvOffset(winter)).toBe(60);
+      expect(formatXmltvDate(winter)).toBe('202612251830 +0100');
+    });
+
+    it.each([
+      ['20260717200000', 14, '20260717200000 +0200'],
+      ['2026-07-17T20:00:00', 14, '20260717200000 +0200'],
+      ['2026-07-17 20:00', 12, '202607172000 +0200'],
+      ['202607172000', 12, '202607172000 +0200'],
+      ['2026-07-17', 8, '20260717 +0200'],
+      ['20260717', 8, '20260717 +0200'],
+      ['2026-07', 6, '202607 +0200'],
+      ['2026', 4, '2026 +0100'],
+    ])('takes %j and keeps how much of it was said', (local, precision, formatted) => {
+      const date = zonedXmltvDate(local, bratislava);
+
+      expect(getXmltvPrecision(date)).toBe(precision);
+      expect(formatXmltvDate(date)).toBe(formatted);
+    });
+
+    it('takes the first of an hour the clocks repeated', () => {
+      // 03:00 becomes 02:00 that night, so 02:30 happens twice. A guide is read
+      // forwards, so it means the first — and the two differ by an hour.
+      const repeated = zonedXmltvDate('2026-10-25 02:30', bratislava);
+
+      expect(repeated.toISOString()).toBe('2026-10-25T00:30:00.000Z');
+      expect(getXmltvOffset(repeated)).toBe(120);
+
+      // Either side of the change is unambiguous and comes out as written.
+      expect(zonedXmltvDate('2026-10-25 01:30', bratislava).toISOString()).toBe(
+        '2026-10-24T23:30:00.000Z',
+      );
+      expect(zonedXmltvDate('2026-10-25 03:30', bratislava).toISOString()).toBe(
+        '2026-10-25T02:30:00.000Z',
+      );
+    });
+
+    it('moves an hour the clocks skipped forward by the gap', () => {
+      // 02:00 becomes 03:00, so 02:30 never happened. It reads as 03:30, which
+      // keeps the night in order and the gaps the length the source gave them.
+      const skipped = zonedXmltvDate('2026-03-29 02:30', bratislava);
+
+      expect(skipped.toISOString()).toBe('2026-03-29T01:30:00.000Z');
+      expect(getXmltvOffset(skipped)).toBe(120);
+      expect(formatXmltvDate(skipped)).toBe('202603290330 +0200');
+
+      expect(zonedXmltvDate('2026-03-29 01:30', bratislava).toISOString()).toBe(
+        '2026-03-29T00:30:00.000Z',
+      );
+    });
+
+    it.each([
+      ['America/New_York', '2026-11-01 01:30', '2026-11-01T05:30:00.000Z', -240],
+      ['America/New_York', '2026-03-08 02:30', '2026-03-08T07:30:00.000Z', -240],
+      ['Asia/Kathmandu', '2026-07-17 17:45', '2026-07-17T12:00:00.000Z', 345],
+      ['Australia/Sydney', '2026-01-17 23:00', '2026-01-17T12:00:00.000Z', 660],
+      ['Australia/Sydney', '2026-07-17 22:00', '2026-07-17T12:00:00.000Z', 600],
+      ['UTC', '2026-07-17 20:00', '2026-07-17T20:00:00.000Z', 0],
+    ])('handles %s at %s', (zone, local, instant, offset) => {
+      const date = zonedXmltvDate(local, zone);
+
+      expect(date.toISOString()).toBe(instant);
+      expect(getXmltvOffset(date)).toBe(offset);
+    });
+
+    it.each([
+      '2026-07-17 20:00 +0200',
+      '20260717200000 +0200',
+      '2026-07-17T20:00:00Z',
+      '2026-13-01',
+      '2026-04-31',
+      '0099-01-01',
+      'yesterday',
+      '',
+    ])('refuses %j', (local) => {
+      expect(() => zonedXmltvDate(local, bratislava)).toThrow(XmltvDateError);
+    });
+
+    it('names the zone it cannot find', () => {
+      expect(() => zonedXmltvDate('2026-07-17 20:00', 'Europe/Nowhere')).toThrow(
+        /Unknown time zone "Europe\/Nowhere"/,
+      );
+    });
+  });
+
+  describe('xmltvZone', () => {
+    it('resolves a named zone in a parsed datetime, per datetime', () => {
+      const timezones = { CET: xmltvZone(bratislava) };
+
+      // The same abbreviation, worth an hour more in July than in January —
+      // which is what a source stamping every datetime `CET` actually means.
+      expect(parseXmltvDate('20260717200000 CET', timezones).toISOString()).toBe(
+        '2026-07-17T18:00:00.000Z',
+      );
+      expect(parseXmltvDate('20261225183000 CET', timezones).toISOString()).toBe(
+        '2026-12-25T17:30:00.000Z',
+      );
+      expect(getXmltvOffset(parseXmltvDate('20260717200000 CET', timezones))).toBe(120);
+    });
+
+    it('agrees with zonedXmltvDate about the awkward hours', () => {
+      const timezones = { CET: xmltvZone(bratislava) };
+
+      for (const local of ['20261025023000', '20260329023000', '20260717200000']) {
+        expect(parseXmltvDate(`${local} CET`, timezones).getTime(), local).toBe(
+          zonedXmltvDate(local, bratislava).getTime(),
+        );
+      }
+    });
+
+    it('keeps the digits it was given for an hour that never happened', () => {
+      const skipped = parseXmltvDate('20260329023000 CET', { CET: xmltvZone(bratislava) });
+
+      // The same moment `zonedXmltvDate` reads it as, written the only way a
+      // parsed datetime can be: the digits as they came, and the offset from
+      // before the change — a parser cannot move the clock it was handed.
+      expect(skipped.toISOString()).toBe('2026-03-29T01:30:00.000Z');
+      expect(formatXmltvDate(skipped)).toBe('20260329023000 +0100');
+      expect(formatXmltvDate(zonedXmltvDate('20260329023000', bratislava))).toBe(
+        '20260329033000 +0200',
+      );
+    });
+
+    it('still takes a fixed offset, and refuses one that is not an offset', () => {
+      expect(parseXmltvDate('20260717200000 CEST', { CEST: 120 }).toISOString()).toBe(
+        '2026-07-17T18:00:00.000Z',
+      );
+      expect(() => parseXmltvDate('20260717200000 NUTS', { NUTS: () => Number.NaN })).toThrow(
+        /not an offset in minutes/,
+      );
+    });
+  });
+
+  describe('setXmltvZone', () => {
+    it('leaves the instant alone and says where to read it', () => {
+      const instant = new Date('2026-07-17T18:00:00.000Z');
+      const local = setXmltvZone(instant, bratislava);
+
+      expect(local).toBe(instant);
+      expect(local.getTime()).toBe(Date.parse('2026-07-17T18:00:00.000Z'));
+      expect(formatXmltvDate(local)).toBe('20260717200000 +0200');
+    });
+
+    it('gives the same zone a different offset in winter', () => {
+      expect(formatXmltvDate(setXmltvZone(new Date('2026-12-25T17:30:00.000Z'), bratislava))).toBe(
+        '20261225183000 +0100',
+      );
+    });
+  });
+
+  describe('xmltvZoneOffset', () => {
+    it('answers in minutes east of Greenwich, at the instant asked about', () => {
+      expect(xmltvZoneOffset(bratislava, new Date('2026-07-17T12:00:00Z'))).toBe(120);
+      expect(xmltvZoneOffset(bratislava, new Date('2026-12-25T12:00:00Z'))).toBe(60);
+      expect(xmltvZoneOffset('America/New_York', new Date('2026-07-17T12:00:00Z'))).toBe(-240);
+      expect(xmltvZoneOffset('Asia/Kolkata', new Date('2026-07-17T12:00:00Z'))).toBe(330);
+      expect(xmltvZoneOffset('UTC', new Date('2026-07-17T12:00:00Z'))).toBe(0);
+    });
+
+    it('defaults to now, and refuses a zone it does not know', () => {
+      expect(typeof xmltvZoneOffset('UTC')).toBe('number');
+      expect(() => xmltvZoneOffset('Mars/Olympus')).toThrow(RangeError);
+    });
   });
 });

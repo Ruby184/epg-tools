@@ -43,6 +43,10 @@ export {
   writeXmltvToFile,
   parseXmltvStream,
   parseXmltvFile,
+  xmltvZone,
+  xmltvZoneOffset,
+  zonedXmltvDate,
+  setXmltvZone,
 } from './xmltv/main.js';
 export type {
   DateInput,

@@ -155,6 +155,16 @@ const example = defineSiteConfig({
 Afterwards each `programme.channel` is normalized to the channel's `xmltvId`
 and the list is sorted by `start`.
 
+`new Date(…)` there is right only because that source gives instants. When it
+gives a wall clock instead — `2026-07-17 20:00`, meaning eight in the evening
+where the broadcaster is — reach for
+[`zonedXmltvDate`](./xmltv.md#named-zones), which reads it in the zone you name
+rather than in whatever `TZ` the run happens to have:
+
+```ts
+programme(zonedXmltvDate(item.start, 'Europe/Bratislava'), item.title);
+```
+
 A failed `request` fails every channel-day it covered; one channel-day's
 `parseDay` error only drops that channel-day.
 
