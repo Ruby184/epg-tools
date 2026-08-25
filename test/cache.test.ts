@@ -1082,7 +1082,12 @@ describe('NoCacheDriver', () => {
 const sqlite = await import('../src/cache/sqlite-driver.js').catch(() => undefined);
 
 describe.skipIf(sqlite === undefined)('SqliteCacheDriver', () => {
-  const SqliteCacheDriver = sqlite!.SqliteCacheDriver;
+  // Read without insisting: a skipped suite still runs its callback, to find out
+  // what tests are in it, so this line executes on a runtime where the module
+  // never loaded. Nothing inside a skipped test body does.
+  const SqliteCacheDriver = sqlite?.SqliteCacheDriver as NonNullable<
+    typeof sqlite
+  >['SqliteCacheDriver'];
   const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
   let dir: string;
 

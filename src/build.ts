@@ -93,10 +93,21 @@ async function driverFor(
       return new MemoryCacheDriver();
     case 'sqlite': {
       // Imported here and nowhere else: `node:sqlite` does not exist on every
-      // runtime this package supports, so naming it is what loads it.
-      const { SqliteCacheDriver } = await import('./cache/sqlite-driver.js');
+      // runtime this package supports, so naming it is what loads it — and what
+      // fails, on a Node that has never heard of it. Which is worth saying in
+      // terms of the choice that led here rather than leaving Node to say "No
+      // such built-in module" about something the config never mentioned.
+      try {
+        const { SqliteCacheDriver } = await import('./cache/sqlite-driver.js');
 
-      return new SqliteCacheDriver(options);
+        return new SqliteCacheDriver(options);
+      } catch (error) {
+        throw new GrabberError(
+          `The sqlite cache driver needs Node 24 or newer (22.5 with --experimental-sqlite): ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
     }
     default: {
       // Unreachable from TypeScript, which is what the `never` says: every name

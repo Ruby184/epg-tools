@@ -10,6 +10,16 @@ import { defineConfig, type EpgConfig } from '../src/config.js';
 import type { SiteConfig } from '../src/grabber/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 
+/**
+ * Whether this runtime has `node:sqlite` at all: it arrived in Node 22.5 behind
+ * a flag, and the driver named `'sqlite'` is loaded only when asked for, so the
+ * one test that asks has to be skipped where asking would fail.
+ */
+const hasSqlite = await import('node:sqlite').then(
+  () => true,
+  () => false,
+);
+
 const NOW = new Date('2026-07-17T12:00:00.000Z');
 const TODAY = '2026-07-17';
 const TOMORROW = '2026-07-18';
@@ -616,7 +626,18 @@ describe('naming a driver a config does not have', () => {
     await expect(createCacheStore(epgConfig)).rejects.toThrow('Unknown cache driver: postgres');
   });
 
-  it('keeps its entries in one SQLite file when asked for by name', async () => {
+  it.skipIf(hasSqlite)('says what the sqlite driver needs when the runtime lacks it', async () => {
+    const dir = await tempDir();
+    const epgConfig = config(dir, { cache: { dir: join(dir, 'cache'), driver: 'sqlite' } });
+
+    // Node's own message names a module the config never mentioned, so the
+    // choice that led here is named instead — with Node's reason kept.
+    await expect(createCacheStore(epgConfig)).rejects.toThrow(
+      /sqlite cache driver needs Node 24 or newer.*node:sqlite/s,
+    );
+  });
+
+  it.skipIf(!hasSqlite)('keeps its entries in one SQLite file when asked for by name', async () => {
     const dir = await tempDir();
     const fetchedDays: string[] = [];
     const epgConfig = config(dir, {
