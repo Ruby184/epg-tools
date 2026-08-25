@@ -12,6 +12,7 @@ import {
   type ConfigReader,
   type StageDefaults,
 } from './core/answers.js';
+import type { CompressionFormat, CompressionOptions } from './core/output.js';
 import type { AnySiteConfig } from './grabber/types.js';
 import type { MergeOptions } from './merge/types.js';
 import type { XmltvDocumentMeta } from './xmltv/types.js';
@@ -71,6 +72,18 @@ export interface EpgConfig {
    * XMLTV* module takes one.
    */
   output: string;
+  /**
+   * Compress the guide.
+   *
+   * An {@link output} whose name says which — `.gz`, `.br`, `.zst` — already
+   * asks for it, so this is for what a name cannot say: a format for a socket,
+   * `false` to write a plain document to a compressed-sounding path anyway, and
+   * `{ level }` to choose how hard to try, on that format's own scale.
+   *
+   * See [the output reference](../docs/configuration.md#compressing-the-guide)
+   * for what each costs and saves on a real guide.
+   */
+  compress?: CompressionFormat | false | CompressionOptions;
   cache?: EpgCacheConfig;
   /** How many sites grab in parallel. Defaults to all. */
   siteConcurrency?: number;

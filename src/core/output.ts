@@ -21,8 +21,9 @@ import { once } from 'node:events';
 import { stat } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import path from 'node:path';
-import { Writable } from 'node:stream';
+import { Writable, type Transform } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
+import * as zlib from 'node:zlib';
 import { atomicFile } from './atomic.js';
 
 /** An output that cannot be written: no socket there, or nobody listening. */
@@ -32,6 +33,25 @@ export class OutputError extends Error {
 
 /** A path to write, or a stream to write to. */
 export type OutputTarget = string | Writable;
+
+/** What a document can be compressed with on the way out. */
+export type CompressionFormat = 'gzip' | 'brotli' | 'zstd';
+
+/** A format, and how hard to work at it — on that format's own scale. */
+export interface CompressionOptions {
+  format: CompressionFormat;
+  level?: number;
+}
+
+/**
+ * What each extension promises whoever finds the file, which is what makes it
+ * the answer rather than a guess.
+ */
+const BY_EXTENSION: Record<string, CompressionFormat | undefined> = {
+  '.gz': 'gzip',
+  '.br': 'brotli',
+  '.zst': 'zstd',
+};
 
 export interface OutputSink {
   /**
@@ -118,6 +138,21 @@ export interface OutputOptions {
    * from a writer that stopped.
    */
   signal?: AbortSignal;
+  /**
+   * Compress what is written.
+   *
+   * A path whose name says which — `.gz`, `.br`, `.zst` — is taken as asking for
+   * it, since that is what the name promises whoever finds the file. So this is
+   * for what a name cannot say: a format for a socket or a stream, `false` to
+   * write a plain document to a compressed-sounding path anyway, and `{ level }`
+   * to choose how hard to try.
+   *
+   * A guide is enormously compressible, which is worth having when it is served
+   * over a network or kept as a fortnight of days. Check what reads it first: a
+   * consumer reading `xmltv.xml` off disk usually copes with gzip, fewer with
+   * the other two, and tvheadend's socket wants the document itself.
+   */
+  compress?: CompressionFormat | false | CompressionOptions;
 }
 
 /** Resolve a target to a stream, and to whether finishing it means closing it. */
@@ -139,14 +174,93 @@ export async function openOutput(
   // directory as `./x.sock` is reachable, while the same file named absolutely
   // is past what an address field holds — resolving it would be the only
   // reason the connection failed.
+  //
+  // In bytes, because that is what the kernel counts: a relative path of
+  // accented or CJK characters can be fewer UTF-16 units than the absolute one
+  // and more of what actually has to fit.
   return {
     stream: await connect(
-      target.length < resolved.length ? target : resolved,
+      Buffer.byteLength(target) < Buffer.byteLength(resolved) ? target : resolved,
       resolved,
       options.signal,
     ),
     end: true,
   };
+}
+
+/**
+ * The compression a write should go through, if any.
+ *
+ * The name decides by default, because a file called `.gz` that is not gzip is
+ * a worse outcome than either — and the extension is the one thing about the
+ * destination a caller has already said. An explicit format outranks it, in both
+ * directions.
+ */
+function compressorFor(
+  target: OutputTarget,
+  compress: OutputOptions['compress'],
+): Transform | undefined {
+  if (compress === false) {
+    return undefined;
+  }
+
+  const asked = typeof compress === 'object' ? compress : compress && { format: compress };
+  const format =
+    asked?.format ??
+    (typeof target === 'string' ? BY_EXTENSION[path.extname(target).toLowerCase()] : undefined);
+
+  return format === undefined ? undefined : compressor(format, asked?.level);
+}
+
+/** A compressor's own knob for how hard to try. */
+function params(key: number, level: number): { params: Record<number, number> } {
+  return { params: { [key]: level } };
+}
+
+/**
+ * The quality brotli is asked for when nobody says.
+ *
+ * Not brotli's own default, which is 11 and takes **six and a half minutes** on
+ * a 92 MiB guide — long enough that a nightly build looks hung. Quality 7 takes
+ * 5.6 seconds, which is what gzip spends, and leaves 0.63 MiB against gzip's
+ * 2.60. Above it the curve turns vertical: 10 costs 34 seconds to save 50 KiB,
+ * and 11 the rest of the afternoon to save 130.
+ *
+ * A default, not a ceiling — ask for `{ level: 11 }` and it is yours.
+ */
+const BROTLI_QUALITY = 7;
+
+/**
+ * The stream for one format, with `level` said the way that format says it.
+ *
+ * One option, three scales, and no pretence otherwise: 0–9 for gzip, 0–11 for
+ * brotli, 1–22 for zstd. Remapping them onto a shared range would only mean
+ * nobody could ask their format for what it actually offers.
+ */
+function compressor(format: CompressionFormat, level: number | undefined): Transform {
+  switch (format) {
+    case 'gzip':
+      return zlib.createGzip({ level });
+    case 'brotli':
+      return zlib.createBrotliCompress(
+        params(zlib.constants.BROTLI_PARAM_QUALITY, level ?? BROTLI_QUALITY),
+      );
+    default:
+      // Newer than this package's floor — Node 22.15, or 23.8 in the 23.x line —
+      // so it is asked for rather than assumed, and says what it wants rather
+      // than failing as "createZstdCompress is not a function".
+      if (typeof zlib.createZstdCompress !== 'function') {
+        throw new OutputError(
+          'Compressing with zstd needs Node 22.15 or newer (23.8 in the 23.x line)',
+        );
+      }
+
+      // Left at zstd's own default of 3, which is already 99 times smaller in
+      // less time than gzip takes: nothing to improve on by guessing.
+      return zlib.createZstdCompress(
+        level === undefined ? {} : params(zlib.constants.ZSTD_c_compressionLevel, level),
+      );
+  }
 }
 
 /** Write a document to wherever `target` says. */
@@ -156,12 +270,27 @@ export async function writeOutput(
   options: OutputOptions = {},
 ): Promise<void> {
   const sink = await openOutput(target, options);
+  const compressor = compressorFor(target, options.compress);
+  const chain =
+    compressor === undefined
+      ? ([source, sink.stream] as const)
+      : ([source, compressor, sink.stream] as const);
 
   try {
     // The signal goes to the pipeline as well as to the source that feeds it:
     // a source of its own may be a plain array, or a generator that never
     // thought to ask, and a write is exactly as long as what it is writing.
-    await pipeline(source, sink.stream, { end: sink.end, signal: options.signal });
+    //
+    // `end` is the last stream's, so a handed-in stream stays open while the
+    // compressor between them is finished off — which is what flushes it.
+    //
+    // One call whatever the chain holds: `pipeline` takes an array, and reads an
+    // iterable in it exactly as it does a positional one — `as const` is what
+    // makes those two shapes tuples rather than arrays, which is all the
+    // overload wanted. The source stays the iterable it was rather than becoming
+    // a `Readable.from`, which would put a stream between the signal and the
+    // generator it cancels.
+    await pipeline(chain, { end: sink.end, signal: options.signal });
   } catch (error) {
     // A failing or cancelled write rejects the moment it fails, while the
     // stream is still tearing down — and tearing down is what takes the temp

@@ -335,6 +335,13 @@ through — the site's `channelInfo` if it has one, `defaultChannelInfo` if not.
 `mergeInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`,
 `mergeChannels`*, `defaultChannelInfo`.
 
+`writeGuide({ ...options, output, compress? })` writes where `output` says — a
+path renamed into place, a Unix socket, or a stream — and compresses when asked
+or when the name says so, `.gz` / `.br` / `.zst`. See
+[Compressing the guide](./configuration.md#compressing-the-guide) for what each
+costs on a real one. `generateGuide` yields the document itself, so a caller
+piping it somewhere compresses it however they like.
+
 `mergeProgrammeLists(lists, strategy, match?)` combines per-site lists in
 priority order; `match` is a `ProgrammeMatch` object, or a predicate of
 your own — see [what counts as the same

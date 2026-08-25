@@ -437,6 +437,13 @@ export const cachedElsewhere = defineConfig({
   cache: { driver: keyValueCache({ prefix: 'epg' }) },
 });
 
+// --- docs/configuration.md: Compressing the guide --------------------------
+export const compressed = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml.gz', // gzip, because the name says so
+  // compress: { format: 'zstd', level: 12 },
+});
+
 // --- docs/api.md: Running a build ------------------------------------------
 export const run = async (): Promise<number> => {
   const summary = await build(configured, { logger: console.log });

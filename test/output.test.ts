@@ -3,8 +3,19 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
+import { promisify } from 'node:util';
+import {
+  brotliDecompress as brotliCallback,
+  gunzip as gunzipCallback,
+  zstdDecompress as zstdCallback,
+} from 'node:zlib';
 import { describe, expect, it, vi } from 'vitest';
 import { openOutput, writeOutput } from '../src/core/output.js';
+
+const gunzip = promisify(gunzipCallback);
+const brotli = promisify(brotliCallback);
+/** Newer than this package's floor, so the tests either side of it are skipped. */
+const zstd = zstdCallback === undefined ? undefined : promisify(zstdCallback);
 
 async function tempDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'epg-output-test-'));
@@ -57,6 +68,156 @@ describe('writeOutput', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(await readdir(dir)).toEqual([]);
+  });
+
+  describe('gzip', () => {
+    /** What a reader of the file would do with it. */
+    async function gunzipped(file: string): Promise<string> {
+      return (await gunzip(await readFile(file))).toString('utf8');
+    }
+
+    it('compresses a path that says it is compressed', async () => {
+      const dir = await tempDir();
+      const output = join(dir, 'guide.xml.gz');
+
+      await writeOutput(output, ['<tv>', '<programme/>', '</tv>']);
+
+      // The name is the ask: a file called `.gz` that is not gzip is worse than
+      // either answer. The bytes are gzip's, starting with its magic number.
+      const bytes = await readFile(output);
+
+      expect(bytes.subarray(0, 3)).toEqual(Buffer.from([0x1f, 0x8b, 0x08]));
+      expect(await gunzipped(output)).toBe('<tv><programme/></tv>');
+      expect(await readdir(dir)).toEqual(['guide.xml.gz']);
+    });
+
+    it('takes an explicit answer over the name, in both directions', async () => {
+      const dir = await tempDir();
+      const named = join(dir, 'named.xml.gz');
+      const plain = join(dir, 'plain.xml');
+
+      await writeOutput(named, ['<tv></tv>'], { compress: false });
+      await writeOutput(plain, ['<tv></tv>'], { compress: 'gzip' });
+
+      expect(await readFile(named, 'utf8')).toBe('<tv></tv>');
+      expect(await gunzipped(plain)).toBe('<tv></tv>');
+    });
+
+    it('compresses harder or quicker when asked', async () => {
+      const dir = await tempDir();
+      // Programme-shaped text, because the levels differ on prose repeated at a
+      // distance: over 500 bare `<programme id="n"/>` elements level 1 comes out
+      // *smaller* than level 9, which says more about the document than the flag.
+      const document = [
+        '<tv>',
+        ...Array.from(
+          { length: 200 },
+          (_, i) =>
+            `<programme start="2026071720${String(i % 60).padStart(2, '0')}00 +0200" ` +
+            `channel="one.example.tv"><title lang="sk">Programme number ${i}</title>` +
+            `<desc lang="sk">A description of about the length a real one has, with words ` +
+            `that repeat across the document often enough for a level to matter.</desc></programme>`,
+        ),
+        '</tv>',
+      ];
+      const quick = join(dir, 'quick.xml.gz');
+      const small = join(dir, 'small.xml.gz');
+
+      await writeOutput(quick, document, { compress: { format: 'gzip', level: 1 } });
+      await writeOutput(small, document, { compress: { format: 'gzip', level: 9 } });
+
+      expect(await gunzipped(quick)).toBe(await gunzipped(small));
+      expect((await stat(small)).size).toBeLessThan((await stat(quick)).size);
+    });
+
+    it('reads .br as asking for brotli', async () => {
+      const dir = await tempDir();
+      const output = join(dir, 'guide.xml.br');
+
+      await writeOutput(output, ['<tv>', '<programme/>', '</tv>']);
+
+      expect((await brotli(await readFile(output))).toString('utf8')).toBe('<tv><programme/></tv>');
+    });
+
+    it.skipIf(zstd === undefined)('reads .zst as asking for zstd', async () => {
+      const dir = await tempDir();
+      const output = join(dir, 'guide.xml.zst');
+
+      await writeOutput(output, ['<tv>', '<programme/>', '</tv>']);
+
+      expect((await zstd!(await readFile(output))).toString('utf8')).toBe('<tv><programme/></tv>');
+    });
+
+    it.skipIf(zstd !== undefined)('says what zstd needs where the runtime has none', async () => {
+      const dir = await tempDir();
+
+      await expect(writeOutput(join(dir, 'guide.xml.zst'), ['<tv></tv>'])).rejects.toThrow(
+        /zstd needs Node 22.15 or newer/,
+      );
+    });
+
+    it('asks brotli for a quality a guide can wait for', async () => {
+      const dir = await tempDir();
+      const document = Array.from({ length: 300 }, (_, i) => `<programme id="${i}">x</programme>`);
+      const byDefault = join(dir, 'default.xml.br');
+      const asked = join(dir, 'asked.xml.br');
+
+      await writeOutput(byDefault, document);
+      await writeOutput(asked, document, { compress: { format: 'brotli', level: 7 } });
+
+      // Brotli's own default is quality 11, which on a 92 MiB guide takes six
+      // and a half minutes — so this asks for 7, and that is what the bytes say.
+      expect(await readFile(byDefault)).toEqual(await readFile(asked));
+    });
+
+    it('compresses into a stream it was handed, without ending it', async () => {
+      const chunks: Buffer[] = [];
+      let ended = false;
+      const sink = new Writable({
+        write(chunk: Buffer, _encoding, done) {
+          chunks.push(Buffer.from(chunk));
+          done();
+        },
+        final(done) {
+          ended = true;
+          done();
+        },
+      });
+
+      await writeOutput(sink, ['<tv>', '</tv>'], { compress: 'gzip' });
+
+      // The compressor is finished off — which is what flushes it — while the
+      // stream it feeds is left open, since it was never ours to end.
+      expect((await gunzip(Buffer.concat(chunks))).toString('utf8')).toBe('<tv></tv>');
+      expect(ended).toBe(false);
+    });
+
+    it('leaves nothing behind when a compressed write is cancelled', async () => {
+      const dir = await tempDir();
+      const controller = new AbortController();
+
+      async function* endless(): AsyncGenerator<string> {
+        yield '<tv>';
+
+        while (true) {
+          yield '<programme/>';
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      }
+
+      setTimeout(() => controller.abort(new Error('cancelled')), 20);
+
+      // Which stream notices first is not worth pinning down: the abort reaches
+      // the compressor and the source at once, and either may be the one that
+      // rejects. That it stops, and leaves nothing, is the claim.
+      await expect(
+        writeOutput(join(dir, 'guide.xml.gz'), endless(), { signal: controller.signal }),
+      ).rejects.toThrow();
+
+      // Half a compressed guide is worth even less than half a plain one, and
+      // the temp file goes with the stream either way.
+      expect(await readdir(dir)).toEqual([]);
+    });
   });
 
   describe('cancelling', () => {

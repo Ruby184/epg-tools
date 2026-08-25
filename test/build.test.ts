@@ -1,12 +1,15 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { gunzip as gunzipCallback } from 'node:zlib';
 import { describe, expect, it, vi } from 'vitest';
 import { build, createCacheStore, guideStream, runGrab, runMerge } from '../src/build.js';
 import { CacheManager, FsNdjsonCacheDriver } from '../src/cache/main.js';
 import type { ChannelDayKey, StoredEntryMeta } from '../src/cache/main.js';
 import { defineConfig, type EpgConfig } from '../src/config.js';
+import { parseXmltvString } from '../src/xmltv/main.js';
 import type { SiteConfig } from '../src/grabber/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 
@@ -19,6 +22,8 @@ const hasSqlite = await import('node:sqlite').then(
   () => true,
   () => false,
 );
+
+const gunzip = promisify(gunzipCallback);
 
 const NOW = new Date('2026-07-17T12:00:00.000Z');
 const TODAY = '2026-07-17';
@@ -542,6 +547,49 @@ describe('the cache a config describes', () => {
     }
 
     expect(driver!.closed).toBe(1);
+  });
+});
+
+describe('a compressed guide', () => {
+  it('gzips what a `.gz` output asks for, and parses back the same', async () => {
+    const dir = await tempDir();
+    const output = join(dir, 'guide.xml.gz');
+
+    await build(config(dir, { days: 2, output }), { now: NOW });
+
+    const bytes = await readFile(output);
+
+    expect(bytes.subarray(0, 3)).toEqual(Buffer.from([0x1f, 0x8b, 0x08]));
+
+    // The guide inside is the guide that would have been written plainly, and a
+    // fraction of the size — which is the whole reason to ask.
+    const plain = join(dir, 'plain.xml');
+
+    await build(config(dir, { days: 2, output: plain }), { now: NOW });
+
+    const document = (await gunzip(bytes)).toString('utf8');
+
+    expect(document).toBe(await readFile(plain, 'utf8'));
+    expect(bytes.length).toBeLessThan((await stat(plain)).size);
+    expect(parseXmltvString(document).programmes).toHaveLength(2);
+  });
+
+  it('writes a plain guide to a `.gz` name when the config says so', async () => {
+    const dir = await tempDir();
+    const output = join(dir, 'guide.xml.gz');
+
+    await build(config(dir, { output, compress: false }), { now: NOW });
+
+    expect(await readFile(output, 'utf8')).toContain('<programme');
+  });
+
+  it('compresses a guide whose name says nothing, when asked', async () => {
+    const dir = await tempDir();
+    const output = join(dir, 'guide.xml');
+
+    await build(config(dir, { output, compress: { format: 'gzip', level: 9 } }), { now: NOW });
+
+    expect((await gunzip(await readFile(output))).toString('utf8')).toContain('<programme');
   });
 });
 

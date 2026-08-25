@@ -136,7 +136,7 @@ into place, so a reader never sees half a guide.
 | `-c, --config <path>` | config file; defaults to `epg.config.ts\|js\|mjs` in the working directory |
 | `-d, --days <n>` | override the config's `days` |
 | `--offset <n>` | start the window n days from today; may be negative |
-| `-o, --output <path>` | override the output file, or a Unix socket to stream into |
+| `-o, --output <path>` | override the output file, or a Unix socket to stream into — a `.gz`, `.br` or `.zst` name [compresses it](./docs/configuration.md#compressing-the-guide) |
 | `--cache-dir <dir>` | override the cache directory |
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |

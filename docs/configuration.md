@@ -10,6 +10,7 @@ this page is about the run as a whole — what one *site* looks like is
 - [Cache reference](#cache-reference)
 - [CLI reference](#cli-reference)
 - [Cancelling a run](#cancelling-a-run)
+- [Compressing the guide](#compressing-the-guide)
 - [How caching works](#how-caching-works)
 - [Merge strategies](#merge-strategies)
 
@@ -46,6 +47,7 @@ hardcode — a username, a password, a region. See
 |---|---|---|---|
 | `sites` | `AnySiteConfig[]` | **required** | The sites to grab, in priority order — the first covering a channel wins on conflicts. |
 | `output` | `string` | **required** | Where the guide is written: a path, replaced atomically once complete, or a Unix socket to stream it into. |
+| `compress` | `'gzip' \| 'brotli' \| 'zstd' \| false \| { format, level? }` | what the output's name says | Compress the guide — see [Compressing the guide](#compressing-the-guide). A `.gz`, `.br` or `.zst` output already asks for it; this is for a socket, for a plain document under a compressed-sounding name, or for choosing a level. |
 | `days` | `number` | `7` | How many days to grab and include in the guide. A site may override it. |
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
@@ -113,7 +115,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `-c, --config <path>` | config file; defaults to `epg.config.ts\|js\|mjs` in the working directory |
 | `-d, --days <n>` | override the config's `days` |
 | `--offset <n>` | start the window n days from today; may be negative |
-| `-o, --output <path>` | override the output file, or a Unix socket to stream into |
+| `-o, --output <path>` | override the output file, or a Unix socket to stream into — a `.gz`, `.br` or `.zst` name [compresses it](./configuration.md#compressing-the-guide) |
 | `--cache-dir <dir>` | override the cache directory |
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
@@ -194,6 +196,45 @@ complete; that is exactly what tvheadend's **External XMLTV** module expects,
 so a cron job can push a guide straight into a running tvheadend without a
 grabber being registered at all. A path that is *not* a socket is written to a
 temp file and renamed into place, so a reader never sees half a guide.
+
+### Compressing the guide
+
+A guide is enormously compressible: text, in a shape that repeats every
+programme. An output whose name says which — `.gz`, `.br`, `.zst` — is
+compressed with that format, because the name is what the file promises whoever
+finds it. `compress` in the config is for what a name cannot say: a format for a
+socket, `false` to write a plain document to a compressed-sounding path anyway,
+and `{ format, level }` to choose how hard to try.
+
+```ts
+export default defineConfig({
+  sites: [example],
+  output: 'public/epg.xml.gz', // gzip, because the name says so
+  // compress: { format: 'zstd', level: 12 },
+});
+```
+
+Measured on a 500-channel fortnight — 92.4 MiB of XML, 280,000 programmes:
+
+| asked for | size | smaller by | time |
+|---|---|---|---|
+| `gzip` (default level 6) | 2.60 MiB | 35× | 5.7s |
+| `{ format: 'gzip', level: 1 }` | 4.11 MiB | 22× | 4.4s |
+| `brotli` (**quality 7** here) | 0.63 MiB | 147× | 5.6s |
+| `{ format: 'brotli', level: 11 }` | 0.50 MiB | 186× | **387s** |
+| `zstd` (default level 3) | 0.93 MiB | 99× | 3.9s |
+| `{ format: 'zstd', level: 12 }` | 0.64 MiB | 145× | 4.4s |
+
+Three things worth taking from that. **gzip** is the interoperable one — reach
+for it unless you know what reads the file. **zstd** is the quickest and beats
+gzip on both axes, and needs Node 22.15 or newer. And **brotli's own default,
+quality 11, takes six and a half minutes** on that guide, long enough to look
+hung, so this defaults it to 7 instead — the same time gzip takes for a quarter
+of gzip's size. Ask for `{ level: 11 }` if you want it.
+
+Check what reads the guide before compressing it: a consumer reading
+`xmltv.xml` off disk usually copes with gzip, fewer with the other two, and
+tvheadend's socket wants the document itself.
 
 ### `--offset`
 

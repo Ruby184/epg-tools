@@ -1,5 +1,5 @@
 import { dayRange, dayToDate, toDayString } from '../core/days.js';
-import { writeOutput, type OutputTarget } from '../core/output.js';
+import { writeOutput, type OutputOptions, type OutputTarget } from '../core/output.js';
 import { channelElement, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
@@ -381,11 +381,12 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
  * streamed to whoever is listening; or a stream to write into.
  */
 export async function writeGuide(
-  options: BuildGuideOptions & { output: OutputTarget },
+  options: BuildGuideOptions & { output: OutputTarget; compress?: OutputOptions['compress'] },
 ): Promise<void> {
-  const { output, ...guideOptions } = options;
+  const { output, compress, ...guideOptions } = options;
 
   await writeOutput(output, generateGuide(guideOptions), {
     ...(options.signal ? { signal: options.signal } : {}),
+    ...(compress !== undefined ? { compress } : {}),
   });
 }

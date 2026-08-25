@@ -247,6 +247,7 @@ export async function runMerge(source: ConfigSource, options: RunOptions = {}): 
     writeGuide({
       ...guideOptions(config, options, options.now ?? new Date(), cache),
       output: config.output,
+      ...(config.compress !== undefined ? { compress: config.compress } : {}),
     }),
   );
 }
