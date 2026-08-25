@@ -11,6 +11,80 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.3.0](https://github.com/Ruby184/epg-tools/compare/v0.2.0...v0.3.0) (2026-08-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cache:** `CacheStore` now requires `getMetas`, and `close` is no longer optional on it — a run closes the cache it opened without knowing what is underneath, and a store with nothing to release says so in one line. Both stay optional on `CacheDriver`, which is what people write from scratch: a `CacheManager` fills in whichever of them the driver does not have.
+* **cache:** `StalenessPolicy` gained `refetchAll`, so a full policy literal needs it — `{ ...DEFAULT_STALENESS, … }` does not. A config's `staleness` is a `Partial`, and is unaffected.
+* **cache:** `cache.format` is now `cache.driver`, taking the same `'ndjson'` and `'xmltv'` names or a factory. `createCacheStore` returns a promise, since a factory may await. Node >= 20.4 is required, for `Symbol.asyncDispose`.
+* **cache:** An entry now records `schema` and `writtenBy` beside `grabbedAt` and `programmeCount`, so a cache written by an earlier version is refetched rather than read. A driver is handed a `StoredEntryMeta` to write and reports one back; `CacheEntryMeta` stays the two fields a staleness check decides by, which is still what `CacheStore.getMeta` promises.
+* **cache:** `FsCacheStore`, `FsNdjsonCacheStore` and `FsXmltvCacheStore` are now `FsCacheDriver`, `FsNdjsonCacheDriver` and `FsXmltvCacheDriver`, and they are drivers rather than stores — wrap one in a `CacheManager` to get what `grab`, `generateGuide` and `writeGuide` take. `createCacheStore` does that for you and returns a `CacheManager`. A driver's interface is `toStored` / `fromStored` / `readMeta` / `read` / `write` / `delete` / `prune` and an optional `close`, and a subclass of `FsCacheDriver` says what one entry is through `entryData`, `parseEntry`, `parseMeta` and the stored form its type parameter names.
+* **cache:** A cache written by an earlier version is not read by this one — entries have no meta in them, so every channel-day reads as ungrabbed. Delete the cache directory, or let it age out; the sidecars left behind are ignored, and a prune no longer removes them.
+* **cache:** `FsCacheStore` is abstract — construct `FsNdjsonCacheStore` or `FsXmltvCacheStore`, which take `{ dir, signal? }` and no `format`. `EpgConfig.cache.format` is unchanged and still names the one a run uses. An existing cache is not readable: entries hold dates in a different form, and a store no longer reads the other format's files. Delete the cache directory when upgrading and the next run refills it.
+* **merge:** programmes with no stop time now get one, and a stop overlapping the next programme is pulled back. Set merge.fillStop and merge.clipOverlaps to false for the old output.
+* **grabber:** ParseContext has three new required members, `http`, `paced` and `signal`, so anything constructing one by hand — a test calling parseDay directly — has to supply them.
+* **merge:** under programmeStrategy 'merge', programmes from different sources starting within five minutes and agreeing on their title are now merged into one element instead of both being emitted. Set merge.match.startToleranceMs to 0 for the old behaviour.
+* **cache:** StalenessPolicy has a new required emptyMaxAgeDays, and a day cached with no programmes is refetched a day later rather than after maxAgeDays. GrabSummary has a new empty field.
+
+### Features
+
+* **build:** compress the guide on the way out ([c97e6fe](https://github.com/Ruby184/epg-tools/commit/c97e6fe52e2c7f0bbcf5a65feb687ac799943007))
+* **build:** let a run be handed the cache it should use ([ed04e36](https://github.com/Ruby184/epg-tools/commit/ed04e3611e078bd3f33106a773d98d23b4a3065a))
+* **cache:** a store per format, and dates that survive ndjson ([314ceda](https://github.com/Ruby184/epg-tools/commit/314ceda3dc240e3add6cd2be46d1c13264279946))
+* **cache:** age an empty cached day out after a day ([c7d5819](https://github.com/Ruby184/epg-tools/commit/c7d58193df4fdfd1dabc731c0894b10e07d6d814))
+* **cache:** ask a store about a channel's window in one question ([7d5c84b](https://github.com/Ruby184/epg-tools/commit/7d5c84b0e9572c0c934744fcb00b4ee3ea31337d))
+* **cache:** keep entries wherever the config says ([dbeef14](https://github.com/Ruby184/epg-tools/commit/dbeef14737973f79555bc2aef98b2b5c7c389186))
+* **cache:** keep the whole cache in one SQLite file ([450d1b1](https://github.com/Ruby184/epg-tools/commit/450d1b124ec4a5b1a80ec399cec36f5d852546bb))
+* **cache:** one file per entry, meta included ([9bcaa77](https://github.com/Ruby184/epg-tools/commit/9bcaa7754e849e10a9b9b8d78981cf410734ff0f))
+* **cache:** refetch the whole window on request ([e39a4ad](https://github.com/Ruby184/epg-tools/commit/e39a4ad6faa955c30c7499522606f43905764e42))
+* **cache:** version what an entry holds ([258bc5d](https://github.com/Ruby184/epg-tools/commit/258bc5d25af3aab79756bd11ae40981b95f00c24))
+* **cli:** stop a run on a signal instead of dying mid-write ([130845b](https://github.com/Ruby184/epg-tools/commit/130845b80fdf94b217b023566a5cfd42162b1409))
+* **grabber:** let a parse make requests of its own ([f3795c4](https://github.com/Ruby184/epg-tools/commit/f3795c40edae337f27c0c6df07e06c7b4c4230f6))
+* **merge:** fix up the programmes on the way out ([a5365cf](https://github.com/Ruby184/epg-tools/commit/a5365cf284ea663f6ba510c966976e84443b53dd))
+* **merge:** match programmes within a start tolerance ([fa940bf](https://github.com/Ruby184/epg-tools/commit/fa940bfeb94b95408b68e0702ee77b6c5e0f23e5))
+* take a signal everywhere a run can wait ([90b1526](https://github.com/Ruby184/epg-tools/commit/90b1526b949fc5fb42eb6ec102dc8c8b99bf1785))
+* **xmltv:** read a source's wall clock in the zone it was written in ([6958e33](https://github.com/Ruby184/epg-tools/commit/6958e33943eb9bd3bf9ae255b803b97afc252db0))
+* **xmltv:** surface processing instructions instead of skipping them ([313570b](https://github.com/Ruby184/epg-tools/commit/313570bc2049ff0461249d15ca8f7e34ff18641b))
+
+
+### Bug Fixes
+
+* **cache:** keep a key whose segment is `..` inside the cache directory ([64cd8e3](https://github.com/Ruby184/epg-tools/commit/64cd8e3bacbeda827ec4a7bbb0ba2dfa988145b8))
+* **cache:** make a channel's directory when the write says it is missing ([315107b](https://github.com/Ruby184/epg-tools/commit/315107b5ec8de035e59358a527a1e722c240a425))
+* **cache:** say what the sqlite driver needs on a Node without it ([4e606b2](https://github.com/Ruby184/epg-tools/commit/4e606b2162ce3e00e7ab84244df97e8fe1a687fb))
+* **cache:** stop reading an entry's front between chunks, not only before it ([f99cad8](https://github.com/Ruby184/epg-tools/commit/f99cad8f13551dee7b69a352f1721f6f315075f7))
+* **core:** stop an aborted write leaving its temp file behind ([3e5164b](https://github.com/Ruby184/epg-tools/commit/3e5164b089effe36d7e65dc0ce4fc6af7efa701c))
+* **grabber:** plan requests without rescanning the channel list ([59d6995](https://github.com/Ruby184/epg-tools/commit/59d69951d9d0b81db6044b9490a90e10e2cb8ff7))
+* **merge:** merge a programme a source repeats on the next day ([597a0e5](https://github.com/Ruby184/epg-tools/commit/597a0e5fbab6c14c4244057b5b30a6b5b2d4105d))
+* **merge:** resolve every site's channels at once ([fe464f5](https://github.com/Ruby184/epg-tools/commit/fe464f5472523f81600a845e8c7cd1fc0ea93249))
+
+
+### Performance
+
+* **cache:** prune without asking whether a directory is empty ([ae7b393](https://github.com/Ruby184/epg-tools/commit/ae7b393b09678de94375b93d5a1e7c5980307456))
+* **cache:** read an entry's front 2 KiB at a time ([097fee0](https://github.com/Ruby184/epg-tools/commit/097fee046a5635fb419d1009c4f457eead509694))
+* **merge:** read the cache ahead of the writer ([18462b6](https://github.com/Ruby184/epg-tools/commit/18462b6554787322d2395143ee4058519741ff14))
+
+
+### Refactoring
+
+* **cache:** put a manager in front of the drivers ([2378348](https://github.com/Ruby184/epg-tools/commit/237834812a9f000c8a90139f9fd3f35f296fa051))
+* **core:** one home for writing a file atomically ([7ce92d6](https://github.com/Ruby184/epg-tools/commit/7ce92d6fc9eb20410851c728962045232a4f6063))
+* **grabber:** give each queued task a signal of its own ([a60661f](https://github.com/Ruby184/epg-tools/commit/a60661f0ccd38c1406a587ce86737db7863a4663))
+* **grabber:** hook the client only when there is a backoff to run ([9139c1b](https://github.com/Ruby184/epg-tools/commit/9139c1be1f7c923fdfe087413b6b04946fb599c0))
+* **xmltv:** answer a failed flush through its callback ([1deb24f](https://github.com/Ruby184/epg-tools/commit/1deb24fd72c55b88af46af7788ccaa8e18023061))
+* **xmltv:** let a document's two ends place every instruction ([bbe6849](https://github.com/Ruby184/epg-tools/commit/bbe6849261049d6c44da62d8f90a32490f637aaa))
+
+
+### Documentation
+
+* **cache:** say what the memory driver's records actually buy ([0bc976f](https://github.com/Ruby184/epg-tools/commit/0bc976fe934b5badc7a36b48bfd4a829a655f842))
+* **cache:** show the builder a driver of your own is shipped as ([2548fda](https://github.com/Ruby184/epg-tools/commit/2548fda0c8403f5e08b3cc67ccc2b434ed83b460))
+* describe programme matching, the day boundary and empty days ([2f52a54](https://github.com/Ruby184/epg-tools/commit/2f52a5409d6d0f07d1d5c067e049f9cac5da39fb))
+* name every cache driver a config can ask for ([e3cf5b3](https://github.com/Ruby184/epg-tools/commit/e3cf5b32b7d0eb15d7ed009736460e66c6721160))
+
 ## [0.2.0](https://github.com/Ruby184/epg-tools/compare/v0.1.0...v0.2.0) (2026-08-21)
 
 
