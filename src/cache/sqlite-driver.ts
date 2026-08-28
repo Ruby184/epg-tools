@@ -29,8 +29,10 @@ import type {
   ChannelDayKey,
   FoundEntry,
   FoundMeta,
+  FoundState,
   StoredEntryMeta,
   StoredProgramme,
+  StoredStateMeta,
 } from './types.js';
 
 /**
@@ -43,8 +45,9 @@ import type {
  * of the migration story here as everywhere else in this module.
  *
  * 1 — site, channel, day, the four meta fields, and the programmes as JSON.
+ * 2 — a `state` table beside it: what each site remembers between runs.
  */
-const TABLE_VERSION = 1;
+const TABLE_VERSION = 2;
 
 /** What the database is called inside the cache directory. */
 const DEFAULT_FILE = 'cache.sqlite';
@@ -81,7 +84,26 @@ const CREATE_TABLE = [
   'CREATE UNIQUE INDEX entries_key ON entries (site, channel, day)',
   `CREATE INDEX entries_meta ON entries
     (site, channel, day, grabbed_at, programme_count, schema, written_by)`,
+  /**
+   * What each site remembers between runs, one row per group.
+   *
+   * `WITHOUT ROWID` here where `entries` is deliberately not: the reason to keep
+   * a payload out of the key's B-tree is a hot path that reads the meta and not
+   * the payload, and there is no such path for state — every read of a group
+   * wants what is in it. So the key *is* the row, one lookup instead of two.
+   */
+  `CREATE TABLE state (
+    site TEXT NOT NULL,
+    key TEXT NOT NULL,
+    written_at TEXT NOT NULL,
+    schema INTEGER NOT NULL,
+    written_by TEXT NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (site, key)
+  ) STRICT, WITHOUT ROWID`,
 ];
+
+const STATE_COLUMNS = 'written_at, schema, written_by, data';
 
 const META_COLUMNS = 'grabbed_at, programme_count, schema, written_by';
 const BY_KEY = 'WHERE site = ? AND channel = ? AND day = ?';
@@ -103,6 +125,14 @@ interface KeyedMetaRow extends MetaRow {
   site: string;
   channel: string;
   day: string;
+}
+
+/** One group of a site's state, as its row comes back. */
+interface StateRow {
+  written_at: string;
+  schema: number;
+  written_by: string;
+  data: string;
 }
 
 export interface SqliteCacheDriverOptions {
@@ -173,6 +203,7 @@ export class SqliteCacheDriver extends CacheDriverBase implements CacheDriver<St
     }
 
     this.#db.exec('DROP TABLE IF EXISTS entries');
+    this.#db.exec('DROP TABLE IF EXISTS state');
 
     for (const statement of CREATE_TABLE) {
       this.#db.exec(statement);
@@ -323,6 +354,64 @@ export class SqliteCacheDriver extends CacheDriverBase implements CacheDriver<St
     this.#signal?.throwIfAborted();
 
     this.#prepared(`DELETE FROM entries ${BY_KEY}`).run(key.site, key.channelId, key.day);
+  }
+
+  async readState(site: string, key: string): Promise<FoundState | undefined> {
+    this.#signal?.throwIfAborted();
+
+    const row = this.#prepared(`SELECT ${STATE_COLUMNS} FROM state WHERE site = ? AND key = ?`).get(
+      site,
+      key,
+    ) as StateRow | undefined;
+
+    if (row === undefined) {
+      return;
+    }
+
+    try {
+      return {
+        meta: {
+          writtenAt: row.written_at,
+          schema: row.schema,
+          writtenBy: row.written_by,
+        },
+        data: JSON.parse(row.data) as unknown,
+      };
+    } catch {
+      // A row whose payload is not JSON is a group nobody can read, envelope or
+      // no envelope — reported as such, and removed by the manager.
+      return { meta: undefined, data: undefined };
+    }
+  }
+
+  async writeState(site: string, key: string, data: unknown, meta: StoredStateMeta): Promise<void> {
+    this.#signal?.throwIfAborted();
+
+    this.#prepared(
+      `INSERT INTO state (site, key, ${STATE_COLUMNS})
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (site, key) DO UPDATE SET
+         written_at = excluded.written_at,
+         schema = excluded.schema,
+         written_by = excluded.written_by,
+         data = excluded.data`,
+    ).run(
+      site,
+      key,
+      meta.writtenAt,
+      meta.schema,
+      meta.writtenBy,
+      // `null` rather than nothing at all: the column is `NOT NULL` and
+      // `JSON.stringify(undefined)` is not a string, so a group written empty
+      // would fail the insert rather than reading back as empty.
+      JSON.stringify(data ?? null),
+    );
+  }
+
+  async deleteState(site: string, key: string): Promise<void> {
+    this.#signal?.throwIfAborted();
+
+    this.#prepared('DELETE FROM state WHERE site = ? AND key = ?').run(site, key);
   }
 
   async prune(options: { before: string }): Promise<number> {

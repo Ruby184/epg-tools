@@ -149,9 +149,10 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 
 `CacheManager`, the drivers `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`,
 `MemoryCacheDriver` and `NoCacheDriver` with the abstract `FsCacheDriver` and
-`CacheDriverBase` they build on, `CACHE_SCHEMA`, `isStale`,
+`CacheDriverBase` they build on, `CACHE_SCHEMA`, `STATE_SCHEMA`, `isStale`,
 `DEFAULT_STALENESS`, and the `CacheStore` / `CacheDriver` /
 `ChannelDayKey` / `CacheEntryMeta` / `StoredEntryMeta` / `StoredProgramme` /
+`StateEntry` / `StoredStateMeta` / `FoundState` /
 `StalenessPolicy` / `CacheDriverName` types.
 
 A cache is two pieces. A **driver** answers for one store — a directory of
@@ -167,8 +168,10 @@ const cache = new CacheManager({ driver: new FsNdjsonCacheDriver({ dir }) });
 ```
 
 A driver is a small thing to write: `readMeta`, `read`, `write`, `delete`,
-`prune`, `toStored` / `fromStored`, and — if it has them to offer — `readMetas`
-and `close`. It reads and writes programmes in whatever form it keeps them —
+`prune`, `toStored` / `fromStored`, the three that keep [a site's
+state](#what-a-site-remembers-between-runs) — `readState`, `writeState`,
+`deleteState` — and, if it has them to offer, `readMetas` and `close`. It reads
+and writes programmes in whatever form it keeps them —
 `TStored`, which only it knows about — and the manager is what calls `toStored` /
 `fromStored`, at the two moments a programme crosses into the store and back, so
 no driver has to remember to. `read` and `readMeta` return `undefined` when there
@@ -185,6 +188,44 @@ underneath: **one batch is one piece of work**, so an implementation must not
 answer fourteen keys by starting fourteen reads at once — the caller has already
 decided how many of these to have in flight, and for a cache of files that bound
 is what keeps the descriptors down.
+
+### What a site remembers between runs
+
+A cache holds one more thing besides listings: what a site would otherwise have
+to fetch again to get back to where it was — a channel list it was given once, an
+`ETag` for a document it has already read, a token, a cursor. `CacheStore` keeps
+it as one small blob per `(site, key)`:
+
+```ts
+await cache.setState('webtv.sk', 'channels', channels);
+
+const held = await cache.getState('webtv.sk', 'channels');
+// { data: [...], meta: { writtenAt, schema, writtenBy } }
+```
+
+`getState` answers `undefined` for a group nothing has written — and for one the
+store cannot vouch for, which it removes on the way, so the group reads as never
+written and whoever wanted it fetches it again. The envelope is stamped by the
+manager exactly as an entry's meta is; `writtenAt` is the one field a caller may
+set, so a run can stamp what it remembers with its own "now". Its `schema` is
+`STATE_SCHEMA`, a smaller question than `CACHE_SCHEMA`: it describes the
+*wrapper*, so what is inside a group can move on without voiding cached listings
+or the group next to it.
+
+Grouped by key rather than kept as one object per site, and the third reason is
+the one that matters: a `merge` reading a channel list should not have to parse
+every url the last grab revalidated; refreshing one group must not rewrite the
+megabytes beside it; and two runs writing different groups cannot stand on each
+other. A driver stores the bytes and never learns what is in them — which also
+leaves it free to keep a group however it likes, an append-log replayed on read
+included, so long as `readState` answers with what the last `writeState` was
+given.
+
+`FsCacheDriver` puts each group in `<dir>/<site>/<key>.json`, beside the
+channel directories of the same site; a prune only ever looks at the day files,
+so state outlives every listing a site has. `SqliteCacheDriver` keeps a row per
+group. `MemoryCacheDriver` copies in and out, as it does with programmes.
+`NoCacheDriver` remembers nothing, which is the honest answer rather than a gap.
 
 Start from **`CacheDriverBase`** and the storing is already answered. It offers
 two overridable pairs, because they are two questions:

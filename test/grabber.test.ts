@@ -1,7 +1,13 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
-import type { CacheEntryMeta, CacheStore, ChannelDayKey } from '../src/cache/types.js';
+import type {
+  CacheEntryMeta,
+  CacheStore,
+  ChannelDayKey,
+  StateEntry,
+  StoredStateMeta,
+} from '../src/cache/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 import { grab } from '../src/grabber/main.js';
 import type {
@@ -52,6 +58,29 @@ class MemoryCache implements CacheStore {
     }
 
     return metas;
+  }
+
+  /** What each site remembers, by `site|key` — see the state tests below. */
+  state = new Map<string, { data: unknown; meta: StoredStateMeta }>();
+
+  async getState(site: string, key: string): Promise<StateEntry | undefined> {
+    return this.state.get(`${site}|${key}`);
+  }
+
+  async setState(
+    site: string,
+    key: string,
+    data: unknown,
+    meta?: { writtenAt?: string },
+  ): Promise<void> {
+    this.state.set(`${site}|${key}`, {
+      data,
+      meta: {
+        writtenAt: meta?.writtenAt ?? NOW.toISOString(),
+        schema: 1,
+        writtenBy: 'test',
+      },
+    });
   }
 
   async read(key: ChannelDayKey): Promise<XmltvProgramme[] | undefined> {

@@ -22,8 +22,10 @@ import type {
   ChannelDayKey,
   FoundEntry,
   FoundMeta,
+  FoundState,
   StoredEntryMeta,
   StoredProgramme,
+  StoredStateMeta,
 } from '../src/main.js';
 import { envReader } from '../src/core/answers.js';
 import {
@@ -375,6 +377,7 @@ export const configured = defineConfig({
  * documentation is promising is the shape of the driver rather than the client.
  */
 const rows = new Map<string, { meta: StoredEntryMeta; programmes: StoredProgramme[] }>();
+const groups = new Map<string, { meta: StoredStateMeta; data: unknown }>();
 
 class KeyValueCacheDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
   readonly #prefix: string;
@@ -421,6 +424,20 @@ class KeyValueCacheDriver extends CacheDriverBase implements CacheDriver<StoredP
     }
 
     return removed;
+  }
+
+  // What a site remembers between runs: one row per (site, key), opaque to the
+  // driver. A store that cannot keep it answers `undefined` and ignores writes.
+  async readState(site: string, key: string): Promise<FoundState | undefined> {
+    return groups.get(`${this.#prefix}:${site}:${key}`);
+  }
+
+  async writeState(site: string, key: string, data: unknown, meta: StoredStateMeta): Promise<void> {
+    groups.set(`${this.#prefix}:${site}:${key}`, { meta, data });
+  }
+
+  async deleteState(site: string, key: string): Promise<void> {
+    groups.delete(`${this.#prefix}:${site}:${key}`);
   }
 
   async close(): Promise<void> {}

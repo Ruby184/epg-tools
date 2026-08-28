@@ -30,7 +30,9 @@ import type {
   CacheStore,
   ChannelDayKey,
   FoundMeta,
+  StateEntry,
   StoredEntryMeta,
+  StoredStateMeta,
 } from './types.js';
 
 /**
@@ -47,6 +49,20 @@ import type {
  *     two versions.
  */
 export const CACHE_SCHEMA = 1;
+
+/**
+ * The envelope this code writes around a site's remembered state, and the only
+ * one it reads back.
+ *
+ * Its own number rather than {@link CACHE_SCHEMA}, because it answers a smaller
+ * question: what the *wrapper* looks like, not what is inside. What a group
+ * holds is between the code that writes it and the code that reads it — a
+ * channel list, a set of validators — and either can move on without voiding
+ * cached listings, or the other group next to it.
+ *
+ * 1 — one blob per `(site, key)`, carrying `writtenAt` and these two versions.
+ */
+export const STATE_SCHEMA = 1;
 
 export class CacheManager implements CacheStore, AsyncDisposable {
   readonly #driver: CacheDriver;
@@ -142,6 +158,47 @@ export class CacheManager implements CacheStore, AsyncDisposable {
     await this.#driver.delete(key);
   }
 
+  /**
+   * One group of a site's state, if the store has one it can answer for.
+   *
+   * The same judgement as an entry's, for the same reason: what is in a store is
+   * whatever was last put there, by this version or an older one or a person
+   * with an editor. An envelope this code cannot read is removed, and the group
+   * then reads as never written — so whoever wanted it fetches it again, which
+   * is the whole of what a cache has to do about it.
+   */
+  async getState(site: string, key: string): Promise<StateEntry | undefined> {
+    const found = await this.#driver.readState(site, key);
+
+    if (found === undefined) {
+      return;
+    }
+
+    const meta = this.#stateMeta(found.meta);
+
+    if (meta === undefined) {
+      await this.#driver.deleteState(site, key);
+
+      return;
+    }
+
+    return { data: found.data, meta };
+  }
+
+  async setState(
+    site: string,
+    key: string,
+    data: unknown,
+    meta?: { writtenAt?: string },
+  ): Promise<void> {
+    await this.#driver.writeState(site, key, data, {
+      writtenAt: meta?.writtenAt ?? new Date().toISOString(),
+      // Facts about the writing, not the caller's to say — as on an entry.
+      schema: STATE_SCHEMA,
+      writtenBy: __PKG_VERSION__,
+    });
+  }
+
   async prune(options: { before: string }): Promise<number> {
     return this.#driver.prune(options);
   }
@@ -203,5 +260,22 @@ export class CacheManager implements CacheStore, AsyncDisposable {
     }
 
     return stored;
+  }
+
+  /**
+   * The envelope of a state group worth reading, or nothing.
+   *
+   * Nothing to invalidate here and nothing to count: a group says when it was
+   * written and what wrote it, and the schema decides as it does for an entry —
+   * a shape this code does not write is one it cannot read as it was meant,
+   * whether older or newer.
+   */
+  #stateMeta(meta: Partial<StoredStateMeta> | undefined): StoredStateMeta | undefined {
+    return meta !== undefined &&
+      typeof meta.writtenAt === 'string' &&
+      typeof meta.writtenBy === 'string' &&
+      meta.schema === STATE_SCHEMA
+      ? (meta as StoredStateMeta)
+      : undefined;
   }
 }

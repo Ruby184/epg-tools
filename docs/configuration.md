@@ -247,7 +247,10 @@ never removes a day inside the window. Negative values work in both the
 
 Each `site + channel + day` is one cache entry — one file,
 `<dir>/<site>/<channel>/<day>.ndjson`, beginning with when it was grabbed and
-how much it holds. A staleness check reads that much of it and no more. On every
+how much it holds. A staleness check reads that much of it and no more. Beside
+those, a site may keep a little of [what it remembers between
+runs](./api.md#what-a-site-remembers-between-runs) — `<dir>/<site>/<key>.json`,
+one file per group, holding no listings and left alone by a prune. On every
 run a channel-day is refetched only when:
 
 - it is not cached yet (e.g. day 14 after a day passed), or

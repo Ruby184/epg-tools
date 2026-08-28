@@ -11,6 +11,7 @@ import {
   FsXmltvCacheDriver,
   MemoryCacheDriver,
   NoCacheDriver,
+  STATE_SCHEMA,
   isStale,
 } from '../src/cache/main.js';
 import type {
@@ -19,10 +20,12 @@ import type {
   ChannelDayKey,
   FoundEntry,
   FoundMeta,
+  FoundState,
   FsCacheDriverOptions,
   StalenessPolicy,
   StoredEntryMeta,
   StoredProgramme,
+  StoredStateMeta,
 } from '../src/cache/main.js';
 import { getXmltvOffset, getXmltvPrecision, parseXmltvString } from '../src/xmltv/main.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
@@ -670,6 +673,122 @@ describe('a cache of xmltv files', () => {
   });
 });
 
+describe("a site's own state, kept as files", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'epg-cache-test-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  const site = 'example.com';
+
+  it('keeps one file per group, beside the channels of the same site', async () => {
+    const store = ndjson({ dir });
+
+    await store.setState(site, 'channels', [{ xmltvId: 'one.example.com', siteId: '1' }]);
+    await store.write({ site, channelId: 'one.example.com', day: '2026-07-17' }, [programme()]);
+
+    // A group is a file in the site's directory; a channel is a directory in it.
+    // Which is also why a channel called `channels` collides with nothing: the
+    // group carries the extension.
+    expect((await fs.readdir(path.join(dir, site))).sort()).toEqual([
+      'channels.json',
+      'one.example.com',
+    ]);
+
+    const found = await store.getState(site, 'channels');
+
+    expect(found?.data).toEqual([{ xmltvId: 'one.example.com', siteId: '1' }]);
+    expect(found?.meta).toMatchObject({ schema: STATE_SCHEMA });
+  });
+
+  it('writes one group without standing on another', async () => {
+    const store = ndjson({ dir });
+
+    await store.setState(site, 'channels', ['first'], { writtenAt: '2026-07-17T08:00:00.000Z' });
+    await store.setState(site, 'validators', { 'https://example.com/g.xml': { etag: 'W/"1"' } });
+
+    // The point of a key: refreshing the validators leaves the channel list
+    // exactly as it was, including when it was written.
+    await store.setState(site, 'validators', { 'https://example.com/g.xml': { etag: 'W/"2"' } });
+
+    expect(await store.getState(site, 'channels')).toEqual({
+      data: ['first'],
+      meta: expect.objectContaining({ writtenAt: '2026-07-17T08:00:00.000Z' }),
+    });
+    expect((await store.getState(site, 'validators'))?.data).toEqual({
+      'https://example.com/g.xml': { etag: 'W/"2"' },
+    });
+  });
+
+  it('reads nothing for a group nothing has written, and for a site with no directory', async () => {
+    const store = ndjson({ dir });
+
+    expect(await store.getState(site, 'channels')).toBeUndefined();
+
+    await store.setState(site, 'channels', ['first']);
+
+    expect(await store.getState(site, 'validators')).toBeUndefined();
+    expect(await store.getState('other.example', 'channels')).toBeUndefined();
+  });
+
+  it('treats a group it cannot read as one to remove, so it is written again', async () => {
+    const store = ndjson({ dir });
+    const file = path.join(dir, site, 'channels.json');
+
+    await store.setState(site, 'channels', ['first']);
+    await fs.writeFile(file, '{ not json at all');
+
+    // There is a file, and nothing in it anybody can read — so it goes, and the
+    // group reads as never written rather than as an empty one.
+    expect(await store.getState(site, 'channels')).toBeUndefined();
+    await expect(fs.stat(file)).rejects.toThrow();
+
+    await store.setState(site, 'channels', ['again']);
+    expect((await store.getState(site, 'channels'))?.data).toEqual(['again']);
+  });
+
+  it('sanitizes the site and the key, and makes the directory it needs', async () => {
+    const store = ndjson({ dir });
+
+    await store.setState('../escape/../..', '../..', ['held']);
+
+    // Encoded, so a group of a site named out of a channel list stays inside the
+    // cache directory — the same treatment a site or a channel id gets.
+    expect((await fs.readdir(dir)).sort()).toEqual(['..%2Fescape%2F..%2F..']);
+    expect((await store.getState('../escape/../..', '../..'))?.data).toEqual(['held']);
+  });
+
+  it('survives a prune, which only ever looks at the days', async () => {
+    const store = ndjson({ dir });
+
+    await store.setState(site, 'channels', ['kept']);
+    await store.write({ site, channelId: 'one', day: '2026-07-10' }, [programme()]);
+
+    expect(await store.prune({ before: '2026-07-17' })).toBe(1);
+
+    // The channel's directory went with its last day; the state did not, and the
+    // site's directory stayed for it.
+    expect(await fs.readdir(path.join(dir, site))).toEqual(['channels.json']);
+    expect((await store.getState(site, 'channels'))?.data).toEqual(['kept']);
+  });
+
+  it('refuses to write once the run is cancelled', async () => {
+    const controller = new AbortController();
+    const store = ndjson({ dir, signal: controller.signal });
+
+    await store.setState(site, 'channels', ['before']);
+    controller.abort();
+
+    await expect(store.setState(site, 'channels', ['after'])).rejects.toThrow();
+    expect((await ndjson({ dir }).getState(site, 'channels'))?.data).toEqual(['before']);
+  });
+});
+
 describe('CacheManager', () => {
   const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
 
@@ -681,7 +800,10 @@ describe('CacheManager', () => {
    */
   class RecordingDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
     readonly entries = new Map<string, { meta: StoredEntryMeta; programmes: StoredProgramme[] }>();
+    /** What each site remembers, by `site|key`, for a test to read or to spoil. */
+    readonly groups = new Map<string, { meta: Partial<StoredStateMeta>; data: unknown }>();
     deletes: string[] = [];
+    stateDeletes: string[] = [];
     closed = 0;
 
     #id(key: ChannelDayKey): string {
@@ -718,6 +840,24 @@ describe('CacheManager', () => {
 
     async prune(): Promise<number> {
       return 0;
+    }
+
+    async readState(site: string, key: string): Promise<FoundState | undefined> {
+      return this.groups.get(`${site}|${key}`);
+    }
+
+    async writeState(
+      site: string,
+      key: string,
+      data: unknown,
+      meta: StoredStateMeta,
+    ): Promise<void> {
+      this.groups.set(`${site}|${key}`, { meta, data });
+    }
+
+    async deleteState(site: string, key: string): Promise<void> {
+      this.stateDeletes.push(`${site}|${key}`);
+      this.groups.delete(`${site}|${key}`);
     }
 
     async close(): Promise<void> {
@@ -978,6 +1118,74 @@ describe('CacheManager', () => {
     // `close` is a driver's to have or not: a directory holds nothing open.
     await expect(cache(new FsNdjsonCacheDriver({ dir: '.' })).close()).resolves.toBeUndefined();
   });
+
+  it('stamps a remembered group with when it was written and what wrote it', async () => {
+    const driver = new RecordingDriver();
+    const store = cache(driver);
+
+    await store.setState('example.com', 'channels', ['one']);
+
+    const held = driver.groups.get('example.com|channels')!;
+
+    expect(held.data).toEqual(['one']);
+    expect(held.meta).toEqual({
+      writtenAt: expect.any(String),
+      schema: STATE_SCHEMA,
+      writtenBy: expect.any(String),
+    });
+
+    // A run stamps what it remembers with its own "now", as it does a grabbedAt.
+    await store.setState('example.com', 'channels', ['two'], {
+      writtenAt: '2026-07-17T08:00:00.000Z',
+    });
+    expect(driver.groups.get('example.com|channels')!.meta.writtenAt).toBe(
+      '2026-07-17T08:00:00.000Z',
+    );
+  });
+
+  it('voids a group whose envelope is not the one this code writes, and removes it', async () => {
+    const driver = new RecordingDriver();
+    const store = cache(driver);
+
+    await store.setState('example.com', 'channels', ['one']);
+    driver.groups.get('example.com|channels')!.meta.schema = STATE_SCHEMA + 1;
+
+    // Either way — older or newer — a group this code cannot read as it was
+    // meant is one to give up on, so whoever wanted it goes and finds out again.
+    expect(await store.getState('example.com', 'channels')).toBeUndefined();
+    expect(driver.stateDeletes).toEqual(['example.com|channels']);
+    expect(driver.groups.size).toBe(0);
+  });
+
+  it('voids a group that cannot say when it was written or by what', async () => {
+    const driver = new RecordingDriver();
+    const store = cache(driver);
+
+    for (const meta of [{}, { schema: STATE_SCHEMA }, { writtenAt: 5, schema: STATE_SCHEMA }]) {
+      driver.groups.set('example.com|channels', { meta: meta as never, data: ['one'] });
+
+      expect(await store.getState('example.com', 'channels')).toBeUndefined();
+    }
+
+    // And a group whose payload was unreadable, which a driver reports the same
+    // way: an envelope is worth nothing without what it wrapped.
+    driver.groups.set('example.com|channels', { meta: undefined as never, data: undefined });
+    expect(await store.getState('example.com', 'channels')).toBeUndefined();
+  });
+
+  it('keeps one site apart from another, and one group from the next', async () => {
+    const store = cache(new RecordingDriver());
+
+    await store.setState('a.example', 'channels', ['a']);
+    await store.setState('b.example', 'channels', ['b']);
+    await store.setState('a.example', 'validators', { url: { etag: 'W/"1"' } });
+
+    expect((await store.getState('a.example', 'channels'))?.data).toEqual(['a']);
+    expect((await store.getState('b.example', 'channels'))?.data).toEqual(['b']);
+    expect((await store.getState('a.example', 'validators'))?.data).toEqual({
+      url: { etag: 'W/"1"' },
+    });
+  });
 });
 
 describe('MemoryCacheDriver', () => {
@@ -1046,6 +1254,29 @@ describe('MemoryCacheDriver', () => {
     expect(driver.size).toBe(0);
   });
 
+  it('remembers a group for the life of the process, and hands out a copy', async () => {
+    const driver = new MemoryCacheDriver();
+    const store = cache(driver);
+    const mine = { list: ['one'] };
+
+    await store.setState(key.site, 'channels', mine);
+    mine.list.push('two');
+
+    const stored = async (): Promise<{ list: string[] }> =>
+      (await store.getState(key.site, 'channels'))!.data as { list: string[] };
+    const held = await stored();
+
+    // Copied on the way in and again on the way out, because every other driver
+    // serializes: a caller mutating what it stored — or what it read — must not
+    // be editing the cache under this driver and no other.
+    expect(held.list).toEqual(['one']);
+    held.list.push('three');
+    expect((await stored()).list).toEqual(['one']);
+
+    driver.clear();
+    expect(await store.getState(key.site, 'channels')).toBeUndefined();
+  });
+
   it('keeps one site apart from another with the same channel and day', async () => {
     const driver = new MemoryCacheDriver();
     const store = cache(driver);
@@ -1072,6 +1303,14 @@ describe('NoCacheDriver', () => {
     expect(await store.read(key)).toBeUndefined();
     expect(await store.prune({ before: '2026-07-17' })).toBe(0);
     await expect(store.delete(key)).resolves.toBeUndefined();
+  });
+
+  it('remembers nothing either, which a site learns by being told nothing', async () => {
+    const store = cache(new NoCacheDriver());
+
+    await store.setState(key.site, 'channels', ['one']);
+
+    expect(await store.getState(key.site, 'channels')).toBeUndefined();
   });
 });
 
@@ -1256,6 +1495,49 @@ describe.skipIf(sqlite === undefined)('SqliteCacheDriver', () => {
     expect(await store.getMeta(key)).toBeUndefined();
     await store.write(key, [programme()]);
     expect(await store.read(key)).toHaveLength(1);
+  });
+
+  it("keeps a site's state in a row of its own, one per group", async () => {
+    await using store = cache(new SqliteCacheDriver({ dir }));
+
+    await store.setState(key.site, 'channels', [{ xmltvId: 'one', siteId: '1' }]);
+    await store.setState(key.site, 'validators', {
+      'https://example.com/g.xml': { etag: 'W/"1"' },
+    });
+    await store.setState('other.example', 'channels', ['theirs']);
+
+    expect((await store.getState(key.site, 'channels'))?.data).toEqual([
+      { xmltvId: 'one', siteId: '1' },
+    ]);
+    expect((await store.getState(key.site, 'validators'))?.data).toEqual({
+      'https://example.com/g.xml': { etag: 'W/"1"' },
+    });
+    expect((await store.getState('other.example', 'channels'))?.data).toEqual(['theirs']);
+
+    // One row per (site, key), however often it is written.
+    await store.setState(key.site, 'channels', ['replaced']);
+    expect((await store.getState(key.site, 'channels'))?.data).toEqual(['replaced']);
+    expect(await store.getState(key.site, 'nothing-here')).toBeUndefined();
+  });
+
+  it('gives up on a group whose payload is not JSON, and takes the row with it', async () => {
+    const driver = new SqliteCacheDriver({ dir });
+    const store = cache(driver);
+
+    await store.setState(key.site, 'channels', ['one']);
+    await driver.close();
+
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(path.join(dir, 'cache.sqlite'));
+    db.exec("UPDATE state SET data = 'not json'");
+    db.close();
+
+    await using second = cache(new SqliteCacheDriver({ dir }));
+
+    expect(await second.getState(key.site, 'channels')).toBeUndefined();
+    // Removed rather than left to be read again next run.
+    await second.setState(key.site, 'channels', ['again']);
+    expect((await second.getState(key.site, 'channels'))?.data).toEqual(['again']);
   });
 });
 

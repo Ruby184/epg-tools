@@ -58,6 +58,11 @@ function createFakeCache(entries: Record<string, XmltvProgramme[]> = {}): CacheS
     async prune() {
       return 0;
     },
+    // A merge asks nothing of a site's state, so this one remembers nothing.
+    async getState() {
+      return undefined;
+    },
+    async setState() {},
     async close() {},
   };
 }
