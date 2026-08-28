@@ -359,10 +359,16 @@ grabbed again.
 
 ### `epg-tools/grabber`
 
-`grab`, `defineSiteConfig`, `resolveChannels`, `resolveSites`, `siteHttp`,
-`sitePacing`, `retryAfterMs`, `channelElement`, `defaultChannelInfo`,
-`SiteStateHandle`, `StateKey`, `ChannelsGroup`, `TrackedMap`,
-`channelsMaxAgeMs`, `DEFAULT_CHANNELS_MAX_AGE_DAYS`.
+`grab`, `defineSiteConfig`, `defineStreamSiteConfig`, `resolveChannels`,
+`resolveSites`, `siteHttp`, `sitePacing`, `retryAfterMs`, `channelElement`,
+`defaultChannelInfo`, `SiteStateHandle`, `StateKey`, `ChannelsGroup`,
+`TrackedMap`, `channelsMaxAgeMs`, `DEFAULT_CHANNELS_MAX_AGE_DAYS`.
+
+A site comes in two shapes and `grab` takes either: `defineSiteConfig` for one
+that fetches a request at a time and parses each channel-day out of it, and
+`defineStreamSiteConfig` for one that [answers its whole window in one
+pass](./site-config.md#sites-that-answer-in-one-pass). `AnySiteConfig` is the
+union, which is what a list of sites holds.
 
 `resolveChannels(site, { http?, signal?, state?, refresh?, now? })` returns a
 site's channels whichever form they came in — a list or a fetched one — and

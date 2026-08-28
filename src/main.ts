@@ -76,6 +76,7 @@ export {
   channelsMaxAgeMs,
   ChannelsGroup,
   defineSiteConfig,
+  defineStreamSiteConfig,
   DEFAULT_CHANNELS_MAX_AGE_DAYS,
   resolveChannels,
   resolveSites,

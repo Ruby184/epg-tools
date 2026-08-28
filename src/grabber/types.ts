@@ -385,14 +385,16 @@ export type ParsedProgramme = XmltvProgramme | ProgrammeBuilder;
 export type ChannelElement = (displayName?: string) => ChannelBuilder;
 
 /**
- * A site: where to fetch from, how much of the grid one request covers, and how
- * to turn a response into programmes.
+ * What is true of a site whichever way it fetches: who it is, what channels it
+ * covers, how politely to ask it, and what it has to say about its own
+ * programmes on the way back out.
+ *
+ * The two ways part company below — {@link SiteConfig} fetches a request at a
+ * time and parses each channel-day out of it, {@link StreamSiteConfig} streams a
+ * whole document and says what it found as it goes — and everything either of
+ * them has in common is here.
  */
-export interface SiteConfig<
-  TRaw = unknown,
-  TBatching extends BatchingOption = 'none',
-  TData = unknown,
-> {
+export interface BaseSiteConfig<TData = unknown> {
   /** Unique site identifier, e.g. `webtv.sk`. Used as cache namespace. */
   site: string;
   /**
@@ -445,16 +447,6 @@ export interface SiteConfig<
    */
   backoff?: false | SiteBackoff;
   /**
-   * How much of the channel × day grid one {@link request} call covers: a bare
-   * {@link BatchMode}, or that mode with a cap on the request's size
-   * (`{ mode: 'days', daysPerRequest: 7 }`). Defaults to `none`, one
-   * channel-day per request.
-   *
-   * The mode shapes the request context and decides which caps are accepted;
-   * `parseDay` stays per channel-day whatever it is.
-   */
-  batching?: TBatching;
-  /**
    * Base options for this site's own ky instance (`prefix`, `headers`,
    * `hooks`, `retry`, `timeout`, …). Each site gets its own, so nothing here
    * reaches another site — including a `dispatcher`, which is how one site
@@ -463,20 +455,6 @@ export interface SiteConfig<
   ky?: KyOptions;
   /** Per-site override of the staleness policy. */
   staleness?: Partial<StalenessPolicy>;
-  /**
-   * Fetch this request's raw data. What one request covers — and so which
-   * fields its context carries — is decided by {@link batching}.
-   *
-   * A failed request fails every channel-day it covered; one channel-day's
-   * `parseDay` error only drops that channel-day.
-   */
-  request(ctx: RequestContextFor<ModeOf<TBatching>, TData>): Promise<TRaw>;
-  /**
-   * Parse one channel-day out of a response — called once per channel-day the
-   * request covered, each with the same `payload`. `programme.channel` is
-   * normalized to `xmltvId` afterwards.
-   */
-  parseDay(ctx: ParseContext<TRaw, TData>): ParsedProgramme[] | Promise<ParsedProgramme[]>;
   /**
    * A last look at each of this site's programmes on the way *out* of the
    * cache: return it, a different one, or nothing at all to leave it out.
@@ -520,10 +498,118 @@ export interface SiteConfig<
 }
 
 /**
- * A site config whatever its batching — what a list of sites holds, since each
- * site picks its own and they need not agree.
+ * A site: where to fetch from, how much of the grid one request covers, and how
+ * to turn a response into programmes.
  */
-export type AnySiteConfig = SiteConfig<any, BatchingOption, any>;
+export interface SiteConfig<
+  TRaw = unknown,
+  TBatching extends BatchingOption = 'none',
+  TData = unknown,
+> extends BaseSiteConfig<TData> {
+  /**
+   * How much of the channel × day grid one {@link request} call covers: a bare
+   * {@link BatchMode}, or that mode with a cap on the request's size
+   * (`{ mode: 'days', daysPerRequest: 7 }`). Defaults to `none`, one
+   * channel-day per request.
+   *
+   * The mode shapes the request context and decides which caps are accepted;
+   * `parseDay` stays per channel-day whatever it is.
+   */
+  batching?: TBatching;
+  /**
+   * Fetch this request's raw data. What one request covers — and so which
+   * fields its context carries — is decided by {@link batching}.
+   *
+   * A failed request fails every channel-day it covered; one channel-day's
+   * `parseDay` error only drops that channel-day.
+   */
+  request(ctx: RequestContextFor<ModeOf<TBatching>, TData>): Promise<TRaw>;
+  /**
+   * Parse one channel-day out of a response — called once per channel-day the
+   * request covered, each with the same `payload`. `programme.channel` is
+   * normalized to `xmltvId` afterwards.
+   */
+  parseDay(ctx: ParseContext<TRaw, TData>): ParsedProgramme[] | Promise<ParsedProgramme[]>;
+}
+
+/**
+ * What a {@link StreamSiteConfig.stream} says it found: one channel-day, and the
+ * programmes on it.
+ *
+ * The channel is one of the context's own — the site looks up whatever its source
+ * called the channel and hands back the {@link GrabberChannel} it belongs to, so
+ * nothing has to be matched up by id afterwards.
+ */
+export interface StreamedChannelDay<TData = unknown> {
+  channel: GrabberChannel<TData>;
+  /** The day as `YYYY-MM-DD`. */
+  day: string;
+  programmes: ParsedProgramme[];
+}
+
+/**
+ * What a stream is given: the same context a `both`-batched request gets —
+ * every channel and day it is being asked about at once — and somewhere to say
+ * what it noticed on the way through.
+ */
+export interface StreamContext<TData = unknown> extends ChannelsDaysRequestContext<TData> {
+  /**
+   * Say something about this pass, prefixed with the site and put wherever the
+   * run's own messages go.
+   *
+   * A whole-document source is the one place a parse has anything to report: a
+   * warning from the parser, a channel the list did not mention, a document that
+   * turned out not to be sorted the way it usually is.
+   */
+  log(message: string): void;
+}
+
+/**
+ * A site that answers its whole window in one pass: it streams, and says what it
+ * found as it goes.
+ *
+ * For a source that publishes the lot in one document rather than a request per
+ * channel-day — a `xmltv.xml.gz`, a dump behind one endpoint. Splitting that with
+ * {@link SiteConfig.request} would mean holding all of it in memory before the
+ * first entry could be written, since `parseDay` is only called once the request
+ * has returned; a stream writes each channel-day as it becomes complete and
+ * keeps whatever is still open.
+ *
+ * What the grab does with what it yields:
+ *
+ * - a channel-day it was **asked** for is written, counted and logged, exactly as
+ *   a parsed one is;
+ * - one it was **not** asked for — a channel-day already fresh in the cache, or a
+ *   channel nobody asked about — is ignored;
+ * - one yielded **again** has its programmes added to what the earlier emission
+ *   wrote, so a document that turns out not to be grouped by channel costs a
+ *   second write rather than the programmes it already reported;
+ * - one **never** yielded, once the stream ends cleanly, is written empty — the
+ *   source has been through its whole answer and had nothing to say about it,
+ *   which is what `parseDay` returning `[]` means too.
+ *
+ * That last one is why a stream that could not finish must **throw**: ending
+ * quietly is read as "that was the whole answer", and every channel-day it never
+ * reached would be cached as having nothing on. Throwing fails exactly those and
+ * writes nothing.
+ */
+export interface StreamSiteConfig<TData = unknown> extends BaseSiteConfig<TData> {
+  /**
+   * Fetch and split this site's whole window, yielding each channel-day as it is
+   * complete.
+   *
+   * Called once per run — with every stale channel-day the site has, in
+   * `channelDays` — and nothing waits for it to finish before the first of its
+   * channel-days is written.
+   */
+  stream(ctx: StreamContext<TData>): AsyncIterable<StreamedChannelDay<TData>>;
+}
+
+/**
+ * A site config whichever shape it is — what a list of sites holds, since each
+ * site picks its own way of fetching and they need not agree.
+ */
+export type AnySiteConfig = SiteConfig<any, BatchingOption, any> | StreamSiteConfig<any>;
 
 /**
  * Identity helper for type inference in config files. The batching is inferred
@@ -534,6 +620,16 @@ export type AnySiteConfig = SiteConfig<any, BatchingOption, any>;
 export function defineSiteConfig<TRaw, TBatching extends BatchingOption = 'none', TData = unknown>(
   config: SiteConfig<TRaw, TBatching, TData>,
 ): SiteConfig<TRaw, TBatching, TData> {
+  return config;
+}
+
+/**
+ * The same, for a site that streams — a channel's `data` inferred from what
+ * `channels` returns, so `stream` sees the real shape.
+ */
+export function defineStreamSiteConfig<TData = unknown>(
+  config: StreamSiteConfig<TData>,
+): StreamSiteConfig<TData> {
   return config;
 }
 

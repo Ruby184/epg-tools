@@ -9,6 +9,7 @@ import { sitePacing } from './pacing.js';
 import { SiteStateHandle } from './state.js';
 import type {
   AnySiteConfig,
+  BaseSiteConfig,
   BatchingOption,
   BatchMode,
   ParsedProgramme,
@@ -17,6 +18,9 @@ import type {
   GrabOptions,
   GrabSummary,
   GrabTaskError,
+  SiteConfig,
+  StreamContext,
+  StreamSiteConfig,
 } from './types.js';
 
 /**
@@ -108,8 +112,9 @@ function received(value: unknown): string {
  * A site's settings as the planner needs them: checked, and with the run's
  * defaults and the site's own overrides already folded in.
  *
- * Settings only — the site's `request` and `parseDay` are still called on the
- * config itself, so a site written with `this` keeps it.
+ * Settings only — whichever of `request`, `parseDay` and `stream` the site
+ * brought are still called on the config itself, so a site written with `this`
+ * keeps it.
  */
 interface ResolvedSite {
   /** Cache namespace and log prefix. */
@@ -120,19 +125,37 @@ interface ResolvedSite {
   batching: ResolvedBatching;
   /** When a cached day counts as stale: run policy under site override. */
   staleness: StalenessPolicy;
+  /** Which of the two shapes this site is: one pass, or a request at a time. */
+  isStreaming: boolean;
 }
+
+/**
+ * A config as it actually arrived: the members of either shape, none of them
+ * promised.
+ *
+ * What {@link resolveSite} checks against, because that is the situation it is
+ * for — a config that was never held to the type at all. Narrowing the union
+ * would be describing a config that has already been vouched for.
+ */
+type UncheckedSiteConfig = BaseSiteConfig<any> &
+  Partial<Pick<SiteConfig<any, BatchingOption, any>, 'batching' | 'request' | 'parseDay'>> &
+  Partial<Pick<StreamSiteConfig<any>, 'stream'>>;
 
 /**
  * Resolve one site against the run: check what it must bring, then settle every
  * default in one pass, so nothing downstream spells one out again.
  *
- * The types make all four members mandatory, so the checks are for configs that
- * arrive without having been held to them — plain JS, or a config file the CLI
- * imported and this package never saw compiled. Each would otherwise surface a
- * long way from its cause: `parseDay` once per channel-day, and only after every
- * request had already gone out; `channels` as a missing `flatMap`; and `site`
- * not at all, quietly filing this site's cached days under `undefined`, in with
- * those of every other site that left it out.
+ * The types make every one of these mandatory, so the checks are for configs
+ * that arrive without having been held to them — plain JS, or a config file the
+ * CLI imported and this package never saw compiled. Each would otherwise surface
+ * a long way from its cause: `parseDay` once per channel-day, and only after
+ * every request had already gone out; `channels` as a missing `flatMap`; and
+ * `site` not at all, quietly filing this site's cached days under `undefined`,
+ * in with those of every other site that left it out.
+ *
+ * It is also where the two shapes are told apart, by the one member that says
+ * so: a site with `stream` answers its whole window in one pass and is asked for
+ * neither `request` nor `parseDay`.
  *
  * Each message says what the member is *for*, because at this point the mistake
  * is usually a misspelling or a shape that has moved on, not ignorance that it
@@ -153,25 +176,35 @@ function resolveSite(config: AnySiteConfig, options: GrabOptions, startDay: stri
     );
   }
 
-  if (typeof config.request !== 'function') {
-    throw new TypeError(
-      `Site "${config.site}" must define request: a function fetching one request's raw data ` +
-        `(got ${received(config.request)})`,
-    );
-  }
+  const unchecked = config as UncheckedSiteConfig;
+  const isStreaming = typeof unchecked.stream === 'function';
 
-  if (typeof config.parseDay !== 'function') {
-    throw new TypeError(
-      `Site "${config.site}" must define parseDay: a function turning a response into one ` +
-        `channel-day's programmes (got ${received(config.parseDay)})`,
-    );
+  if (!isStreaming) {
+    if (typeof unchecked.request !== 'function') {
+      throw new TypeError(
+        `Site "${config.site}" must define request: a function fetching one request's raw data ` +
+          `— or stream, a function yielding one channel-day at a time out of a whole document ` +
+          `(got ${received(unchecked.request)})`,
+      );
+    }
+
+    if (typeof unchecked.parseDay !== 'function') {
+      throw new TypeError(
+        `Site "${config.site}" must define parseDay: a function turning a response into one ` +
+          `channel-day's programmes (got ${received(unchecked.parseDay)})`,
+      );
+    }
   }
 
   return {
     site: config.site,
     window: [...dayRange(startDay, config.days ?? options.days ?? DEFAULT_DAYS)],
-    batching: resolveBatching(config.batching),
+    // A site that streams is asked about its whole window at once, which is what
+    // `both` with no caps already plans: one request over every stale
+    // channel-day. So the planner needs no idea that this site is different.
+    batching: resolveBatching(isStreaming ? { mode: 'both' } : unchecked.batching),
     staleness: { ...DEFAULT_STALENESS, ...options.staleness, ...config.staleness },
+    isStreaming,
   };
 }
 
@@ -263,7 +296,14 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       window,
       batching: { manyChannels, manyDays, maxChannels, maxDays },
       staleness: policy,
+      isStreaming,
     } = resolveSite(config, options, startDay);
+
+    // Which shape this site is has been settled by `resolveSite` — including for
+    // a config the types never saw — so these are just the two ways of reading
+    // it, and only the one that applies is ever called.
+    const fetching = config as SiteConfig<any, BatchingOption, any>;
+    const streaming = config as StreamSiteConfig<any>;
 
     // Everything this site remembers between runs, in one handle: its channel
     // list if it asked for that to be kept, and the bag its own code reads and
@@ -331,6 +371,76 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       }),
     );
 
+    /**
+     * The channel-days this run has already written, so a second lot of
+     * programmes for one of them is added rather than put in its place.
+     *
+     * Only a stream can do that — a request's channel-days are parsed once each
+     * — and a document that is not grouped by channel is where it happens: the
+     * split flushes what it has when the channel changes, and finds the channel
+     * again later. Kept per site rather than per request, since a stream is one
+     * pass over the whole window.
+     */
+    const written = new Set<string>();
+
+    /**
+     * Put one channel-day in the cache, and account for it.
+     *
+     * Not queued: this is the inside of a `localWork` task, which is what makes
+     * the parse and the write it is for one piece of work rather than two.
+     */
+    const persist = async (
+      channel: GrabberChannel,
+      day: string,
+      parsed: ParsedProgramme[],
+      taskSignal?: AbortSignal,
+    ): Promise<void> => {
+      // Cancelled while the parse was running. p-queue has let go of this task
+      // already — it rejected what `add` returned the moment the signal fired —
+      // so a write from here would land after the summary that should have
+      // accounted for it, and be counted into a total nobody is going to read.
+      taskSignal?.throwIfAborted();
+
+      const key = { site, channelId: channel.xmltvId, day };
+      const id = `${channel.xmltvId}|${day}`;
+      const mine = parsed
+        .map((entry) => ({ ...built(entry), channel: channel.xmltvId }))
+        .sort((a, b) => a.start.getTime() - b.start.getTime());
+
+      if (!written.has(id)) {
+        written.add(id);
+        await cache.write(key, mine, { grabbedAt });
+        fetched++;
+
+        if (mine.length === 0) {
+          empty++;
+        }
+
+        log(`[${site}] ${channel.xmltvId} ${day}: ${mine.length} programmes`);
+
+        return;
+      }
+
+      // Said twice, so the entry is what both emissions add up to. Read back
+      // rather than held: what came before may have been written thousands of
+      // channel-days ago, and this is the rare case rather than the hot path.
+      const before = (await cache.read(key)) ?? [];
+      const programmes = [...before, ...mine].sort((a, b) => a.start.getTime() - b.start.getTime());
+
+      await cache.write(key, programmes, { grabbedAt });
+
+      // Counted as one channel-day however many times it is mentioned — and no
+      // longer an empty one, if the first emission was all there was of it.
+      if (before.length === 0 && programmes.length > 0) {
+        empty--;
+      }
+
+      log(
+        `[${site}] ${channel.xmltvId} ${day}: ${mine.length} more programmes, ` +
+          `${programmes.length} in all`,
+      );
+    };
+
     // Parse one channel-day out of the payload and cache it. Queued on
     // `localWork`: `parseDay` is the site's own code and the write is a file, so
     // a wide response must not put every one of its channel-days through both
@@ -343,7 +453,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       enqueue(
         localWork,
         async ({ signal: taskSignal }) => {
-          const parsed = await config.parseDay({
+          const parsed = await fetching.parseDay({
             channel,
             date: dayToDate(day),
             day,
@@ -366,29 +476,24 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
                 ...options,
               }),
           });
-          // Cancelled while the parse was running. p-queue has let go of this
-          // task already — it rejected what `add` returned the moment the
-          // signal fired — so a write from here would land after the summary
-          // that should have accounted for it, and be counted into a total
-          // nobody is going to read.
-          taskSignal?.throwIfAborted();
 
-          const programmes = parsed
-            .map((entry) => ({ ...built(entry), channel: channel.xmltvId }))
-            .sort((a, b) => a.start.getTime() - b.start.getTime());
-
-          await cache.write({ site, channelId: channel.xmltvId, day }, programmes, {
-            grabbedAt,
-          });
-          fetched++;
-
-          if (programmes.length === 0) {
-            empty++;
-          }
-
-          log(`[${site}] ${channel.xmltvId} ${day}: ${programmes.length} programmes`);
+          await persist(channel, day, parsed, taskSignal);
         },
         { priority: 1 },
+      );
+
+    /** The same, for a channel-day a stream has already worked out. */
+    const storeStreamed = (
+      channel: GrabberChannel,
+      day: string,
+      programmes: ParsedProgramme[],
+    ): Promise<void> =>
+      enqueue(
+        localWork,
+        ({ signal: taskSignal }) => persist(channel, day, programmes, taskSignal),
+        {
+          priority: 1,
+        },
       );
 
     // Which channel-days actually need fetching. The meta reads never leave the
@@ -550,7 +655,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
         // is that task's signal, not the run's — what governs the slot governs
         // the work in it.
         payload = await enqueue(requests, ({ signal: taskSignal }) =>
-          config.request(contextFor(request, taskSignal)),
+          fetching.request(contextFor(request, taskSignal)),
         );
         // The run's own, and a different question: was this cancelled while it
         // was in flight? p-queue's task signal governs the slot, not the work
@@ -581,11 +686,126 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       );
     };
 
+    /**
+     * The whole window in one pass: run the site's stream, and write each
+     * channel-day it says it found.
+     *
+     * The request queue's slot covers the lot, since the pass *is* the request —
+     * one long-lived response, from which channel-days fall out as they become
+     * complete. A stream has no `parseDay` to ask for a request of its own, so
+     * nothing is waiting behind that slot.
+     */
+    const streamPipeline = async (request: Request): Promise<void> => {
+      if (signal?.aborted) {
+        return;
+      }
+
+      // What is still owed, by channel-day. An emission takes its pair out; what
+      // is left when the stream ends is what the source never mentioned.
+      const owed = new Map(
+        request.pairs.map((pair) => [`${pair.channel.xmltvId}|${pair.day}`, pair]),
+      );
+      // Writes in flight. Each records its own failure, so none of these ever
+      // rejects and the whole lot can be waited for at the end.
+      const writes: Promise<void>[] = [];
+      let ignored = 0;
+      let failure: unknown;
+
+      const write = (pair: Pair, programmes: ParsedProgramme[]): void => {
+        writes.push(
+          storeStreamed(pair.channel, pair.day, programmes).catch((error: unknown) => {
+            failed.push({ site, channelId: pair.channel.xmltvId, day: pair.day, error });
+            log(`[${site}] ${pair.channel.xmltvId} ${pair.day}: ${errorMessage(error)}`);
+          }),
+        );
+      };
+
+      try {
+        await enqueue(requests, async ({ signal: taskSignal }) => {
+          const context = {
+            ...contextFor(request, taskSignal),
+            log: (message: string) => log(`[${site}] ${message}`),
+            // The shape a stream is handed is the one a `both`-batched request
+            // gets, which is what `resolveSite` planned for it — the compiler
+            // cannot follow that through the conditional type.
+          } as unknown as StreamContext;
+
+          for await (const { channel, day, programmes } of streaming.stream(context)) {
+            // Between emissions, which is as often as this has anything to say:
+            // a cancelled run stops here rather than writing the rest of a
+            // document nobody is waiting for.
+            signal?.throwIfAborted();
+
+            const id = `${channel?.xmltvId}|${day}`;
+            const pair = owed.get(id);
+
+            if (pair !== undefined) {
+              owed.delete(id);
+              write(pair, programmes);
+            } else if (written.has(id)) {
+              // Said again: added to what the earlier emission wrote, rather
+              // than put in its place. A document not grouped by channel.
+              write({ channel, day }, programmes);
+            } else {
+              // A channel-day nobody asked about — one already fresh in the
+              // cache, a channel outside the list, or an emission that makes no
+              // sense. Counted, and reported once at the end.
+              ignored++;
+            }
+
+            // Backpressure, and the only thing holding the parser back: writing
+            // is queued rather than awaited, so the split runs on while entries
+            // land, but no further ahead than `localConcurrency` of them.
+            await localWork.onSizeLessThan(localWork.concurrency);
+          }
+        });
+      } catch (error) {
+        failure = error;
+      }
+
+      // Every write that was started, before deciding what was missed: one of
+      // them may be the last mention of a channel-day still in `owed`.
+      await Promise.all(writes);
+
+      if (ignored > 0) {
+        log(`[${site}] ignored ${ignored} channel-day(s) it was not asked for`);
+      }
+
+      if (failure !== undefined) {
+        // The stream did not finish, so what it never reached is short — not
+        // empty. Anything else would cache "nothing on" for a document that was
+        // cut off half way.
+        for (const { channel, day } of owed.values()) {
+          failed.push({ site, channelId: channel.xmltvId, day, error: failure });
+        }
+
+        log(`[${site}] ${describe(request)}: ${errorMessage(failure)}`);
+
+        return;
+      }
+
+      if (owed.size === 0) {
+        return;
+      }
+
+      // A clean end with channel-days unmentioned: the source has been through
+      // its whole answer and had nothing to say about them, which is what a
+      // `parseDay` returning `[]` means too. Cached empty, so the staleness
+      // policy decides when to ask again rather than every run asking.
+      log(`[${site}] ${owed.size} channel-day(s) not in the document: caching them empty`);
+
+      for (const pair of owed.values()) {
+        write(pair, []);
+      }
+
+      await Promise.all(writes);
+    };
+
     for (const request of plan(await collectStale())) {
       // Nothing awaits this, and a pipeline reports its own failures, so there
       // is no rejection to swallow: a cancelled run leaves each of these to
       // return without doing anything.
-      void pipelines.add(() => pipeline(request));
+      void pipelines.add(() => (isStreaming ? streamPipeline(request) : pipeline(request)));
     }
 
     try {

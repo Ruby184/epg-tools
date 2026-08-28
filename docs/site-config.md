@@ -29,8 +29,9 @@ accepted) and the type of a channel's `data` from what `channels` returns.
 | `site` | `string` | **required** | Unique site identifier, e.g. `webtv.sk`. Used as the cache namespace. |
 | `channels` | `GrabberChannel[]` or `(ctx) => GrabberChannel[] \| Promise<…>` | **required** | The channels to grab, written out or [fetched](#a-channel-list-that-has-to-be-fetched). |
 | `cacheChannels` | `boolean \| { maxAgeDays? }` | off | Keep a **fetched** channel list in the cache, so the next command reads it instead of asking the source — see [keeping a fetched list](#keeping-a-fetched-list). `true` means a day. |
-| `request` | `(ctx) => Promise<TRaw>` | **required** | Fetch one request's raw data. The context's shape comes from `batching`. |
-| `parseDay` | `(ctx) => ParsedProgramme[] \| Promise<…>` | **required** | Turn part of a response into one channel-day's programmes. Called once per channel-day. May return builders, plain objects, or a mix. |
+| `request` | `(ctx) => Promise<TRaw>` | **required**\* | Fetch one request's raw data. The context's shape comes from `batching`. |
+| `parseDay` | `(ctx) => ParsedProgramme[] \| Promise<…>` | **required**\* | Turn part of a response into one channel-day's programmes. Called once per channel-day. May return builders, plain objects, or a mix. |
+| `stream` | `(ctx) => AsyncIterable<StreamedChannelDay>` | — | \*Instead of `request` and `parseDay`: answer the whole window in one pass, yielding each channel-day as it is complete — see [sites that answer in one pass](#sites-that-answer-in-one-pass). |
 | `channelInfo` | `(channel, element) => XmltvChannel \| ChannelBuilder` | `defaultChannelInfo` — id, display name and logo | Build the `<channel>` element for a channel. |
 | `transform` | `(programme, ctx) => XmltvProgramme \| null` | — | A last say over each of this site's programmes as the cache is **read** — see [fixing up one source](#fixing-up-one-source). |
 | `days` | `number` | the config's `days`, then `7` | Override how many days this site grabs. |
@@ -460,6 +461,65 @@ throttle whole requests. Batching both axes at once is the one case where a
 request can span a channel-day that was already fresh — narrow the query with
 `channelDays`, or answer the whole rectangle and let the extra be ignored: a
 fresh channel-day is neither parsed nor rewritten either way.
+
+## Sites that answer in one pass
+
+Some sources publish the lot in one document — a `xmltv.xml.gz`, a dump behind
+one endpoint. Batching says how much of the grid one request covers, and for
+these the answer is "all of it", which `request` cannot express: `parseDay` is
+only called once the request has returned, so the whole window would have to be
+in memory before the first entry could be written.
+
+Such a site defines `stream` **instead of** `request` and `parseDay`, and says
+what it found as it goes:
+
+```ts
+const published = defineStreamSiteConfig({
+  site: 'published.example',
+  channels: [/* … */],
+  async *stream({ channelDays, http, log }) {
+    const byChannel = new Map(channelDays.map(({ channel, day }) => [`${channel.siteId}|${day}`, channel]));
+    const response = await http.get('guide.xml');
+
+    for await (const { channel, day, programmes } of splitByChannelDay(response, log)) {
+      const known = byChannel.get(`${channel}|${day}`);
+
+      if (known) {
+        yield { channel: known, day, programmes };
+      }
+    }
+  },
+});
+```
+
+It is called **once per run**, with every stale channel-day of the site in
+`channelDays` — the same context a `'both'`-batched request gets, plus `log` for
+what a pass through a document notices: a warning from the parser, a channel the
+list did not mention. Nothing waits for the pass to finish before the first
+channel-day it yields is written, and the writing holds the split back rather
+than the other way round, so memory stays flat however large the document is.
+
+What the grab does with each channel-day:
+
+| the channel-day is | what happens |
+|---|---|
+| one it **asked** for | written, counted and logged, exactly as a parsed one is |
+| one it did **not** ask for — already fresh, or a channel nobody asked about | ignored, and counted in one line at the end |
+| yielded **again** | added to what the earlier emission wrote, so a document that is not grouped by channel costs a second write rather than the programmes it already reported |
+| **never** yielded, after a clean end | written **empty** — the source went through its whole answer and had nothing to say, which is what `parseDay` returning `[]` means too |
+
+That last row is the one to design around: **a stream that cannot finish must
+throw.** Ending quietly is read as "that was the whole answer", so a download cut
+off half way would cache "nothing on" for every channel-day it never reached.
+Throwing fails exactly those and writes nothing — which, for anything built on
+Node streams, means being careful that a broken pipe surfaces as a rejection
+rather than as an end of iteration.
+
+Everything else about a site is the same: `channels`, `cacheChannels`,
+`concurrency`, `rateLimit`, `backoff`, `ky`, `staleness`, `transform`,
+`channelInfo` and `state` all mean what they mean anywhere else, and caching
+stays per channel-day, so a run still only asks about what is missing or stale.
+A site cannot do both — `stream` is what makes it this shape.
 
 ## HTTP settings and proxies
 

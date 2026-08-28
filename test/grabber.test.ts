@@ -16,6 +16,8 @@ import type {
   DaysBatching,
   GrabberChannel,
   SiteConfig,
+  StreamedChannelDay,
+  StreamSiteConfig,
 } from '../src/grabber/main.js';
 
 const NOW = new Date('2026-07-17T12:00:00.000Z');
@@ -1783,5 +1785,346 @@ describe('grab with a site that is missing a mandatory member', () => {
     const config = { ...without('parseDay'), parseDay: 'parseDay' as unknown as never };
 
     expect(await failure(config)).toContain("channel-day's programmes (got a string)");
+  });
+});
+
+describe('a site that streams its whole window', () => {
+  /** A streaming site over three channels and two days, yielding what it is told to. */
+  function streamSite(
+    emissions: (channels: GrabberChannel[], days: string[]) => StreamedChannelDay[],
+    overrides: Partial<StreamSiteConfig> = {},
+  ): StreamSiteConfig {
+    return {
+      site: 'stream.example',
+      channels: [channel('a'), channel('b')],
+      days: 2,
+      // eslint-disable-next-line require-yield
+      async *stream({ channels, days }) {
+        yield* emissions(channels, days);
+      },
+      ...overrides,
+    };
+  }
+
+  /** One programme, so an entry can be told from an empty one. */
+  function some(day: string, channel: GrabberChannel): StreamedChannelDay {
+    return { channel, day, programmes: [programme(`${day}T06:00:00.000Z`, channel.siteId)] };
+  }
+
+  it('writes every channel-day it yields, and counts them as fetched', async () => {
+    const cache = new MemoryCache();
+    const summary = await grab(
+      [streamSite((channels, days) => days.flatMap((day) => channels.map((ch) => some(day, ch))))],
+      { cache, now: NOW },
+    );
+
+    expect(summary.fetched).toBe(4);
+    expect(summary.empty).toBe(0);
+    expect(summary.failed).toEqual([]);
+    expect(cache.entries.size).toBe(4);
+    // The programmes are the site's, with the channel normalized to the output id.
+    expect(cache.get({ site: 'stream.example', channelId: 'a', day: TODAY })?.programmes).toEqual([
+      expect.objectContaining({ channel: 'a' }),
+    ]);
+  });
+
+  it('is asked once, for every stale channel-day at once', async () => {
+    const cache = new MemoryCache();
+    const asked: Array<{ channels: string[]; days: string[]; pairs: number }> = [];
+
+    cache.seed(
+      { site: 'stream.example', channelId: 'a', day: TOMORROW },
+      { grabbedAt: NOW.toISOString(), programmeCount: 3 },
+    );
+
+    await grab(
+      [
+        {
+          ...streamSite(() => []),
+          staleness: { alwaysRefetchDays: 0 },
+          async *stream({ channels, days, channelDays, from, to }) {
+            asked.push({
+              channels: channels.map((ch) => ch.xmltvId),
+              days,
+              pairs: channelDays.length,
+            });
+            expect(from.toISOString()).toBe(`${TODAY}T00:00:00.000Z`);
+            expect(to.toISOString()).toBe(`${TOMORROW}T00:00:00.000Z`);
+
+            yield* channelDays.map(({ channel: ch, day }) => some(day, ch));
+          },
+        },
+      ],
+      { cache, now: NOW },
+    );
+
+    // One pass over the lot — and the channel-day already fresh in the cache is
+    // not among the pairs it is asked for, though its day still is.
+    expect(asked).toEqual([{ channels: ['a', 'b'], days: [TODAY, TOMORROW], pairs: 3 }]);
+  });
+
+  it('caches empty every channel-day the document never mentioned', async () => {
+    const cache = new MemoryCache();
+    const messages: string[] = [];
+    const summary = await grab([streamSite((channels, days) => [some(days[0]!, channels[0]!)])], {
+      cache,
+      now: NOW,
+      logger: (message) => messages.push(message),
+    });
+
+    // The stream ended cleanly, so silence about a channel-day means nothing on
+    // — the same as a `parseDay` returning []. Cached, so the staleness policy
+    // decides when to ask again rather than every run asking.
+    expect(summary.fetched).toBe(4);
+    expect(summary.empty).toBe(3);
+    expect(summary.failed).toEqual([]);
+    expect(
+      cache.get({ site: 'stream.example', channelId: 'b', day: TOMORROW })?.programmes,
+    ).toEqual([]);
+    expect(messages).toContain(
+      '[stream.example] 3 channel-day(s) not in the document: caching them empty',
+    );
+  });
+
+  it('adds to a channel-day it yields a second time', async () => {
+    const cache = new MemoryCache();
+    const summary = await grab(
+      [
+        streamSite((channels, days) => {
+          const [day] = days;
+          const [a] = channels;
+
+          return [
+            { channel: a!, day: day!, programmes: [programme(`${day}T06:00:00.000Z`, 'a')] },
+            // The same channel-day again, as a document ordered by time rather
+            // than grouped by channel would give it.
+            { channel: a!, day: day!, programmes: [programme(`${day}T05:00:00.000Z`, 'a')] },
+          ];
+        }),
+      ],
+      { cache, now: NOW },
+    );
+
+    const entry = cache.get({ site: 'stream.example', channelId: 'a', day: TODAY });
+
+    // Both lots, in order — not the second in place of the first.
+    expect(entry?.programmes.map((p) => p.start.toISOString())).toEqual([
+      `${TODAY}T05:00:00.000Z`,
+      `${TODAY}T06:00:00.000Z`,
+    ]);
+    // And counted once, however often it was mentioned.
+    expect(summary.fetched).toBe(4);
+  });
+
+  it('stops counting a channel-day empty once a later emission fills it', async () => {
+    const cache = new MemoryCache();
+    const summary = await grab(
+      [
+        streamSite((channels, days) => [
+          { channel: channels[0]!, day: days[0]!, programmes: [] },
+          some(days[0]!, channels[0]!),
+        ]),
+      ],
+      { cache, now: NOW },
+    );
+
+    // Empty when it was all there was of it, and not once it was not.
+    expect(summary.empty).toBe(3);
+    expect(
+      cache.get({ site: 'stream.example', channelId: 'a', day: TODAY })?.programmes,
+    ).toHaveLength(1);
+  });
+
+  it('ignores a channel-day it was not asked for, saying how many', async () => {
+    const cache = new MemoryCache();
+    const messages: string[] = [];
+
+    cache.seed(
+      { site: 'stream.example', channelId: 'a', day: TOMORROW },
+      { grabbedAt: NOW.toISOString(), programmeCount: 2 },
+      [programme(`${TOMORROW}T20:00:00.000Z`, 'a')],
+    );
+
+    const summary = await grab(
+      [
+        {
+          ...streamSite(() => []),
+          staleness: { alwaysRefetchDays: 0 },
+          async *stream({ channels, days }) {
+            // Everything the document holds, including the channel-day already
+            // fresh in the cache and a channel nobody asked about.
+            yield* days.flatMap((day) => channels.map((ch) => some(day, ch)));
+            yield some(days[0]!, channel('unknown'));
+          },
+        },
+      ],
+      { cache, now: NOW, logger: (message) => messages.push(message) },
+    );
+
+    // A fresh entry is not rewritten, and its grabbedAt stands.
+    expect(cache.get({ site: 'stream.example', channelId: 'a', day: TOMORROW })?.meta).toEqual({
+      grabbedAt: NOW.toISOString(),
+      programmeCount: 2,
+    });
+    expect(summary.fetched).toBe(3);
+    expect(messages).toContain('[stream.example] ignored 2 channel-day(s) it was not asked for');
+  });
+
+  it('fails what it never reached when the stream throws', async () => {
+    const cache = new MemoryCache();
+    const summary = await grab(
+      [
+        {
+          ...streamSite(() => []),
+          async *stream({ channels, days }) {
+            yield some(days[0]!, channels[0]!);
+            throw new Error('the connection went away');
+          },
+        },
+      ],
+      { cache, now: NOW },
+    );
+
+    // What arrived is kept; what the document never reached is short rather than
+    // empty, which is the whole reason a stream must throw rather than end.
+    expect(summary.fetched).toBe(1);
+    expect(summary.empty).toBe(0);
+    expect(summary.failed).toHaveLength(3);
+    expect(summary.failed.map((failure) => `${failure.channelId} ${failure.day}`).sort()).toEqual([
+      `a ${TOMORROW}`,
+      `b ${TODAY}`,
+      `b ${TOMORROW}`,
+    ]);
+    expect(cache.entries.size).toBe(1);
+  });
+
+  it('carries the run to a stop when it is cancelled mid-document', async () => {
+    const cache = new MemoryCache();
+    const controller = new AbortController();
+    let yielded = 0;
+
+    const summary = await grab(
+      [
+        {
+          ...streamSite(() => []),
+          channels: [channel('a'), channel('b'), channel('c')],
+          days: 4,
+          async *stream({ channelDays }) {
+            for (const { channel: ch, day } of channelDays) {
+              yielded++;
+
+              if (yielded === 2) {
+                controller.abort();
+              }
+
+              yield some(day, ch);
+            }
+          },
+        },
+      ],
+      { cache, now: NOW, signal: controller.signal },
+    );
+
+    // Stopped where it was told to rather than reading out the rest of a
+    // document nobody is waiting for: the emission that fired the abort is the
+    // last one pulled out of the generator, of twelve it had to give.
+    expect(yielded).toBe(2);
+    expect(summary.fetched).toBeLessThan(12);
+    // And nothing was cached empty on the way out: the pass did not finish, so
+    // silence about a channel-day says nothing about what is on it.
+    expect([...cache.entries.values()].every((entry) => entry.programmes.length > 0)).toBe(true);
+  });
+
+  it('keeps writing while it splits, without running ahead of the cache', async () => {
+    const cache = new MemoryCache();
+    let alive = 0;
+    let mostAlive = 0;
+
+    // A store slow enough that the split would outrun it, and one that says how
+    // many writes are in flight at once.
+    const slow = new MemoryCache();
+
+    slow.write = async (key, programmes, meta): Promise<void> => {
+      alive++;
+      mostAlive = Math.max(mostAlive, alive);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      await MemoryCache.prototype.write.call(cache, key, programmes, meta);
+      alive--;
+    };
+
+    const summary = await grab(
+      [
+        {
+          ...streamSite(() => []),
+          channels: Array.from({ length: 20 }, (_, index) => channel(`c${index}`)),
+          days: 5,
+          async *stream({ channelDays }) {
+            yield* channelDays.map(({ channel: ch, day }) => some(day, ch));
+          },
+        },
+      ],
+      { cache: slow, now: NOW, localConcurrency: 4 },
+    );
+
+    // A hundred channel-days through a queue four wide: all of them written, and
+    // never more than four writes at once — the split is held back by the queue
+    // rather than filling it.
+    expect(summary.fetched).toBe(100);
+    expect(summary.failed).toEqual([]);
+    expect(cache.entries.size).toBe(100);
+    expect(mostAlive).toBeLessThanOrEqual(4);
+  });
+
+  it('gets the site state and the client every other site gets', async () => {
+    const cache = new MemoryCache();
+    let seen: { sameState: boolean; hasHttp: boolean; logged: string[] } | undefined;
+    const messages: string[] = [];
+
+    await grab(
+      [
+        {
+          ...streamSite(() => []),
+          async *stream({ channelDays, http, state, log }) {
+            state.set('passes', 1);
+            log('one pass, and here is a warning');
+            seen = {
+              sameState: state instanceof Map,
+              hasHttp: typeof http.get === 'function',
+              logged: messages,
+            };
+
+            yield* channelDays.map(({ channel: ch, day }) => some(day, ch));
+          },
+        },
+      ],
+      { cache, now: NOW, logger: (message) => messages.push(message) },
+    );
+
+    expect(seen?.sameState).toBe(true);
+    expect(seen?.hasHttp).toBe(true);
+    // A stream's own messages go where the run's do, prefixed with the site.
+    expect(messages).toContain('[stream.example] one pass, and here is a warning');
+    // And what it remembered is kept, as any site's is.
+    expect(cache.state.get('stream.example|state')?.data).toEqual([['passes', 1]]);
+  });
+
+  it('is refused without a stream or a request, and named either way', async () => {
+    const cache = new MemoryCache();
+    const summary = await grab(
+      [
+        {
+          site: 'stream.example',
+          channels: [channel('a')],
+          days: 1,
+        } as unknown as StreamSiteConfig,
+      ],
+      { cache, now: NOW },
+    );
+
+    expect(summary.failed).toHaveLength(1);
+    expect((summary.failed[0]!.error as Error).message).toContain(
+      'must define request: a function fetching one request',
+    );
+    expect((summary.failed[0]!.error as Error).message).toContain('or stream');
   });
 });

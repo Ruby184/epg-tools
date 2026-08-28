@@ -15,5 +15,5 @@ export {
   StateKey,
   TrackedMap,
 } from './state.js';
-export { defineSiteConfig } from './types.js';
+export { defineSiteConfig, defineStreamSiteConfig } from './types.js';
 export type * from './types.js';

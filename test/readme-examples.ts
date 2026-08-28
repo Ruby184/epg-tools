@@ -14,6 +14,7 @@ import {
   CacheDriverBase,
   defineConfig,
   defineSiteConfig,
+  defineStreamSiteConfig,
   guideStream,
   SiteStateHandle,
 } from '../src/main.js';
@@ -22,6 +23,7 @@ import type {
   CacheDriverFactory,
   CacheStore,
   ChannelDayKey,
+  XmltvProgramme,
   FoundEntry,
   FoundMeta,
   FoundState,
@@ -248,6 +250,36 @@ export const keptChannels = defineSiteConfig({
     return {};
   },
   parseDay: () => [],
+});
+
+// --- docs/site-config.md: Sites that answer in one pass ---------------------
+
+/** Stands in for whatever splits the document — the real one is the parser. */
+async function* splitByChannelDay(
+  response: Response,
+  log: (message: string) => void,
+): AsyncGenerator<{ channel: string; day: string; programmes: XmltvProgramme[] }> {
+  log(`splitting ${response.url}`);
+  yield { channel: '1', day: '2026-08-28', programmes: [] };
+}
+
+export const published = defineStreamSiteConfig({
+  site: 'published.example',
+  channels: [{ xmltvId: 'one.published.example', siteId: '1' }],
+  async *stream({ channelDays, http, log }) {
+    const byChannel = new Map(
+      channelDays.map(({ channel, day }) => [`${channel.siteId}|${day}`, channel]),
+    );
+    const response = await http.get('guide.xml');
+
+    for await (const { channel, day, programmes } of splitByChannelDay(response, log)) {
+      const known = byChannel.get(`${channel}|${day}`);
+
+      if (known) {
+        yield { channel: known, day, programmes };
+      }
+    }
+  },
 });
 
 // --- docs/site-config.md: Remembering something between runs ----------------
