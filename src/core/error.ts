@@ -26,3 +26,15 @@ export class GrabberError extends Error {
     this.code = code;
   }
 }
+
+/**
+ * What to put in a log line about something that went wrong.
+ *
+ * A `catch` binds `unknown`, and a grab logs plenty of them — a failed request,
+ * a parse that threw, a site that could not be resolved. The message when there
+ * is one, and whatever it was when there is not: a run's log should not be the
+ * place a stray `throw 'nope'` becomes a crash.
+ */
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
