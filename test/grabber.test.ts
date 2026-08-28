@@ -62,8 +62,18 @@ class MemoryCache implements CacheStore {
 
   /** What each site remembers, by `site|key` — see the state tests below. */
   state = new Map<string, { data: unknown; meta: StoredStateMeta }>();
+  /** Which groups were read and written, so a test can say how often. */
+  stateReads: string[] = [];
+  stateWrites: string[] = [];
+
+  /** Remember a group as an earlier run would have left it. */
+  seedState(site: string, key: string, data: unknown, writtenAt: string = NOW.toISOString()): void {
+    this.state.set(`${site}|${key}`, { data, meta: { writtenAt, schema: 1, writtenBy: 'test' } });
+  }
 
   async getState(site: string, key: string): Promise<StateEntry | undefined> {
+    this.stateReads.push(`${site}|${key}`);
+
     return this.state.get(`${site}|${key}`);
   }
 
@@ -73,14 +83,8 @@ class MemoryCache implements CacheStore {
     data: unknown,
     meta?: { writtenAt?: string },
   ): Promise<void> {
-    this.state.set(`${site}|${key}`, {
-      data,
-      meta: {
-        writtenAt: meta?.writtenAt ?? NOW.toISOString(),
-        schema: 1,
-        writtenBy: 'test',
-      },
-    });
+    this.stateWrites.push(`${site}|${key}`);
+    this.seedState(site, key, data, meta?.writtenAt ?? NOW.toISOString());
   }
 
   async read(key: ChannelDayKey): Promise<XmltvProgramme[] | undefined> {
@@ -565,6 +569,169 @@ describe('grab', () => {
     // instead measures zero whenever a stall leaves several windows expired at
     // once and the queue catches up inside one tick.
     expect(elapsed).toBeGreaterThanOrEqual(55);
+  });
+
+  describe('a channel list kept between runs', () => {
+    /** A site whose list is fetched, counting how often the source is asked. */
+    function fetchingSite(
+      asked: string[],
+      overrides: Partial<SiteConfig<unknown>> = {},
+    ): SiteConfig<unknown> {
+      return makeConfig({
+        channels: () => {
+          asked.push('fetched');
+          return [channel('one')];
+        },
+        ...overrides,
+      });
+    }
+
+    it('is fetched once and read back by the next run', async () => {
+      const cache = new MemoryCache();
+      const asked: string[] = [];
+      const config = fetchingSite(asked, { cacheChannels: true });
+
+      await grab([config], { cache, now: NOW });
+      await grab([config], { cache, now: NOW });
+
+      // The second run asks the cache instead of the source — and gets the same
+      // channels, so it grabs the same channel-days.
+      expect(asked).toEqual(['fetched']);
+      expect(cache.state.get('example.com|channels')?.data).toEqual([
+        { xmltvId: 'one', siteId: 'site-one' },
+      ]);
+      expect(cache.stateWrites.filter((key) => key.endsWith('|channels'))).toEqual([
+        'example.com|channels',
+      ]);
+    });
+
+    it('is fetched again once it is older than the site allows', async () => {
+      const cache = new MemoryCache();
+      const asked: string[] = [];
+      const config = fetchingSite(asked, { cacheChannels: { maxAgeDays: 1 } });
+
+      await grab([config], { cache, now: NOW });
+      // A day and a minute later, which a one-day list has not survived.
+      await grab([config], { cache, now: new Date(NOW.getTime() + 86_460_000) });
+
+      expect(asked).toEqual(['fetched', 'fetched']);
+    });
+
+    it('is left alone by a site that never asked for it to be kept', async () => {
+      const cache = new MemoryCache();
+      const asked: string[] = [];
+      const config = fetchingSite(asked);
+
+      await grab([config], { cache, now: NOW });
+      await grab([config], { cache, now: NOW });
+
+      // Off unless asked: the group is neither read nor written, and the source
+      // answers every run as it did before any of this existed. The site's own
+      // bag is still read — `ctx.state` has to be there before the first
+      // request — but that is one small read and no write.
+      expect(asked).toEqual(['fetched', 'fetched']);
+      expect(cache.stateWrites).toEqual([]);
+      expect(cache.stateReads.filter((key) => key.endsWith('|channels'))).toEqual([]);
+    });
+
+    it('is fetched whatever is cached when the run refetches everything', async () => {
+      const cache = new MemoryCache();
+      const asked: string[] = [];
+      const config = fetchingSite(asked, { cacheChannels: true });
+
+      await grab([config], { cache, now: NOW });
+      await grab([config], { cache, now: NOW, staleness: { refetchAll: true } });
+
+      // `--refresh` means ask the source, and a channel list is something the
+      // source says.
+      expect(asked).toEqual(['fetched', 'fetched']);
+    });
+
+    it('is fetched again when what was stored is not a channel list', async () => {
+      const cache = new MemoryCache();
+      const asked: string[] = [];
+      const config = fetchingSite(asked, { cacheChannels: true });
+
+      cache.seedState('example.com', 'channels', [{ nothing: 'like a channel' }]);
+      await grab([config], { cache, now: NOW });
+
+      expect(asked).toEqual(['fetched']);
+      expect(cache.state.get('example.com|channels')?.data).toEqual([
+        { xmltvId: 'one', siteId: 'site-one' },
+      ]);
+    });
+  });
+
+  describe("a site's own state", () => {
+    it('reaches every request and parse, and survives to the next run', async () => {
+      const cache = new MemoryCache();
+      const seen: Array<unknown> = [];
+      const config = makeConfig({
+        days: 2,
+        async request({ state }) {
+          seen.push(state.get('token'));
+          state.set('token', 'from-the-first-request');
+
+          return {};
+        },
+        parseDay({ state, day }) {
+          // The same Map the request was handed, not a copy of it.
+          seen.push(`parse ${day}: ${String(state.get('token'))}`);
+
+          return [];
+        },
+      });
+
+      await grab([config], { cache, now: NOW });
+
+      expect(cache.state.get('example.com|state')?.data).toEqual([
+        ['token', 'from-the-first-request'],
+      ]);
+
+      await grab([config], { cache, now: NOW });
+
+      // Nothing on the first request of the first run; by the second run it is
+      // whatever the site left behind.
+      expect(seen[0]).toBeUndefined();
+      expect(seen).toContain('from-the-first-request');
+      expect(seen.filter((entry) => entry === undefined)).toHaveLength(1);
+    });
+
+    it('is written only when the site changed something', async () => {
+      const cache = new MemoryCache();
+      const config = makeConfig({
+        async request() {
+          return {};
+        },
+      });
+
+      await grab([config], { cache, now: NOW });
+
+      // A site that never touches its bag costs no write — the group is read
+      // once per site run and left as it was.
+      expect(cache.stateWrites).toEqual([]);
+      expect(cache.stateReads).toEqual(['example.com|state']);
+    });
+
+    it('is empty for a store that remembers nothing, and still works', async () => {
+      const cache = new MemoryCache();
+      const config = makeConfig({
+        async request({ state }) {
+          state.set('cursor', 12);
+
+          return {};
+        },
+      });
+
+      // A store whose state goes nowhere — `NoCacheDriver`, a read-only
+      // filesystem. The site's own code neither knows nor breaks.
+      cache.setState = async (): Promise<void> => {};
+
+      const summary = await grab([config], { cache, now: NOW });
+
+      expect(summary.fetched).toBe(1);
+      expect(cache.state.size).toBe(0);
+    });
   });
 
   it("hands parseDay the site's client, and the run's signal", async () => {

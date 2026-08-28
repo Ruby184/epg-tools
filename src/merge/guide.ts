@@ -117,10 +117,16 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   // Through the same helper the grab uses, so a site that fetches its channel
   // list is asked the same way by both — and every site at once rather than one
   // after another, since each is a single request to a host of its own.
+  //
+  // The cache goes with it: a site that keeps its channel list there has one the
+  // grab just wrote, and a merge asking the source again could only disagree
+  // with what it is about to read.
   const resolved = (
     await resolveSites(options.sites, {
       ...(options.siteConcurrency !== undefined ? { concurrency: options.siteConcurrency } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
+      store: cache,
+      now,
     })
   ).map((config) => ({ config, channels: config.channels as GrabberChannel[] }));
 

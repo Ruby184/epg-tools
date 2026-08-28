@@ -15,10 +15,12 @@ import {
   defineConfig,
   defineSiteConfig,
   guideStream,
+  SiteStateHandle,
 } from '../src/main.js';
 import type {
   CacheDriver,
   CacheDriverFactory,
+  CacheStore,
   ChannelDayKey,
   FoundEntry,
   FoundMeta,
@@ -232,6 +234,41 @@ const fetchedChannels = defineSiteConfig({
 
 export const fetched = defineConfig({ sites: [fetchedChannels], output: 'guide.xml' });
 
+// --- docs/site-config.md: Keeping a fetched list ----------------------------
+export const keptChannels = defineSiteConfig({
+  site: 'example.tv',
+  cacheChannels: true, // a day; { maxAgeDays: 7 } for longer
+  async channels({ http }) {
+    return (await http.get('channels').json<{ id: string }[]>()).map((item) => ({
+      xmltvId: `${item.id}.example.tv`,
+      siteId: item.id,
+    }));
+  },
+  async request() {
+    return {};
+  },
+  parseDay: () => [],
+});
+
+// --- docs/site-config.md: Remembering something between runs ----------------
+export const remembering = defineSiteConfig({
+  site: 'example.tv',
+  channels: [],
+  async request({ channel, day, http, state }) {
+    let token = state.get('token') as string | undefined;
+
+    if (token === undefined) {
+      token = (await http.post('session').json<{ token: string }>()).token;
+      state.set('token', token); // synchronous; saved once, for next time
+    }
+
+    return http
+      .get(`epg/${channel.siteId}/${day}`, { headers: { authorization: `Bearer ${token}` } })
+      .json();
+  },
+  parseDay: () => [],
+});
+
 // The mode decides which caps are accepted, and the shape of the context.
 export const wrongCap = defineSiteConfig({
   site: 'example.tv',
@@ -442,6 +479,15 @@ class KeyValueCacheDriver extends CacheDriverBase implements CacheDriver<StoredP
 
   async close(): Promise<void> {}
 }
+
+// --- docs/api.md: What a site remembers between runs ------------------------
+export const siteState = async (cache: CacheStore): Promise<void> => {
+  const state = SiteStateHandle.open(cache, 'example.tv');
+
+  (await state.channels()).fresh(86_400_000, new Date()); // the list, while it lasts
+  (await state.bag()).set('cursor', 42); // the site's own Map
+  await state.save(); // the changed groups only
+};
 
 /** The builder the documentation recommends exporting, rather than the class. */
 export function keyValueCache(options: { prefix?: string }): CacheDriverFactory {

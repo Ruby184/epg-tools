@@ -28,6 +28,7 @@ accepted) and the type of a channel's `data` from what `channels` returns.
 |---|---|---|---|
 | `site` | `string` | **required** | Unique site identifier, e.g. `webtv.sk`. Used as the cache namespace. |
 | `channels` | `GrabberChannel[]` or `(ctx) => GrabberChannel[] \| Promise<…>` | **required** | The channels to grab, written out or [fetched](#a-channel-list-that-has-to-be-fetched). |
+| `cacheChannels` | `boolean \| { maxAgeDays? }` | off | Keep a **fetched** channel list in the cache, so the next command reads it instead of asking the source — see [keeping a fetched list](#keeping-a-fetched-list). `true` means a day. |
 | `request` | `(ctx) => Promise<TRaw>` | **required** | Fetch one request's raw data. The context's shape comes from `batching`. |
 | `parseDay` | `(ctx) => ParsedProgramme[] \| Promise<…>` | **required** | Turn part of a response into one channel-day's programmes. Called once per channel-day. May return builders, plain objects, or a mix. |
 | `channelInfo` | `(channel, element) => XmltvChannel \| ChannelBuilder` | `defaultChannelInfo` — id, display name and logo | Build the `<channel>` element for a channel. |
@@ -113,6 +114,34 @@ themselves, as does `--list-channels`; [`resolveChannels` and
 `resolveSites`](./api.md#epg-toolsgrabber) are exported for code of your own
 that wants a site's channels without caring which form they came in.
 
+### Keeping a fetched list
+
+One process resolving once is not the same as one *machine* resolving once:
+`epg grab` and then `epg merge` are two commands and each asks. `cacheChannels`
+puts the list in the cache instead, [beside the
+listings](./api.md#what-a-site-remembers-between-runs):
+
+```ts
+const example = defineSiteConfig({
+  site: 'example.tv',
+  cacheChannels: true,             // a day; { maxAgeDays: 7 } for longer
+  async channels({ http }) { /* … */ },
+  // …
+});
+```
+
+Worth turning on when fetching the list is not free — a paginated API, a list of
+thousands, a request that has to be paid for some other way — and worth leaving
+off when it is, since a channel added to the source then turns up on the next run
+rather than a day later. It applies to the function form only; a list written out
+in the config is already there.
+
+Two things to know. The list goes through JSON, so a channel's `data` must
+survive that: a `Date` or a `Map` in there comes back a string or `{}`, and every
+run but the one that fetched it sees the round-tripped form. And `--refresh`
+fetches the list whatever is cached, because asking the source is what that flag
+means.
+
 ## Requests and parsing
 
 `request` fetches, `parseDay` interprets. They are separate because one
@@ -130,6 +159,7 @@ What a `parseDay` call is given:
 | `programme` | `(start, title, options?) => ProgrammeBuilder` | A [builder bound to this channel-day](#building-programmes). |
 | `http` | `KyInstance` | The site's client — the very instance `request` was handed. See [a parse that needs another request](#a-parse-that-needs-another-request). |
 | `paced` | `<T>(task) => Promise<T>` | Run a request through the site's queue, so its `concurrency`, `rateLimit` and backoff apply to it. |
+| `state` | `Map<string, unknown>` | What this site [remembers between runs](#remembering-something-between-runs). |
 | `signal` | `AbortSignal \| undefined` | Already applied to `http`; here for work that does not go through it. |
 
 ```ts
@@ -167,6 +197,46 @@ programme(zonedXmltvDate(item.start, 'Europe/Bratislava'), item.title);
 
 A failed `request` fails every channel-day it covered; one channel-day's
 `parseDay` error only drops that channel-day.
+
+### Remembering something between runs
+
+`request` and `parseDay` are both handed `state`, an ordinary `Map` the site can
+put things in — read from the cache at the start of the site's run, written back
+at the end if anything changed:
+
+```ts
+async request({ channel, day, http, state }) {
+  let token = state.get('token') as string | undefined;
+
+  if (token === undefined) {
+    token = (await http.post('session').json<{ token: string }>()).token;
+    state.set('token', token);          // synchronous; saved once, for next time
+  }
+
+  return http.get(`epg/${channel.siteId}/${day}`, {
+    headers: { authorization: `Bearer ${token}` },
+  }).json();
+}
+```
+
+For what a site would otherwise fetch again to get back to where it was: a
+token, a cursor, a page count, an id it has already dealt with. Four things are
+worth knowing.
+
+- It is **one `Map` per site for the whole run**, not one per channel-day. A
+  value written by one request is there for every later request and for every
+  `parseDay`, and two of this site's pipelines running at once share it.
+- Whatever goes in must survive `JSON.stringify` — it is a cache file.
+- A store that remembers nothing (`NoCacheDriver`, a read-only filesystem) hands
+  over an empty `Map` at the start of every run. Nothing breaks; nothing carries
+  over.
+- Two `epg grab` processes over the same site do not queue behind each other, so
+  the last one to finish is the one whose state is kept. It is a cache, not a
+  database.
+
+Nothing else in the package reads it, and it is stored [beside the
+listings](./api.md#what-a-site-remembers-between-runs) — `state.json` in the
+site's cache directory.
 
 ### A parse that needs another request
 

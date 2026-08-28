@@ -61,6 +61,19 @@ export interface ChannelDay<TData = unknown> {
   date: Date;
 }
 
+/**
+ * What a site remembers between runs, as a site sees it: a `Map` of its own,
+ * read once at the start of the run and written back at the end if it changed.
+ *
+ * For what a site would otherwise fetch again to get back to where it was — a
+ * token, a cursor, a page count, an id it has already dealt with. One per site
+ * for the whole run rather than per channel-day, so anything put here by one
+ * request is there for every later request and every `parseDay`. Whatever goes
+ * in must survive `JSON.stringify`, this being a cache file, and a store that
+ * remembers nothing (`NoCacheDriver`) leaves it empty at the start of every run.
+ */
+export type SiteState = Map<string, unknown>;
+
 interface BaseRequestContext<TData> {
   /**
    * Exactly the channel-days this request is being made for — every one of
@@ -82,6 +95,8 @@ interface BaseRequestContext<TData> {
    * through it: another client, or a check between two pages of your own.
    */
   signal?: AbortSignal;
+  /** What this site remembers between runs — see {@link SiteState}. */
+  state: SiteState;
 }
 
 /**
@@ -345,6 +360,11 @@ export interface ParseContext<TRaw, TData = unknown> {
    * simply not queued, so nothing spaces them.
    */
   paced: PacedRequest;
+  /**
+   * What this site remembers between runs — see {@link SiteState}. The same
+   * `Map` every request and every parse of this site is handed.
+   */
+  state: SiteState;
 }
 
 /**
@@ -381,6 +401,27 @@ export interface SiteConfig<
    * when channels are actually needed, never by `--capabilities` and friends.
    */
   channels: ChannelsSource<TData>;
+  /**
+   * Keep a fetched channel list in the cache, so the next command reads it
+   * instead of asking the source again.
+   *
+   * For the function form of {@link channels} only — a list written out in the
+   * config is already there. Worth turning on when fetching it is not free: a
+   * paginated API, a list of thousands, or a request that has to be paid for in
+   * some other way. `epg grab` and then `epg merge` are two processes and each
+   * resolves the list, so caching it also stops the two disagreeing about which
+   * channels the run was for.
+   *
+   * `true` keeps it for a day; `{ maxAgeDays }` for as long as you like. Off by
+   * default, since a list that is cheap to fetch is better fetched — a channel
+   * added to a source then turns up on the next run rather than a day later.
+   * `--refresh` fetches it whatever this says.
+   *
+   * It goes through JSON, so a channel's `data` must survive that: a `Date` or a
+   * `Map` in there comes back a string or `{}`, and every run but the one that
+   * fetched it sees the round-tripped form.
+   */
+  cacheChannels?: boolean | { maxAgeDays?: number };
   /** Override the number of days to grab for this site. */
   days?: number;
   /** Max concurrent requests for this site. Defaults to 1. */

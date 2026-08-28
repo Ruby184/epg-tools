@@ -6,6 +6,7 @@ import { ProgrammeBuilder } from '../xmltv/builder.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import { resolveChannels } from './channels.js';
 import { sitePacing } from './pacing.js';
+import { SiteStateHandle } from './state.js';
 import type {
   AnySiteConfig,
   BatchingOption,
@@ -264,6 +265,14 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       staleness: policy,
     } = resolveSite(config, options, startDay);
 
+    // Everything this site remembers between runs, in one handle: its channel
+    // list if it asked for that to be kept, and the bag its own code reads and
+    // writes. Opened before anything asks the source, since the list may make
+    // the first request unnecessary; read only as far as it is asked for, and
+    // written once at the end of the site's run.
+    const state = SiteStateHandle.open(cache, site);
+    const siteState = await state.bag();
+
     // The queue and the client together: the signal rides on the instance, so
     // every call a site makes through it is abortable without the site having
     // to pass it on, and a slow-down the client meets stops the queue.
@@ -313,7 +322,13 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     // The signal it is handed is p-queue's, this task's own: what governs the
     // slot governs the work in it.
     const channels = await enqueue(requests, ({ signal }) =>
-      resolveChannels(config, { http, ...(signal ? { signal } : {}) }),
+      resolveChannels(config, {
+        http,
+        ...(signal ? { signal } : {}),
+        state,
+        refresh: policy.refetchAll,
+        now,
+      }),
     );
 
     // Parse one channel-day out of the payload and cache it. Queued on
@@ -334,6 +349,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
             day,
             payload,
             http,
+            state: siteState,
             ...(taskSignal ? { signal: taskSignal } : {}),
             // A request of the parse's own goes through the site's queue, like
             // the request being parsed did — ahead of the planned ones, so a
@@ -503,6 +519,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
             }
           : { day: request.days[0]!, date: dates[0]! }),
         http,
+        state: siteState,
         ...(signal ? { signal } : {}),
       };
 
@@ -578,6 +595,11 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       await pipelines.onIdle();
     } finally {
       dispose();
+      // Beside `dispose`, and for the same reason: a site that threw, or was
+      // cancelled part way, has as much to hand back as one that finished — the
+      // channel list it fetched, and whatever its own code remembered. Only the
+      // groups that changed are written.
+      await state.save();
     }
   };
 

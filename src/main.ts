@@ -73,12 +73,18 @@ export type * from './cache/types.js';
 export {
   grab,
   channelElement,
+  channelsMaxAgeMs,
+  ChannelsGroup,
   defineSiteConfig,
+  DEFAULT_CHANNELS_MAX_AGE_DAYS,
   resolveChannels,
   resolveSites,
   retryAfterMs,
   siteHttp,
   sitePacing,
+  SiteStateHandle,
+  StateKey,
+  TrackedMap,
 } from './grabber/main.js';
 export type * from './grabber/types.js';
 

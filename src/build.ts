@@ -287,22 +287,31 @@ export async function build(source: ConfigSource, options: RunOptions = {}): Pro
   const config = await resolveConfigSource(source);
   const now = options.now ?? new Date();
 
-  // Channel lists too, and for the same reason one level down: a site that
-  // fetches its channels would otherwise be asked twice, and a list that
-  // changed in between would leave the guide describing channels the grab
-  // never went for.
-  const resolved: EpgConfig = {
-    ...config,
-    sites: await resolveSites(config.sites, {
-      ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
-    }),
-  };
-
   // One cache for both halves, rather than each of them asking the config for
   // its own: a driver that opens a database opens it once, and one that keeps
   // entries in memory is still holding them when the merge comes to read.
-  return withCache(resolved, options, async (cache) => {
+  //
+  // Opened before the channel lists are resolved, rather than after, because
+  // that is where a site's cached list lives — a `cacheChannels` site then makes
+  // no request for a list this cache already has.
+  return withCache(config, options, async (cache) => {
+    // Channel lists resolved once too, and for the same reason one level down: a
+    // site that fetches its channels would otherwise be asked twice, and a list
+    // that changed in between would leave the guide describing channels the grab
+    // never went for.
+    const resolved: EpgConfig = {
+      ...config,
+      sites: await resolveSites(config.sites, {
+        ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+        store: cache,
+        // `--refresh` means ask the source, and a channel list is something the
+        // source says.
+        ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
+        now,
+      }),
+    };
+
     const summary = await runGrab(resolved, { ...options, now, cache });
 
     if (options.signal?.aborted !== true) {

@@ -327,6 +327,31 @@ describe('a configuration that still needs its answers', () => {
     expect(await readFile(join(dir, 'guide.xml'), 'utf8')).toContain('one.example');
   });
 
+  it('keeps a fetched channel list for the next build when the site asks', async () => {
+    const dir = await tempDir();
+    let calls = 0;
+
+    const cached: SiteConfig<unknown> = {
+      ...site([]),
+      cacheChannels: true,
+      channels: () => {
+        calls++;
+        return [{ xmltvId: 'one.example', siteId: '1', name: 'One' }];
+      },
+    };
+
+    await build(config(dir, { sites: [cached] }), { now: NOW });
+    await build(config(dir, { sites: [cached] }), { now: NOW });
+
+    // Two builds, one question of the source — the second read the list the
+    // first left in the cache, and built the same guide from it.
+    expect(calls).toBe(1);
+    expect(await readFile(join(dir, 'guide.xml'), 'utf8')).toContain('one.example');
+    expect(await readFile(join(dir, 'cache', 'example.com', 'channels.json'), 'utf8')).toContain(
+      'one.example',
+    );
+  });
+
   it('asks every site for its channels at once when a merge has to ask', async () => {
     const dir = await tempDir();
     let waiting = 0;

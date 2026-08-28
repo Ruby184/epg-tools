@@ -360,15 +360,38 @@ grabbed again.
 ### `epg-tools/grabber`
 
 `grab`, `defineSiteConfig`, `resolveChannels`, `resolveSites`, `siteHttp`,
-`sitePacing`, `retryAfterMs`, `channelElement`, `defaultChannelInfo`.
+`sitePacing`, `retryAfterMs`, `channelElement`, `defaultChannelInfo`,
+`SiteStateHandle`, `StateKey`, `ChannelsGroup`, `TrackedMap`,
+`channelsMaxAgeMs`, `DEFAULT_CHANNELS_MAX_AGE_DAYS`.
 
-`resolveChannels(site, { http?, signal? })` returns a site's channels whichever
-form they came in — a list or a fetched one — and `resolveSites(sites, {
-signal?, concurrency? })` does it for several, which is what `build` uses to
-fix the list across the grab and the merge. `siteHttp(config, signal?)` builds
-the site's ky instance, and `sitePacing(config, { signal?, log? })` its queue.
-`channelElement(config, channel)` is what every `<channel>` in the output goes
-through — the site's `channelInfo` if it has one, `defaultChannelInfo` if not.
+`resolveChannels(site, { http?, signal?, state?, refresh?, now? })` returns a
+site's channels whichever form they came in — a list or a fetched one — and
+`resolveSites(sites, { signal?, concurrency?, store?, refresh?, now? })` does it
+for several, which is what `build` uses to fix the list across the grab and the
+merge. Given a `store`, both honour a site's
+[`cacheChannels`](./site-config.md#keeping-a-fetched-list): a list still inside
+its max age comes back without the source being asked. `siteHttp(config,
+signal?)` builds the site's ky instance, and `sitePacing(config, { signal?, log?
+})` its queue. `channelElement(config, channel)` is what every `<channel>` in the
+output goes through — the site's `channelInfo` if it has one,
+`defaultChannelInfo` if not.
+
+**`SiteStateHandle`** is how [what a site
+remembers](#what-a-site-remembers-between-runs) is held for the length of a run —
+`grab` opens one per site, and code driving a grab of its own can too:
+
+```ts
+const state = SiteStateHandle.open(cache, 'example.tv');
+
+(await state.channels()).fresh(86_400_000, new Date());   // the list, while it lasts
+(await state.bag()).set('cursor', 42);                     // the site's own Map
+await state.save();                                        // the changed groups only
+```
+
+Each group is read on first ask and remembered, so asking twice — or from two
+places at once — costs one read, and `save` writes only what changed. `bag(key?)`
+names another group when one bag is not enough; both hand back a **`TrackedMap`**,
+a `Map` that records which keys were touched so nothing untouched is rewritten.
 
 ### `epg-tools/merge`
 
