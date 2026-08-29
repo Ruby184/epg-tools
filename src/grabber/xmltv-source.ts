@@ -372,10 +372,16 @@ export function defineXmltvSite<TData = XmltvChannel>(
 
       for (const { channel, day } of channelDays) {
         planned.add(`${channel.xmltvId}|${day}`);
-        wanted.set(channel.siteId, [
-          ...(wanted.get(channel.siteId) ?? []).filter((one) => one !== channel),
-          channel,
-        ]);
+
+        const under = wanted.get(channel.siteId);
+
+        if (under === undefined) {
+          wanted.set(channel.siteId, [channel]);
+        } else if (!under.includes(channel)) {
+          // Once, not once per day of it: the same channel arrives here for every
+          // day of its window.
+          under.push(channel);
+        }
       }
 
       /** Programmes waiting to be handed over, by source channel and day. */
@@ -391,13 +397,20 @@ export function defineXmltvSite<TData = XmltvChannel>(
         }
 
         const days = open.get(siteId);
+        const channels = wanted.get(siteId) ?? [];
 
         open.delete(siteId);
         flushed.add(siteId);
 
         for (const [day, programmes] of days ?? []) {
-          for (const channel of wanted.get(siteId) ?? []) {
-            yield { channel, day, programmes };
+          for (const channel of channels) {
+            // Only what this channel was asked about. A day is kept as soon as
+            // *any* channel sharing the source id wanted it, and two ids on one
+            // feed need not have the same days stale — so the ones that did not
+            // are dropped here rather than handed over to be ignored.
+            if (planned.has(`${channel.xmltvId}|${day}`)) {
+              yield { channel, day, programmes };
+            }
           }
         }
       }
@@ -461,12 +474,23 @@ export function defineXmltvSite<TData = XmltvChannel>(
           open.set(siteId, days);
         }
 
-        days.set(day, [...(days.get(day) ?? []), programme]);
+        const bucket = days.get(day);
+
+        // Pushed, not rebuilt. `[...previous, programme]` is quadratic in a day's
+        // length, which at a couple of hundred programmes a day is a few percent
+        // of a grab and lost in the parse — but it grows with the one number a
+        // dense channel makes large, on the innermost line of the split, for
+        // nothing.
+        if (bucket === undefined) {
+          days.set(day, [programme]);
+        } else {
+          bucket.push(programme);
+        }
       }
 
       for (const siteId of [...open.keys()]) {
         yield* release(siteId);
       }
     },
-  } as StreamSiteConfig<TData>;
+  };
 }
