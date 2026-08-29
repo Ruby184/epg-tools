@@ -340,6 +340,31 @@ describe('defineXmltvSite', () => {
       expect(await entries(cache, 'a', TODAY)).toHaveLength(1);
     });
 
+    it('reads a gzip whose magic number arrives a byte at a time', async () => {
+      // A body arrives as the socket gave it, and a dribbling origin or a proxy
+      // flushing small frames really does hand over one byte first. Deciding on
+      // the first chunk rather than the first four bytes read that as a document
+      // that is "neither XML nor anything recognizable".
+      const body = gzipSync(GROUPED);
+      const source = await serve((_request, response) => {
+        response.writeHead(200, { 'content-type': 'application/gzip' });
+        response.write(body.subarray(0, 1));
+        setTimeout(() => {
+          response.write(body.subarray(1, 3));
+          setTimeout(() => response.end(body.subarray(3)), 5);
+        }, 5);
+      });
+      const cache = store();
+
+      const summary = await grab(
+        [defineXmltvSite({ site: 'published.example', url: `${source.url}guide.xml.gz` })],
+        { cache, now: NOW, days: 1 },
+      );
+
+      expect(summary.failed).toEqual([]);
+      expect(await entries(cache, 'a', TODAY)).toHaveLength(1);
+    });
+
     it('says so when the bytes are neither XML nor anything it knows', async () => {
       const source = await serve((_request, response) => {
         response.writeHead(200, { 'content-type': 'application/octet-stream' });

@@ -89,11 +89,37 @@ export interface XmltvSiteOptions<TData = XmltvChannel> extends Omit<
   order?: 'grouped' | 'any';
 }
 
-/** The first chunk of a stream, and the stream with it put back. */
-async function peek(source: Readable): Promise<{ head: Buffer; body: Readable }> {
+/** How many bytes {@link sniff} needs to decide: the longest magic number below. */
+const MAGIC_BYTES = 4;
+
+/**
+ * The first bytes of a stream, and the stream with them put back.
+ *
+ * Enough of them to decide on, rather than one chunk of whatever length: a body
+ * arrives as the socket gave it, and a dribbling origin or a proxy flushing
+ * small frames hands over **one byte** first — measured, not supposed. A magic
+ * number read out of that is a gzipped guide reported as "neither XML nor
+ * anything recognizable", which is a whole site failed over a chunk boundary.
+ */
+async function peek(source: Readable, want: number): Promise<{ head: Buffer; body: Readable }> {
   const reader = source[Symbol.asyncIterator]();
-  const first = await reader.next();
-  const head = first.done === true ? Buffer.alloc(0) : Buffer.from(first.value as Uint8Array);
+  const chunks: Buffer[] = [];
+  let size = 0;
+
+  while (size < want) {
+    const next = await reader.next();
+
+    if (next.done === true) {
+      break;
+    }
+
+    const chunk = Buffer.from(next.value as Uint8Array);
+
+    chunks.push(chunk);
+    size += chunk.length;
+  }
+
+  const head = Buffer.concat(chunks);
 
   return {
     head,
@@ -198,7 +224,7 @@ async function* documentBytes(
     return;
   }
 
-  const { head, body } = await peek(Readable.fromWeb(response.body));
+  const { head, body } = await peek(Readable.fromWeb(response.body), MAGIC_BYTES);
   const format =
     compression === undefined
       ? sniff(head, {
