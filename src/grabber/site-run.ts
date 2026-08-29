@@ -19,20 +19,14 @@
 import type { KyInstance } from 'ky';
 import PQueue from 'p-queue';
 import { isStale } from '../cache/main.js';
-import type { CacheStore, StalenessPolicy } from '../cache/types.js';
+import type { CacheStore } from '../cache/types.js';
 import { dayToDate } from '../core/days.js';
 import { errorMessage } from '../core/error.js';
 import { ProgrammeBuilder } from '../xmltv/builder.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import { resolveChannels } from './channels.js';
 import { sitePacing } from './pacing.js';
-import {
-  describeRequest,
-  planRequests,
-  type Pair,
-  type Request,
-  type ResolvedBatching,
-} from './planner.js';
+import { describeRequest, planRequests, type Pair, type Request } from './planner.js';
 import {
   forget,
   isUnchanged,
@@ -41,12 +35,14 @@ import {
   type Revalidation,
   type Validator,
 } from './revalidate.js';
-import { resolveSite } from './site.js';
+import { resolveSite, type ResolvedSite } from './site.js';
 import { SiteStateHandle, StateKey, TrackedMap } from './state.js';
 import type {
   AnySiteConfig,
+  BaseRequestContext,
   BatchingOption,
   BatchMode,
+  ChannelsDaysRequestContext,
   GrabberChannel,
   GrabOptions,
   GrabTaskError,
@@ -102,15 +98,18 @@ export class SiteRun {
   readonly #run: Run;
   readonly #config: AnySiteConfig;
 
-  /** Which shape this site is, and the two ways of reading it. */
-  readonly #isStreaming: boolean;
-  readonly #fetching: SiteConfig<any, BatchingOption, any>;
-  readonly #streaming: StreamSiteConfig<any>;
+  /**
+   * Which shape this site is, with the config narrowed to match.
+   *
+   * Kept as the one object `resolveSite` handed back rather than picked apart,
+   * because that is what carries the narrowing: reading `isStreaming` off it
+   * tells the compiler what `config` is, so neither pipeline can be given the
+   * wrong kind and neither has to assert what it was given.
+   */
+  readonly #resolved: ResolvedSite;
 
+  /** This site's name, which every log line and cache key starts with. */
   readonly #site: string;
-  readonly #window: string[];
-  readonly #batching: ResolvedBatching;
-  readonly #policy: StalenessPolicy;
 
   /** The site's own client and request queue, and how to let them go. */
   readonly #http: KyInstance;
@@ -145,25 +144,14 @@ export class SiteRun {
   constructor(config: AnySiteConfig, run: Run) {
     // Before its queue exists, let alone a request: a site that cannot be
     // resolved is one nothing else here can be asked about.
-    const { site, window, batching, staleness, isStreaming } = resolveSite(
-      config,
-      run.options,
-      run.startDay,
-    );
+    const resolved = resolveSite(config, run.options, run.startDay);
 
     this.#run = run;
     this.#config = config;
-    this.#site = site;
-    this.#window = window;
-    this.#batching = batching;
-    this.#policy = staleness;
-    this.#isStreaming = isStreaming;
-    // Settled by `resolveSite` — including for a config the types never saw — so
-    // these are just the two ways of reading it, and only one is ever called.
-    this.#fetching = config as SiteConfig<any, BatchingOption, any>;
-    this.#streaming = config as StreamSiteConfig<any>;
+    this.#resolved = resolved;
+    this.#site = resolved.site;
     this.#revalidates = config.conditionalGet === true;
-    this.#state = SiteStateHandle.open(run.cache, site);
+    this.#state = SiteStateHandle.open(run.cache, resolved.site);
 
     // The queue and the client together: the signal rides on the instance, so
     // every call a site makes through it is abortable without the site having to
@@ -223,7 +211,7 @@ export class SiteRun {
     // Pruned as it is taken on: the days this window covers are the days its
     // entries survive a prune for, so a validator about anything earlier is one
     // whose channel-days have gone.
-    this.#validators = pruneValidators(validators, this.#window[0] ?? this.#run.startDay);
+    this.#validators = pruneValidators(validators, this.#resolved.window[0] ?? this.#run.startDay);
 
     // Fetching the channel list is a request to the same source as the rest, so
     // it goes through the same queue: a site's `rateLimit` spaces the first EPG
@@ -235,24 +223,29 @@ export class SiteRun {
         http: this.#http,
         ...(signal ? { signal } : {}),
         state: this.#state,
-        refresh: this.#policy.refetchAll,
+        refresh: this.#resolved.staleness.refetchAll,
         now: this.#run.now,
       }),
     );
 
     const requests = planRequests({
       channels: this.#channels,
-      window: this.#window,
+      window: this.#resolved.window,
       stale: await this.#collectStale(),
-      batching: this.#batching,
+      batching: this.#resolved.batching,
     });
 
     for (const request of requests) {
       // Nothing awaits this, and a pipeline reports its own failures, so there is
       // no rejection to swallow: a cancelled run leaves each of these to return
       // without doing anything.
+      // Which pipeline runs and which config it is handed are the same decision,
+      // taken here and nowhere else — so neither can be got wrong, and neither
+      // pipeline has to assert what it was given.
       void this.#pipelines.add(() =>
-        this.#isStreaming ? this.#streamPipeline(request) : this.#requestPipeline(request),
+        this.#resolved.isStreaming
+          ? this.#streamPipeline(this.#resolved.config, request)
+          : this.#requestPipeline(this.#resolved.config, request),
       );
     }
 
@@ -299,13 +292,17 @@ export class SiteRun {
     const checked = await Promise.all(
       this.#channels.map((channel) =>
         enqueue(localWork, async (): Promise<Pair[]> => {
-          const keys = this.#window.map((day) => ({ site, channelId: channel.xmltvId, day }));
+          const keys = this.#resolved.window.map((day) => ({
+            site,
+            channelId: channel.xmltvId,
+            day,
+          }));
           const metas = await cache.getMetas(keys);
 
-          return this.#window.flatMap((day, index) => {
+          return this.#resolved.window.flatMap((day, index) => {
             const cached = metas[index];
 
-            if (isStale(day, cached, this.#policy, now)) {
+            if (isStale(day, cached, this.#resolved.staleness, now)) {
               // The meta goes with it: what a conditional request asks with, and
               // what it would keep. Read once here rather than again later.
               return [{ channel, day, ...(cached === undefined ? {} : { cached }) }];
@@ -346,10 +343,10 @@ export class SiteRun {
           : earliest,
       undefined,
     );
-    const staleAt = this.#run.now.getTime() - this.#policy.maxAgeDays * 86_400_000;
+    const staleAt = this.#run.now.getTime() - this.#resolved.staleness.maxAgeDays * 86_400_000;
     const mayKeep =
       this.#revalidates &&
-      !this.#policy.refetchAll &&
+      !this.#resolved.staleness.refetchAll &&
       cached.every((meta) => meta !== undefined && Date.parse(meta.grabbedAt) >= staleAt);
 
     return {
@@ -361,43 +358,74 @@ export class SiteRun {
     };
   }
 
-  /**
-   * The context for one request, in the shape this site's mode declares — plus
-   * the channel-days it is for, which the plan already worked out.
-   */
-  #contextFor(request: Request, signal?: AbortSignal): RequestContextFor<BatchMode> {
-    const { manyChannels, manyDays } = this.#batching;
-    // A Date of its own everywhere one is handed out, `from` and `to` included.
-    // They are mutable — `Object.freeze` does not help, a Date keeps its value in
-    // an internal slot rather than a property — so the hazard worth removing is
-    // not that a site can change one, it is that changing one would silently
-    // change the others: `from` and `dates[0]` as the same object is a bug nobody
-    // would find.
-    const dates = request.days.map(dayToDate);
-    const context = {
+  /** What every context carries, whichever shape the rest of it takes. */
+  #contextBase(request: Request, signal?: AbortSignal): BaseRequestContext {
+    return {
       channelDays: request.pairs.map(({ channel, day, cached }) => ({
         channel,
         day,
         date: dayToDate(day),
         ...(cached === undefined ? {} : { cached }),
       })),
-      ...(manyChannels ? { channels: request.channels } : { channel: request.channels[0]! }),
-      ...(manyDays
-        ? {
-            days: request.days,
-            dates,
-            from: dayToDate(request.days[0]!),
-            to: dayToDate(request.days[request.days.length - 1]!),
-          }
-        : { day: request.days[0]!, date: dates[0]! }),
       http: this.#http,
       state: this.#siteState,
       ...(signal ? { signal } : {}),
+    };
+  }
+
+  /**
+   * The days a request covers, as a context that batches them says them.
+   *
+   * A Date of its own everywhere one is handed out, `from` and `to` included.
+   * They are mutable — `Object.freeze` does not help, a Date keeps its value in
+   * an internal slot rather than a property — so the hazard worth removing is not
+   * that a site can change one, it is that changing one would silently change the
+   * others: `from` and `dates[0]` as the same object is a bug nobody would find.
+   */
+  #manyDays(request: Request): Pick<ChannelsDaysRequestContext, 'days' | 'dates' | 'from' | 'to'> {
+    return {
+      days: request.days,
+      dates: request.days.map(dayToDate),
+      from: dayToDate(request.days[0]!),
+      to: dayToDate(request.days[request.days.length - 1]!),
+    };
+  }
+
+  /**
+   * The context for one request, in the shape this site's mode declares — plus
+   * the channel-days it is for, which the plan already worked out.
+   */
+  #contextFor(request: Request, signal?: AbortSignal): RequestContextFor<BatchMode> {
+    const { manyChannels, manyDays } = this.#resolved.batching;
+    const context = {
+      ...this.#contextBase(request, signal),
+      ...(manyChannels ? { channels: request.channels } : { channel: request.channels[0]! }),
+      ...(manyDays
+        ? this.#manyDays(request)
+        : { day: request.days[0]!, date: dayToDate(request.days[0]!) }),
     };
 
     // The mode and this shape were chosen together right here; the compiler
     // cannot follow that through the conditional type.
     return context as RequestContextFor<BatchMode>;
+  }
+
+  /**
+   * The context a stream is given: every channel and day it is being asked
+   * about, and somewhere to say what it noticed on the way through.
+   *
+   * Built rather than cast from {@link #contextFor}'s: a stream site always
+   * resolves to `both`, so this shape is not one of several and needs no
+   * assertion to say which — a member added to `StreamContext` fails to compile
+   * here instead of being quietly missing at runtime.
+   */
+  #streamContextFor(request: Request, signal?: AbortSignal): StreamContext {
+    return {
+      ...this.#contextBase(request, signal),
+      ...this.#manyDays(request),
+      channels: request.channels,
+      log: (message: string) => this.#run.log(`[${this.#site}] ${message}`),
+    };
   }
 
   /**
@@ -469,13 +497,18 @@ export class SiteRun {
    * hand is held in memory until it is written, while a staleness check only
    * discovers more work to do.
    */
-  #store(channel: GrabberChannel, day: string, payload: unknown): Promise<void> {
+  #store(
+    config: SiteConfig<any, BatchingOption, any>,
+    channel: GrabberChannel,
+    day: string,
+    payload: unknown,
+  ): Promise<void> {
     const { enqueue, localWork } = this.#run;
 
     return enqueue(
       localWork,
       async ({ signal: taskSignal }) => {
-        const parsed = await this.#fetching.parseDay({
+        const parsed = await config.parseDay({
           channel,
           date: dayToDate(day),
           day,
@@ -589,7 +622,10 @@ export class SiteRun {
    * simply not made, while one interrupted in flight leaves the channel-days it
    * was for short, and says so.
    */
-  async #requestPipeline(request: Request): Promise<void> {
+  async #requestPipeline(
+    config: SiteConfig<any, BatchingOption, any>,
+    request: Request,
+  ): Promise<void> {
     const { enqueue, signal } = this.#run;
 
     if (signal?.aborted) {
@@ -611,9 +647,7 @@ export class SiteRun {
       // Around the site's call and nothing else, which is also what keeps a
       // request made later from inside `parseDay` out of it.
       payload = await enqueue(this.#requests, ({ signal: taskSignal }) =>
-        revalidation.run(asking, () =>
-          this.#fetching.request(this.#contextFor(request, taskSignal)),
-        ),
+        revalidation.run(asking, () => config.request(this.#contextFor(request, taskSignal))),
       );
       // The run's own, and a different question: was this cancelled while it was
       // in flight? p-queue's task signal governs the slot, not the work in it, so
@@ -643,7 +677,7 @@ export class SiteRun {
     await Promise.all(
       request.pairs.map(async ({ channel, day }) => {
         try {
-          await this.#store(channel, day, payload);
+          await this.#store(config, channel, day, payload);
         } catch (error) {
           this.#fail(channel, day, error);
         }
@@ -660,7 +694,7 @@ export class SiteRun {
    * complete. A stream has no `parseDay` to ask for a request of its own, so
    * nothing is waiting behind that slot.
    */
-  async #streamPipeline(request: Request): Promise<void> {
+  async #streamPipeline(config: StreamSiteConfig<any>, request: Request): Promise<void> {
     const { enqueue, localWork, log, signal } = this.#run;
 
     if (signal?.aborted) {
@@ -695,15 +729,7 @@ export class SiteRun {
       // in a context this one never reached.
       await enqueue(this.#requests, async ({ signal: taskSignal }) =>
         revalidation.run(asking, async () => {
-          const context = {
-            ...this.#contextFor(request, taskSignal),
-            log: (message: string) => log(`[${this.#site}] ${message}`),
-            // The shape a stream is handed is the one a `both`-batched request
-            // gets, which is what `resolveSite` planned for it — the compiler
-            // cannot follow that through the conditional type.
-          } as unknown as StreamContext;
-
-          for await (const emission of this.#streaming.stream(context)) {
+          for await (const emission of config.stream(this.#streamContextFor(request, taskSignal))) {
             // Between emissions, which is as often as this has anything to say: a
             // cancelled run stops here rather than writing the rest of a document
             // nobody is waiting for.

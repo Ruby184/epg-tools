@@ -88,7 +88,11 @@ export interface ChannelDay<TData = unknown> {
  */
 export type SiteState = Map<string, unknown>;
 
-interface BaseRequestContext<TData> {
+/**
+ * What every context carries, whichever shape the rest of it takes: the
+ * channel-days it is for, the site's client, its state, and the run's signal.
+ */
+export interface BaseRequestContext<TData = unknown> {
   /**
    * Exactly the channel-days this request is being made for — every one of
    * them stale, in channel order and then day order.
