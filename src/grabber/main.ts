@@ -15,5 +15,7 @@ export {
   StateKey,
   TrackedMap,
 } from './state.js';
+export { isUnchanged, UnchangedError } from './revalidate.js';
+export type { Validator } from './revalidate.js';
 export { defineSiteConfig, defineStreamSiteConfig } from './types.js';
 export type * from './types.js';

@@ -81,11 +81,13 @@ export {
   resolveChannels,
   resolveSites,
   retryAfterMs,
+  isUnchanged,
   siteHttp,
   sitePacing,
   SiteStateHandle,
   StateKey,
   TrackedMap,
+  UnchangedError,
 } from './grabber/main.js';
 export type * from './grabber/types.js';
 

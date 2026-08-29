@@ -7,12 +7,23 @@
  * with nothing in it to mock.
  */
 
+import type { CacheEntryMeta } from '../cache/types.js';
 import type { BatchingOption, BatchMode, GrabberChannel } from './types.js';
 
 /** One channel-day: the unit of caching, parsing and failure reporting. */
 export interface Pair {
   channel: GrabberChannel;
   day: string;
+  /**
+   * What the cache holds for it, when it holds anything.
+   *
+   * A stale channel-day is not necessarily a missing one — it may be there and
+   * merely old enough to ask about again — and the sweep that decided so has the
+   * meta in its hand. Carrying it costs nothing and is what lets a request be
+   * conditional: something to ask "changed since?" with, and something to keep if
+   * the answer is no.
+   */
+  cached?: CacheEntryMeta;
 }
 
 /**
@@ -109,17 +120,20 @@ export function planRequests(options: {
 }): Request[] {
   const { channels, window, stale } = options;
   const { maxChannels, maxDays } = options.batching;
-  const staleByDay = new Map<string, Set<GrabberChannel>>();
+  // By day, and to the pair itself rather than to the channel: a pair carries
+  // what the cache holds for it, and rebuilding one here would throw that away
+  // — which is a request that cannot ask whether anything has changed.
+  const staleByDay = new Map<string, Map<GrabberChannel, Pair>>();
 
-  for (const { channel, day } of stale) {
-    let channelsOfDay = staleByDay.get(day);
+  for (const pair of stale) {
+    let channelsOfDay = staleByDay.get(pair.day);
 
     if (!channelsOfDay) {
-      channelsOfDay = new Set();
-      staleByDay.set(day, channelsOfDay);
+      channelsOfDay = new Map();
+      staleByDay.set(pair.day, channelsOfDay);
     }
 
-    channelsOfDay.add(channel);
+    channelsOfDay.set(pair.channel, pair);
   }
 
   // Day groups are cut from the whole window rather than from the stale days, so
@@ -137,8 +151,10 @@ export function planRequests(options: {
 
       for (const channel of group) {
         for (const [index, day] of dayGroup.entries()) {
-          if (staleOn[index]?.has(channel)) {
-            pairs.push({ channel, day });
+          const pair = staleOn[index]?.get(channel);
+
+          if (pair !== undefined) {
+            pairs.push(pair);
             days.add(day);
           }
         }

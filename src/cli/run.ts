@@ -178,12 +178,18 @@ async function report(
   // A day that came back with nothing is not a failure — a channel with no
   // listings is a legitimate answer — but it is the one thing a run cannot
   // otherwise see, so it is named beside the fetches it is part of.
-  const fetched =
+  // What the source said was unchanged is named only when there is any, so a
+  // site that never asks does not read a nought about it every run.
+  const parts = [
     summary.empty > 0
       ? `${summary.fetched} fetched (${summary.empty} empty)`
-      : `${summary.fetched} fetched`;
+      : `${summary.fetched} fetched`,
+    `${summary.fromCache} from cache`,
+    ...(summary.unchanged > 0 ? [`${summary.unchanged} unchanged`] : []),
+    `${summary.failed.length} failed`,
+  ];
 
-  log?.(`Grab done: ${fetched}, ${summary.fromCache} from cache, ${summary.failed.length} failed`);
+  log?.(`Grab done: ${parts.join(', ')}`);
 
   // Failures, so they are reported even under --quiet.
   await writeLines(

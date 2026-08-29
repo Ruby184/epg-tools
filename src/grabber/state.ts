@@ -27,6 +27,8 @@ import type { AnySiteConfig, GrabberChannel, SiteState } from './types.js';
 export enum StateKey {
   /** A channel list `resolveChannels` fetched. */
   CHANNELS = 'channels',
+  /** What each url last answered with — see `revalidate.ts`. */
+  VALIDATORS = 'validators',
   /** Whatever the site itself put there. */
   SITE = 'state',
 }

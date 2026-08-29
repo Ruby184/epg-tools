@@ -2,7 +2,7 @@ import type { KyInstance, Options as KyOptions } from 'ky';
 import type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from '../xmltv/builder.js';
 import type { DateInput } from '../xmltv/date.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
-import type { CacheStore, StalenessPolicy } from '../cache/types.js';
+import type { CacheEntryMeta, CacheStore, StalenessPolicy } from '../cache/types.js';
 
 /**
  * A channel to grab: maps an output XMLTV id to a site-specific id.
@@ -59,6 +59,20 @@ export interface ChannelDay<TData = unknown> {
   day: string;
   /** The same day as UTC midnight. */
   date: Date;
+  /**
+   * What the cache already holds for this channel-day, or `undefined` when it
+   * holds nothing.
+   *
+   * A stale channel-day is not the same as a missing one: it may be there and
+   * simply old enough to ask about again. `grabbedAt` is what a source can be
+   * asked "has it changed since?" with, and `programmeCount` says what would be
+   * kept if the answer is no.
+   *
+   * Every channel-day here is one this request is *for*, so a cached one is a
+   * candidate for `conditionalGet` rather than something to skip — the run has
+   * already left out what is still fresh.
+   */
+  cached?: CacheEntryMeta;
 }
 
 /**
@@ -456,6 +470,34 @@ export interface BaseSiteConfig<TData = unknown> {
   /** Per-site override of the staleness policy. */
   staleness?: Partial<StalenessPolicy>;
   /**
+   * Ask the source whether anything has changed, and keep what is cached when it
+   * says no.
+   *
+   * A site writes no code for this. Turning it on puts two hooks in the site's
+   * own client: one sends `If-None-Match` or `If-Modified-Since` with a request,
+   * the other turns a `304` into an {@link UnchangedError} — which reaches out of
+   * `request` or `stream` without either of them mentioning it, and tells the run
+   * to keep every channel-day that request was for. They are counted in
+   * `unchanged` rather than `fetched`, and nothing is rewritten.
+   *
+   * What it asks with, in order: an `ETag` the source gave last time, then a
+   * `Last-Modified`, then — with neither stored — the `grabbedAt` of the entries
+   * themselves, which is a fair thing to ask "has it changed since?" with and
+   * needs nothing remembered at all.
+   *
+   * **Off by default, and worth understanding before turning on.** It makes any
+   * 304 from any request inside `request` mean "nothing changed for these
+   * channel-days", which is true of a source whose channel-day comes from one
+   * request and wrong for one that pages through several. Send
+   * `context: { revalidate: false }` with a request that should never be asked
+   * conditionally — a page after the first, a lookup that is not the listings.
+   *
+   * A validator is never sent where a `304` could not be honoured: not when a
+   * channel-day it covers has nothing cached, not when one is past
+   * `maxAgeDays`, and not under `--refresh`.
+   */
+  conditionalGet?: boolean;
+  /**
    * A last look at each of this site's programmes on the way *out* of the
    * cache: return it, a different one, or nothing at all to leave it out.
    *
@@ -533,19 +575,36 @@ export interface SiteConfig<
 }
 
 /**
- * What a {@link StreamSiteConfig.stream} says it found: one channel-day, and the
- * programmes on it.
+ * What a {@link StreamSiteConfig.stream} says it found: one channel-day, and
+ * either the programmes on it or word that what is cached still stands.
  *
  * The channel is one of the context's own — the site looks up whatever its source
  * called the channel and hands back the {@link GrabberChannel} it belongs to, so
  * nothing has to be matched up by id afterwards.
  */
-export interface StreamedChannelDay<TData = unknown> {
-  channel: GrabberChannel<TData>;
-  /** The day as `YYYY-MM-DD`. */
-  day: string;
-  programmes: ParsedProgramme[];
-}
+export type StreamedChannelDay<TData = unknown> =
+  | {
+      channel: GrabberChannel<TData>;
+      /** The day as `YYYY-MM-DD`. */
+      day: string;
+      programmes: ParsedProgramme[];
+      unchanged?: false;
+    }
+  | {
+      channel: GrabberChannel<TData>;
+      day: string;
+      programmes?: undefined;
+      /**
+       * Nothing has changed here: keep the cached entry as it is.
+       *
+       * For a pass that can tell — a document with a per-channel revision, a
+       * source answering `304` for part of what was asked. The entry is left
+       * alone, `grabbedAt` and all, and counted in `unchanged` rather than
+       * `fetched`. A channel-day with nothing cached cannot be kept, and is
+       * reported as a failure rather than quietly left out of the guide.
+       */
+      unchanged: true;
+    };
 
 /**
  * What a stream is given: the same context a `both`-batched request gets —
@@ -698,5 +757,14 @@ export interface GrabSummary {
   empty: number;
   /** Channel-days skipped because the cache was fresh. */
   fromCache: number;
+  /**
+   * Channel-days the source said were unchanged, so the cached entry stands.
+   *
+   * Different from {@link fromCache}, which is what a run never asked about: this
+   * is what it *did* ask about and was told to keep — one conditional request
+   * instead of a download. Nothing was written, so `grabbedAt` is unmoved and the
+   * next run asks again, which is the cheap question it should be asking.
+   */
+  unchanged: number;
   failed: GrabTaskError[];
 }

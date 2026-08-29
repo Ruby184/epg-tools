@@ -3,6 +3,7 @@ import PQueue from 'p-queue';
 import type { CacheStore } from '../cache/types.js';
 import { ChannelBuilder } from '../xmltv/builder.js';
 import type { XmltvChannel } from '../xmltv/types.js';
+import { revalidationHooks } from './revalidate.js';
 import { channelsMaxAgeMs, SiteStateHandle } from './state.js';
 import type { AnySiteConfig, GrabberChannel } from './types.js';
 
@@ -25,6 +26,10 @@ export function siteHttp(config: AnySiteConfig, signal?: AbortSignal): KyInstanc
 
   return ky.create({
     ...config.ky,
+    // Only for a site that asked. ky hands each `afterResponse` hook a clone of
+    // the response, so a site with no use for conditional requests should not be
+    // paying for one — even a cheap one.
+    ...(config.conditionalGet === true ? { hooks: revalidationHooks(config.ky?.hooks) } : {}),
     ...(signals.length > 0
       ? { signal: signals.length === 1 ? signals[0]! : AbortSignal.any(signals) }
       : {}),

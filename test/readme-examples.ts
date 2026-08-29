@@ -252,6 +252,43 @@ export const keptChannels = defineSiteConfig({
   parseDay: () => [],
 });
 
+// --- docs/site-config.md: Asking only when it is worth it -------------------
+export const revalidating = defineSiteConfig({
+  site: 'example.tv',
+  conditionalGet: true,
+  channels: [],
+  async request({ channel, day, http }) {
+    return http.get(`epg/${channel.siteId}/${day}`).json(); // unchanged
+  },
+  parseDay: () => [],
+});
+
+interface Index {
+  pages: string[];
+}
+
+interface Page {
+  items: RawProgramme[];
+}
+
+export const paginated = defineSiteConfig({
+  site: 'example.tv',
+  conditionalGet: true,
+  channels: [],
+  async request({ channel, day, http }) {
+    const index = await http.get(`epg/${channel.siteId}/${day}`).json<Index>();
+    const pages = await Promise.all(
+      index.pages.map((page) =>
+        // A 304 here would say nothing about the channel-day as a whole.
+        http.get(page, { context: { revalidate: false } }).json<Page>(),
+      ),
+    );
+
+    return { index, pages };
+  },
+  parseDay: () => [],
+});
+
 // --- docs/site-config.md: Sites that answer in one pass ---------------------
 
 /** Stands in for whatever splits the document — the real one is the parser. */

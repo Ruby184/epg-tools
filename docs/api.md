@@ -362,7 +362,8 @@ grabbed again.
 `grab`, `defineSiteConfig`, `defineStreamSiteConfig`, `resolveChannels`,
 `resolveSites`, `siteHttp`, `sitePacing`, `retryAfterMs`, `channelElement`,
 `defaultChannelInfo`, `SiteStateHandle`, `StateKey`, `ChannelsGroup`,
-`TrackedMap`, `channelsMaxAgeMs`, `DEFAULT_CHANNELS_MAX_AGE_DAYS`.
+`TrackedMap`, `channelsMaxAgeMs`, `DEFAULT_CHANNELS_MAX_AGE_DAYS`,
+`UnchangedError`, `isUnchanged`.
 
 A site comes in two shapes and `grab` takes either: `defineSiteConfig` for one
 that fetches a request at a time and parses each channel-day out of it, and

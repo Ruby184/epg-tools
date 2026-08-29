@@ -29,6 +29,7 @@ accepted) and the type of a channel's `data` from what `channels` returns.
 | `site` | `string` | **required** | Unique site identifier, e.g. `webtv.sk`. Used as the cache namespace. |
 | `channels` | `GrabberChannel[]` or `(ctx) => GrabberChannel[] \| Promise<…>` | **required** | The channels to grab, written out or [fetched](#a-channel-list-that-has-to-be-fetched). |
 | `cacheChannels` | `boolean \| { maxAgeDays? }` | off | Keep a **fetched** channel list in the cache, so the next command reads it instead of asking the source — see [keeping a fetched list](#keeping-a-fetched-list). `true` means a day. |
+| `conditionalGet` | `boolean` | off | Ask the source whether anything has changed, and keep what is cached when it says no — see [asking only when it is worth it](#asking-only-when-it-is-worth-it). No code changes in the site. |
 | `request` | `(ctx) => Promise<TRaw>` | **required**\* | Fetch one request's raw data. The context's shape comes from `batching`. |
 | `parseDay` | `(ctx) => ParsedProgramme[] \| Promise<…>` | **required**\* | Turn part of a response into one channel-day's programmes. Called once per channel-day. May return builders, plain objects, or a mix. |
 | `stream` | `(ctx) => AsyncIterable<StreamedChannelDay>` | — | \*Instead of `request` and `parseDay`: answer the whole window in one pass, yielding each channel-day as it is complete — see [sites that answer in one pass](#sites-that-answer-in-one-pass). |
@@ -462,6 +463,77 @@ request can span a channel-day that was already fresh — narrow the query with
 `channelDays`, or answer the whole rectangle and let the extra be ignored: a
 fresh channel-day is neither parsed nor rewritten either way.
 
+## Asking only when it is worth it
+
+A stale channel-day is not a missing one: it is usually there and merely old
+enough to ask about again. `conditionalGet` asks *whether* rather than *for*,
+and the site writes no code for it:
+
+```ts
+const example = defineSiteConfig({
+  site: 'example.tv',
+  conditionalGet: true,
+  async request({ channel, day, http }) {
+    return http.get(`epg/${channel.siteId}/${day}`).json(); // unchanged
+  },
+  // …
+});
+```
+
+Two hooks go into the site's own client. One sends `If-None-Match` or
+`If-Modified-Since`; the other turns a `304` into an `UnchangedError`, which
+reaches out of `request` — or `stream` — without either of them mentioning it,
+and tells the run to keep every channel-day that request was for. They are
+counted in `unchanged` rather than `fetched`, nothing is written, and `grabbedAt`
+is left where it was, so the next run asks the same cheap question:
+
+```
+Grab done: 0 fetched, 0 from cache, 3 unchanged, 0 failed
+```
+
+What it asks with, in order: an `ETag` the source gave last time, then a
+`Last-Modified`, then — with neither stored — the **`grabbedAt` of the entries
+themselves**, which is a fair thing to ask "has it changed since?" with and needs
+nothing remembered at all. Whatever a source answers with is kept in the cache
+[beside the listings](./api.md#what-a-site-remembers-between-runs) and is dropped
+when the channel-days it covered leave the window.
+
+**A validator is never sent where a 304 could not be honoured**, and each of
+those is a way one could do damage:
+
+| the run refuses when | because a 304 would otherwise |
+|---|---|
+| a channel-day this request covers has nothing cached | leave a hole in the guide, silently |
+| one is past `maxAgeDays` | let a source with a lying `Last-Modified` freeze the guide for good rather than for a week |
+| the run is `--refresh` | be the opposite of what the flag asks for |
+
+**Off by default, and worth understanding before turning it on.** It makes any
+304 from any request inside `request` mean "nothing changed for these
+channel-days" — true of a source whose channel-day comes from one request, wrong
+for one that pages through several. Send `context: { revalidate: false }` with a
+request that should never be asked conditionally:
+
+```ts
+async request({ channel, day, http }) {
+  const index = await http.get(`epg/${channel.siteId}/${day}`).json<Index>();
+  const pages = await Promise.all(
+    index.pages.map((page) =>
+      // A 304 here would say nothing about the channel-day as a whole.
+      http.get(page, { context: { revalidate: false } }).json<Page>()),
+  );
+
+  return { index, pages };
+}
+```
+
+A request made from inside `parseDay` is never revalidated at all: a 304 on a
+detail page cannot mean "keep this channel-day" when the channel-day itself was
+just refetched.
+
+A site doing its own revalidating can `throw new UnchangedError()` and get the
+same treatment — which is also how a [streaming site](#sites-that-answer-in-one-pass)
+says a whole document is unchanged.
+
 ## Sites that answer in one pass
 
 Some sources publish the lot in one document — a `xmltv.xml.gz`, a dump behind
@@ -506,6 +578,7 @@ What the grab does with each channel-day:
 | one it **asked** for | written, counted and logged, exactly as a parsed one is |
 | one it did **not** ask for — already fresh, or a channel nobody asked about | ignored, and counted in one line at the end |
 | yielded **again** | added to what the earlier emission wrote, so a document that is not grouped by channel costs a second write rather than the programmes it already reported |
+| yielded as `{ channel, day, unchanged: true }` | left exactly as it is — see [asking only when it is worth it](#asking-only-when-it-is-worth-it). Counted in `unchanged`; a channel-day with nothing cached cannot be kept and is reported as a failure |
 | **never** yielded, after a clean end | written **empty** — the source went through its whole answer and had nothing to say, which is what `parseDay` returning `[]` means too |
 
 That last row is the one to design around: **a stream that cannot finish must

@@ -25,7 +25,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
   const now = options.now ?? new Date();
   const log = options.logger ?? ((): void => {});
   const { cache, signal } = options;
-  const tally: RunTally = { fetched: 0, empty: 0, fromCache: 0, failed: [] };
+  const tally: RunTally = { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: [] };
 
   /**
    * Everything that is not a request: the staleness sweep, and parsing a

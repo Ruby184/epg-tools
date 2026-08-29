@@ -33,8 +33,16 @@ import {
   type Request,
   type ResolvedBatching,
 } from './planner.js';
+import {
+  forget,
+  isUnchanged,
+  pruneValidators,
+  revalidation,
+  type Revalidation,
+  type Validator,
+} from './revalidate.js';
 import { resolveSite } from './site.js';
-import { SiteStateHandle } from './state.js';
+import { SiteStateHandle, StateKey, TrackedMap } from './state.js';
 import type {
   AnySiteConfig,
   BatchingOption,
@@ -55,6 +63,7 @@ export interface RunTally {
   fetched: number;
   empty: number;
   fromCache: number;
+  unchanged: number;
   failed: GrabTaskError[];
 }
 
@@ -125,8 +134,12 @@ export class SiteRun {
    */
   readonly #written = new Set<string>();
 
-  /** Filled in by {@link run}, since both of them may have to be waited for. */
+  /** Whether this site asked to be told when nothing has changed. */
+  readonly #revalidates: boolean;
+
+  /** Filled in by {@link run}, since each of them has to be waited for. */
   #siteState: SiteState = new Map();
+  #validators: TrackedMap<Validator> = new TrackedMap();
   #channels: GrabberChannel[] = [];
 
   constructor(config: AnySiteConfig, run: Run) {
@@ -149,6 +162,7 @@ export class SiteRun {
     // these are just the two ways of reading it, and only one is ever called.
     this.#fetching = config as SiteConfig<any, BatchingOption, any>;
     this.#streaming = config as StreamSiteConfig<any>;
+    this.#revalidates = config.conditionalGet === true;
     this.#state = SiteStateHandle.open(run.cache, site);
 
     // The queue and the client together: the signal rides on the instance, so
@@ -196,9 +210,20 @@ export class SiteRun {
   async run(): Promise<void> {
     const { enqueue } = this.#run;
 
-    // Read before anything asks the source: the channel list may be in there,
-    // and a site's own code expects its bag from the first request onwards.
-    this.#siteState = await this.#state.bag();
+    // Both groups at once, and before anything asks the source: a site's own code
+    // expects its bag from the first request onwards, and what is stored about a
+    // url decides what that request even looks like. Two small reads with nothing
+    // to do with each other, so the site waits for the slower rather than both.
+    const stored: Promise<TrackedMap<Validator>> = this.#revalidates
+      ? this.#state.bag<Validator>(StateKey.VALIDATORS)
+      : Promise.resolve(new TrackedMap<Validator>());
+    const [siteState, validators] = await Promise.all([this.#state.bag(), stored]);
+
+    this.#siteState = siteState;
+    // Pruned as it is taken on: the days this window covers are the days its
+    // entries survive a prune for, so a validator about anything earlier is one
+    // whose channel-days have gone.
+    this.#validators = pruneValidators(validators, this.#window[0] ?? this.#run.startDay);
 
     // Fetching the channel list is a request to the same source as the rest, so
     // it goes through the same queue: a site's `rateLimit` spaces the first EPG
@@ -278,8 +303,12 @@ export class SiteRun {
           const metas = await cache.getMetas(keys);
 
           return this.#window.flatMap((day, index) => {
-            if (isStale(day, metas[index], this.#policy, now)) {
-              return [{ channel, day }];
+            const cached = metas[index];
+
+            if (isStale(day, cached, this.#policy, now)) {
+              // The meta goes with it: what a conditional request asks with, and
+              // what it would keep. Read once here rather than again later.
+              return [{ channel, day, ...(cached === undefined ? {} : { cached }) }];
             }
 
             tally.fromCache++;
@@ -292,6 +321,44 @@ export class SiteRun {
     );
 
     return checked.flat();
+  }
+
+  /**
+   * What this request may ask the source, and what it is allowed to hear back.
+   *
+   * `mayKeep` is the guard on a conditional request, and every clause of it is a
+   * way a 304 could do damage: with a channel-day of this request uncached, being
+   * told "unchanged" would leave a hole in the guide; with one past `maxAgeDays`,
+   * a source whose `Last-Modified` lies could freeze the guide indefinitely
+   * rather than for a week; and under `--refresh` the whole point is to ask
+   * outright.
+   *
+   * `since` is what to ask with when nothing is stored about the url: the oldest
+   * `grabbedAt` of the channel-days this request covers, which is the moment
+   * everything it would keep was known to be right.
+   */
+  #revalidationFor(request: Request): Revalidation {
+    const cached = request.pairs.map((pair) => pair.cached);
+    const oldest = cached.reduce<string | undefined>(
+      (earliest, meta) =>
+        meta !== undefined && (earliest === undefined || meta.grabbedAt < earliest)
+          ? meta.grabbedAt
+          : earliest,
+      undefined,
+    );
+    const staleAt = this.#run.now.getTime() - this.#policy.maxAgeDays * 86_400_000;
+    const mayKeep =
+      this.#revalidates &&
+      !this.#policy.refetchAll &&
+      cached.every((meta) => meta !== undefined && Date.parse(meta.grabbedAt) >= staleAt);
+
+    return {
+      mayKeep,
+      ...(oldest === undefined ? {} : { since: new Date(oldest).toUTCString() }),
+      lastDay: request.days[request.days.length - 1] ?? this.#run.startDay,
+      validators: this.#validators,
+      touched: [],
+    };
   }
 
   /**
@@ -308,10 +375,11 @@ export class SiteRun {
     // would find.
     const dates = request.days.map(dayToDate);
     const context = {
-      channelDays: request.pairs.map(({ channel, day }) => ({
+      channelDays: request.pairs.map(({ channel, day, cached }) => ({
         channel,
         day,
         date: dayToDate(day),
+        ...(cached === undefined ? {} : { cached }),
       })),
       ...(manyChannels ? { channels: request.channels } : { channel: request.channels[0]! }),
       ...(manyDays
@@ -459,6 +527,45 @@ export class SiteRun {
   }
 
   /**
+   * Keep these channel-days as they are: the source says nothing has changed.
+   *
+   * Counted in `unchanged` rather than `fetched`, and nothing is written — so
+   * `grabbedAt` stands where it was, the entry ages as it was already ageing, and
+   * the next run asks the same cheap question again.
+   *
+   * A channel-day with nothing cached cannot be kept, and saying otherwise would
+   * leave a hole in the guide that nothing else would report. `mayKeep` is what
+   * stops this package's own hooks ever asking in that position; a site that
+   * throws `UnchangedError` on its own judgement can still land here, and is told
+   * so as a failure.
+   */
+  #keep(pairs: Iterable<Pair>, error: unknown): void {
+    const { log, tally } = this.#run;
+    let kept = 0;
+
+    for (const { channel, day, cached } of pairs) {
+      if (cached === undefined) {
+        this.#fail(
+          channel,
+          day,
+          new Error(`the source says this channel-day is unchanged, but nothing is cached for it`, {
+            cause: error,
+          }),
+        );
+
+        continue;
+      }
+
+      tally.unchanged++;
+      kept++;
+    }
+
+    if (kept > 0) {
+      log(`[${this.#site}] ${kept} channel-day(s) unchanged, keeping what is cached`);
+    }
+  }
+
+  /**
    * A whole request's worth of failure: every channel-day it was owed, and one
    * line about the request rather than one per channel-day it covered.
    *
@@ -489,14 +596,24 @@ export class SiteRun {
       return;
     }
 
+    const asking = this.#revalidationFor(request);
     let payload: unknown;
 
     try {
       // The request queue's slot covers this and nothing else, so a parse below is
       // free to ask for one of its own. What the request is handed is that task's
       // signal, not the run's — what governs the slot governs the work in it.
+      //
+      // The ambient store goes *inside* the task, not around `enqueue`: a task
+      // that has to wait for a slot is started later by the queue's own drain
+      // loop, in a context this one never reached — so wrapping the `add` would
+      // work for the first request of a site and silently for none of the rest.
+      // Around the site's call and nothing else, which is also what keeps a
+      // request made later from inside `parseDay` out of it.
       payload = await enqueue(this.#requests, ({ signal: taskSignal }) =>
-        this.#fetching.request(this.#contextFor(request, taskSignal)),
+        revalidation.run(asking, () =>
+          this.#fetching.request(this.#contextFor(request, taskSignal)),
+        ),
       );
       // The run's own, and a different question: was this cancelled while it was
       // in flight? p-queue's task signal governs the slot, not the work in it, so
@@ -504,6 +621,17 @@ export class SiteRun {
       // for, which is news.
       signal?.throwIfAborted();
     } catch (error) {
+      if (isUnchanged(error)) {
+        // Nothing has changed, so every channel-day this request was for keeps
+        // the entry it has: no parse, no write, and `grabbedAt` unmoved.
+        this.#keep(request.pairs, error);
+
+        return;
+      }
+
+      // The request did not finish, so what it remembered on the way is not to be
+      // asked with next time — see `forget`.
+      forget(asking);
       // A failed request fails every channel-day it was covering.
       this.#failRequest(request, request.pairs, error);
 
@@ -547,6 +675,9 @@ export class SiteRun {
     // Writes in flight. Each records its own failure, so none of these ever
     // rejects and the whole lot can be waited for at the end.
     const writes: Promise<void>[] = [];
+    /** Channel-days the pass said were unchanged, kept once it ends cleanly. */
+    const keeping: Pair[] = [];
+    const asking = this.#revalidationFor(request);
     let ignored = 0;
     let failure: unknown;
 
@@ -559,44 +690,58 @@ export class SiteRun {
     };
 
     try {
-      await enqueue(this.#requests, async ({ signal: taskSignal }) => {
-        const context = {
-          ...this.#contextFor(request, taskSignal),
-          log: (message: string) => log(`[${this.#site}] ${message}`),
-          // The shape a stream is handed is the one a `both`-batched request
-          // gets, which is what `resolveSite` planned for it — the compiler
-          // cannot follow that through the conditional type.
-        } as unknown as StreamContext;
+      // The store goes inside the task rather than around `enqueue`, for the
+      // reason the request pipeline gives: a task that waited for a slot starts
+      // in a context this one never reached.
+      await enqueue(this.#requests, async ({ signal: taskSignal }) =>
+        revalidation.run(asking, async () => {
+          const context = {
+            ...this.#contextFor(request, taskSignal),
+            log: (message: string) => log(`[${this.#site}] ${message}`),
+            // The shape a stream is handed is the one a `both`-batched request
+            // gets, which is what `resolveSite` planned for it — the compiler
+            // cannot follow that through the conditional type.
+          } as unknown as StreamContext;
 
-        for await (const { channel, day, programmes } of this.#streaming.stream(context)) {
-          // Between emissions, which is as often as this has anything to say: a
-          // cancelled run stops here rather than writing the rest of a document
-          // nobody is waiting for.
-          signal?.throwIfAborted();
+          for await (const emission of this.#streaming.stream(context)) {
+            // Between emissions, which is as often as this has anything to say: a
+            // cancelled run stops here rather than writing the rest of a document
+            // nobody is waiting for.
+            signal?.throwIfAborted();
 
-          const id = `${channel?.xmltvId}|${day}`;
-          const pair = owed.get(id);
+            const { channel, day } = emission;
+            const id = `${channel?.xmltvId}|${day}`;
+            const pair = owed.get(id);
 
-          if (pair !== undefined) {
-            owed.delete(id);
-            write(pair, programmes);
-          } else if (this.#written.has(id)) {
-            // Said again: added to what the earlier emission wrote, rather than
-            // put in its place. A document not grouped by channel.
-            write({ channel, day }, programmes);
-          } else {
-            // A channel-day nobody asked about — one already fresh in the cache, a
-            // channel outside the list, or an emission that makes no sense.
-            // Counted, and reported once at the end.
-            ignored++;
+            if (pair === undefined) {
+              if (this.#written.has(id) && emission.unchanged !== true) {
+                // Said again: added to what the earlier emission wrote, rather
+                // than put in its place. A document not grouped by channel.
+                write({ channel, day }, emission.programmes);
+              } else {
+                // A channel-day nobody asked about — one already fresh in the
+                // cache, a channel outside the list, or an emission that makes no
+                // sense. Counted, and reported once at the end.
+                ignored++;
+              }
+            } else if (emission.unchanged === true) {
+              // Nothing to write: the pass says what is cached still stands. Held
+              // until the stream ends, since a pass that then fails has not
+              // vouched for anything.
+              owed.delete(id);
+              keeping.push(pair);
+            } else {
+              owed.delete(id);
+              write(pair, emission.programmes);
+            }
+
+            // Backpressure, and the only thing holding the parser back: writing is
+            // queued rather than awaited, so the split runs on while entries land,
+            // but no further ahead than `localConcurrency` of them.
+            await localWork.onSizeLessThan(localWork.concurrency);
           }
-
-          // Backpressure, and the only thing holding the parser back: writing is
-          // queued rather than awaited, so the split runs on while entries land,
-          // but no further ahead than `localConcurrency` of them.
-          await localWork.onSizeLessThan(localWork.concurrency);
-        }
-      });
+        }),
+      );
     } catch (error) {
       failure = error;
     }
@@ -609,14 +754,29 @@ export class SiteRun {
       log(`[${this.#site}] ignored ${ignored} channel-day(s) it was not asked for`);
     }
 
-    if (failure !== undefined) {
-      // The stream did not finish, so what it never reached is short — not empty.
-      // Anything else would cache "nothing on" for a document that was cut off
-      // half way.
-      this.#failRequest(request, owed.values(), failure);
+    if (failure !== undefined && isUnchanged(failure)) {
+      // The whole document is unchanged — a 304 on the one request a pass makes.
+      // Everything it was for keeps what it has, including anything it had
+      // already said was unchanged before the answer came back.
+      this.#keep([...keeping, ...owed.values()], failure);
 
       return;
     }
+
+    if (failure !== undefined) {
+      // The stream did not finish, so what it never reached is short — not empty.
+      // Anything else would cache "nothing on" for a document that was cut off
+      // half way. What it remembered on the way is dropped for the same reason.
+      forget(asking);
+      this.#failRequest(request, owed.values(), failure);
+      // What it did vouch for before it broke is still cached and still counted:
+      // those entries were not touched, and saying they were lost would be wrong.
+      this.#keep(keeping, failure);
+
+      return;
+    }
+
+    this.#keep(keeping, failure);
 
     if (owed.size === 0) {
       return;

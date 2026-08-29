@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { describe, expect, it } from 'vitest';
 import type {
@@ -9,7 +10,7 @@ import type {
   StoredStateMeta,
 } from '../src/cache/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
-import { grab } from '../src/grabber/main.js';
+import { grab, UnchangedError } from '../src/grabber/main.js';
 import type {
   ChannelsBatching,
   ChannelsDaysBatching,
@@ -1148,7 +1149,7 @@ describe('grab', () => {
     const summary = await grab([config], { cache, now: NOW, signal: controller.signal });
 
     expect(calls).toBe(0);
-    expect(summary).toEqual({ fetched: 0, empty: 0, fromCache: 0, failed: [] });
+    expect(summary).toEqual({ fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: [] });
   });
 
   it('leaves nothing unhandled when the abort lands after the run is over', async () => {
@@ -2126,5 +2127,537 @@ describe('a site that streams its whole window', () => {
       'must define request: a function fetching one request',
     );
     expect((summary.failed[0]!.error as Error).message).toContain('or stream');
+  });
+});
+
+describe('asking whether anything has changed', () => {
+  /** A site whose requests go to a real server, so ky's hooks are in play. */
+  async function server(
+    handler: (request: IncomingMessage, response: ServerResponse) => void,
+  ): Promise<{ url: string; close: () => Promise<void>; asked: IncomingMessage[] }> {
+    const asked: IncomingMessage[] = [];
+    const instance = createServer((request, response) => {
+      asked.push(request);
+      handler(request, response);
+    });
+
+    await new Promise<void>((resolve) => instance.listen(0, '127.0.0.1', resolve));
+
+    return {
+      asked,
+      url: `http://127.0.0.1:${(instance.address() as AddressInfo).port}/`,
+      close: () => new Promise<void>((resolve) => instance.close(() => resolve())),
+    };
+  }
+
+  /** A site that fetches one channel-day, from `url`, and says what it got. */
+  function conditional(url: string, overrides: Partial<SiteConfig<unknown>> = {}) {
+    return makeConfig({
+      conditionalGet: true,
+      // Today is stale every run (`alwaysRefetchDays`) and cached after the
+      // first — which is exactly the position a conditional request is for.
+      staleness: { maxAgeDays: 7 },
+      ky: { prefix: url, retry: 0 },
+      async request({ http }) {
+        return http.get('guide').json();
+      },
+      parseDay({ day }) {
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+      ...overrides,
+    });
+  }
+
+  /** A cache holding yesterday's entry for the one channel-day under test. */
+  function cacheWithEntry(grabbedAt = NOW.toISOString()): MemoryCache {
+    const cache = new MemoryCache();
+
+    cache.seed(
+      { site: 'example.com', channelId: 'one.example', day: TODAY },
+      {
+        grabbedAt,
+        programmeCount: 3,
+      },
+      [programme(`${TODAY}T20:00:00.000Z`, 'one.example')],
+    );
+
+    return cache;
+  }
+
+  it('asks outright the first time, and conditionally once it has an ETag', async () => {
+    const source = await server((request, response) => {
+      if (request.headers['if-none-match'] === 'W/"v1"') {
+        response.writeHead(304, { etag: 'W/"v1"' });
+        response.end();
+        return;
+      }
+
+      response.writeHead(200, { etag: 'W/"v1"', 'content-type': 'application/json' });
+      response.end('{"ok":true}');
+    });
+
+    try {
+      const cache = new MemoryCache();
+      const config = conditional(source.url);
+
+      // Nothing cached, so nothing to keep: asked outright, whatever is stored.
+      const first = await grab([config], { cache, now: NOW });
+
+      expect(first.fetched).toBe(1);
+      expect(first.unchanged).toBe(0);
+      expect(source.asked[0]!.headers['if-none-match']).toBeUndefined();
+
+      // Now there is an entry and an ETag, so the second run asks conditionally
+      // — and keeps what it has when the answer is 304.
+      const second = await grab([config], { cache, now: NOW });
+
+      expect(source.asked[1]!.headers['if-none-match']).toBe('W/"v1"');
+      expect(second.unchanged).toBe(1);
+      expect(second.fetched).toBe(0);
+      expect(second.failed).toEqual([]);
+    } finally {
+      await source.close();
+    }
+  });
+
+  it('leaves the entry and its grabbedAt exactly as they were', async () => {
+    const source = await server((request, response) => {
+      response.writeHead(304, { etag: 'W/"v1"' });
+      response.end();
+    });
+
+    try {
+      const grabbedAt = '2026-07-16T09:00:00.000Z';
+      const cache = cacheWithEntry(grabbedAt);
+
+      cache.seedState('example.com', 'validators', [
+        ['url', { etag: 'W/"v1"', seenAt: grabbedAt, lastDay: TODAY }],
+      ]);
+
+      const summary = await grab([conditional(source.url)], { cache, now: NOW });
+
+      expect(summary.unchanged).toBe(1);
+      // Untouched: the same programmes, and the same grabbedAt, so it ages as it
+      // was already ageing and the next run asks the same cheap question.
+      expect(
+        cache.get({ site: 'example.com', channelId: 'one.example', day: TODAY }),
+      ).toMatchObject({ meta: { grabbedAt, programmeCount: 3 } });
+    } finally {
+      await source.close();
+    }
+  });
+
+  it('sends nothing when a channel-day it covers has nothing cached', async () => {
+    const source = await server((request, response) => {
+      response.writeHead(200, { etag: 'W/"v1"', 'content-type': 'application/json' });
+      response.end('{}');
+    });
+
+    try {
+      // Two days in one request, one of them never grabbed: a 304 would leave a
+      // hole in the guide, so it goes out unconditionally.
+      const cache = cacheWithEntry();
+
+      cache.seedState('example.com', 'validators', [
+        [`${source.url}guide`, { etag: 'W/"v1"', seenAt: NOW.toISOString(), lastDay: TOMORROW }],
+      ]);
+
+      const spanning: SiteConfig<unknown, DaysBatching> = {
+        site: 'example.com',
+        channels: [channel('one.example')],
+        days: 2,
+        batching: { mode: 'days' },
+        conditionalGet: true,
+        staleness: { maxAgeDays: 7 },
+        ky: { prefix: source.url, retry: 0 },
+        async request({ http }) {
+          return http.get('guide').json();
+        },
+        parseDay: ({ day }) => [programme(`${day}T06:00:00.000Z`)],
+      };
+
+      await grab([spanning], { cache, now: NOW });
+
+      expect(source.asked[0]!.headers['if-none-match']).toBeUndefined();
+      expect(source.asked[0]!.headers['if-modified-since']).toBeUndefined();
+    } finally {
+      await source.close();
+    }
+  });
+
+  it('sends nothing for an entry already past maxAgeDays', async () => {
+    const source = await server((request, response) => {
+      response.writeHead(200, { etag: 'W/"v1"', 'content-type': 'application/json' });
+      response.end('{}');
+    });
+
+    try {
+      // Eight days old under a seven-day policy: it is stale on age, and a source
+      // with a lying Last-Modified must not be able to keep it for ever.
+      const cache = cacheWithEntry(new Date(NOW.getTime() - 8 * 86_400_000).toISOString());
+
+      await grab([conditional(source.url)], { cache, now: NOW });
+
+      expect(source.asked[0]!.headers['if-modified-since']).toBeUndefined();
+    } finally {
+      await source.close();
+    }
+  });
+
+  it('sends nothing under --refresh, however fresh the entry', async () => {
+    const source = await server((request, response) => {
+      response.writeHead(200, { etag: 'W/"v1"', 'content-type': 'application/json' });
+      response.end('{}');
+    });
+
+    try {
+      const cache = cacheWithEntry();
+
+      await grab([conditional(source.url)], {
+        cache,
+        now: NOW,
+        staleness: { refetchAll: true },
+      });
+
+      // Asking the source is what the flag means.
+      expect(source.asked[0]!.headers['if-none-match']).toBeUndefined();
+      expect(source.asked[0]!.headers['if-modified-since']).toBeUndefined();
+    } finally {
+      await source.close();
+    }
+  });
+
+  it("asks with the entry's own grabbedAt when nothing is stored about the url", async () => {
+    const source = await server((request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{}');
+    });
+
+    try {
+      const grabbedAt = '2026-07-16T09:00:00.000Z';
+
+      await grab([conditional(source.url)], { cache: cacheWithEntry(grabbedAt), now: NOW });
+
+      // No ETag was ever offered, but the entries themselves say when they were
+      // known to be right — which is a fair thing to ask "changed since?" with.
+      expect(source.asked[0]!.headers['if-modified-since']).toBe(new Date(grabbedAt).toUTCString());
+    } finally {
+      await source.close();
+    }
+  });
+
+  it('keeps asking conditionally through a run of 304s', async () => {
+    const source = await server((request, response) => {
+      if (request.headers['if-none-match'] === 'W/"v1"') {
+        response.writeHead(304);
+        response.end();
+        return;
+      }
+
+      response.writeHead(200, { etag: 'W/"v1"', 'content-type': 'application/json' });
+      response.end('{}');
+    });
+
+    try {
+      const cache = new MemoryCache();
+      const config = conditional(source.url);
+
+      await grab([config], { cache, now: NOW });
+
+      // Three runs of 304s. A url that is never modified only ever gets them, so
+      // if a 304 did not touch what is stored, the record would age out of the
+      // window and earn a full download for a document nothing changed in.
+      for (let run = 0; run < 3; run++) {
+        const summary = await grab([config], { cache, now: NOW });
+
+        expect(summary.unchanged).toBe(1);
+      }
+
+      expect(source.asked.slice(1).every((request) => request.headers['if-none-match'])).toBe(true);
+      expect(source.asked).toHaveLength(4);
+    } finally {
+      await source.close();
+    }
+  });
+
+  it('forgets a validator whose download did not finish', async () => {
+    let version = 'W/"v1"';
+    const source = await server((request, response) => {
+      response.writeHead(200, { etag: version, 'content-type': 'application/json' });
+
+      if (version === 'W/"v1"') {
+        response.end('{"ok":true}');
+        return;
+      }
+
+      // Headers and an ETag arrive — so the hook remembers v2 — and then the
+      // body stops half way.
+      response.write('{"ok":');
+      response.destroy();
+    });
+
+    try {
+      const cache = new MemoryCache();
+      const config = conditional(source.url);
+
+      await grab([config], { cache, now: NOW });
+      expect(cache.state.get('example.com|validators')?.data).toMatchObject([
+        [expect.any(String), { etag: 'W/"v1"' }],
+      ]);
+
+      // The entries still hold what v1 said, because v2 never arrived in full.
+      // Remembering v2 would earn a 304 next run and keep v1's programmes for
+      // ever under a name that says they are v2's.
+      version = 'W/"v2"';
+      const summary = await grab([config], { cache, now: NOW });
+
+      expect(summary.failed).toHaveLength(1);
+      expect(cache.state.get('example.com|validators')?.data).toMatchObject([
+        [expect.any(String), { etag: 'W/"v1"' }],
+      ]);
+    } finally {
+      await source.close();
+    }
+  });
+
+  it('is off unless the site asks, and adds no headers when it has not', async () => {
+    const source = await server((request, response) => {
+      response.writeHead(200, { etag: 'W/"v1"', 'content-type': 'application/json' });
+      response.end('{}');
+    });
+
+    try {
+      const cache = cacheWithEntry();
+      const config = conditional(source.url, { conditionalGet: false });
+
+      await grab([config], { cache, now: NOW });
+      await grab([config], { cache, now: NOW });
+
+      expect(source.asked.every((request) => !request.headers['if-none-match'])).toBe(true);
+      expect(source.asked.every((request) => !request.headers['if-modified-since'])).toBe(true);
+      // Nothing remembered either: the group is never even read.
+      expect(cache.state.get('example.com|validators')).toBeUndefined();
+    } finally {
+      await source.close();
+    }
+  });
+
+  it('never revalidates a request made from inside parseDay', async () => {
+    const source = await server((request, response) => {
+      response.writeHead(200, { etag: 'W/"v1"', 'content-type': 'application/json' });
+      response.end('{}');
+    });
+
+    try {
+      const cache = cacheWithEntry();
+
+      cache.seedState('example.com', 'validators', [
+        [`${source.url}detail`, { etag: 'W/"d1"', seenAt: NOW.toISOString(), lastDay: TODAY }],
+      ]);
+
+      await grab(
+        [
+          conditional(source.url, {
+            async parseDay({ http, paced, day }) {
+              await paced(({ signal }) =>
+                http.get('detail', { ...(signal ? { signal } : {}) }).json(),
+              );
+
+              return [programme(`${day}T06:00:00.000Z`)];
+            },
+          }),
+        ],
+        { cache, now: NOW },
+      );
+
+      // A 304 on a detail page could not mean "keep this channel-day" — the
+      // channel-day itself was just refetched — so the store never reaches it.
+      const detail = source.asked.find((request) => request.url === '/detail');
+
+      expect(detail).toBeDefined();
+      expect(detail!.headers['if-none-match']).toBeUndefined();
+    } finally {
+      await source.close();
+    }
+  });
+
+  it('lets one request opt out while the site is asking on the rest', async () => {
+    const source = await server((request, response) => {
+      response.writeHead(200, { etag: 'W/"v1"', 'content-type': 'application/json' });
+      response.end('{}');
+    });
+
+    try {
+      const cache = cacheWithEntry();
+
+      cache.seedState('example.com', 'validators', [
+        [`${source.url}guide`, { etag: 'W/"v1"', seenAt: NOW.toISOString(), lastDay: TODAY }],
+      ]);
+
+      await grab(
+        [
+          conditional(source.url, {
+            async request({ http }) {
+              // A page after the first, a lookup that is not the listings: a 304
+              // on one of these says nothing about the channel-day.
+              return http.get('guide', { context: { revalidate: false } }).json();
+            },
+          }),
+        ],
+        { cache, now: NOW },
+      );
+
+      expect(source.asked[0]!.headers['if-none-match']).toBeUndefined();
+    } finally {
+      await source.close();
+    }
+  });
+});
+
+describe('a stream that says nothing has changed', () => {
+  function site(
+    stream: StreamSiteConfig['stream'],
+    overrides: Partial<StreamSiteConfig> = {},
+  ): StreamSiteConfig {
+    return {
+      site: 'stream.example',
+      channels: [channel('a'), channel('b')],
+      days: 1,
+      stream,
+      ...overrides,
+    };
+  }
+
+  /** A cache holding an entry for each of the site's channel-days. */
+  function cacheWithBoth(): MemoryCache {
+    const cache = new MemoryCache();
+
+    for (const channelId of ['a', 'b']) {
+      cache.seed(
+        { site: 'stream.example', channelId, day: TODAY },
+        { grabbedAt: '2026-07-16T09:00:00.000Z', programmeCount: 2 },
+        [programme(`${TODAY}T20:00:00.000Z`, channelId)],
+      );
+    }
+
+    return cache;
+  }
+
+  it('keeps a channel-day it says is unchanged, and writes nothing', async () => {
+    const cache = cacheWithBoth();
+    const summary = await grab(
+      [
+        site(async function* ({ channelDays }) {
+          for (const { channel: ch, day } of channelDays) {
+            yield { channel: ch, day, unchanged: true };
+          }
+        }),
+      ],
+      { cache, now: NOW },
+    );
+
+    expect(summary.unchanged).toBe(2);
+    expect(summary.fetched).toBe(0);
+    expect(summary.empty).toBe(0);
+    expect(summary.failed).toEqual([]);
+    // Untouched, grabbedAt and all — so it ages as it was already ageing.
+    expect(cache.get({ site: 'stream.example', channelId: 'a', day: TODAY })?.meta).toEqual({
+      grabbedAt: '2026-07-16T09:00:00.000Z',
+      programmeCount: 2,
+    });
+  });
+
+  it('mixes kept and written channel-days in one pass', async () => {
+    const cache = cacheWithBoth();
+    const summary = await grab(
+      [
+        site(async function* ({ channelDays }) {
+          const [first, second] = channelDays;
+
+          yield { channel: first!.channel, day: first!.day, unchanged: true };
+          yield {
+            channel: second!.channel,
+            day: second!.day,
+            programmes: [programme(`${TODAY}T06:00:00.000Z`, second!.channel.siteId)],
+          };
+        }),
+      ],
+      { cache, now: NOW },
+    );
+
+    expect(summary.unchanged).toBe(1);
+    expect(summary.fetched).toBe(1);
+    expect(
+      cache.get({ site: 'stream.example', channelId: 'a', day: TODAY })?.meta.programmeCount,
+    ).toBe(2);
+    expect(
+      cache.get({ site: 'stream.example', channelId: 'b', day: TODAY })?.meta.programmeCount,
+    ).toBe(1);
+  });
+
+  it('refuses to keep a channel-day with nothing cached', async () => {
+    // Nothing seeded: "unchanged" cannot mean anything here, and quietly
+    // agreeing would leave a hole in the guide that nothing else would report.
+    const cache = new MemoryCache();
+    const summary = await grab(
+      [
+        site(async function* ({ channelDays }) {
+          for (const { channel: ch, day } of channelDays) {
+            yield { channel: ch, day, unchanged: true };
+          }
+        }),
+      ],
+      { cache, now: NOW },
+    );
+
+    expect(summary.unchanged).toBe(0);
+    expect(summary.failed).toHaveLength(2);
+    expect((summary.failed[0]!.error as Error).message).toContain('nothing is cached for it');
+  });
+
+  it('keeps everything when the whole document is unchanged', async () => {
+    const cache = cacheWithBoth();
+    const summary = await grab(
+      [
+        site(
+          // eslint-disable-next-line require-yield
+          async function* () {
+            // What the hooks do on a 304, and what a site may do itself: one
+            // throw for a pass that covers the lot.
+            throw new UnchangedError('https://example.test/guide.xml');
+          },
+        ),
+      ],
+      { cache, now: NOW },
+    );
+
+    expect(summary.unchanged).toBe(2);
+    expect(summary.failed).toEqual([]);
+    expect(cache.get({ site: 'stream.example', channelId: 'b', day: TODAY })?.meta).toMatchObject({
+      grabbedAt: '2026-07-16T09:00:00.000Z',
+    });
+  });
+
+  it('keeps what a broken pass had already vouched for', async () => {
+    const cache = cacheWithBoth();
+    const summary = await grab(
+      [
+        site(async function* ({ channelDays }) {
+          yield { channel: channelDays[0]!.channel, day: channelDays[0]!.day, unchanged: true };
+
+          throw new Error('the connection went away');
+        }),
+      ],
+      { cache, now: NOW },
+    );
+
+    // The one it vouched for is still cached and still counted; the one it never
+    // reached is short rather than empty.
+    expect(summary.unchanged).toBe(1);
+    expect(summary.failed).toHaveLength(1);
+    expect(summary.failed[0]!.channelId).toBe('b');
+    expect(
+      cache.get({ site: 'stream.example', channelId: 'b', day: TODAY })?.programmes,
+    ).toHaveLength(1);
   });
 });

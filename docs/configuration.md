@@ -271,6 +271,13 @@ empty (`Grab done: 42 fetched (3 empty), …`), since nothing else would: no
 request failed, and the entries are cached like any other. Old days are pruned automatically after a
 grab (disable with `cache.prune: false`).
 
+A refetched channel-day need not mean a download. A site with
+[`conditionalGet`](./site-config.md#asking-only-when-it-is-worth-it) asks the
+source whether anything has changed — with an `ETag`, a `Last-Modified`, or the
+entry's own `grabbedAt` — and a `304` keeps what is cached: nothing written,
+`grabbedAt` unmoved, and counted separately (`…, 3 unchanged, …`) from the
+channel-days a run never asked about at all.
+
 Passing a `signal` cancels a run: what is still queued — requests, staleness
 checks, cache writes — is dropped rather than started, and what is in flight
 aborts through the client it was issued on. The grab resolves with the partial
