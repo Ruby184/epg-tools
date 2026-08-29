@@ -507,6 +507,15 @@ those is a way one could do damage:
 | one is past `maxAgeDays` | let a source with a lying `Last-Modified` freeze the guide for good rather than for a week |
 | the run is `--refresh` | be the opposite of what the flag asks for |
 
+The first of those has a consequence worth knowing in advance: **a window that
+has rolled onto a new day asks outright.** Run daily and the last day of the
+window is one nothing is cached for, so the request covering it cannot honour a
+304 — which for a [whole-document source](#a-published-guide-as-a-source) means
+the document is downloaded. What `conditionalGet` saves is every *other* run:
+the second and third grab of the same day, a `build` after a `grab`, a retry
+after a failure. Run it every few hours, as a guide that changes once a day
+deserves, and all but one of those runs costs a `304`.
+
 **Off by default, and worth understanding before turning it on.** It makes any
 304 from any request inside `request` mean "nothing changed for these
 channel-days" — true of a source whose channel-day comes from one request, wrong
