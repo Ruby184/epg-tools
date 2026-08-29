@@ -15,6 +15,7 @@ import {
   defineConfig,
   defineSiteConfig,
   defineStreamSiteConfig,
+  defineXmltvSite,
   guideStream,
   SiteStateHandle,
 } from '../src/main.js';
@@ -250,6 +251,12 @@ export const keptChannels = defineSiteConfig({
     return {};
   },
   parseDay: () => [],
+});
+
+// --- README.md / docs/site-config.md: A published guide as a source ---------
+export const fromPublishedGuide = defineConfig({
+  sites: [defineXmltvSite({ site: 'published.example', url: 'https://example.test/guide.xml.gz' })],
+  output: 'public/epg.xml',
 });
 
 // --- docs/site-config.md: Asking only when it is worth it -------------------

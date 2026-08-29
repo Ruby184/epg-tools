@@ -18,4 +18,6 @@ export {
 export { isUnchanged, UnchangedError } from './revalidate.js';
 export type { Validator } from './revalidate.js';
 export { defineSiteConfig, defineStreamSiteConfig } from './types.js';
+export { defineXmltvSite } from './xmltv-source.js';
+export type { XmltvDayZone, XmltvSiteOptions } from './xmltv-source.js';
 export type * from './types.js';

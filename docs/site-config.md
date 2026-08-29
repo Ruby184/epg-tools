@@ -534,6 +534,64 @@ A site doing its own revalidating can `throw new UnchangedError()` and get the
 same treatment — which is also how a [streaming site](#sites-that-answer-in-one-pass)
 says a whole document is unchanged.
 
+## A published guide as a source
+
+Someone else's `xmltv.xml.gz` is a source with no site config to write — the
+format is the one this package already parses, and the only questions are where
+it is and which of its channels you want:
+
+```ts
+import { defineConfig, defineXmltvSite } from 'epg-tools';
+
+export default defineConfig({
+  sites: [defineXmltvSite({ site: 'published.example', url: 'https://example.test/guide.xml.gz' })],
+  output: 'guide.xml',
+});
+```
+
+That is the whole of it. The document is **streamed** through the parser and
+**split** by channel-day, so its entries merge with any other site's and the
+guide is never held whole: 43 MiB of XML — 1,000 channels over a week, 7,000
+channel-days — grabs under a **40 MiB heap**, where parsing the same document to
+split it afterwards needs **192 MiB**. The first number stays put as a guide
+grows; the second follows it. Its **channels come from its own head**: the DTD puts every
+`<channel>` before the first `<programme>`, so the list is read and the download
+stopped there, and each channel's element is kept and written back out whole —
+every display name, icon and url, not just the three fields a default `<channel>`
+holds. On later runs it [asks whether anything has
+changed](#asking-only-when-it-is-worth-it), so an unchanged guide is a `304`
+rather than a download.
+
+| option | default | what it is |
+|---|---|---|
+| `url` | **required** | Where the document is. |
+| `channels` | every channel the document declares | The channels to take, mapping `siteId` (its `<channel id>`) to the id you want out. A list narrows *and* renames. |
+| `dayZone` | `'source'` | Which day a programme belongs to: the day it falls on in the offset the document wrote it with (`source`), the day of its UTC instant (`utc`), or the day in a named zone (`Europe/Bratislava`). |
+| `compression` | sniffed | `'gzip'`, `'brotli'`, `'zstd'`, or `false` for none. |
+| `parse` | — | `XmltvParseOptions`: `timezones` for a document using named zones, `tolerateMissingId`. |
+| `order` | `'grouped'` | Whether the document groups each channel's programmes together — see below. |
+
+Everything a site config takes is taken here too: `days`, `staleness`,
+`concurrency`, `rateLimit`, `backoff`, `ky`, `transform`, `channelInfo`, and both
+`cacheChannels` and `conditionalGet`, which are **on by default** here because a
+published guide is one file that changes at most daily.
+
+**Compression is sniffed, not asked about.** `Content-Encoding` says what the
+origin claimed rather than what the bytes are: `fetch` decodes gzip, `br` and
+`zstd` before this ever sees them and leaves the header on, and does *not* decode
+a coding it does not know — so its presence and its absence are equally
+uninformative. A `.gz` name is no better, since servers serve `.gz` files as
+`Content-Encoding: gzip` and hand over plain XML. A magic number is a fact.
+Brotli has none, so a brotli document is the one that must be named — by
+`compression: 'brotli'`, a `.br` url, or an `application/x-brotli` type — and
+anything else unreadable is an error rather than a guess.
+
+**If a document is not grouped by channel**, which the DTD allows and some
+publishers do, it is noticed at the first channel that comes round again: the
+rest is held to the end and nothing is lost, with a line in the log saying so.
+`order: 'any'` starts held, for a source known to be ordered by time — no
+warning, no second write, and the whole document in memory while it parses.
+
 ## Sites that answer in one pass
 
 Some sources publish the lot in one document — a `xmltv.xml.gz`, a dump behind

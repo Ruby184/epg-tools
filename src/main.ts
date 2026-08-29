@@ -77,6 +77,7 @@ export {
   ChannelsGroup,
   defineSiteConfig,
   defineStreamSiteConfig,
+  defineXmltvSite,
   DEFAULT_CHANNELS_MAX_AGE_DAYS,
   resolveChannels,
   resolveSites,

@@ -53,6 +53,40 @@ const BY_EXTENSION: Record<string, CompressionFormat | undefined> = {
   '.zst': 'zstd',
 };
 
+/**
+ * The format a name promises, if it promises one — `.gz`, `.br`, `.zst`.
+ *
+ * The same table both ways: what a guide written to `guide.xml.gz` is
+ * compressed with, and what one *read* from a url ending the same way is likely
+ * to hold. Likely, because a name is a promise rather than a fact — see
+ * `defineXmltvSite`, which sniffs the bytes and keeps this for the one format
+ * that cannot be sniffed.
+ */
+export function compressionFromName(name: string): CompressionFormat | undefined {
+  return BY_EXTENSION[path.extname(name).toLowerCase()];
+}
+
+/**
+ * The stream that undoes one format — the mirror of {@link compressor}.
+ *
+ * Nothing to say about levels: a decompressor takes what it is given.
+ */
+export function decompressor(format: CompressionFormat): Transform {
+  switch (format) {
+    case 'gzip':
+      return zlib.createGunzip();
+    case 'brotli':
+      return zlib.createBrotliDecompress();
+    default:
+      // Newer than this package's floor, as on the way out.
+      if (typeof zlib.createZstdDecompress !== 'function') {
+        throw new OutputError('Reading zstd needs Node 22.15 or newer (23.8 in the 23.x line)');
+      }
+
+      return zlib.createZstdDecompress();
+  }
+}
+
 export interface OutputSink {
   /**
    * Where the document goes — and whoever takes it owns its errors. A stream
