@@ -365,6 +365,28 @@ describe('defineXmltvSite', () => {
       expect(await entries(cache, 'a', TODAY)).toHaveLength(1);
     });
 
+    it('reads a document that ends inside the first few bytes', async () => {
+      // Shorter than the window the sniff needs, so there is never a fourth byte
+      // to wait for. The stream has said `end` by then and will not take its
+      // bytes back, so what was held is the whole document and is handed on as
+      // one — the case that turns "wait for four" into a stall.
+      const source = await serve((_request, response) => {
+        response.writeHead(200, { 'content-type': 'application/xml' });
+        response.end('<tv/>');
+      });
+      const cache = store();
+
+      const summary = await grab(
+        [defineXmltvSite({ site: 'published.example', url: source.url })],
+        { cache, now: NOW, days: 1 },
+      );
+
+      // A guide declaring no channels is a guide with nothing to grab, which is
+      // not a failure — it is a source that had nothing to say.
+      expect(summary.failed).toEqual([]);
+      expect(summary.fetched).toBe(0);
+    });
+
     it('says so when the bytes are neither XML nor anything it knows', async () => {
       const source = await serve((_request, response) => {
         response.writeHead(200, { 'content-type': 'application/octet-stream' });

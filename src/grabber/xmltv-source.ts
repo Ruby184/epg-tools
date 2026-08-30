@@ -15,8 +15,8 @@
  *   rather than a download.
  */
 
-import { PassThrough, Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
+import { once } from 'node:events';
+import { PassThrough, pipeline, Readable } from 'node:stream';
 import { toDayString } from '../core/days.js';
 import { compressionFromName, decompressor, type CompressionFormat } from '../core/output.js';
 import { getXmltvOffset, parseXmltvStream, xmltvZoneOffset } from '../xmltv/main.js';
@@ -93,27 +93,69 @@ export interface XmltvSiteOptions<TData = XmltvChannel> extends Omit<
 const MAGIC_BYTES = 4;
 
 /**
- * The first bytes of a stream, and the stream with them put back.
+ * Wait for a stream to have more to say, or to have finished saying it.
+ *
+ * Both, because either can be next and only one of them will come. An empty
+ * body emits `readable` first — with nothing to read — and `end` only on the
+ * turn after, so waiting on `readable` alone hangs on a document that turned out
+ * to be nothing at all.
+ *
+ * The controller is what takes the loser's listener away; without it a stream
+ * that dribbles collects one per chunk. An `error` rejects both, which is how a
+ * dying connection reaches the caller rather than stalling it.
+ */
+async function readableOrEnd(source: Readable): Promise<void> {
+  const settled = new AbortController();
+  const more = once(source, 'readable', { signal: settled.signal });
+  const ended = once(source, 'end', { signal: settled.signal });
+
+  // The loser rejects when the controller fires below; saying so here is what
+  // keeps that from being an unhandled rejection.
+  more.catch(() => {});
+  ended.catch(() => {});
+
+  try {
+    await Promise.race([more, ended]);
+  } finally {
+    settled.abort();
+  }
+}
+
+/**
+ * The first bytes of a stream, put back where they came from.
  *
  * Enough of them to decide on, rather than one chunk of whatever length: a body
  * arrives as the socket gave it, and a dribbling origin or a proxy flushing
  * small frames hands over **one byte** first — measured, not supposed. A magic
  * number read out of that is a gzipped guide reported as "neither XML nor
  * anything recognizable", which is a whole site failed over a chunk boundary.
+ *
+ * Whatever is there is taken and held, rather than asking for `want` bytes and
+ * waiting: `read(want)` on a stream holding fewer returns nothing *and* asks to
+ * be told about the same bytes again, so a dribbling body spins — one byte
+ * buffered, one byte reported, forever. Consuming empties the buffer, which
+ * makes the next `readable` mean what it says.
+ *
+ * `unshift` then puts the head back and the stream carries on as though nobody
+ * had looked, so everything after this is one stream that `pipeline` owns —
+ * except for a document that ended inside the window, which is a document held
+ * whole and worth handing over as one.
  */
 async function peek(source: Readable, want: number): Promise<{ head: Buffer; body: Readable }> {
-  const reader = source[Symbol.asyncIterator]();
   const chunks: Buffer[] = [];
   let size = 0;
 
   while (size < want) {
-    const next = await reader.next();
+    const chunk = source.read() as Buffer | null;
 
-    if (next.done === true) {
-      break;
+    if (chunk === null) {
+      if (source.readableEnded) {
+        break;
+      }
+
+      await readableOrEnd(source);
+      continue;
     }
-
-    const chunk = Buffer.from(next.value as Uint8Array);
 
     chunks.push(chunk);
     size += chunk.length;
@@ -121,33 +163,17 @@ async function peek(source: Readable, want: number): Promise<{ head: Buffer; bod
 
   const head = Buffer.concat(chunks);
 
-  return {
-    head,
-    body: Readable.from(
-      (async function* () {
-        try {
-          if (head.length > 0) {
-            yield head;
-          }
+  if (source.readableEnded) {
+    // Everything there was, and a stream that has said `end` refuses to take it
+    // back. What is held is the whole document, so it is one to hand over.
+    return { head, body: Readable.from(head.length > 0 ? [head] : []) };
+  }
 
-          while (true) {
-            const next = await reader.next();
+  if (head.length > 0) {
+    source.unshift(head);
+  }
 
-            if (next.done === true) {
-              return;
-            }
-
-            yield next.value;
-          }
-        } finally {
-          // A consumer that stopped early — channel discovery does, at the first
-          // programme — lets go of the response here rather than leaving it to
-          // the collector.
-          await reader.return?.();
-        }
-      })(),
-    ),
-  };
+  return { head, body: source };
 }
 
 const MAGIC: Array<{ format: CompressionFormat; bytes: number[] }> = [
@@ -214,40 +240,70 @@ function sniff(
   );
 }
 
+/**
+ * The document's stream, and what it turned out to be compressed with.
+ *
+ * Both come from the same look at its first bytes, which is why they are
+ * answered together — and why a document nobody can make sense of is let go of
+ * here. Nothing has been piped yet at that point, so nothing else would: the
+ * response would sit holding a socket until undici noticed that nobody was ever
+ * going to read it.
+ */
+async function opened(
+  response: Response,
+  url: string,
+  compression: CompressionFormat | false | undefined,
+): Promise<{ body: Readable; format: CompressionFormat | undefined }> {
+  // A response with no body at all — a `204`, a `HEAD` — is a document of no
+  // bytes rather than a special case: it peeks as empty, sniffs as nothing in
+  // particular, and pipes through to no programmes.
+  const source = response.body === null ? Readable.from([]) : Readable.fromWeb(response.body);
+
+  try {
+    const { head, body } = await peek(source, MAGIC_BYTES);
+
+    return {
+      body,
+      format:
+        compression === undefined
+          ? sniff(head, {
+              url,
+              contentType: response.headers.get('content-type'),
+              contentEncoding: response.headers.get('content-encoding'),
+            })
+          : compression === false
+            ? undefined
+            : compression,
+    };
+  } catch (error) {
+    source.destroy();
+
+    throw error;
+  }
+}
+
 /** The document's bytes, decompressed, however it arrives. */
 async function* documentBytes(
   response: Response,
   url: string,
   compression: CompressionFormat | false | undefined,
 ): AsyncGenerator<Buffer> {
-  if (response.body === null) {
-    return;
-  }
-
-  const { head, body } = await peek(Readable.fromWeb(response.body), MAGIC_BYTES);
-  const format =
-    compression === undefined
-      ? sniff(head, {
-          url,
-          contentType: response.headers.get('content-type'),
-          contentEncoding: response.headers.get('content-encoding'),
-        })
-      : compression === false
-        ? undefined
-        : compression;
+  const { body, format } = await opened(response, url, compression);
 
   // Through a `pipeline` into a stream of its own, rather than `compose` or
   // `.pipe`: those two each drop an error in one direction — a truncated member
   // goes unhandled through `compose`, a dying connection through `.pipe` — and a
   // stream that ends quietly instead of throwing is read as a complete document,
   // which would cache "nothing on" for every channel-day past the break.
-  const out = new PassThrough();
-  const chain =
-    format === undefined ? pipeline(body, out) : pipeline(body, decompressor(format), out);
-
-  // The pipeline's failure destroys `out`, which is what makes the iteration
-  // below reject rather than end.
-  void chain.catch(() => {});
+  //
+  // The callback form, because it hands back the stream it was given and there
+  // is nothing here to await. Its callback does nothing on purpose and cannot be
+  // left out — `pipeline` refuses to run without one — since a failure destroys
+  // every stream in the chain, so it arrives where the document is read.
+  const out =
+    format === undefined
+      ? pipeline(body, new PassThrough(), () => {})
+      : pipeline(body, decompressor(format), new PassThrough(), () => {});
 
   yield* out;
 }
