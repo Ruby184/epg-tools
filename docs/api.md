@@ -160,8 +160,10 @@ the point. The collecting and the flushing happen whatever the `level` is: askin
 for errors only must still end with the errors.
 
 `progressReporter` is what `site:started` exists for: by the time it fires the
-planner has resolved the channel list and swept the cache, so the number of
-requests is what will actually happen — a denominator that is real. Underneath
+planner has resolved the channel list and swept the cache, so `entries` — the
+channel-days that will actually be fetched — is a denominator that is real. It
+measures against those and not against `requests`, because a whole-document
+source makes *one* request and two thousand channel-days out of it. Underneath
 it is a `textReporter`, because a warning, a failure, a site's own message and
 the summary are all things to keep: the line is erased, they are written, and it
 is drawn again. It draws only at `level: 'info'` and only on a stream with a

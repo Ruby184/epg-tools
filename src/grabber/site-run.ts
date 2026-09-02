@@ -244,10 +244,11 @@ export class SiteRun {
       }),
     );
 
+    const stale = await this.#collectStale();
     const requests = planRequests({
       channels: this.#channels,
       window: this.#resolved.window,
-      stale: await this.#collectStale(),
+      stale,
       batching: this.#resolved.batching,
     });
 
@@ -259,6 +260,7 @@ export class SiteRun {
       site: this.#site,
       channels: this.#channels.length,
       days: this.#resolved.window.length,
+      entries: stale.length,
       requests: requests.length,
     });
 

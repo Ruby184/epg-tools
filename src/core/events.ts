@@ -83,8 +83,21 @@ export type EpgEventInput =
    * The one event that makes a run's shape known before it happens: a progress
    * line has no totals without it, and at `info` it is what says a site is
    * being worked on at all.
+   *
+   * `entries` is the channel-days that will actually be fetched, and it is the
+   * one to measure against: `requests` is how they were grouped, which for a
+   * whole-document source is *one* however many channel-days come out of it.
+   * The channel-days already fresh in the cache are not in either — they were
+   * counted before this, which is how the sweep discovers them.
    */
-  | { type: 'site:started'; site: string; channels: number; days: number; requests: number }
+  | {
+      type: 'site:started';
+      site: string;
+      channels: number;
+      days: number;
+      entries: number;
+      requests: number;
+    }
   | ({ type: 'site:done'; site: string } & GrabCounts)
   /** The site could not be read or run at all, so none of it was grabbed. */
   | { type: 'site:failed'; site: string; error: unknown }

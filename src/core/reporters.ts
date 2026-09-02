@@ -127,7 +127,7 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
     case 'site:started':
       return (
         `${at(event.site, prefix)}${event.channels} channel(s) × ${event.days} day(s): ` +
-        `${event.requests} request(s)`
+        `${event.entries} to fetch in ${event.requests} request(s)`
       );
     case 'site:done':
       return `${at(event.site, prefix)}${counts(event)}`;
@@ -470,8 +470,7 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
   const counts: GrabCounts = { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0 };
   const sites = new Set<string>();
   let finishedSites = 0;
-  let requests = 0;
-  let asked = 0;
+  let planned = 0;
   let merged = 0;
   let merging = false;
   /** What is on screen now, and `''` when nothing is. */
@@ -492,11 +491,14 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
     }
 
     const where = sites.size === 1 ? [...sites][0]! : `${finishedSites}/${sites.size} sites`;
+    // Channel-days rather than requests: a whole-document source makes one
+    // request and two thousand channel-days out of it, so a fraction of
+    // requests would read `0/1` for the length of the run.
+    const settled = counts.fetched + counts.unchanged + counts.failed;
 
     return [
       where,
-      `${asked}/${requests} requests`,
-      `${counts.fetched} fetched`,
+      `${settled}/${planned} channel-days`,
       ...(counts.fromCache > 0 ? [`${counts.fromCache} cached`] : []),
       ...(counts.unchanged > 0 ? [`${counts.unchanged} unchanged`] : []),
       ...(counts.failed > 0 ? [`${counts.failed} failed`] : []),
@@ -530,14 +532,10 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
     switch (event.type) {
       case 'site:started':
         sites.add(event.site);
-        requests += event.requests;
+        planned += event.entries;
         break;
       case 'site:done':
         finishedSites++;
-        break;
-      case 'request:done':
-      case 'request:failed':
-        asked++;
         break;
       case 'entry:fetched':
         counts.fetched++;

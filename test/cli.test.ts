@@ -220,7 +220,7 @@ describe('epg', () => {
       // The per-channel-day chatter is what drowned the four lines that matter,
       // and what `--quiet` was the only defence against.
       expect(stdout).not.toContain('1 programme');
-      expect(stdout).toContain('[example.tv] 1 channel(s) × 1 day(s): 1 request(s)');
+      expect(stdout).toContain('[example.tv] 1 channel(s) × 1 day(s): 1 to fetch in 1 request(s)');
       expect(stdout).toContain('Grab done: 1 fetched');
     });
 

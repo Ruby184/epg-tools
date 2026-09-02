@@ -2772,6 +2772,7 @@ describe('what a run reports', () => {
       site: 'example.com',
       channels: 2,
       days: 2,
+      entries: 4,
       requests: 4,
       level: 'info',
       phase: 'grab',

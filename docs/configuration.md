@@ -161,7 +161,7 @@ On a terminal that summary is preceded by a **single line, rewritten in place**,
 off totals the planner has already worked out:
 
 ```
-example.tv · 42/350 requests · 84 fetched · 10 cached · 2 failed
+example.tv · 84/350 channel-days · 10 cached · 2 failed
 ```
 
 It is erased whenever there is something worth keeping — a warning, a failure,

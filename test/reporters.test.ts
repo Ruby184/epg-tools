@@ -127,8 +127,8 @@ describe('render', () => {
       '[a.tv] 3 channel-day(s) not in the document: caching them empty',
     ],
     [
-      { type: 'site:started', site: 'a.tv', channels: 50, days: 7, requests: 350 },
-      '[a.tv] 50 channel(s) × 7 day(s): 350 request(s)',
+      { type: 'site:started', site: 'a.tv', channels: 50, days: 7, entries: 300, requests: 350 },
+      '[a.tv] 50 channel(s) × 7 day(s): 300 to fetch in 350 request(s)',
     ],
     [
       { type: 'grab:done', fetched: 1, empty: 0, fromCache: 0, unchanged: 0, failed: 0 },
@@ -242,10 +242,10 @@ describe('textReporter', () => {
 
     run(textReporter({ stream: out, level: 'info' }), [
       { type: 'entry:cached', site: 'a.tv', channelId: 'one', day: '2026-09-01' },
-      { type: 'site:started', site: 'a.tv', channels: 1, days: 1, requests: 1 },
+      { type: 'site:started', site: 'a.tv', channels: 1, days: 1, entries: 1, requests: 1 },
     ]);
 
-    expect(out.lines).toEqual(['[a.tv] 1 channel(s) × 1 day(s): 1 request(s)']);
+    expect(out.lines).toEqual(['[a.tv] 1 channel(s) × 1 day(s): 1 to fetch in 1 request(s)']);
   });
 
   it('shows the per-channel-day chatter at debug', () => {
@@ -387,6 +387,7 @@ describe('progressReporter', () => {
     site: 'a.tv',
     channels: 2,
     days: 3,
+    entries: 6,
     requests: 6,
   };
 
@@ -401,7 +402,7 @@ describe('progressReporter', () => {
 
     // The totals come from `site:started`, which the planner has already
     // resolved — a denominator that is real.
-    expect(out.raw).toContain('a.tv · 1/6 requests · 1 fetched');
+    expect(out.raw).toContain('a.tv · 1/6 channel-days');
     expect(out.raw).toContain('\r\u001b[K');
   });
 
@@ -417,9 +418,7 @@ describe('progressReporter', () => {
     expect(err.lines).toEqual(['[a.tv] the source moved a channel']);
     // Erased before the warning and drawn again after it, so the warning is not
     // written into a line that is about to be overwritten.
-    expect(out.raw).toBe(
-      `a.tv · 0/6 requests · 0 fetched\r\u001b[Ka.tv · 0/6 requests · 0 fetched`,
-    );
+    expect(out.raw).toBe(`a.tv · 0/6 channel-days\r\u001b[Ka.tv · 0/6 channel-days`);
   });
 
   it('takes the line away when the run is over, and lets the summary stand', () => {
@@ -444,7 +443,7 @@ describe('progressReporter', () => {
       { type: 'stream:ignored', site: 'a.tv', count: 2 },
     ]);
 
-    expect(out.raw).toBe('a.tv · 0/6 requests · 0 fetched');
+    expect(out.raw).toBe('a.tv · 0/6 channel-days');
   });
 
   it('leaves nothing on screen when a half of the run ends', () => {
@@ -477,7 +476,7 @@ describe('progressReporter', () => {
       },
     ]);
 
-    expect(out.raw).toContain('1/6 requests · 0 fetched · 2 failed');
+    expect(out.raw).toContain('2/6 channel-days · 2 failed');
   });
 
   it('is the text one on anything without a cursor to move', () => {
@@ -486,7 +485,7 @@ describe('progressReporter', () => {
     run(progressReporter({ stream: pipe }), [started]);
 
     // A pipe, a file, a CI log: what a script reads is unchanged.
-    expect(pipe.lines).toEqual(['[a.tv] 2 channel(s) × 3 day(s): 6 request(s)']);
+    expect(pipe.lines).toEqual(['[a.tv] 2 channel(s) × 3 day(s): 6 to fetch in 6 request(s)']);
   });
 
   it.each(['debug', 'warn', 'error'] as const)('is the text one at %s', (level) => {
