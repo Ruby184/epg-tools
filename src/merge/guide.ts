@@ -1,5 +1,6 @@
 import { dayRange, dayToDate, toDayString } from '../core/days.js';
 import { writeOutput, type OutputOptions, type OutputTarget } from '../core/output.js';
+import { emitter } from '../core/reporters.js';
 import { channelElement, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
@@ -112,7 +113,8 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   const days = [...dayRange(options.startDay ?? toDayString(now), options.days ?? 7)];
   const channelStrategy = options.merge?.channelStrategy ?? 'merge-programmes';
   const programmeStrategy = options.merge?.programmeStrategy ?? 'merge';
-  const { cache, logger } = options;
+  const { cache } = options;
+  const emit = emitter(options);
 
   // Through the same helper the grab uses, so a site that fetches its channel
   // list is asked the same way by both — and every site at once rather than one
@@ -367,7 +369,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       }
 
       if (last) {
-        logger?.(`merge: channel ${entry.xmltvId} done`);
+        emit({ type: 'merge:channel', channelId: entry.xmltvId });
       }
     }
   }

@@ -9,6 +9,8 @@
 
 import type { KyInstance } from 'ky';
 import PQueue from 'p-queue';
+import type { Emit } from '../core/events.js';
+import { emitter } from '../core/reporters.js';
 import { siteHttp } from './channels.js';
 import type { AnySiteConfig, SiteBackoff } from './types.js';
 
@@ -97,9 +99,19 @@ function requestQueue(config: AnySiteConfig): PQueue {
 
 export function sitePacing(
   config: AnySiteConfig,
-  options: { signal?: AbortSignal; log?: (message: string) => void } = {},
+  options: {
+    signal?: AbortSignal;
+    /** Say what the queue did — see `core/events.ts`. */
+    emit?: Emit;
+    /**
+     * Progress, line by line.
+     *
+     * @deprecated Pass {@link emit} instead.
+     */
+    log?: (message: string) => void;
+  } = {},
 ): SitePacing {
-  const log = options.log ?? ((): void => {});
+  const emit = options.emit ?? emitter({ ...(options.log ? { logger: options.log } : {}) });
   const queue = requestQueue(config);
   const backoff = config.backoff === false ? undefined : { ...DEFAULT_BACKOFF, ...config.backoff };
   const ceiling = queue.concurrency;
@@ -134,7 +146,7 @@ export function sitePacing(
     holdingUntil = until;
     clearTimeout(timer);
     queue.pause();
-    log(`[${config.site}] HTTP ${status}: holding requests for ${Math.round(ms)}ms`);
+    emit({ type: 'pacing:held', site: config.site, status, ms: Math.round(ms) });
     // Deliberately not unref'd: a run in the middle of a hold has to stay
     // alive, or the process would exit with the guide half grabbed.
     timer = setTimeout(release, ms);
@@ -167,7 +179,11 @@ export function sitePacing(
                   // climb back.
                   if (backoff.adapt && queue.concurrency > 1 && !holding()) {
                     queue.concurrency = Math.max(1, Math.floor(queue.concurrency / 2));
-                    log(`[${config.site}] concurrency down to ${queue.concurrency}`);
+                    emit({
+                      type: 'pacing:slowed',
+                      site: config.site,
+                      concurrency: queue.concurrency,
+                    });
                   }
 
                   hold(
@@ -189,7 +205,11 @@ export function sitePacing(
                 ) {
                   clean = 0;
                   queue.concurrency += 1;
-                  log(`[${config.site}] concurrency back up to ${queue.concurrency}`);
+                  emit({
+                    type: 'pacing:recovered',
+                    site: config.site,
+                    concurrency: queue.concurrency,
+                  });
                 }
               },
             ],
@@ -198,8 +218,10 @@ export function sitePacing(
 
   // Only ever fires for a site that is paced, and it is the one thing a
   // `rateLimit` gives no other sign of.
-  queue.on('rateLimit', () => log(`[${config.site}] rate limit reached, waiting for the window`));
-  queue.on('rateLimitCleared', () => log(`[${config.site}] rate limit window open again`));
+  queue.on('rateLimit', () => emit({ type: 'pacing:rateLimit', site: config.site, waiting: true }));
+  queue.on('rateLimitCleared', () =>
+    emit({ type: 'pacing:rateLimit', site: config.site, waiting: false }),
+  );
 
   // A cancelled run must not sit out the rest of a hold — the timer is not
   // unref'd, so it would hold the process open — and must not resume either.

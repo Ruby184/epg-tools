@@ -18,6 +18,7 @@ accepted) and the type of a channel's `data` from what `channels` returns.
 - [Requests and parsing](#requests-and-parsing)
   - [Building programmes](#building-programmes)
   - [The `<channel>` element](#the-channel-element)
+  - [Saying something](#saying-something)
 - [Batching](#batching-how-much-one-request-covers)
 - [HTTP settings and proxies](#http-settings-and-proxies)
 - [Rate limits and backoff](#rate-limits-and-backoff)
@@ -377,6 +378,48 @@ Everything that emits a `<channel>` goes through this — the merge and the
 grabber's `--list-channels` — so a channel is described identically wherever it
 turns up.
 
+### Saying something
+
+Every context — `channels`, `request`, `parseDay`, `stream` — carries `log` and
+`warn`. They take one line each and the site's name is added for you, so say
+what happened rather than who it happened to:
+
+```ts
+const example = defineSiteConfig({
+  site: 'example.tv',
+  async request({ channel, day, http, log }) {
+    log(`asking for ${channel.siteId}`);
+
+    return http.get(`epg/${channel.siteId}/${day}`).json();
+  },
+  parseDay({ payload, programme, warn }) {
+    return payload.items.flatMap((item) => {
+      if (item.start === undefined) {
+        warn(`skipped an item with no start time`);
+
+        return [];
+      }
+
+      return programme(new Date(item.start), item.title);
+    });
+  },
+});
+```
+
+The difference between them is what survives a run asked to be quiet:
+
+| | shown at | for |
+|---|---|---|
+| `log` | the run's default verbosity | progress — what is being asked for, what came back |
+| `warn` | always, down to errors only | a signal — the source has changed shape, something was skipped |
+
+Neither is `console.log`, and that is the point: there is no `console` call
+anywhere in this package, because a `tv_grab_*` writes its guide to stdout and
+one stray line in the middle of it is a broken document. Both of these go
+wherever the run's own messages go, which the caller chose — a
+[reporter](./api.md#reporting-what-a-run-is-doing), a file, `--quiet`, or
+nothing at all.
+
 ## Batching: how much one request covers
 
 A site has one `request`, and `batching` says how much of the channel × day
@@ -632,9 +675,10 @@ const published = defineStreamSiteConfig({
 ```
 
 It is called **once per run**, with every stale channel-day of the site in
-`channelDays` — the same context a `'both'`-batched request gets, plus `log` for
-what a pass through a document notices: a warning from the parser, a channel the
-list did not mention. Nothing waits for the pass to finish before the first
+`channelDays` — the same context a `'both'`-batched request gets, which includes
+the [`log` and `warn`](#saying-something) a pass through a document has plenty of
+use for: a warning from the parser, a channel the list did not mention. Nothing
+waits for the pass to finish before the first
 channel-day it yields is written, and the writing holds the split back rather
 than the other way round, so memory stays flat however large the document is.
 

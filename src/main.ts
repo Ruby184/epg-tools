@@ -11,6 +11,37 @@ export type {
 export { createConfigContext, defaultsReader, envReader } from './core/answers.js';
 export type { ConfigContext, ConfigReader, StageDefaults } from './core/answers.js';
 export { GrabberError } from './core/error.js';
+export { atLevel, EVENT_KINDS, LEVELS } from './core/events.js';
+export type {
+  Emit,
+  EpgEvent,
+  EpgEventInput,
+  EpgEventType,
+  EventKind,
+  EventLevel,
+  GrabCounts,
+  Reporter,
+  RunPhase,
+} from './core/events.js';
+export {
+  DEFAULT_FAILURE_CAP,
+  isFailure,
+  jsonReporter,
+  render,
+  renderFailure,
+  reporterFor,
+  REPORTER_NAMES,
+  textReporter,
+} from './core/reporters.js';
+export type {
+  FailureEvent,
+  JsonReporterOptions,
+  ReportedOptions,
+  ReporterFactory,
+  ReporterName,
+  ReporterRuntime,
+  TextReporterOptions,
+} from './core/reporters.js';
 export type { CompressionFormat, CompressionOptions } from './core/output.js';
 export { build, runGrab, runMerge, guideStream, createCacheStore } from './build.js';
 export type { RunOptions } from './build.js';

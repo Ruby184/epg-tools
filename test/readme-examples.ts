@@ -18,6 +18,7 @@ import {
   defineXmltvSite,
   guideStream,
   SiteStateHandle,
+  textReporter,
 } from '../src/main.js';
 import type {
   CacheDriver,
@@ -585,8 +586,30 @@ export const compressed = defineConfig({
 
 // --- docs/api.md: Running a build ------------------------------------------
 export const run = async (): Promise<number> => {
-  const summary = await build(configured, { logger: console.log });
+  const summary = await build(configured, {
+    reporter: textReporter({ stream: process.stdout }),
+  });
+
   return summary.fetched + summary.fromCache + summary.failed.length;
+};
+
+// --- docs/api.md: Reporting what a run is doing -----------------------------
+export const reported = async (): Promise<void> => {
+  await build(configured, { reporter: textReporter({ stream: process.stdout, level: 'debug' }) });
+};
+
+export const counted = async (): Promise<number> => {
+  let failed = 0;
+
+  await build(configured, {
+    reporter: (event) => {
+      if (event.type === 'entry:failed') {
+        failed++;
+      }
+    },
+  });
+
+  return failed;
 };
 
 export const streamed = async (): Promise<string> => {

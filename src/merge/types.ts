@@ -1,6 +1,7 @@
 import type { XmltvDocumentMeta, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheStore } from '../cache/types.js';
 import type { AnySiteConfig } from '../grabber/types.js';
+import type { Reporter } from '../core/events.js';
 
 /**
  * What to do when multiple sites cover the same xmltv channel id.
@@ -197,6 +198,15 @@ export interface BuildGuideOptions {
   startDay?: string;
   merge?: MergeOptions;
   meta?: XmltvDocumentMeta;
+  /**
+   * Where this merge's events go — see {@link Reporter}.
+   */
+  reporter?: Reporter;
+  /**
+   * Progress, line by line.
+   *
+   * @deprecated Pass {@link reporter} instead.
+   */
   logger?: (message: string) => void;
   /**
    * Pretty-print the guide with this indentation (a number of spaces or a

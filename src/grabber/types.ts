@@ -3,6 +3,7 @@ import type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from '../xmlt
 import type { DateInput } from '../xmltv/date.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheEntryMeta, CacheStore, StalenessPolicy } from '../cache/types.js';
+import type { Reporter } from '../core/events.js';
 
 /**
  * A channel to grab: maps an output XMLTV id to a site-specific id.
@@ -115,6 +116,23 @@ export interface BaseRequestContext<TData = unknown> {
   signal?: AbortSignal;
   /** What this site remembers between runs — see {@link SiteState}. */
   state: SiteState;
+  /**
+   * Say something about what this site is doing, wherever the run's own
+   * messages go.
+   *
+   * Progress, so it is shown at the run's default verbosity and hidden when the
+   * run is asked to be quiet. The site's name is added for you — say what
+   * happened, not who it happened to.
+   */
+  log(message: string): void;
+  /**
+   * The same, for something the reader has to see.
+   *
+   * A warning is a signal rather than progress: it survives a run asked to
+   * report errors only, because "the source moved this channel" is worth
+   * hearing even then. Throw instead when the channel-day should also fail.
+   */
+  warn(message: string): void;
 }
 
 /**
@@ -383,6 +401,16 @@ export interface ParseContext<TRaw, TData = unknown> {
    * `Map` every request and every parse of this site is handed.
    */
   state: SiteState;
+  /**
+   * Say something about this channel-day — as on a request context.
+   *
+   * Here because a parse is where a site notices things: a field the source has
+   * started leaving out, a programme it had to skip. Before this there was
+   * nowhere at all to put that, and no `console` in the package to borrow.
+   */
+  log(message: string): void;
+  /** The same, for something the reader has to see — as on a request context. */
+  warn(message: string): void;
 }
 
 /**
@@ -612,20 +640,16 @@ export type StreamedChannelDay<TData = unknown> =
 
 /**
  * What a stream is given: the same context a `both`-batched request gets —
- * every channel and day it is being asked about at once — and somewhere to say
- * what it noticed on the way through.
+ * every channel and day it is being asked about at once.
+ *
+ * Which now includes {@link BaseRequestContext.log} and
+ * {@link BaseRequestContext.warn}, so it is an alias rather than a shape of its
+ * own: a whole-document source is the one place a parse has plenty to report —
+ * a warning from the parser, a channel the list did not mention, a document not
+ * sorted the way it usually is — but it stopped being the only place that has
+ * anything.
  */
-export interface StreamContext<TData = unknown> extends ChannelsDaysRequestContext<TData> {
-  /**
-   * Say something about this pass, prefixed with the site and put wherever the
-   * run's own messages go.
-   *
-   * A whole-document source is the one place a parse has anything to report: a
-   * warning from the parser, a channel the list did not mention, a document that
-   * turned out not to be sorted the way it usually is.
-   */
-  log(message: string): void;
-}
+export type StreamContext<TData = unknown> = ChannelsDaysRequestContext<TData>;
 
 /**
  * A site that answers its whole window in one pass: it streams, and says what it
@@ -724,6 +748,21 @@ export interface GrabOptions {
   staleness?: Partial<StalenessPolicy>;
   /** "Now" reference, for tests. Defaults to `new Date()`. */
   now?: Date;
+  /**
+   * Where this run's events go — see {@link Reporter}.
+   *
+   * A function told what happened as it happens. `textReporter` and
+   * `jsonReporter` are the ones this package ships; anything of your own is a
+   * function of one argument.
+   */
+  reporter?: Reporter;
+  /**
+   * Progress, line by line.
+   *
+   * @deprecated Pass {@link reporter} instead. Kept working by rendering each
+   * event back to the line it used to be, which is all this ever was — and
+   * which is why it cannot filter, name a level, or tell you *what* happened.
+   */
   logger?: (message: string) => void;
   /**
    * Cancel the run. Anything still queued — requests, staleness checks, cache

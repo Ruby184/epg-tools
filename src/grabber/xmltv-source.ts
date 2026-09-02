@@ -419,7 +419,7 @@ export function defineXmltvSite<TData = XmltvChannel>(
           : element();
       }),
     async *stream(ctx): AsyncGenerator<StreamedChannelDay<TData>> {
-      const { channelDays, http, log, signal } = ctx;
+      const { channelDays, http, signal, warn } = ctx;
       // What was asked for, and who to hand it back as. A source channel may map
       // to more than one output channel — the same feed under two ids — so this
       // is a list.
@@ -478,7 +478,10 @@ export function defineXmltvSite<TData = XmltvChannel>(
         ...(signal ? { signal } : {}),
       })) {
         if (event.type === 'warning') {
-          log(`${event.value.code} at line ${event.value.line}: ${event.value.message}`);
+          // `warn`, not `log`: a document that does not parse cleanly is a
+          // signal about the source rather than progress, so it is still said
+          // when the run has been asked for errors only.
+          warn(`${event.value.code} at line ${event.value.line}: ${event.value.message}`);
           continue;
         }
 
@@ -496,7 +499,7 @@ export function defineXmltvSite<TData = XmltvChannel>(
             // keeps the rest correct; what was already written is added to
             // rather than replaced.
             holding = true;
-            log(
+            warn(
               `this document is not grouped by channel (${siteId} appears again), ` +
                 `so the rest of it is held until the end`,
             );

@@ -11,6 +11,7 @@ import type {
 } from '../src/cache/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 import { grab, UnchangedError } from '../src/grabber/main.js';
+import type { EpgEvent } from '../src/core/events.js';
 import type {
   ChannelsBatching,
   ChannelsDaysBatching,
@@ -2659,5 +2660,149 @@ describe('a stream that says nothing has changed', () => {
     expect(
       cache.get({ site: 'stream.example', channelId: 'b', day: TODAY })?.programmes,
     ).toHaveLength(1);
+  });
+});
+
+describe('what a run reports', () => {
+  /** Every event a grab emitted, which is what a reporter is handed. */
+  function collect(): { events: EpgEvent[]; reporter: (event: EpgEvent) => void } {
+    const events: EpgEvent[] = [];
+
+    return { events, reporter: (event) => events.push(event) };
+  }
+
+  const types = (events: EpgEvent[]): string[] => events.map((event) => event.type);
+
+  it('says what a site is about to do before it does it', async () => {
+    const { events, reporter } = collect();
+    const config = makeConfig({
+      channels: [channel('one.example'), channel('two.example')],
+      days: 2,
+      async request() {
+        return {};
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter });
+
+    // The planner has already run, so the numbers are what will actually happen
+    // rather than what was asked for — which is what a progress line needs.
+    expect(events.find((event) => event.type === 'site:started')).toEqual({
+      type: 'site:started',
+      site: 'example.com',
+      channels: 2,
+      days: 2,
+      requests: 4,
+      level: 'info',
+      phase: 'grab',
+    });
+    expect(types(events).indexOf('site:started')).toBeLessThan(
+      types(events).indexOf('entry:fetched'),
+    );
+  });
+
+  it('counts each site on its own, and the run as a whole', async () => {
+    const { events, reporter } = collect();
+    const good = makeConfig({
+      site: 'good.example',
+      async request() {
+        return {};
+      },
+    });
+    const bad = makeConfig({
+      site: 'bad.example',
+      async request() {
+        throw new Error('down');
+      },
+    });
+
+    const summary = await grab([good, bad], { cache: new MemoryCache(), now: NOW, reporter });
+
+    // A run's total says nothing about which of six sources was the one that
+    // failed; a per-site count is the only thing that does.
+    expect(events.filter((event) => event.type === 'site:done')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ site: 'good.example', fetched: 1, failed: 0 }),
+        expect.objectContaining({ site: 'bad.example', fetched: 0, failed: 1 }),
+      ]),
+    );
+    expect(events.at(-1)).toMatchObject({
+      type: 'grab:done',
+      fetched: 1,
+      failed: 1,
+      level: 'info',
+    });
+    expect(summary.failed).toHaveLength(1);
+  });
+
+  it('says a failed request once, however many channel-days it took down', async () => {
+    const { events, reporter } = collect();
+    const config: SiteConfig<unknown, ChannelsDaysBatching> = {
+      site: 'example.com',
+      channels: [channel('one.example'), channel('two.example')],
+      batching: { mode: 'both' },
+      async request() {
+        throw new Error('the whole thing');
+      },
+      parseDay() {
+        return [];
+      },
+    };
+
+    const summary = await grab([config], { cache: new MemoryCache(), now: NOW, days: 3, reporter });
+
+    // Six channel-days lost, one event about it — which is the difference
+    // between one line and six thousand for a site that is down.
+    expect(summary.failed).toHaveLength(6);
+    expect(events.filter((event) => event.type === 'entry:failed')).toEqual([]);
+    expect(events.filter((event) => event.type === 'request:failed')).toEqual([
+      expect.objectContaining({
+        type: 'request:failed',
+        site: 'example.com',
+        channels: ['one.example', 'two.example'],
+        entries: 6,
+        level: 'error',
+      }),
+    ]);
+  });
+
+  it('lets any site say something, not only one that streams', async () => {
+    const { events, reporter } = collect();
+    const config = makeConfig({
+      async request({ log, warn }) {
+        log('asked the index');
+        warn('the source renamed a channel');
+
+        return {};
+      },
+      parseDay({ log }) {
+        log('parsed it');
+
+        return [];
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter });
+
+    // `parseDay` had no way at all to speak before this, and no `console` to
+    // reach for either — there is not one in the package.
+    expect(events.filter((event) => event.type === 'site:note')).toEqual([
+      expect.objectContaining({ message: 'asked the index', level: 'info' }),
+      expect.objectContaining({ message: 'parsed it', level: 'info' }),
+    ]);
+    expect(events.filter((event) => event.type === 'site:warning')).toEqual([
+      expect.objectContaining({ message: 'the source renamed a channel', level: 'warn' }),
+    ]);
+  });
+
+  it('refuses to guess when handed both a reporter and a logger', async () => {
+    await expect(
+      grab([makeConfig({})], {
+        cache: new MemoryCache(),
+        now: NOW,
+        reporter: () => {},
+        logger: () => {},
+      }),
+    ).rejects.toThrow(/either reporter or logger/);
   });
 });

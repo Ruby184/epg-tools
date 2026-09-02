@@ -9,7 +9,7 @@
 
 import PQueue from 'p-queue';
 import { toDayString } from '../core/days.js';
-import { errorMessage } from '../core/error.js';
+import { emitter } from '../core/reporters.js';
 import { SiteRun, type Run, type RunTally } from './site-run.js';
 import type { AnySiteConfig, GrabOptions, GrabSummary } from './types.js';
 
@@ -23,7 +23,7 @@ const DEFAULT_LOCAL_CONCURRENCY = 16;
 
 export async function grab(configs: AnySiteConfig[], options: GrabOptions): Promise<GrabSummary> {
   const now = options.now ?? new Date();
-  const log = options.logger ?? ((): void => {});
+  const emit = emitter(options);
   const { cache, signal } = options;
   const tally: RunTally = { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: [] };
 
@@ -71,7 +71,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     now,
     grabbedAt: now.toISOString(),
     startDay: options.startDay ?? toDayString(now),
-    log,
+    emit,
     ...(signal ? { signal } : {}),
     localWork,
     enqueue,
@@ -89,11 +89,13 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
           await new SiteRun(config, run).run();
         } catch (error) {
           tally.failed.push({ site: config.site, channelId: '*', day: '*', error });
-          log(`[${config.site}] site failed: ${errorMessage(error)}`);
+          emit({ type: 'site:failed', site: config.site, error });
         }
       }).catch(() => {}),
     ),
   );
+
+  emit({ type: 'grab:done', ...tally, failed: tally.failed.length });
 
   return tally;
 }

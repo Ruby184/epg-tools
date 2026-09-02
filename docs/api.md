@@ -4,6 +4,7 @@ Everything the `epg` CLI does is available as a library. The package is
 **ESM-only** and ships types for every entry point.
 
 - [Running a build](#running-a-build)
+- [Reporting what a run is doing](#reporting-what-a-run-is-doing)
 - [Streaming a guide](#streaming-a-guide)
 - [Entry points](#entry-points)
 - [Export map](#export-map)
@@ -11,10 +12,10 @@ Everything the `epg` CLI does is available as a library. The package is
 ## Running a build
 
 ```ts
-import { build, runGrab, runMerge } from 'epg-tools';
+import { build, runGrab, runMerge, textReporter } from 'epg-tools';
 import config from './epg.config.ts';
 
-const summary = await build(config, { logger: console.log });
+const summary = await build(config, { reporter: textReporter({ stream: process.stdout }) });
 console.log(summary); // { fetched, fromCache, failed }
 ```
 
@@ -58,9 +59,87 @@ await using cache = await createCacheStore(config);
 |---|---|---|---|
 | `now` | `Date` | the current time | The reference for staleness and the `grabbedAt` stamp — and, unless `offset` says otherwise, the first day of the window. Pass one to make a run reproducible in a test. |
 | `offset` | `number` | `0` | Shift the window this many days from `now`'s day; may be negative. `now` itself is unchanged, so staleness and pruning keep using the real current time. |
-| `logger` | `(line: string) => void` | none | Progress, line by line. Omit for silence. |
+| `reporter` | `(event: EpgEvent) => void` | none | Where the run's events go — see [reporting what a run is doing](#reporting-what-a-run-is-doing). Omit for silence. |
+| `logger` | `(line: string) => void` | none | **Deprecated.** Progress, line by line. Kept working by rendering each event back to the line it used to be; pass `reporter` instead. Passing both throws. |
 | `cache` | `CacheStore` | the one the config describes | Use this store instead. It stays the caller's — nothing here closes what it did not open — which is for a process running several builds, or a test with a store already in hand. |
 | `signal` | `AbortSignal` | none | Cancel the run — see [Cancelling a run](./configuration.md#cancelling-a-run). A grab resolves with the partial summary; a merge rejects, and the guide it was writing is discarded rather than replacing the one in place. `build` skips the merge entirely if the grab was cancelled. |
+
+## Reporting what a run is doing
+
+A run does not print anything. It **emits events**, and what to do with them is
+the caller's:
+
+```ts
+import { build, textReporter } from 'epg-tools';
+
+await build(config, {
+  reporter: textReporter({ stream: process.stdout, level: 'debug' }),
+});
+```
+
+A reporter is a function of one argument, so anything can be one:
+
+```ts
+await build(config, {
+  reporter: (event) => {
+    if (event.type === 'entry:failed') {
+      metrics.increment('epg.failed', { site: event.site });
+    }
+  },
+});
+```
+
+Every event carries a `type`, the fields that type is about, a `level`
+(`error`, `warn`, `info`, `debug`) and a `phase` (`run`, `grab`, `merge`,
+`prune`). The level and phase follow from the type rather than being chosen at
+the call site — `EVENT_KINDS` is the whole table, and it is the whole answer to
+"what does the default verbosity show?".
+
+| group | types |
+|---|---|
+| the run | `run:cancelled`, `grab:done` |
+| a site | `site:started`, `site:done`, `site:failed`, `site:note`, `site:warning` |
+| one channel-day | `entry:cached`, `entry:fetched`, `entry:appended`, `entry:unchanged`, `entry:failed` |
+| one request | `request:failed` |
+| a whole-document source | `stream:gaps`, `stream:ignored` |
+| pacing | `pacing:held`, `pacing:slowed`, `pacing:recovered`, `pacing:rateLimit` |
+| merging, tidying | `merge:channel`, `merge:done`, `prune:done` |
+
+Two things about the shape are deliberate, and both are the difference between a
+structured sink and a string one. **A failed request is one event, not one per
+channel-day it covered** — `request:failed` carries `entries`, so a site that is
+down says so once rather than seven thousand times, and no `entry:failed` is
+emitted for those. And **`site` is a field**, never a prefix: a reporter that
+shows it decides how, and a single-site grabber leaves it out.
+
+**Filtering is a reporter's job and happens nowhere else.** A sink of your own
+is told everything, which is what makes one worth writing; the ones below take a
+`level` and drop what is under it.
+
+### The ones this package ships
+
+Each is built by a function that takes options, so naming one and configuring it
+are the same act:
+
+| built by | writes |
+|---|---|
+| `textReporter({ stream, errorStream?, level?, failures?, failureCap?, prefix? })` | lines of text — what a person reads and a CI log keeps |
+| `jsonReporter({ stream, level?, pretty? })` | one JSON object per line, for a pipeline |
+
+`reporterFor(nameOrFactory, { stdout, stderr, level })` resolves either of them
+by name — `REPORTER_NAMES` is the list — the way `cache.driver` is resolved.
+
+`textReporter` owns the one policy `render` cannot: what to do with a failure.
+`failures: 'block'` (the default) holds them and writes one block, capped at
+`failureCap` (20, `0` for all), when the run finishes — which keeps a site that
+is down from burying the progress it interleaved with. `failures: 'inline'`
+writes each where it happens and holds nothing, for a log where interleaving is
+the point. The collecting and the flushing happen whatever the `level` is: asking
+for errors only must still end with the errors.
+
+`render(event, prefix?)` is the line by itself, for a caller who wants the text
+and not the policy — it answers `undefined` for a failure, which `renderFailure`
+covers.
 
 ## Streaming a guide
 
@@ -120,6 +199,8 @@ want is to read or write XMLTV; and a handful of names live only on a subpath
 | Config | `defineConfig`, `resolveConfigSource` |
 | Answers | `createConfigContext`, `defaultsReader`, `envReader` |
 | Errors | `GrabberError` |
+| Events | `LEVELS`, `EVENT_KINDS`, `atLevel` |
+| Reporters | `textReporter`, `jsonReporter`, `render`, `renderFailure`, `isFailure`, `reporterFor`, `REPORTER_NAMES`, `DEFAULT_FAILURE_CAP` |
 | Runners | `build`, `runGrab`, `runMerge`, `guideStream`, `createCacheStore` |
 | Days | `toDayString`, `dayToDate`, `addDays`, `diffDays`, `dayRange` |
 | Options parsing | `parseOptions`, `OptionError` |
@@ -378,7 +459,7 @@ for several, which is what `build` uses to fix the list across the grab and the
 merge. Given a `store`, both honour a site's
 [`cacheChannels`](./site-config.md#keeping-a-fetched-list): a list still inside
 its max age comes back without the source being asked. `siteHttp(config,
-signal?)` builds the site's ky instance, and `sitePacing(config, { signal?, log?
+signal?)` builds the site's ky instance, and `sitePacing(config, { signal?, emit?
 })` its queue. `channelElement(config, channel)` is what every `<channel>` in the
 output goes through — the site's `channelInfo` if it has one,
 `defaultChannelInfo` if not.

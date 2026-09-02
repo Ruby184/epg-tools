@@ -12,6 +12,8 @@ import { generateGuide, writeGuide } from './merge/main.js';
 import type { BuildGuideOptions } from './merge/types.js';
 import { addDays, toDayString } from './core/days.js';
 import { GrabberError } from './core/error.js';
+import type { Reporter } from './core/events.js';
+import { emitter } from './core/reporters.js';
 import {
   resolveConfigSource,
   type ConfigSource,
@@ -50,6 +52,20 @@ export interface RunOptions {
    * so staleness and the `grabbedAt` stamp keep using the real current time.
    */
   offset?: number;
+  /**
+   * Where this run's events go — see {@link Reporter}.
+   *
+   * A function told what happened as it happens, which is what both halves of a
+   * run and every site in it report through. `textReporter` and `jsonReporter`
+   * are the ones this package ships.
+   */
+  reporter?: Reporter;
+  /**
+   * Progress, line by line.
+   *
+   * @deprecated Pass {@link reporter} instead. Kept working by rendering each
+   * event back to the line it used to be.
+   */
   logger?: (message: string) => void;
 }
 
@@ -191,8 +207,22 @@ function guideOptions(
     ...(config.merge ? { merge: config.merge } : {}),
     ...(config.meta ? { meta: config.meta } : {}),
     ...(config.indent !== undefined ? { indent: config.indent } : {}),
-    ...(options.logger ? { logger: options.logger } : {}),
+    ...reported(options),
     ...(options.signal ? { signal: options.signal } : {}),
+  };
+}
+
+/**
+ * Whichever of the two sinks the caller gave, passed on as it was.
+ *
+ * Not resolved to an `Emit` here: each half builds its own, and one of them
+ * throwing on "both, and which wins?" is better said once, where the run
+ * starts, than by two halves disagreeing quietly.
+ */
+function reported(options: RunOptions): Pick<RunOptions, 'reporter' | 'logger'> {
+  return {
+    ...(options.reporter ? { reporter: options.reporter } : {}),
+    ...(options.logger ? { logger: options.logger } : {}),
   };
 }
 
@@ -216,7 +246,7 @@ export async function runGrab(
         : {}),
       ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
       now,
-      ...(options.logger ? { logger: options.logger } : {}),
+      ...reported(options),
       ...(options.signal ? { signal: options.signal } : {}),
     });
 
@@ -231,7 +261,7 @@ export async function runGrab(
       const removed = await cache.prune({ before });
 
       if (removed > 0) {
-        options.logger?.(`Pruned ${removed} cached day(s) older than ${before}`);
+        emitter(options)({ type: 'prune:done', removed, before });
       }
     }
 

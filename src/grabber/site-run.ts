@@ -21,12 +21,12 @@ import PQueue from 'p-queue';
 import { isStale } from '../cache/main.js';
 import type { CacheStore } from '../cache/types.js';
 import { dayToDate } from '../core/days.js';
-import { errorMessage } from '../core/error.js';
+import type { Emit, GrabCounts } from '../core/events.js';
 import { ProgrammeBuilder } from '../xmltv/builder.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import { resolveChannels } from './channels.js';
 import { sitePacing } from './pacing.js';
-import { describeRequest, planRequests, type Pair, type Request } from './planner.js';
+import { planRequests, type Pair, type Request } from './planner.js';
 import {
   forget,
   isUnchanged,
@@ -81,7 +81,8 @@ export interface Run {
   grabbedAt: string;
   /** First day of the window. */
   startDay: string;
-  log: (message: string) => void;
+  /** Say what happened, for whoever is listening — see `core/events.ts`. */
+  emit: Emit;
   signal?: AbortSignal | undefined;
   /** The run-wide queue for work that never leaves the machine. */
   localWork: PQueue;
@@ -136,6 +137,17 @@ export class SiteRun {
   /** Whether this site asked to be told when nothing has changed. */
   readonly #revalidates: boolean;
 
+  /**
+   * What this site came to, beside what the run came to.
+   *
+   * Both, rather than a diff of the run's at either end: sites go at once, so
+   * the run's counters move under this one and nothing could be attributed
+   * afterwards. Five numbers per site, and the site is the unit a reader
+   * actually wants — "which of my six sources is the one that failed" has no
+   * answer in a single total.
+   */
+  readonly #counts: GrabCounts = { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0 };
+
   /** Filled in by {@link run}, since each of them has to be waited for. */
   #siteState: SiteState = new Map();
   #validators: TrackedMap<Validator> = new TrackedMap();
@@ -163,7 +175,7 @@ export class SiteRun {
     // for a request of its own.
     const { queue, http, dispose } = sitePacing(config, {
       ...(run.signal ? { signal: run.signal } : {}),
-      log: run.log,
+      emit: run.emit,
     });
 
     this.#requests = queue;
@@ -192,6 +204,15 @@ export class SiteRun {
      * business, where it can say what a dropped channel-day amounts to.
      */
     this.#pipelines = new PQueue({ concurrency: Math.max(1, config.concurrency ?? 1) });
+  }
+
+  /** Count one channel-day, for this site and for the run it is part of. */
+  #count(field: keyof GrabCounts, delta = 1): void {
+    this.#counts[field] += delta;
+
+    if (field !== 'failed') {
+      this.#run.tally[field] += delta;
+    }
   }
 
   /** Everything this site does, start to finish. */
@@ -235,6 +256,17 @@ export class SiteRun {
       batching: this.#resolved.batching,
     });
 
+    // The one thing said before the work rather than after it, and the only
+    // place a run's shape is known in advance: the channel list has arrived, the
+    // cache has been swept, and what is left is exactly this many requests.
+    this.#run.emit({
+      type: 'site:started',
+      site: this.#site,
+      channels: this.#channels.length,
+      days: this.#resolved.window.length,
+      requests: requests.length,
+    });
+
     for (const request of requests) {
       // Nothing awaits this, and a pipeline reports its own failures, so there is
       // no rejection to swallow: a cancelled run leaves each of these to return
@@ -261,6 +293,7 @@ export class SiteRun {
       // channel list it fetched, and whatever its own code remembered. Only the
       // groups that changed are written.
       await this.#state.save();
+      this.#run.emit({ type: 'site:done', site: this.#site, ...this.#counts });
     }
   }
 
@@ -286,7 +319,7 @@ export class SiteRun {
    * against thousands of round trips saved for a store that has to make them.
    */
   async #collectStale(): Promise<Pair[]> {
-    const { cache, enqueue, localWork, log, now, tally } = this.#run;
+    const { cache, emit, enqueue, localWork, now } = this.#run;
     const site = this.#site;
 
     const checked = await Promise.all(
@@ -308,8 +341,8 @@ export class SiteRun {
               return [{ channel, day, ...(cached === undefined ? {} : { cached }) }];
             }
 
-            tally.fromCache++;
-            log(`[${site}] ${channel.xmltvId} ${day}: fresh in cache, skipping`);
+            this.#count('fromCache');
+            emit({ type: 'entry:cached', site, channelId: channel.xmltvId, day });
 
             return [];
           });
@@ -369,6 +402,9 @@ export class SiteRun {
       })),
       http: this.#http,
       state: this.#siteState,
+      log: (message: string) => this.#run.emit({ type: 'site:note', site: this.#site, message }),
+      warn: (message: string) =>
+        this.#run.emit({ type: 'site:warning', site: this.#site, message }),
       ...(signal ? { signal } : {}),
     };
   }
@@ -424,7 +460,6 @@ export class SiteRun {
       ...this.#contextBase(request, signal),
       ...this.#manyDays(request),
       channels: request.channels,
-      log: (message: string) => this.#run.log(`[${this.#site}] ${message}`),
     };
   }
 
@@ -446,7 +481,7 @@ export class SiteRun {
     // for it, and be counted into a total nobody is going to read.
     taskSignal?.throwIfAborted();
 
-    const { cache, grabbedAt, log, tally } = this.#run;
+    const { cache, emit, grabbedAt } = this.#run;
     const site = this.#site;
     const key = { site, channelId: channel.xmltvId, day };
     const id = `${channel.xmltvId}|${day}`;
@@ -457,13 +492,19 @@ export class SiteRun {
     if (!this.#written.has(id)) {
       this.#written.add(id);
       await cache.write(key, mine, { grabbedAt });
-      tally.fetched++;
+      this.#count('fetched');
 
       if (mine.length === 0) {
-        tally.empty++;
+        this.#count('empty');
       }
 
-      log(`[${site}] ${channel.xmltvId} ${day}: ${mine.length} programmes`);
+      emit({
+        type: 'entry:fetched',
+        site,
+        channelId: channel.xmltvId,
+        day,
+        programmes: mine.length,
+      });
 
       return;
     }
@@ -479,13 +520,17 @@ export class SiteRun {
     // Counted as one channel-day however many times it is mentioned — and no
     // longer an empty one, if the first emission was all there was of it.
     if (before.length === 0 && programmes.length > 0) {
-      tally.empty--;
+      this.#count('empty', -1);
     }
 
-    log(
-      `[${site}] ${channel.xmltvId} ${day}: ${mine.length} more programmes, ` +
-        `${programmes.length} in all`,
-    );
+    emit({
+      type: 'entry:appended',
+      site,
+      channelId: channel.xmltvId,
+      day,
+      added: mine.length,
+      total: programmes.length,
+    });
   }
 
   /**
@@ -515,6 +560,10 @@ export class SiteRun {
           payload,
           http: this.#http,
           state: this.#siteState,
+          log: (message: string) =>
+            this.#run.emit({ type: 'site:note', site: this.#site, message }),
+          warn: (message: string) =>
+            this.#run.emit({ type: 'site:warning', site: this.#site, message }),
           ...(taskSignal ? { signal: taskSignal } : {}),
           // A request of the parse's own goes through the site's queue, like the
           // request being parsed did — ahead of the planned ones, so a channel-day
@@ -556,7 +605,14 @@ export class SiteRun {
   /** One channel-day's failure, reported and counted. */
   #fail(channel: GrabberChannel, day: string, error: unknown): void {
     this.#run.tally.failed.push({ site: this.#site, channelId: channel.xmltvId, day, error });
-    this.#run.log(`[${this.#site}] ${channel.xmltvId} ${day}: ${errorMessage(error)}`);
+    this.#count('failed');
+    this.#run.emit({
+      type: 'entry:failed',
+      site: this.#site,
+      channelId: channel.xmltvId,
+      day,
+      error,
+    });
   }
 
   /**
@@ -573,8 +629,7 @@ export class SiteRun {
    * so as a failure.
    */
   #keep(pairs: Iterable<Pair>, error: unknown): void {
-    const { log, tally } = this.#run;
-    let kept = 0;
+    const { emit } = this.#run;
 
     for (const { channel, day, cached } of pairs) {
       if (cached === undefined) {
@@ -589,12 +644,11 @@ export class SiteRun {
         continue;
       }
 
-      tally.unchanged++;
-      kept++;
-    }
-
-    if (kept > 0) {
-      log(`[${this.#site}] ${kept} channel-day(s) unchanged, keeping what is cached`);
+      this.#count('unchanged');
+      // One each rather than a count for the request: what a reader wants of a
+      // kept channel-day is which one it was, and `site:done` already carries
+      // how many there were.
+      emit({ type: 'entry:unchanged', site: this.#site, channelId: channel.xmltvId, day });
     }
   }
 
@@ -606,11 +660,25 @@ export class SiteRun {
    * stopped part way — since what went wrong is the one fetch in both cases.
    */
   #failRequest(request: Request, pairs: Iterable<Pair>, error: unknown): void {
+    let entries = 0;
+
     for (const { channel, day } of pairs) {
       this.#run.tally.failed.push({ site: this.#site, channelId: channel.xmltvId, day, error });
+      this.#count('failed');
+      entries++;
     }
 
-    this.#run.log(`[${this.#site}] ${describeRequest(request)}: ${errorMessage(error)}`);
+    // One event for the request, carrying how many channel-days went with it —
+    // and deliberately no `entry:failed` for each, which is the difference
+    // between one line about a site that is down and thousands.
+    this.#run.emit({
+      type: 'request:failed',
+      site: this.#site,
+      channels: request.channels.map((channel) => channel.xmltvId),
+      days: request.days,
+      entries,
+      error,
+    });
   }
 
   /**
@@ -695,7 +763,7 @@ export class SiteRun {
    * nothing is waiting behind that slot.
    */
   async #streamPipeline(config: StreamSiteConfig<any>, request: Request): Promise<void> {
-    const { enqueue, localWork, log, signal } = this.#run;
+    const { emit, enqueue, localWork, signal } = this.#run;
 
     if (signal?.aborted) {
       return;
@@ -777,7 +845,7 @@ export class SiteRun {
     await Promise.all(writes);
 
     if (ignored > 0) {
-      log(`[${this.#site}] ignored ${ignored} channel-day(s) it was not asked for`);
+      emit({ type: 'stream:ignored', site: this.#site, count: ignored });
     }
 
     if (failure !== undefined && isUnchanged(failure)) {
@@ -812,7 +880,7 @@ export class SiteRun {
     // whole answer and had nothing to say about them, which is what a `parseDay`
     // returning `[]` means too. Cached empty, so the staleness policy decides when
     // to ask again rather than every run asking.
-    log(`[${this.#site}] ${owed.size} channel-day(s) not in the document: caching them empty`);
+    emit({ type: 'stream:gaps', site: this.#site, count: owed.size });
 
     for (const pair of owed.values()) {
       write(pair, []);
