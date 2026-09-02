@@ -172,7 +172,7 @@ into place, so a reader never sees half a guide.
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
 | `-v, --verbose` | same as `--log-level debug`; `-q, --quiet` is `--log-level error` |
-| `--reporter <name>` | `text` (default), `json` — one object per line — or `progress` |
+| `--reporter <name>` | `progress` (default — a live line on a terminal, `text` anywhere else), `text`, or `json` for one object per line |
 | `--failures <how>` | `block` (default) — one capped block at the end — or `inline` |
 | `-V, --version` | print the package name and version |
 | `-h, --help` | print the usage |

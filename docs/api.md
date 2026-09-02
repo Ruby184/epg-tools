@@ -128,6 +128,7 @@ are the same act:
 |---|---|
 | `textReporter({ stream, errorStream?, level?, failures?, failureCap?, prefix? })` | lines of text — what a person reads and a CI log keeps |
 | `jsonReporter({ stream, level?, pretty? })` | one JSON object per line, for a pipeline |
+| `progressReporter({ stream, … })` | one line, rewritten in place — `textReporter`'s options, plus a cursor |
 
 ### Naming one in a config
 
@@ -157,6 +158,16 @@ is down from burying the progress it interleaved with. `failures: 'inline'`
 writes each where it happens and holds nothing, for a log where interleaving is
 the point. The collecting and the flushing happen whatever the `level` is: asking
 for errors only must still end with the errors.
+
+`progressReporter` is what `site:started` exists for: by the time it fires the
+planner has resolved the channel list and swept the cache, so the number of
+requests is what will actually happen — a denominator that is real. Underneath
+it is a `textReporter`, because a warning, a failure, a site's own message and
+the summary are all things to keep: the line is erased, they are written, and it
+is drawn again. It draws only at `level: 'info'` and only on a stream with a
+cursor to move; anywhere else — a pipe, a file, `TERM=dumb`, `--verbose` — it
+*is* that text reporter, so what a script reads never depends on whether someone
+was watching.
 
 `render(event, prefix?)` is the line by itself, for a caller who wants the text
 and not the policy — it answers `undefined` for a failure, which

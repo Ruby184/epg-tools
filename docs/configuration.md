@@ -124,7 +124,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
 | `-v, --verbose` | same as `--log-level debug` — every channel-day |
 | `-q, --quiet` | same as `--log-level error` — failures only. Beats `--verbose` if both are given |
-| `--reporter <name>` | how to report it: `text` (default), `json` or `progress` |
+| `--reporter <name>` | how to report it: `progress` (default — a live line on a terminal, `text` anywhere else), `text` or `json` |
 | `--failures <how>` | `block` (default) — one capped block at the end — or `inline` |
 | `-V, --version` | print the package name and version |
 | `-h, --help` | print the usage |
@@ -155,8 +155,24 @@ Grab done: 40 fetched, 10 from cache, 84 failed
 ```
 
 `--failures inline` writes each where it happens instead and holds nothing, for
-a log read as it is written. And `--reporter json` writes one JSON object per
-line rather than text, which is the thing a formatted line cannot be asked:
+a log read as it is written.
+
+On a terminal that summary is preceded by a **single line, rewritten in place**,
+off totals the planner has already worked out:
+
+```
+example.tv · 42/350 requests · 84 fetched · 10 cached · 2 failed
+```
+
+It is erased whenever there is something worth keeping — a warning, a failure,
+the summary — and again when the run ends, so nothing is left behind. Only on a
+terminal, and only at the default verbosity: through a pipe, into a file, under
+`--verbose` or `--quiet`, `--reporter progress` *is* the text reporter, so what
+a script reads never depends on whether anyone was watching. `--reporter text`
+asks for the lines outright.
+
+And `--reporter json` writes one JSON object per line rather than text, which is
+the thing a formatted line cannot be asked:
 
 ```console
 $ epg grab --reporter json --log-level debug | jq -c 'select(.level == "error")'

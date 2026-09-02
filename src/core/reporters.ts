@@ -407,6 +407,186 @@ export function emitter(options: ReportedOptions): Emit {
 }
 
 /**
+ * The events a live line stands in for, so they are not also written out.
+ *
+ * Everything else — a warning, a failure, a site's own message, the summary —
+ * goes through the text reporter underneath, because a line that is about to be
+ * overwritten is no place for something worth keeping.
+ */
+const ENDS = new Set<EpgEvent['type']>(['grab:done', 'run:cancelled', 'merge:done', 'prune:done']);
+
+const SUMMARIZED = new Set<EpgEvent['type']>([
+  'site:started',
+  'site:done',
+  'entry:cached',
+  'entry:fetched',
+  'entry:appended',
+  'entry:unchanged',
+  'request:started',
+  'request:done',
+  'stream:ignored',
+  'merge:channel',
+]);
+
+/** Whether this stream is something a cursor can be moved around in. */
+function isTerminal(stream: Writable): boolean {
+  const { isTTY, columns } = stream as Writable & { isTTY?: boolean; columns?: number };
+
+  // `TERM=dumb` is how a terminal says it cannot do this, and CI sets it.
+  return isTTY === true && columns !== undefined && process.env['TERM'] !== 'dumb';
+}
+
+export interface ProgressReporterOptions extends Omit<TextReporterOptions, 'stream'> {
+  /** Where the line is drawn, and where progress would otherwise be written. */
+  stream: Writable;
+}
+
+/**
+ * One line, rewritten in place, off the totals `site:started` carries.
+ *
+ * Which is what that event is for: the planner has already resolved the channel
+ * list and swept the cache by the time it fires, so the number of requests is
+ * what will actually happen rather than what was asked for — and a bar with a
+ * denominator is only honest if the denominator is real.
+ *
+ * A {@link textReporter} underneath does everything a rewritten line must not:
+ * a warning, a failure, a site's own message and the summary are all things to
+ * keep, so the line is erased, they are written, and it is drawn again. On a
+ * stream with no cursor to move — a pipe, a file, `TERM=dumb` — this *is* that
+ * reporter and nothing else.
+ */
+export function progressReporter(options: ProgressReporterOptions): Reporter {
+  const { stream, level = 'info' } = options;
+  const lines = textReporter(options);
+
+  // Only at `info`, which is the one level a live line is the right answer for:
+  // `debug` asks for the per-channel-day lines this would swallow, and `warn`
+  // and `error` have asked for less than progress. Anything with no cursor to
+  // move gets the lines too.
+  if (level !== 'info' || !isTerminal(stream)) {
+    return lines;
+  }
+
+  const counts: GrabCounts = { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0 };
+  const sites = new Set<string>();
+  let finishedSites = 0;
+  let requests = 0;
+  let asked = 0;
+  let merged = 0;
+  let merging = false;
+  /** What is on screen now, and `''` when nothing is. */
+  let shown = '';
+
+  const erase = (): void => {
+    if (shown !== '') {
+      // Back to the start and clear to the end: the line is kept inside the
+      // terminal's width below, so there is never a second row to erase.
+      stream.write('\r\u001b[K');
+      shown = '';
+    }
+  };
+
+  const text = (): string => {
+    if (merging) {
+      return `merging · ${count(merged, 'channel')}`;
+    }
+
+    const where = sites.size === 1 ? [...sites][0]! : `${finishedSites}/${sites.size} sites`;
+
+    return [
+      where,
+      `${asked}/${requests} requests`,
+      `${counts.fetched} fetched`,
+      ...(counts.fromCache > 0 ? [`${counts.fromCache} cached`] : []),
+      ...(counts.unchanged > 0 ? [`${counts.unchanged} unchanged`] : []),
+      ...(counts.failed > 0 ? [`${counts.failed} failed`] : []),
+    ].join(' · ');
+  };
+
+  /**
+   * Draw it, unless it already says this.
+   *
+   * Which is the throttle: most events move a number nobody can see — a request
+   * starting, a channel-day cached while the count is already right — and
+   * comparing the text is both cheaper than writing it and never stale, where a
+   * timer would leave the last state of a burst on screen until the next event.
+   */
+  const paint = (): void => {
+    const { columns = 80 } = stream as Writable & { columns?: number };
+    // Cut to the width rather than letting it wrap: a wrapped line is two rows
+    // and `\r` only reaches the start of the second.
+    const next = text().slice(0, columns - 1);
+
+    if (next === shown) {
+      return;
+    }
+
+    erase();
+    stream.write(next);
+    shown = next;
+  };
+
+  return (event) => {
+    switch (event.type) {
+      case 'site:started':
+        sites.add(event.site);
+        requests += event.requests;
+        break;
+      case 'site:done':
+        finishedSites++;
+        break;
+      case 'request:done':
+      case 'request:failed':
+        asked++;
+        break;
+      case 'entry:fetched':
+        counts.fetched++;
+        break;
+      case 'entry:cached':
+        counts.fromCache++;
+        break;
+      case 'entry:unchanged':
+        counts.unchanged++;
+        break;
+      case 'entry:failed':
+        counts.failed++;
+        break;
+      case 'merge:channel':
+        merging = true;
+        merged++;
+        break;
+      default:
+        break;
+    }
+
+    if (event.type === 'request:failed') {
+      counts.failed += event.entries;
+    }
+
+    if (ENDS.has(event.type)) {
+      // A half is over: the line goes and is not drawn again, so nothing is
+      // left on screen under what the run came to. `grab:done` is one of these
+      // and the merge that may follow it draws a line of its own — which its
+      // own `merge:done` then takes away.
+      erase();
+      lines(event);
+
+      return;
+    }
+
+    if (SUMMARIZED.has(event.type)) {
+      paint();
+
+      return;
+    }
+
+    erase();
+    lines(event);
+    paint();
+  };
+}
+
+/**
  * A reporter for what a config asked for.
  *
  * Shaped like `driverFor` in `build.ts`: a name is one of ours, anything else
@@ -426,10 +606,14 @@ export function reporterFor(
 
   switch (reporter) {
     case 'text':
-    case 'progress':
-      // `progress` is the text one until a live line exists — which is the
-      // fallback it will have anyway on a stream that is not a terminal.
       return textReporter({
+        stream: runtime.stdout,
+        errorStream: runtime.stderr,
+        level: runtime.level,
+        ...(runtime.failures ? { failures: runtime.failures } : {}),
+      });
+    case 'progress':
+      return progressReporter({
         stream: runtime.stdout,
         errorStream: runtime.stderr,
         level: runtime.level,

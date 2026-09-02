@@ -25,8 +25,10 @@ export type {
 } from './core/events.js';
 export {
   DEFAULT_FAILURE_CAP,
+  FAILURE_MODES,
   isFailure,
   jsonReporter,
+  progressReporter,
   render,
   renderFailure,
   reporterFor,
@@ -35,7 +37,9 @@ export {
 } from './core/reporters.js';
 export type {
   FailureEvent,
+  FailureMode,
   JsonReporterOptions,
+  ProgressReporterOptions,
   ReportedOptions,
   ReporterFactory,
   ReporterName,

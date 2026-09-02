@@ -5,6 +5,7 @@ import {
   EVENT_KINDS,
   jsonReporter,
   LEVELS,
+  progressReporter,
   render,
   renderFailure,
   reporterFor,
@@ -18,8 +19,10 @@ import { emitter } from '../src/core/reporters.js';
 /** Collects lines, so what a reporter wrote can be read back. */
 class Sink extends Writable {
   readonly lines: string[] = [];
+  protected readonly chunks: string[] = [];
 
   override _write(chunk: Buffer | string, _encoding: string, done: () => void): void {
+    this.chunks.push(String(chunk));
     this.lines.push(...String(chunk).split('\n').filter(Boolean));
     done();
   }
@@ -358,6 +361,142 @@ describe('textReporter', () => {
     expect(err.lines).toEqual([
       'Cancelled. 2 channel-day(s) reached the cache; no guide was written.',
     ]);
+  });
+});
+
+describe('progressReporter', () => {
+  /** A sink that says it is a terminal, since that is what decides. */
+  class Tty extends Sink {
+    readonly isTTY = true;
+    readonly columns = 200;
+
+    /** Everything written, control codes and all, as one string. */
+    get raw(): string {
+      return this.chunks.join('');
+    }
+  }
+
+  function run(reporter: Reporter, events: EpgEventInput[]): void {
+    for (const input of events) {
+      reporter(event(input));
+    }
+  }
+
+  const started: EpgEventInput = {
+    type: 'site:started',
+    site: 'a.tv',
+    channels: 2,
+    days: 3,
+    requests: 6,
+  };
+
+  it('draws one line and rewrites it, rather than adding to a list', () => {
+    const out = new Tty();
+
+    run(progressReporter({ stream: out, failureCap: 0 }), [
+      started,
+      { type: 'request:done', site: 'a.tv', channels: ['one'], days: ['2026-09-01'], ms: 3 },
+      { type: 'entry:fetched', site: 'a.tv', channelId: 'one', day: '2026-09-01', programmes: 4 },
+    ]);
+
+    // The totals come from `site:started`, which the planner has already
+    // resolved — a denominator that is real.
+    expect(out.raw).toContain('a.tv · 1/6 requests · 1 fetched');
+    expect(out.raw).toContain('\r\u001b[K');
+  });
+
+  it('erases the line to write what is worth keeping, then draws it again', () => {
+    const out = new Tty();
+    const err = new Sink();
+
+    run(progressReporter({ stream: out, errorStream: err, failures: 'inline' }), [
+      started,
+      { type: 'site:warning', site: 'a.tv', message: 'the source moved a channel' },
+    ]);
+
+    expect(err.lines).toEqual(['[a.tv] the source moved a channel']);
+    // Erased before the warning and drawn again after it, so the warning is not
+    // written into a line that is about to be overwritten.
+    expect(out.raw).toBe(
+      `a.tv · 0/6 requests · 0 fetched\r\u001b[Ka.tv · 0/6 requests · 0 fetched`,
+    );
+  });
+
+  it('takes the line away when the run is over, and lets the summary stand', () => {
+    const out = new Tty();
+
+    run(progressReporter({ stream: out }), [
+      started,
+      { type: 'grab:done', fetched: 6, empty: 0, fromCache: 0, unchanged: 0, failed: 0 },
+    ]);
+
+    expect(out.lines.at(-1)).toBe('Grab done: 6 fetched, 0 from cache, 0 failed');
+    expect(out.raw.endsWith('Grab done: 6 fetched, 0 from cache, 0 failed\n')).toBe(true);
+  });
+
+  it('writes nothing when the line would say what it already says', () => {
+    const out = new Tty();
+
+    run(progressReporter({ stream: out }), [
+      started,
+      // Neither of these moves a number the line shows.
+      { type: 'request:started', site: 'a.tv', channels: ['one'], days: ['2026-09-01'] },
+      { type: 'stream:ignored', site: 'a.tv', count: 2 },
+    ]);
+
+    expect(out.raw).toBe('a.tv · 0/6 requests · 0 fetched');
+  });
+
+  it('leaves nothing on screen when a half of the run ends', () => {
+    const out = new Tty();
+
+    run(progressReporter({ stream: out }), [
+      started,
+      { type: 'grab:done', fetched: 6, empty: 0, fromCache: 0, unchanged: 0, failed: 0 },
+      // The merge draws a line of its own, and takes it away again.
+      { type: 'merge:channel', channelId: 'one' },
+      { type: 'merge:done', output: 'guide.xml' },
+    ]);
+
+    expect(out.raw.endsWith('Guide written to guide.xml\n')).toBe(true);
+    expect(out.raw).toContain('merging · 1 channel');
+  });
+
+  it('counts every channel-day a failed request took down', () => {
+    const out = new Tty();
+
+    run(progressReporter({ stream: out, errorStream: new Sink() }), [
+      started,
+      {
+        type: 'request:failed',
+        site: 'a.tv',
+        channels: ['one', 'two'],
+        days: ['2026-09-01'],
+        entries: 2,
+        error: new Error('down'),
+      },
+    ]);
+
+    expect(out.raw).toContain('1/6 requests · 0 fetched · 2 failed');
+  });
+
+  it('is the text one on anything without a cursor to move', () => {
+    const pipe = new Sink();
+
+    run(progressReporter({ stream: pipe }), [started]);
+
+    // A pipe, a file, a CI log: what a script reads is unchanged.
+    expect(pipe.lines).toEqual(['[a.tv] 2 channel(s) × 3 day(s): 6 request(s)']);
+  });
+
+  it.each(['debug', 'warn', 'error'] as const)('is the text one at %s', (level) => {
+    const out = new Tty();
+
+    run(progressReporter({ stream: out, level }), [started]);
+
+    // At `debug` the per-channel-day lines are the point and a live line would
+    // swallow them; below `info` there is no progress to show.
+    expect(out.raw).not.toContain('\u001b[K');
   });
 });
 

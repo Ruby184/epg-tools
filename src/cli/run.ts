@@ -45,7 +45,8 @@ Options:
       --log-level <l>   How much to report: error, warn, info (default) or debug
   -v, --verbose         Same as --log-level debug
   -q, --quiet           Same as --log-level error. Beats --verbose if both are given
-      --reporter <name> How to report it: text (default), json or progress
+      --reporter <name> How to report it: progress (default, a live line on a
+                        terminal and text elsewhere), text or json
       --failures <how>  block (default) — one capped block at the end; or inline
   -V, --version         Print this package's version
   -h, --help            Show this help
@@ -331,7 +332,10 @@ async function execute(
   // thousand lines.
   const level: EventLevel =
     values['log-level'] ?? (values.quiet ? 'error' : values.verbose ? 'debug' : 'info');
-  const reporter = reporterFor(values.reporter ?? config.reporter ?? 'text', {
+  // `progress` rather than `text` by default, and it is the text one on anything
+  // that is not a terminal — a pipe, a file, a CI log — so what a script reads
+  // is unchanged and only an interactive run gets the line.
+  const reporter = reporterFor(values.reporter ?? config.reporter ?? 'progress', {
     stdout,
     stderr,
     level,
