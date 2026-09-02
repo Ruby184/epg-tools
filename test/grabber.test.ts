@@ -2750,17 +2750,11 @@ describe('a stream that says nothing has changed', () => {
 });
 
 describe('what a run reports', () => {
-  /** Every event a grab emitted, which is what a reporter is handed. */
-  function collect(): { events: EpgEvent[]; reporter: (event: EpgEvent) => void } {
-    const events: EpgEvent[] = [];
-
-    return { events, reporter: (event) => events.push(event) };
-  }
-
   const types = (events: EpgEvent[]): string[] => events.map((event) => event.type);
 
   it('says what a site is about to do before it does it', async () => {
-    const { events, reporter } = collect();
+    const report = collect();
+    const { events, reporter } = report;
     const config = makeConfig({
       channels: [channel('one.example'), channel('two.example')],
       days: 2,
@@ -2788,7 +2782,8 @@ describe('what a run reports', () => {
   });
 
   it('counts each site on its own, and the run as a whole', async () => {
-    const { events, reporter } = collect();
+    const report = collect();
+    const { events, reporter } = report;
     const good = makeConfig({
       site: 'good.example',
       async request() {
@@ -2822,7 +2817,8 @@ describe('what a run reports', () => {
   });
 
   it('says a failed request once, however many channel-days it took down', async () => {
-    const { events, reporter } = collect();
+    const report = collect();
+    const { events, reporter } = report;
     const config: SiteConfig<unknown, ChannelsDaysBatching> = {
       site: 'example.com',
       channels: [channel('one.example'), channel('two.example')],
@@ -2852,8 +2848,34 @@ describe('what a run reports', () => {
     ]);
   });
 
+  it('says what a request cost, timed from inside its slot', async () => {
+    const report = collect();
+    const config = makeConfig({
+      // Paced to one request per 40ms, so a naive timing would report the wait
+      // for the slot as the request's own.
+      rateLimit: { requests: 1, perMs: 40 },
+      channels: [channel('one.example'), channel('two.example')],
+      async request() {
+        return {};
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    const timed = report.of('request:done');
+
+    expect(timed).toHaveLength(2);
+    expect(report.of('request:started')).toHaveLength(2);
+    // Nothing here waits, so both are near-instant — the point being that the
+    // second one is not charged for the window it sat out.
+    for (const event of timed) {
+      expect(event.ms).toBeLessThan(30);
+    }
+  });
+
   it('lets any site say something, not only one that streams', async () => {
-    const { events, reporter } = collect();
+    const report = collect();
+    const { events, reporter } = report;
     const config = makeConfig({
       async request({ log, warn }) {
         log('asked the index');

@@ -38,3 +38,25 @@ export class GrabberError extends Error {
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+/** How deep a `cause` chain is followed before it is called a cycle. */
+export const MAX_CAUSE_DEPTH = 8;
+
+/**
+ * The same, with what caused it, and what caused that.
+ *
+ * {@link errorMessage} reads `.message` and nothing else, which makes a chain
+ * unreachable — and a grab builds them: "the source says this channel-day is
+ * unchanged, but nothing is cached for it" has the 304 that said so underneath,
+ * and reading only the top of that leaves the reader with the conclusion and
+ * none of the evidence. Kept out of the default line because a chain per
+ * failure is noise until you are looking for one.
+ */
+export function errorChain(error: unknown, depth = 0): string {
+  const message = errorMessage(error);
+  const cause = error instanceof Error ? error.cause : undefined;
+
+  return cause === undefined || depth >= MAX_CAUSE_DEPTH
+    ? message
+    : `${message}: ${errorChain(cause, depth + 1)}`;
+}

@@ -597,6 +597,17 @@ export class SiteRun {
     );
   }
 
+  /**
+   * What a request covers, as the three events about it name it.
+   *
+   * The ids rather than the channels: an event is data a reporter or a JSON
+   * consumer reads, and handing out the live `GrabberChannel`s would put a
+   * site's own `data` — which may be anything at all — into the log.
+   */
+  static #span(request: Request): { channels: string[]; days: string[] } {
+    return { channels: request.channels.map((channel) => channel.xmltvId), days: request.days };
+  }
+
   /** One channel-day's failure, reported and counted. */
   #fail(channel: GrabberChannel, day: string, error: unknown): void {
     this.#count('failed');
@@ -667,8 +678,7 @@ export class SiteRun {
     this.#run.emit({
       type: 'request:failed',
       site: this.#site,
-      channels: request.channels.map((channel) => channel.xmltvId),
-      days: request.days,
+      ...SiteRun.#span(request),
       entries,
       error,
     });
@@ -694,6 +704,7 @@ export class SiteRun {
     }
 
     const asking = this.#revalidationFor(request);
+    const span = SiteRun.#span(request);
     let payload: unknown;
 
     try {
@@ -707,9 +718,27 @@ export class SiteRun {
       // work for the first request of a site and silently for none of the rest.
       // Around the site's call and nothing else, which is also what keeps a
       // request made later from inside `parseDay` out of it.
-      payload = await enqueue(this.#requests, ({ signal: taskSignal }) =>
-        revalidation.run(asking, () => config.request(this.#contextFor(request, taskSignal))),
-      );
+      payload = await enqueue(this.#requests, ({ signal: taskSignal }) => {
+        // Timed from inside the task, so what is reported is the request rather
+        // than the wait for a slot — a site paced to one request a second would
+        // otherwise report every request as having taken a second.
+        this.#run.emit({ type: 'request:started', site: this.#site, ...span });
+
+        const began = Date.now();
+
+        return revalidation
+          .run(asking, () => config.request(this.#contextFor(request, taskSignal)))
+          .then((raw) => {
+            this.#run.emit({
+              type: 'request:done',
+              site: this.#site,
+              ...span,
+              ms: Date.now() - began,
+            });
+
+            return raw;
+          });
+      });
       // The run's own, and a different question: was this cancelled while it was
       // in flight? p-queue's task signal governs the slot, not the work in it, so
       // stopping is ours to do — and what it stops here is a response already paid
@@ -788,8 +817,12 @@ export class SiteRun {
       // The store goes inside the task rather than around `enqueue`, for the
       // reason the request pipeline gives: a task that waited for a slot starts
       // in a context this one never reached.
-      await enqueue(this.#requests, async ({ signal: taskSignal }) =>
-        revalidation.run(asking, async () => {
+      await enqueue(this.#requests, async ({ signal: taskSignal }) => {
+        emit({ type: 'request:started', site: this.#site, ...SiteRun.#span(request) });
+
+        const began = Date.now();
+
+        await revalidation.run(asking, async () => {
           for await (const emission of config.stream(this.#streamContextFor(request, taskSignal))) {
             // Between emissions, which is as often as this has anything to say: a
             // cancelled run stops here rather than writing the rest of a document
@@ -827,8 +860,15 @@ export class SiteRun {
             // but no further ahead than `localConcurrency` of them.
             await localWork.onSizeLessThan(localWork.concurrency);
           }
-        }),
-      );
+        });
+
+        emit({
+          type: 'request:done',
+          site: this.#site,
+          ...SiteRun.#span(request),
+          ms: Date.now() - began,
+        });
+      });
     } catch (error) {
       failure = error;
     }

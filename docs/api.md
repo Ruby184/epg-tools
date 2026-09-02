@@ -103,7 +103,7 @@ the call site — `EVENT_KINDS` is the whole table, and it is the whole answer t
 | the run | `run:cancelled`, `grab:done` |
 | a site | `site:started`, `site:done`, `site:failed`, `site:note`, `site:warning` |
 | one channel-day | `entry:cached`, `entry:fetched`, `entry:appended`, `entry:unchanged`, `entry:failed` |
-| one request | `request:failed` |
+| one request | `request:started`, `request:done` (with `ms`), `request:failed` |
 | a whole-document source | `stream:gaps`, `stream:ignored` |
 | pacing | `pacing:held`, `pacing:slowed`, `pacing:recovered`, `pacing:rateLimit` |
 | merging, tidying | `merge:channel`, `merge:done`, `prune:done` |
@@ -159,8 +159,15 @@ the point. The collecting and the flushing happen whatever the `level` is: askin
 for errors only must still end with the errors.
 
 `render(event, prefix?)` is the line by itself, for a caller who wants the text
-and not the policy — it answers `undefined` for a failure, which `renderFailure`
-covers.
+and not the policy — it answers `undefined` for a failure, which
+`renderFailure(event, prefix?, cause?)` covers.
+
+At `debug`, a failure line carries its `cause` chain. It is not there by default
+because a chain per failure is noise until you are looking for one — but the run
+builds them, and `errorMessage` reads `.message` alone, so "this channel-day is
+unchanged, but nothing is cached for it" used to arrive without the `304` that
+said so. `errorChain(error)` is the same walk, exported for a caller doing its
+own rendering.
 
 ## Streaming a guide
 
@@ -219,7 +226,7 @@ want is to read or write XMLTV; and a handful of names live only on a subpath
 |---|---|
 | Config | `defineConfig`, `resolveConfigSource` |
 | Answers | `createConfigContext`, `defaultsReader`, `envReader` |
-| Errors | `GrabberError` |
+| Errors | `GrabberError`, `errorMessage`, `errorChain` |
 | Events | `LEVELS`, `EVENT_KINDS`, `atLevel` |
 | Reporters | `textReporter`, `jsonReporter`, `render`, `renderFailure`, `isFailure`, `reporterFor`, `REPORTER_NAMES`, `DEFAULT_FAILURE_CAP` |
 | Runners | `build`, `runGrab`, `runMerge`, `guideStream`, `createCacheStore` |

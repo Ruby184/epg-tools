@@ -108,6 +108,14 @@ describe('render', () => {
       '[a.tv] HTTP 429: holding requests for 60ms',
     ],
     [
+      { type: 'request:started', site: 'a.tv', channels: ['one'], days: ['2026-09-01'] },
+      '[a.tv] one 2026-09-01: asking',
+    ],
+    [
+      { type: 'request:done', site: 'a.tv', channels: ['one'], days: ['2026-09-01'], ms: 412 },
+      '[a.tv] one 2026-09-01: answered in 412ms',
+    ],
+    [
       { type: 'pacing:rateLimit', site: 'a.tv', waiting: true },
       '[a.tv] rate limit reached, waiting for the window',
     ],
@@ -182,6 +190,25 @@ describe('render', () => {
     expect(renderFailure(one)).toBe('FAILED [a.tv] one 2026-09-01: gone');
     expect(renderFailure(many)).toBe(
       'FAILED [a.tv] 3 channels 2026-09-01..2026-09-02 (2 days) (6 channel-day(s)): gone',
+    );
+  });
+
+  it('reads the cause chain when asked, and only then', () => {
+    const failed = event({
+      type: 'entry:failed',
+      site: 'a.tv',
+      channelId: 'one',
+      day: '2026-09-01',
+      error: new Error('unchanged, but nothing is cached', { cause: new Error('304') }),
+    });
+
+    // `errorMessage` reads `.message` and nothing else, so the chain a grab
+    // builds was unreachable before this.
+    expect(renderFailure(failed)).toBe(
+      'FAILED [a.tv] one 2026-09-01: unchanged, but nothing is cached',
+    );
+    expect(renderFailure(failed, true, true)).toBe(
+      'FAILED [a.tv] one 2026-09-01: unchanged, but nothing is cached: 304',
     );
   });
 
@@ -265,6 +292,25 @@ describe('textReporter', () => {
     ]);
 
     expect(err.lines).toEqual(['  FAILED [a.tv] one 2026-09-01: the feed went away']);
+  });
+
+  it('reads the cause chain at debug, since that is where detail is wanted', () => {
+    const err = new Sink();
+
+    run(
+      textReporter({ stream: new Sink(), errorStream: err, level: 'debug', failures: 'inline' }),
+      [
+        {
+          type: 'entry:failed',
+          site: 'a.tv',
+          channelId: 'one',
+          day: '2026-09-01',
+          error: new Error('kept nothing', { cause: new Error('304') }),
+        },
+      ],
+    );
+
+    expect(err.lines).toEqual(['FAILED [a.tv] one 2026-09-01: kept nothing: 304']);
   });
 
   it('caps the block and says how many more there were', () => {

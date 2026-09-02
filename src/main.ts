@@ -10,7 +10,7 @@ export type {
 } from './config.js';
 export { createConfigContext, defaultsReader, envReader } from './core/answers.js';
 export type { ConfigContext, ConfigReader, StageDefaults } from './core/answers.js';
-export { GrabberError } from './core/error.js';
+export { errorChain, errorMessage, GrabberError } from './core/error.js';
 export { atLevel, EVENT_KINDS, LEVELS } from './core/events.js';
 export type {
   Emit,

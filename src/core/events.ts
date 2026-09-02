@@ -103,6 +103,16 @@ export type EpgEventInput =
   | ({ type: 'entry:failed'; error: unknown } & EntryRef)
   // ── one request ──────────────────────────────────────────────────────────
   /**
+   * A request is about to go out, over these channels and days.
+   *
+   * The pair with {@link EpgEventInput} `request:done` is the only place a run
+   * says what a request *cost*: pacing could report that concurrency moved and
+   * never what moving it bought.
+   */
+  | { type: 'request:started'; site: string; channels: string[]; days: string[] }
+  /** It came back. `ms` is wall time, the queue wait not included. */
+  | { type: 'request:done'; site: string; channels: string[]; days: string[]; ms: number }
+  /**
    * A request failed, and took every channel-day it covered with it.
    *
    * `entries` is the count that has to be here: it is the difference between
@@ -181,6 +191,8 @@ export const EVENT_KINDS = {
   'entry:appended': { level: 'debug', phase: 'grab' },
   'entry:unchanged': { level: 'debug', phase: 'grab' },
   'entry:failed': { level: 'error', phase: 'grab' },
+  'request:started': { level: 'debug', phase: 'grab' },
+  'request:done': { level: 'debug', phase: 'grab' },
   'request:failed': { level: 'error', phase: 'grab' },
   'stream:gaps': { level: 'warn', phase: 'grab' },
   'stream:ignored': { level: 'debug', phase: 'grab' },

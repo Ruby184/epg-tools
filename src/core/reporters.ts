@@ -27,7 +27,7 @@ import {
   type GrabCounts,
   type Reporter,
 } from './events.js';
-import { errorMessage } from './error.js';
+import { errorChain, errorMessage, MAX_CAUSE_DEPTH } from './error.js';
 import { queueLine } from './streams.js';
 
 /** A reporter this package ships, by name — what a config can ask for. */
@@ -158,6 +158,13 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       );
     case 'stream:ignored':
       return `${at(event.site, prefix)}ignored ${event.count} channel-day(s) it was not asked for`;
+    case 'request:started':
+      return `${at(event.site, prefix)}${describeSpan(event.channels, event.days)}: asking`;
+    case 'request:done':
+      return (
+        `${at(event.site, prefix)}${describeSpan(event.channels, event.days)}: ` +
+        `answered in ${event.ms}ms`
+      );
     case 'pacing:held':
       return `${at(event.site, prefix)}HTTP ${event.status}: holding requests for ${event.ms}ms`;
     case 'pacing:slowed':
@@ -207,12 +214,13 @@ export function isFailure(event: EpgEvent): event is FailureEvent {
  * is the whole reason `request:failed` carries `entries`: a site that is down
  * says so once, where it used to say it seven thousand times.
  */
-export function renderFailure(event: FailureEvent, prefix = true): string {
+export function renderFailure(event: FailureEvent, prefix = true, cause = false): string {
   const where = prefix ? `[${event.site}] ` : '';
+  const said = cause ? errorChain : errorMessage;
 
   switch (event.type) {
     case 'entry:failed':
-      return `FAILED ${where}${event.channelId} ${event.day}: ${errorMessage(event.error)}`;
+      return `FAILED ${where}${event.channelId} ${event.day}: ${said(event.error)}`;
     case 'request:failed': {
       // The count only when there is more than one: a site that fetches one
       // channel-day per request comes through here for every failure, and
@@ -220,12 +228,11 @@ export function renderFailure(event: FailureEvent, prefix = true): string {
       const covered = event.entries === 1 ? '' : ` (${event.entries} channel-day(s))`;
 
       return (
-        `FAILED ${where}${describeSpan(event.channels, event.days)}${covered}: ` +
-        errorMessage(event.error)
+        `FAILED ${where}${describeSpan(event.channels, event.days)}${covered}: ` + said(event.error)
       );
     }
     default:
-      return `FAILED ${where}site failed: ${errorMessage(event.error)}`;
+      return `FAILED ${where}site failed: ${said(event.error)}`;
   }
 }
 
@@ -274,6 +281,9 @@ export function textReporter(options: TextReporterOptions): Reporter {
     prefix = true,
   } = options;
 
+  // The chain only where somebody has asked for detail: a `cause` per failure
+  // is noise until you are looking for one.
+  const cause = atLevel('debug', level);
   const held: string[] = [];
   let dropped = 0;
 
@@ -293,7 +303,7 @@ export function textReporter(options: TextReporterOptions): Reporter {
 
   return (event) => {
     if (isFailure(event)) {
-      const line = renderFailure(event, prefix);
+      const line = renderFailure(event, prefix, cause);
 
       if (failures === 'inline') {
         queueLine(errorStream, line);
@@ -333,9 +343,6 @@ export function textReporter(options: TextReporterOptions): Reporter {
     }
   };
 }
-
-/** How deep an `error.cause` chain is followed before it is called a cycle. */
-const MAX_CAUSE_DEPTH = 8;
 
 /** An error as JSON keeps it, `cause` chain and all. */
 function errorJson(error: unknown, depth = 0): unknown {
