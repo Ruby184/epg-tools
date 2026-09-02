@@ -757,14 +757,6 @@ export interface GrabOptions {
    */
   reporter?: Reporter;
   /**
-   * Progress, line by line.
-   *
-   * @deprecated Pass {@link reporter} instead. Kept working by rendering each
-   * event back to the line it used to be, which is all this ever was — and
-   * which is why it cannot filter, name a level, or tell you *what* happened.
-   */
-  logger?: (message: string) => void;
-  /**
    * Cancel the run. Anything still queued — requests, staleness checks, cache
    * writes — is dropped rather than started, and whatever is already in flight
    * aborts on the same signal, which every site's HTTP client carries.
@@ -775,13 +767,6 @@ export interface GrabOptions {
    * pile of one failure per channel-day it never got to.
    */
   signal?: AbortSignal;
-}
-
-export interface GrabTaskError {
-  site: string;
-  channelId: string;
-  day: string;
-  error: unknown;
 }
 
 export interface GrabSummary {
@@ -809,5 +794,17 @@ export interface GrabSummary {
    * next run asks again, which is the cheap question it should be asking.
    */
   unchanged: number;
-  failed: GrabTaskError[];
+  /**
+   * Channel-days that could not be fetched.
+   *
+   * A count, not a list. It used to be the errors themselves, and it was the
+   * one thing a run retained that grew with the size of the guide: a site that
+   * is down leaves seven thousand live `Error`s with stacks, against the
+   * flat-in-the-size-of-the-guide discipline everything else here keeps.
+   *
+   * What each of them *was* arrives as an `entry:failed` or `request:failed`
+   * event while it happens — see `reporter`. A caller wanting the list keeps
+   * one of its own, and gets to decide how long it may grow.
+   */
+  failed: number;
 }

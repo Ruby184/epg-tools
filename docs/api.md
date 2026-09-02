@@ -27,15 +27,19 @@ console.log(summary); // { fetched, fromCache, failed }
 | `guideStream(source, options?)` | The merged guide as an async generator of XML chunks. |
 | `createCacheStore(config)` | The cache a config describes: a `CacheManager` over the driver its `driver` names or builds. |
 
-`GrabSummary` counts `fetched` (channel-days that went to the network) and
-`fromCache` (skipped because the cache was fresh); `failed` is the **list** of
-errors, not a count, so `summary.failed.length` is what to check.
+`GrabSummary` counts `fetched` (channel-days that went to the network),
+`fromCache` (skipped because the cache was fresh), `empty`, `unchanged` and
+`failed` — five numbers, and nothing that grows with the size of the guide.
 
-A `failed` entry names the channel-day it is about, except where the failure is
-the whole site's — a site that cannot be read at all, because it is missing
-`site`, `channels`, `request` or `parseDay`, is one entry with `channelId` and
-`day` as `*`. That is checked before the site's first request, and it fails only
-that site: the others in the same run carry on.
+`failed` is a **count**. It used to be the errors themselves, which for a site
+that is down meant seven thousand live `Error`s with stacks retained for the
+length of the run. What each failure *was* arrives as it happens, as an
+`entry:failed`, `request:failed` or `site:failed` event — see [reporting what a
+run is doing](#reporting-what-a-run-is-doing) — so a caller that wants the list
+keeps one of its own and decides how long it may grow. A site that cannot be
+read at all, because it is missing `site`, `channels`, `request` or `parseDay`,
+is one `site:failed` and one added to the count; that is checked before the
+site's first request, and it fails only that site.
 
 `build`, `runGrab`, `runMerge` and `guideStream` all take either shape — a
 plain `EpgConfig` or a `defineConfig` factory still waiting for its answers —
@@ -60,7 +64,6 @@ await using cache = await createCacheStore(config);
 | `now` | `Date` | the current time | The reference for staleness and the `grabbedAt` stamp — and, unless `offset` says otherwise, the first day of the window. Pass one to make a run reproducible in a test. |
 | `offset` | `number` | `0` | Shift the window this many days from `now`'s day; may be negative. `now` itself is unchanged, so staleness and pruning keep using the real current time. |
 | `reporter` | `(event: EpgEvent) => void` | none | Where the run's events go — see [reporting what a run is doing](#reporting-what-a-run-is-doing). Omit for silence. |
-| `logger` | `(line: string) => void` | none | **Deprecated.** Progress, line by line. Kept working by rendering each event back to the line it used to be; pass `reporter` instead. Passing both throws. |
 | `cache` | `CacheStore` | the one the config describes | Use this store instead. It stays the caller's — nothing here closes what it did not open — which is for a process running several builds, or a test with a store already in hand. |
 | `signal` | `AbortSignal` | none | Cancel the run — see [Cancelling a run](./configuration.md#cancelling-a-run). A grab resolves with the partial summary; a merge rejects, and the guide it was writing is discarded rather than replacing the one in place. `build` skips the merge entirely if the grab was cancelled. |
 
@@ -126,8 +129,26 @@ are the same act:
 | `textReporter({ stream, errorStream?, level?, failures?, failureCap?, prefix? })` | lines of text — what a person reads and a CI log keeps |
 | `jsonReporter({ stream, level?, pretty? })` | one JSON object per line, for a pipeline |
 
-`reporterFor(nameOrFactory, { stdout, stderr, level })` resolves either of them
-by name — `REPORTER_NAMES` is the list — the way `cache.driver` is resolved.
+### Naming one in a config
+
+`cache.driver` takes a name or a factory, and a reporter works the same way, so
+a config file can choose without the caller writing code:
+
+```ts
+export default defineConfig({
+  reporter: 'json',
+  // or, configured:
+  reporter: ({ stdout, level }) => textReporter({ stream: stdout, level, failures: 'inline' }),
+  // …
+});
+```
+
+A factory is handed `{ stdout, stderr, level, failures? }` — the streams the
+command itself was given and what it was asked for, which is what keeps a
+command something a test can drive. `REPORTER_NAMES` is the list of names, and
+`reporterFor(nameOrFactory, runtime)` does the resolving; `--reporter` overrides
+the config, as a flag does everywhere else here, but only among the names, since
+a command line cannot pass a function.
 
 `textReporter` owns the one policy `render` cannot: what to do with a failure.
 `failures: 'block'` (the default) holds them and writes one block, capped at

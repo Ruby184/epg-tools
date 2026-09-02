@@ -40,6 +40,20 @@ export interface StringSpec<T = string> extends SpecBase {
   type: 'string';
   /** What the value is called in the usage synopsis, e.g. `FILE`. */
   placeholder?: string;
+  /**
+   * The only values accepted, and the type of the parsed one.
+   *
+   * Checked before {@link transform}, so a transform only ever sees a value
+   * from this list — and the parsed value is typed as the union rather than as
+   * `string`, which is what a `readonly` tuple (`[...] as const`) buys and a
+   * `string[]` does not.
+   *
+   * Here rather than in each command because a name checked against a shipped
+   * list is the commonest option this package has — a cache driver, a level, a
+   * reporter — and four hand-written copies of the check are four chances for
+   * the message to differ.
+   */
+  choices?: readonly T[];
   /** Collect every occurrence instead of keeping the last one. */
   multiple?: boolean;
   /** Used when the flag is **absent**. */
@@ -92,11 +106,15 @@ type BaseValue<S> = S extends { type: 'boolean' }
       ? S extends { multiple: true }
         ? R[]
         : R
-      : S extends { type: 'string' }
+      : S extends { type: 'string'; choices: readonly (infer C)[] }
         ? S extends { multiple: true }
-          ? string[]
-          : string
-        : never;
+          ? C[]
+          : C
+        : S extends { type: 'string' }
+          ? S extends { multiple: true }
+            ? string[]
+            : string
+          : never;
 
 /** `--no-x` yields `false` for a flag, and `null` for anything with a value. */
 type SpecValue<S> = S extends { negatable: true }
@@ -299,6 +317,18 @@ export function parseOptions<S extends Record<string, OptionSpec>>(
     }
 
     const flag = `--${name}`;
+
+    if (spec.type === 'string' && spec.choices !== undefined) {
+      const allowed = spec.choices as readonly unknown[];
+
+      for (const item of Array.isArray(value) ? (value as unknown[]) : [value]) {
+        if (!allowed.includes(String(item))) {
+          throw new OptionError(
+            `Invalid ${flag} value: ${String(item)} (expected ${allowed.join(', ')})`,
+          );
+        }
+      }
+    }
 
     if (spec.type === 'number') {
       values[name] = toNumber(String(value), flag, spec);

@@ -68,10 +68,13 @@ export interface GrabCounts {
  */
 export type EpgEventInput =
   // ── the run as a whole ───────────────────────────────────────────────────
-  /** Interrupted. `fetched` is what reached the cache before it stopped. */
+  /**
+   * Interrupted. `fetched` is what reached the cache before it stopped.
+   *
+   * An error rather than a warning, because it is the run's *outcome*: no guide
+   * was written, and a command asked to report errors only still has to say so.
+   */
   | { type: 'run:cancelled'; fetched?: number }
-  /** The run itself could not finish — as opposed to something in it failing. */
-  | { type: 'run:failed'; error: unknown }
   // ── grabbing ─────────────────────────────────────────────────────────────
   | ({ type: 'grab:done' } & GrabCounts)
   /**
@@ -166,8 +169,7 @@ export interface EventKind {
  * {@link EpgEventInput} without a row here fails to compile.
  */
 export const EVENT_KINDS = {
-  'run:cancelled': { level: 'warn', phase: 'run' },
-  'run:failed': { level: 'error', phase: 'run' },
+  'run:cancelled': { level: 'error', phase: 'run' },
   'grab:done': { level: 'info', phase: 'grab' },
   'site:started': { level: 'info', phase: 'grab' },
   'site:done': { level: 'info', phase: 'grab' },

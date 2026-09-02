@@ -7,6 +7,7 @@ import type { CacheStore } from '../src/cache/main.js';
 import { defineXmltvSite, grab, resolveChannels } from '../src/grabber/main.js';
 import type { GrabberChannel } from '../src/grabber/main.js';
 import type { XmltvChannel } from '../src/xmltv/types.js';
+import { collect } from './reporting.js';
 
 const NOW = new Date('2026-08-29T12:00:00.000Z');
 const TODAY = '2026-08-29';
@@ -113,7 +114,7 @@ describe('defineXmltvSite', () => {
     // Two channels the config never mentioned, over two days, from one document.
     expect(summary.fetched).toBe(4);
     expect(summary.empty).toBe(0);
-    expect(summary.failed).toEqual([]);
+    expect(summary.failed).toBe(0);
     expect(await entries(cache, 'a', TODAY)).toHaveLength(1);
     expect(await entries(cache, 'b', TOMORROW)).toHaveLength(1);
   });
@@ -223,20 +224,20 @@ describe('defineXmltvSite', () => {
     );
     const source = await serveGzip(interleaved);
     const cache = store();
-    const messages: string[] = [];
+    const report = collect();
 
     const summary = await grab([defineXmltvSite({ site: 'published.example', url: source.url })], {
       cache,
       now: NOW,
       days: 1,
-      logger: (message) => messages.push(message),
+      reporter: report.reporter,
     });
 
     // Nothing lost: both programmes of each channel are there, in order.
     expect(await entries(cache, 'a', TODAY)).toHaveLength(2);
     expect(await entries(cache, 'b', TODAY)).toHaveLength(2);
     expect(summary.fetched).toBe(2);
-    expect(messages.some((message) => message.includes('not grouped by channel'))).toBe(true);
+    expect(report.messages.some((line) => line.includes('not grouped by channel'))).toBe(true);
   });
 
   it('holds everything from the start when told the order is anything', async () => {
@@ -249,18 +250,18 @@ describe('defineXmltvSite', () => {
     );
     const source = await serveGzip(interleaved);
     const cache = store();
-    const messages: string[] = [];
+    const report = collect();
 
     await grab([defineXmltvSite({ site: 'published.example', url: source.url, order: 'any' })], {
       cache,
       now: NOW,
       days: 1,
-      logger: (message) => messages.push(message),
+      reporter: report.reporter,
     });
 
     expect(await entries(cache, 'a', TODAY)).toHaveLength(2);
     // Nothing to warn about: it was told.
-    expect(messages.some((message) => message.includes('not grouped'))).toBe(false);
+    expect(report.messages.some((line) => line.includes('not grouped'))).toBe(false);
   });
 
   it('caches empty the channel-days the document never mentions', async () => {
@@ -319,7 +320,7 @@ describe('defineXmltvSite', () => {
           { cache, now: NOW, days: 1 },
         );
 
-        expect(summary.failed).toEqual([]);
+        expect(summary.failed).toBe(0);
         expect(await entries(cache, 'a', TODAY)).toHaveLength(1);
       });
     }
@@ -336,7 +337,7 @@ describe('defineXmltvSite', () => {
         { cache, now: NOW, days: 1 },
       );
 
-      expect(summary.failed).toEqual([]);
+      expect(summary.failed).toBe(0);
       expect(await entries(cache, 'a', TODAY)).toHaveLength(1);
     });
 
@@ -361,7 +362,7 @@ describe('defineXmltvSite', () => {
         { cache, now: NOW, days: 1 },
       );
 
-      expect(summary.failed).toEqual([]);
+      expect(summary.failed).toBe(0);
       expect(await entries(cache, 'a', TODAY)).toHaveLength(1);
     });
 
@@ -383,7 +384,7 @@ describe('defineXmltvSite', () => {
 
       // A guide declaring no channels is a guide with nothing to grab, which is
       // not a failure — it is a source that had nothing to say.
-      expect(summary.failed).toEqual([]);
+      expect(summary.failed).toBe(0);
       expect(summary.fetched).toBe(0);
     });
 
@@ -394,16 +395,21 @@ describe('defineXmltvSite', () => {
       });
       const cache = store();
 
+      const report = collect();
       const summary = await grab(
         [defineXmltvSite({ site: 'published.example', url: source.url })],
-        { cache, now: NOW, days: 1 },
+        { cache, now: NOW, days: 1, reporter: report.reporter },
       );
 
       // The channel list comes out of the same document, so an unreadable one
       // fails the site rather than each of its channel-days: there are none.
-      expect(summary.failed).toHaveLength(1);
-      expect(summary.failed[0]).toMatchObject({ site: 'published.example', channelId: '*' });
-      expect((summary.failed[0]!.error as Error).message).toContain("compression: 'brotli'");
+      expect(summary.failed).toBe(1);
+      expect(report.of('site:failed')).toEqual([
+        expect.objectContaining({ site: 'published.example' }),
+      ]);
+      expect((report.of('site:failed')[0]!.error as Error).message).toContain(
+        "compression: 'brotli'",
+      );
     });
   });
 
@@ -431,7 +437,7 @@ describe('defineXmltvSite', () => {
       { cache, now: NOW, days: 1 },
     );
 
-    expect(summary.failed.length).toBeGreaterThan(0);
+    expect(summary.failed).toBeGreaterThan(0);
     expect(summary.empty).toBe(0);
     // Nothing was quietly blanked.
     expect(await entries(cache, 'b', TODAY)).toBeUndefined();

@@ -590,8 +590,21 @@ export const run = async (): Promise<number> => {
     reporter: textReporter({ stream: process.stdout }),
   });
 
-  return summary.fetched + summary.fromCache + summary.failed.length;
+  return summary.fetched + summary.fromCache + summary.failed;
 };
+
+// --- docs/api.md: Naming one in a config ------------------------------------
+export const reporting = defineConfig({
+  sites: [example],
+  output: 'guide.xml',
+  reporter: 'json',
+});
+
+export const reportingInline = defineConfig({
+  sites: [example],
+  output: 'guide.xml',
+  reporter: ({ stdout, level }) => textReporter({ stream: stdout, level, failures: 'inline' }),
+});
 
 // --- docs/api.md: Reporting what a run is doing -----------------------------
 export const reported = async (): Promise<void> => {

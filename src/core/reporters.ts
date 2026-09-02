@@ -35,6 +35,11 @@ export const REPORTER_NAMES = ['text', 'json', 'progress'] as const;
 
 export type ReporterName = (typeof REPORTER_NAMES)[number];
 
+/** What a text reporter may do with a failure. */
+export const FAILURE_MODES = ['block', 'inline'] as const;
+
+export type FailureMode = (typeof FAILURE_MODES)[number];
+
 /**
  * What the run knows and a reporter cannot: where it may write, and how much it
  * is being asked for.
@@ -49,6 +54,8 @@ export interface ReporterRuntime {
   /** Failures, and anything `--quiet` must not eat. */
   stderr: Writable;
   level: EventLevel;
+  /** What to do with a failure — see {@link TextReporterOptions.failures}. */
+  failures?: FailureMode;
 }
 
 /** A reporter that wants those before it can be built. */
@@ -222,48 +229,6 @@ export function renderFailure(event: FailureEvent, prefix = true): string {
   }
 }
 
-/**
- * The events that did not exist while `logger` did, so the bridge below leaves
- * them out — a caller who passed `logger: console.log` should read what it read
- * before, not a summary line its own CLI already prints.
- */
-const NEWER_THAN_LOGGER = new Set<EpgEvent['type']>([
-  'run:cancelled',
-  'grab:done',
-  'site:started',
-  'site:done',
-  'merge:done',
-]);
-
-/**
- * A reporter that hands finished lines to a plain function.
- *
- * The bridge under the `logger` option this package used to take, so nothing
- * that passed one has to change while the events settle. Unfiltered and inline,
- * which is what `logger` was: one level, and a failure said where it happened.
- *
- * @deprecated Pass a reporter instead — `textReporter` for the same lines with
- * a level, or a function of your own for the events themselves.
- */
-export function lineReporter(logger: (message: string) => void): Reporter {
-  return (event) => {
-    if (NEWER_THAN_LOGGER.has(event.type)) {
-      return;
-    }
-
-    const line = isFailure(event) ? renderFailure(event) : render(event);
-
-    if (line !== undefined) {
-      logger(line);
-    }
-  };
-}
-
-/** What a run has finished doing, whatever it finished as — when a block is flushed. */
-function isTerminal(event: EpgEvent): boolean {
-  return event.type === 'grab:done' || event.type === 'run:cancelled';
-}
-
 export interface TextReporterOptions {
   /** Where progress goes. */
   stream: Writable;
@@ -280,7 +245,7 @@ export interface TextReporterOptions {
    * for a CI log, where interleaving is the point and a block at the end has
    * already scrolled past.
    */
-  failures?: 'block' | 'inline';
+  failures?: FailureMode;
   /** How many the block shows before saying how many more there were. `0` for all. */
   failureCap?: number;
   /** The `[site]` prefix. Off for a grabber that only ever has one. */
@@ -344,21 +309,27 @@ export function textReporter(options: TextReporterOptions): Reporter {
       return;
     }
 
-    if (isTerminal(event)) {
-      // Before its own line, so the failures read as part of what the run came
-      // to rather than as an afterthought — and whether that line is written at
-      // all depends on the level, while this does not.
-      flush();
+    if (event.type === 'run:cancelled') {
+      // Dropped rather than flushed. What a cancelled run failed at is mostly
+      // the requests the cancel itself took away, and a screen of those under
+      // "Cancelled." would describe the interruption as a broken source.
+      held.length = 0;
+      dropped = 0;
     }
 
-    if (!atLevel(event.level, level)) {
-      return;
-    }
-
-    const line = render(event, prefix);
+    // The level decides what is *written*; it never decides what this notices.
+    const line = atLevel(event.level, level) ? render(event, prefix) : undefined;
 
     if (line !== undefined) {
       queueLine(event.level === 'error' || event.level === 'warn' ? errorStream : stream, line);
+    }
+
+    if (event.type === 'grab:done') {
+      // After the summary rather than before it, so the block reads as the
+      // detail under "84 failed" — and not conditional on that summary having
+      // been written, because a run asked for errors only must still end with
+      // the errors.
+      flush();
     }
   };
 }
@@ -418,30 +389,14 @@ export function jsonReporter(options: JsonReporterOptions): Reporter {
   };
 }
 
-/** The two options a caller could answer "where do the events go?" with. */
+/** What a caller says when asked where the events go. */
 export interface ReportedOptions {
   reporter?: Reporter;
-  /** @deprecated See {@link lineReporter}. */
-  logger?: (message: string) => void;
 }
 
-/**
- * Where a run's events go, from what it was given.
- *
- * Passing both is a mistake worth naming rather than silently resolving: they
- * are two answers to one question, and picking one for the caller would mean a
- * reporter that quietly never runs.
- */
+/** Where a run's events go — nowhere, when nobody is listening. */
 export function emitter(options: ReportedOptions): Emit {
-  if (options.reporter !== undefined && options.logger !== undefined) {
-    throw new TypeError('Pass either reporter or logger, not both');
-  }
-
-  if (options.reporter !== undefined) {
-    return stamped(options.reporter);
-  }
-
-  return options.logger === undefined ? silent : stamped(lineReporter(options.logger));
+  return options.reporter === undefined ? silent : stamped(options.reporter);
 }
 
 /**
@@ -464,22 +419,17 @@ export function reporterFor(
 
   switch (reporter) {
     case 'text':
+    case 'progress':
+      // `progress` is the text one until a live line exists — which is the
+      // fallback it will have anyway on a stream that is not a terminal.
       return textReporter({
         stream: runtime.stdout,
         errorStream: runtime.stderr,
         level: runtime.level,
+        ...(runtime.failures ? { failures: runtime.failures } : {}),
       });
     case 'json':
       return jsonReporter({ stream: runtime.stdout, level: runtime.level });
-    case 'progress':
-      // Until the progress reporter exists, the honest answer is the one that
-      // does — and the fallback it will have anyway on a stream that is not a
-      // terminal.
-      return textReporter({
-        stream: runtime.stdout,
-        errorStream: runtime.stderr,
-        level: runtime.level,
-      });
     default: {
       // Unreachable from TypeScript, which is what the `never` says: a name
       // added without a case here fails to compile. A config written in

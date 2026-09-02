@@ -25,7 +25,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
   const now = options.now ?? new Date();
   const emit = emitter(options);
   const { cache, signal } = options;
-  const tally: RunTally = { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: [] };
+  const tally: RunTally = { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0 };
 
   /**
    * Everything that is not a request: the staleness sweep, and parsing a
@@ -88,14 +88,25 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
           // has a queue or a client to let go of.
           await new SiteRun(config, run).run();
         } catch (error) {
-          tally.failed.push({ site: config.site, channelId: '*', day: '*', error });
+          // One, not one per channel-day: nothing of this site was reached, so
+          // there is no grid to attribute it across — and `site:failed` is what
+          // says which source it was.
+          tally.failed++;
           emit({ type: 'site:failed', site: config.site, error });
         }
       }).catch(() => {}),
     ),
   );
 
-  emit({ type: 'grab:done', ...tally, failed: tally.failed.length });
+  // A cancelled run is not a finished one, and the difference matters to
+  // whoever is listening: `grab:done` is what a reporter treats as "this is
+  // what the run came to", while a cancel says the opposite — most of what
+  // failed was dropped by the cancel itself.
+  emit(
+    signal?.aborted
+      ? { type: 'run:cancelled', fetched: tally.fetched }
+      : { type: 'grab:done', ...tally },
+  );
 
   return tally;
 }

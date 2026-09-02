@@ -165,7 +165,7 @@ describe('cancellation', () => {
     // The channel-day in flight when the cancel landed is reported, and the one
     // still queued was never asked for.
     expect(fetched).toEqual(['one.example']);
-    expect(summary.failed).toHaveLength(1);
+    expect(summary.failed).toBe(1);
     // Half a window is not what the guide in place should be replaced with.
     expect(existsSync(epgConfig.output)).toBe(false);
   });

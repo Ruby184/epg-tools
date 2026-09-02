@@ -45,7 +45,6 @@ import type {
   ChannelsDaysRequestContext,
   GrabberChannel,
   GrabOptions,
-  GrabTaskError,
   ParsedProgramme,
   RequestContextFor,
   SiteConfig,
@@ -54,14 +53,13 @@ import type {
   StreamSiteConfig,
 } from './types.js';
 
-/** What a run counts as it goes, and answers with when it is done. */
-export interface RunTally {
-  fetched: number;
-  empty: number;
-  fromCache: number;
-  unchanged: number;
-  failed: GrabTaskError[];
-}
+/**
+ * What a run counts as it goes, and answers with when it is done.
+ *
+ * The same five numbers a site keeps for itself, which is what makes summing
+ * them a matter of adding rather than of merging two shapes.
+ */
+export type RunTally = GrabCounts;
 
 /** Queue one task on `queue`, cancellable with the run — see {@link grab}. */
 export type Enqueue = <T>(
@@ -209,10 +207,7 @@ export class SiteRun {
   /** Count one channel-day, for this site and for the run it is part of. */
   #count(field: keyof GrabCounts, delta = 1): void {
     this.#counts[field] += delta;
-
-    if (field !== 'failed') {
-      this.#run.tally[field] += delta;
-    }
+    this.#run.tally[field] += delta;
   }
 
   /** Everything this site does, start to finish. */
@@ -604,7 +599,6 @@ export class SiteRun {
 
   /** One channel-day's failure, reported and counted. */
   #fail(channel: GrabberChannel, day: string, error: unknown): void {
-    this.#run.tally.failed.push({ site: this.#site, channelId: channel.xmltvId, day, error });
     this.#count('failed');
     this.#run.emit({
       type: 'entry:failed',
@@ -662,8 +656,7 @@ export class SiteRun {
   #failRequest(request: Request, pairs: Iterable<Pair>, error: unknown): void {
     let entries = 0;
 
-    for (const { channel, day } of pairs) {
-      this.#run.tally.failed.push({ site: this.#site, channelId: channel.xmltvId, day, error });
+    for (const _pair of pairs) {
       this.#count('failed');
       entries++;
     }

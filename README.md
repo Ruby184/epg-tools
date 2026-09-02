@@ -170,8 +170,11 @@ into place, so a reader never sees half a guide.
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
-| `-q, --quiet` | no progress on stdout; failures still go to stderr |
-| `-v, --version` | print the package name and version |
+| `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
+| `-v, --verbose` | same as `--log-level debug`; `-q, --quiet` is `--log-level error` |
+| `--reporter <name>` | `text` (default), `json` — one object per line — or `progress` |
+| `--failures <how>` | `block` (default) — one capped block at the end — or `inline` |
+| `-V, --version` | print the package name and version |
 | `-h, --help` | print the usage |
 | `--description`, `--grabber-version`, `--force` | `init-grabber` only — see [XMLTV grabber](./docs/tv-grab.md) |
 

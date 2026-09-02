@@ -257,4 +257,70 @@ describe('parseOptions', () => {
       ).toThrow('Invalid --day value: nope (expected YYYY-MM-DD)');
     });
   });
+
+  describe('choices', () => {
+    const LEVELS = ['error', 'warn', 'info', 'debug'] as const;
+
+    it('accepts one of them, typed as the union rather than as a string', () => {
+      const { values } = parseOptions(['--level=warn'], {
+        level: { type: 'string', choices: LEVELS },
+      });
+      // Typed, not merely checked: assigning it to the union is the assertion.
+      const level: 'error' | 'warn' | 'info' | 'debug' | undefined = values.level;
+
+      expect(level).toBe('warn');
+    });
+
+    it('names what it expected when given something else', () => {
+      expect(() =>
+        parseOptions(['--level=loud'], { level: { type: 'string', choices: LEVELS } }),
+      ).toThrow('Invalid --level value: loud (expected error, warn, info, debug)');
+    });
+
+    it('checks a default too, so a bad one is not read as absent', () => {
+      expect(() =>
+        parseOptions([], { level: { type: 'string', choices: LEVELS, default: 'loud' } }),
+      ).toThrow('Invalid --level value: loud');
+    });
+
+    it('checks every occurrence of a multiple option', () => {
+      const { values } = parseOptions(['--level=warn', '--level=debug'], {
+        level: { type: 'string', choices: LEVELS, multiple: true },
+      });
+
+      expect(values.level).toEqual(['warn', 'debug']);
+      expect(() =>
+        parseOptions(['--level=warn', '--level=loud'], {
+          level: { type: 'string', choices: LEVELS, multiple: true },
+        }),
+      ).toThrow('Invalid --level value: loud');
+    });
+
+    it('runs before a transform, so a transform only sees what it allows', () => {
+      const seen: string[] = [];
+
+      expect(() =>
+        parseOptions(['--level=loud'], {
+          level: {
+            type: 'string',
+            choices: LEVELS,
+            transform: (raw) => {
+              seen.push(raw);
+
+              return raw;
+            },
+          },
+        }),
+      ).toThrow('Invalid --level value: loud');
+      expect(seen).toEqual([]);
+    });
+
+    it('leaves an option that was switched off alone', () => {
+      const { values } = parseOptions(['--no-level'], {
+        level: { type: 'string', choices: LEVELS, negatable: true },
+      });
+
+      expect(values.level).toBeNull();
+    });
+  });
 });

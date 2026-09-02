@@ -60,13 +60,6 @@ export interface RunOptions {
    * are the ones this package ships.
    */
   reporter?: Reporter;
-  /**
-   * Progress, line by line.
-   *
-   * @deprecated Pass {@link reporter} instead. Kept working by rendering each
-   * event back to the line it used to be.
-   */
-  logger?: (message: string) => void;
 }
 
 /**
@@ -213,17 +206,14 @@ function guideOptions(
 }
 
 /**
- * Whichever of the two sinks the caller gave, passed on as it was.
+ * The sink, passed on as it was.
  *
- * Not resolved to an `Emit` here: each half builds its own, and one of them
- * throwing on "both, and which wins?" is better said once, where the run
- * starts, than by two halves disagreeing quietly.
+ * Not resolved to an `Emit` here: each half builds its own from the same
+ * function, so a run's two halves report through one reporter without either
+ * knowing about the other.
  */
-function reported(options: RunOptions): Pick<RunOptions, 'reporter' | 'logger'> {
-  return {
-    ...(options.reporter ? { reporter: options.reporter } : {}),
-    ...(options.logger ? { logger: options.logger } : {}),
-  };
+function reported(options: RunOptions): Pick<RunOptions, 'reporter'> {
+  return options.reporter ? { reporter: options.reporter } : {};
 }
 
 /** Grab all sites into the cache (only stale/missing channel-days are fetched). */

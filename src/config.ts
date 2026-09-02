@@ -16,6 +16,7 @@ import type { CompressionFormat, CompressionOptions } from './core/output.js';
 import type { AnySiteConfig } from './grabber/types.js';
 import type { MergeOptions } from './merge/types.js';
 import type { XmltvDocumentMeta } from './xmltv/types.js';
+import type { ReporterFactory, ReporterName } from './core/reporters.js';
 
 /**
  * What builds the driver a run keeps its cache in.
@@ -100,6 +101,20 @@ export interface EpgConfig {
    * spaces or a string like `'\t'`). Omit for compact output — the default.
    */
   indent?: string | number;
+  /**
+   * How a run reports what it is doing. Defaults to `'text'`.
+   *
+   * A name for a reporter this package ships — `'text'`, `'json'`,
+   * `'progress'` — or a {@link ReporterFactory} returning one of your own,
+   * handed the streams the command was given and the level it was asked for.
+   * The same shape as {@link EpgCacheConfig.driver}, and for the same reason: a
+   * name covers the usual answers and a function covers the rest.
+   *
+   * `--reporter` overrides it, as a flag overrides a config field everywhere
+   * else here — but only among the names, since a command line cannot pass a
+   * function. See [reporting a run](../docs/api.md#reporting-what-a-run-is-doing).
+   */
+  reporter?: ReporterName | ReporterFactory;
 }
 
 /** Builds the config from whatever answered the questions. */

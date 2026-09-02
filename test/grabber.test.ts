@@ -12,6 +12,7 @@ import type {
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 import { grab, UnchangedError } from '../src/grabber/main.js';
 import type { EpgEvent } from '../src/core/events.js';
+import { collect } from './reporting.js';
 import type {
   ChannelsBatching,
   ChannelsDaysBatching,
@@ -221,7 +222,7 @@ describe('grab', () => {
 
     expect(summary.fromCache).toBe(1);
     expect(summary.fetched).toBe(1);
-    expect(summary.failed).toEqual([]);
+    expect(summary.failed).toBe(0);
     expect(fetchedDays).toEqual([TOMORROW]);
   });
 
@@ -239,7 +240,7 @@ describe('grab', () => {
 
     expect(summary.fetched).toBe(4);
     expect(summary.empty).toBe(2);
-    expect(summary.failed).toEqual([]);
+    expect(summary.failed).toBe(0);
     // Cached like any other entry — what makes it come round again is the
     // staleness policy, not the grab.
     expect(
@@ -455,15 +456,25 @@ describe('grab', () => {
       },
     });
 
-    const logs: string[] = [];
-    const summary = await grab([config], { cache, now: NOW, logger: (m) => logs.push(m) });
+    const report = collect();
+    const summary = await grab([config], { cache, now: NOW, reporter: report.reporter });
 
     expect(summary.fetched).toBe(1);
-    expect(summary.failed).toEqual([
-      { site: 'example.com', channelId: 'bad.example', day: TODAY, error: boom },
+    expect(summary.failed).toBe(1);
+    // The request is what failed, and it says which channel-day went with it —
+    // the summary is now only the count.
+    expect(report.failures).toEqual([
+      expect.objectContaining({
+        type: 'request:failed',
+        site: 'example.com',
+        channels: ['bad.example'],
+        days: [TODAY],
+        entries: 1,
+        error: boom,
+      }),
     ]);
     expect(cache.get({ site: 'example.com', channelId: 'good.example', day: TODAY })).toBeDefined();
-    expect(logs.some((m) => m.includes('network down'))).toBe(true);
+    expect(report.messages.some((line) => line.includes('network down'))).toBe(true);
   });
 
   it('runs channel-days sequentially per site when concurrency is 1', async () => {
@@ -507,7 +518,7 @@ describe('grab', () => {
 
     try {
       const cache = new MemoryCache();
-      const logs: string[] = [];
+      const report = collect();
       const asked: number[] = [];
 
       const config = makeConfig({
@@ -522,14 +533,16 @@ describe('grab', () => {
         },
       });
 
-      const summary = await grab([config], { cache, now: NOW, logger: (m) => logs.push(m) });
+      const summary = await grab([config], { cache, now: NOW, reporter: report.reporter });
 
       // All three days were attempted — the two behind the 429 were held, not
       // dropped — and only the first failed.
       expect(asked).toHaveLength(3);
       expect(summary.fetched).toBe(2);
-      expect(summary.failed).toHaveLength(1);
-      expect(logs.some((m) => m.includes('HTTP 429: holding requests'))).toBe(true);
+      expect(summary.failed).toBe(1);
+      expect(report.messages.some((line) => line.includes('HTTP 429: holding requests'))).toBe(
+        true,
+      );
     } finally {
       server.close();
     }
@@ -822,7 +835,7 @@ describe('grab', () => {
 
     try {
       const cache = new MemoryCache();
-      const logs: string[] = [];
+      const report = collect();
       const config = makeConfig({
         days: 2,
         backoff: { fallbackMs: 40, maxMs: 40 },
@@ -838,11 +851,13 @@ describe('grab', () => {
         },
       });
 
-      await grab([config], { cache, now: NOW, logger: (message) => logs.push(message) });
+      await grab([config], { cache, now: NOW, reporter: report.reporter });
 
       // The client reports a slow-down to the queue whoever asked for it, so a
       // parse cannot talk a site past a limit its requests are respecting.
-      expect(logs.some((message) => message.includes('HTTP 429: holding requests'))).toBe(true);
+      expect(report.messages.some((line) => line.includes('HTTP 429: holding requests'))).toBe(
+        true,
+      );
     } finally {
       server.close();
     }
@@ -1092,11 +1107,21 @@ describe('grab', () => {
         },
       });
 
-      const summary = await grab([config], { cache, now: NOW, signal: controller.signal });
+      const report = collect();
+      const summary = await grab([config], {
+        cache,
+        now: NOW,
+        signal: controller.signal,
+        reporter: report.reporter,
+      });
 
       expect(summary.fetched).toBe(0);
-      expect(summary.failed).toEqual([
-        { site: 'example.com', channelId: '*', day: '*', error: boom },
+      expect(summary.failed).toBe(1);
+      // The whole site, not a channel-day of it: nothing was reached, so there
+      // is no grid to attribute it across — which the old `*` sentinels stood in
+      // for and this says outright.
+      expect(report.failures).toEqual([
+        expect.objectContaining({ type: 'site:failed', site: 'example.com', error: boom }),
       ]);
     } finally {
       server.close();
@@ -1122,14 +1147,21 @@ describe('grab', () => {
       },
     });
 
-    const summary = await grab([config], { cache, now: NOW, signal: controller.signal });
+    const report = collect();
+    const summary = await grab([config], {
+      cache,
+      now: NOW,
+      signal: controller.signal,
+      reporter: report.reporter,
+    });
 
     // The 18 channel-days still waiting are removed from the queue, not
     // dequeued only to notice and report themselves failed.
     expect(calls).toBe(2);
     expect(summary.fetched).toBe(1);
-    expect(summary.failed).toEqual([
-      { site: 'example.com', channelId: 'one.example', day: TOMORROW, error: boom },
+    expect(summary.failed).toBe(1);
+    expect(report.failures).toEqual([
+      expect.objectContaining({ type: 'request:failed', days: [TOMORROW], error: boom }),
     ]);
   });
 
@@ -1150,7 +1182,7 @@ describe('grab', () => {
     const summary = await grab([config], { cache, now: NOW, signal: controller.signal });
 
     expect(calls).toBe(0);
-    expect(summary).toEqual({ fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: [] });
+    expect(summary).toEqual({ fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0 });
   });
 
   it('leaves nothing unhandled when the abort lands after the run is over', async () => {
@@ -1247,7 +1279,7 @@ describe('grab with batching: channels', () => {
 
     expect(batchCalls).toEqual([['a', 'b', 'c']]); // one request, all channels
     expect(summary.fetched).toBe(3); // three channel-days written
-    expect(summary.failed).toEqual([]);
+    expect(summary.failed).toBe(0);
     for (const id of ['a', 'b', 'c']) {
       const written = cache.get({ site: 'batch.example', channelId: id, day: TODAY });
       expect(written?.programmes.map((p) => p.channel)).toEqual([id]); // normalized to xmltvId
@@ -1378,12 +1410,21 @@ describe('grab with batching: channels', () => {
       },
     });
 
-    const summary = await grab([config], { cache, now: NOW });
+    const report = collect();
+    const summary = await grab([config], { cache, now: NOW, reporter: report.reporter });
 
     expect(summary.fetched).toBe(0);
-    expect(summary.failed).toEqual([
-      { site: 'batch.example', channelId: 'a', day: TODAY, error: boom },
-      { site: 'batch.example', channelId: 'b', day: TODAY, error: boom },
+    expect(summary.failed).toBe(2);
+    // One event for the request, naming both channel-days it took down, rather
+    // than one event each.
+    expect(report.failures).toEqual([
+      expect.objectContaining({
+        type: 'request:failed',
+        site: 'batch.example',
+        channels: ['a', 'b'],
+        entries: 2,
+        error: boom,
+      }),
     ]);
   });
 
@@ -1402,11 +1443,21 @@ describe('grab with batching: channels', () => {
       },
     });
 
-    const summary = await grab([config], { cache, now: NOW });
+    const report = collect();
+    const summary = await grab([config], { cache, now: NOW, reporter: report.reporter });
 
     expect(summary.fetched).toBe(1);
-    expect(summary.failed).toEqual([
-      { site: 'batch.example', channelId: 'a', day: TODAY, error: boom },
+    expect(summary.failed).toBe(1);
+    // A parse failure is one channel-day's own, so it says which — where a
+    // failed request says only how many it covered.
+    expect(report.failures).toEqual([
+      expect.objectContaining({
+        type: 'entry:failed',
+        site: 'batch.example',
+        channelId: 'a',
+        day: TODAY,
+        error: boom,
+      }),
     ]);
     expect(cache.get({ site: 'batch.example', channelId: 'b', day: TODAY })).toBeDefined();
   });
@@ -1440,7 +1491,7 @@ describe('grab with batching: days', () => {
       },
     ]);
     expect(summary.fetched).toBe(4); // one request, four channel-days written
-    expect(summary.failed).toEqual([]);
+    expect(summary.failed).toBe(0);
     for (const day of [TODAY, TOMORROW, '2026-07-19', '2026-07-20']) {
       const written = cache.get({ site: 'days.example', channelId: 'a', day });
       expect(written?.programmes.map((p) => p.start.toISOString())).toEqual([
@@ -1522,12 +1573,19 @@ describe('grab with batching: days', () => {
       },
     });
 
-    const summary = await grab([config], { cache, now: NOW });
+    const report = collect();
+    const summary = await grab([config], { cache, now: NOW, reporter: report.reporter });
 
     expect(summary.fetched).toBe(0);
-    expect(summary.failed).toEqual([
-      { site: 'days.example', channelId: 'a', day: TODAY, error: boom },
-      { site: 'days.example', channelId: 'a', day: TOMORROW, error: boom },
+    expect(summary.failed).toBe(2);
+    expect(report.failures).toEqual([
+      expect.objectContaining({
+        type: 'request:failed',
+        site: 'days.example',
+        days: [TODAY, TOMORROW],
+        entries: 2,
+        error: boom,
+      }),
     ]);
   });
 
@@ -1546,11 +1604,13 @@ describe('grab with batching: days', () => {
       },
     });
 
-    const summary = await grab([config], { cache, now: NOW });
+    const report = collect();
+    const summary = await grab([config], { cache, now: NOW, reporter: report.reporter });
 
     expect(summary.fetched).toBe(1);
-    expect(summary.failed).toEqual([
-      { site: 'days.example', channelId: 'a', day: TODAY, error: boom },
+    expect(summary.failed).toBe(1);
+    expect(report.failures).toEqual([
+      expect.objectContaining({ type: 'entry:failed', day: TODAY, error: boom }),
     ]);
     expect(cache.get({ site: 'days.example', channelId: 'a', day: TOMORROW })).toBeDefined();
   });
@@ -1728,7 +1788,7 @@ describe('grab over a grid too big to plan by scanning', () => {
     expect(covered.slice().sort()).toEqual(expected.slice().sort());
     expect(summary.fetched).toBe(expected.length);
     expect(summary.fromCache).toBe(CHANNELS / 2);
-    expect(summary.failed).toEqual([]);
+    expect(summary.failed).toBe(0);
   });
 });
 
@@ -1736,14 +1796,22 @@ describe('grab with a site that is missing a mandatory member', () => {
   /** What the site failed with, for a config the types would have caught. */
   async function failure(config: Partial<SiteConfig<unknown>>): Promise<string> {
     const cache = new MemoryCache();
-    const summary = await grab([config as SiteConfig<unknown>], { cache, now: NOW });
+    const report = collect();
+    const summary = await grab([config as SiteConfig<unknown>], {
+      cache,
+      now: NOW,
+      reporter: report.reporter,
+    });
 
     expect(summary.fetched).toBe(0);
     expect(cache.entries.size).toBe(0);
-    expect(summary.failed).toHaveLength(1);
-    expect(summary.failed[0]!.error).toBeInstanceOf(TypeError);
+    expect(summary.failed).toBe(1);
 
-    return (summary.failed[0]!.error as Error).message;
+    const failed = report.of('site:failed')[0]!;
+
+    expect(failed.error).toBeInstanceOf(TypeError);
+
+    return (failed.error as Error).message;
   }
 
   /** A site that would work, less the one member the case is about. */
@@ -1822,7 +1890,7 @@ describe('a site that streams its whole window', () => {
 
     expect(summary.fetched).toBe(4);
     expect(summary.empty).toBe(0);
-    expect(summary.failed).toEqual([]);
+    expect(summary.failed).toBe(0);
     expect(cache.entries.size).toBe(4);
     // The programmes are the site's, with the channel normalized to the output id.
     expect(cache.get({ site: 'stream.example', channelId: 'a', day: TODAY })?.programmes).toEqual([
@@ -1867,11 +1935,11 @@ describe('a site that streams its whole window', () => {
 
   it('caches empty every channel-day the document never mentioned', async () => {
     const cache = new MemoryCache();
-    const messages: string[] = [];
+    const report = collect();
     const summary = await grab([streamSite((channels, days) => [some(days[0]!, channels[0]!)])], {
       cache,
       now: NOW,
-      logger: (message) => messages.push(message),
+      reporter: report.reporter,
     });
 
     // The stream ended cleanly, so silence about a channel-day means nothing on
@@ -1879,11 +1947,11 @@ describe('a site that streams its whole window', () => {
     // decides when to ask again rather than every run asking.
     expect(summary.fetched).toBe(4);
     expect(summary.empty).toBe(3);
-    expect(summary.failed).toEqual([]);
+    expect(summary.failed).toBe(0);
     expect(
       cache.get({ site: 'stream.example', channelId: 'b', day: TOMORROW })?.programmes,
     ).toEqual([]);
-    expect(messages).toContain(
+    expect(report.messages).toContain(
       '[stream.example] 3 channel-day(s) not in the document: caching them empty',
     );
   });
@@ -1939,7 +2007,7 @@ describe('a site that streams its whole window', () => {
 
   it('ignores a channel-day it was not asked for, saying how many', async () => {
     const cache = new MemoryCache();
-    const messages: string[] = [];
+    const report = collect();
 
     cache.seed(
       { site: 'stream.example', channelId: 'a', day: TOMORROW },
@@ -1960,7 +2028,7 @@ describe('a site that streams its whole window', () => {
           },
         },
       ],
-      { cache, now: NOW, logger: (message) => messages.push(message) },
+      { cache, now: NOW, reporter: report.reporter },
     );
 
     // A fresh entry is not rewritten, and its grabbedAt stands.
@@ -1969,11 +2037,14 @@ describe('a site that streams its whole window', () => {
       programmeCount: 2,
     });
     expect(summary.fetched).toBe(3);
-    expect(messages).toContain('[stream.example] ignored 2 channel-day(s) it was not asked for');
+    expect(report.messages).toContain(
+      '[stream.example] ignored 2 channel-day(s) it was not asked for',
+    );
   });
 
   it('fails what it never reached when the stream throws', async () => {
     const cache = new MemoryCache();
+    const report = collect();
     const summary = await grab(
       [
         {
@@ -1984,18 +2055,23 @@ describe('a site that streams its whole window', () => {
           },
         },
       ],
-      { cache, now: NOW },
+      { cache, now: NOW, reporter: report.reporter },
     );
 
     // What arrived is kept; what the document never reached is short rather than
     // empty, which is the whole reason a stream must throw rather than end.
     expect(summary.fetched).toBe(1);
     expect(summary.empty).toBe(0);
-    expect(summary.failed).toHaveLength(3);
-    expect(summary.failed.map((failure) => `${failure.channelId} ${failure.day}`).sort()).toEqual([
-      `a ${TOMORROW}`,
-      `b ${TODAY}`,
-      `b ${TOMORROW}`,
+    expect(summary.failed).toBe(3);
+    // One event for the pass that broke, naming the three channel-days it was
+    // still owed rather than one event each.
+    expect(report.failures).toEqual([
+      expect.objectContaining({
+        type: 'request:failed',
+        channels: ['a', 'b'],
+        days: [TODAY, TOMORROW],
+        entries: 3,
+      }),
     ]);
     expect(cache.entries.size).toBe(1);
   });
@@ -2072,7 +2148,7 @@ describe('a site that streams its whole window', () => {
     // never more than four writes at once — the split is held back by the queue
     // rather than filling it.
     expect(summary.fetched).toBe(100);
-    expect(summary.failed).toEqual([]);
+    expect(summary.failed).toBe(0);
     expect(cache.entries.size).toBe(100);
     expect(mostAlive).toBeLessThanOrEqual(4);
   });
@@ -2080,7 +2156,7 @@ describe('a site that streams its whole window', () => {
   it('gets the site state and the client every other site gets', async () => {
     const cache = new MemoryCache();
     let seen: { sameState: boolean; hasHttp: boolean; logged: string[] } | undefined;
-    const messages: string[] = [];
+    const report = collect();
 
     await grab(
       [
@@ -2092,26 +2168,27 @@ describe('a site that streams its whole window', () => {
             seen = {
               sameState: state instanceof Map,
               hasHttp: typeof http.get === 'function',
-              logged: messages,
+              logged: report.messages,
             };
 
             yield* channelDays.map(({ channel: ch, day }) => some(day, ch));
           },
         },
       ],
-      { cache, now: NOW, logger: (message) => messages.push(message) },
+      { cache, now: NOW, reporter: report.reporter },
     );
 
     expect(seen?.sameState).toBe(true);
     expect(seen?.hasHttp).toBe(true);
     // A stream's own messages go where the run's do, prefixed with the site.
-    expect(messages).toContain('[stream.example] one pass, and here is a warning');
+    expect(report.messages).toContain('[stream.example] one pass, and here is a warning');
     // And what it remembered is kept, as any site's is.
     expect(cache.state.get('stream.example|state')?.data).toEqual([['passes', 1]]);
   });
 
   it('is refused without a stream or a request, and named either way', async () => {
     const cache = new MemoryCache();
+    const report = collect();
     const summary = await grab(
       [
         {
@@ -2120,14 +2197,15 @@ describe('a site that streams its whole window', () => {
           days: 1,
         } as unknown as StreamSiteConfig,
       ],
-      { cache, now: NOW },
+      { cache, now: NOW, reporter: report.reporter },
     );
 
-    expect(summary.failed).toHaveLength(1);
-    expect((summary.failed[0]!.error as Error).message).toContain(
-      'must define request: a function fetching one request',
-    );
-    expect((summary.failed[0]!.error as Error).message).toContain('or stream');
+    expect(summary.failed).toBe(1);
+
+    const { message } = report.of('site:failed')[0]!.error as Error;
+
+    expect(message).toContain('must define request: a function fetching one request');
+    expect(message).toContain('or stream');
   });
 });
 
@@ -2215,7 +2293,7 @@ describe('asking whether anything has changed', () => {
       expect(source.asked[1]!.headers['if-none-match']).toBe('W/"v1"');
       expect(second.unchanged).toBe(1);
       expect(second.fetched).toBe(0);
-      expect(second.failed).toEqual([]);
+      expect(second.failed).toBe(0);
     } finally {
       await source.close();
     }
@@ -2412,7 +2490,7 @@ describe('asking whether anything has changed', () => {
       version = 'W/"v2"';
       const summary = await grab([config], { cache, now: NOW });
 
-      expect(summary.failed).toHaveLength(1);
+      expect(summary.failed).toBe(1);
       expect(cache.state.get('example.com|validators')?.data).toMatchObject([
         [expect.any(String), { etag: 'W/"v1"' }],
       ]);
@@ -2560,7 +2638,7 @@ describe('a stream that says nothing has changed', () => {
     expect(summary.unchanged).toBe(2);
     expect(summary.fetched).toBe(0);
     expect(summary.empty).toBe(0);
-    expect(summary.failed).toEqual([]);
+    expect(summary.failed).toBe(0);
     // Untouched, grabbedAt and all — so it ages as it was already ageing.
     expect(cache.get({ site: 'stream.example', channelId: 'a', day: TODAY })?.meta).toEqual({
       grabbedAt: '2026-07-16T09:00:00.000Z',
@@ -2600,6 +2678,7 @@ describe('a stream that says nothing has changed', () => {
     // Nothing seeded: "unchanged" cannot mean anything here, and quietly
     // agreeing would leave a hole in the guide that nothing else would report.
     const cache = new MemoryCache();
+    const report = collect();
     const summary = await grab(
       [
         site(async function* ({ channelDays }) {
@@ -2608,12 +2687,14 @@ describe('a stream that says nothing has changed', () => {
           }
         }),
       ],
-      { cache, now: NOW },
+      { cache, now: NOW, reporter: report.reporter },
     );
 
     expect(summary.unchanged).toBe(0);
-    expect(summary.failed).toHaveLength(2);
-    expect((summary.failed[0]!.error as Error).message).toContain('nothing is cached for it');
+    expect(summary.failed).toBe(2);
+    expect((report.of('entry:failed')[0]!.error as Error).message).toContain(
+      'nothing is cached for it',
+    );
   });
 
   it('keeps everything when the whole document is unchanged', async () => {
@@ -2633,7 +2714,7 @@ describe('a stream that says nothing has changed', () => {
     );
 
     expect(summary.unchanged).toBe(2);
-    expect(summary.failed).toEqual([]);
+    expect(summary.failed).toBe(0);
     expect(cache.get({ site: 'stream.example', channelId: 'b', day: TODAY })?.meta).toMatchObject({
       grabbedAt: '2026-07-16T09:00:00.000Z',
     });
@@ -2641,6 +2722,7 @@ describe('a stream that says nothing has changed', () => {
 
   it('keeps what a broken pass had already vouched for', async () => {
     const cache = cacheWithBoth();
+    const report = collect();
     const summary = await grab(
       [
         site(async function* ({ channelDays }) {
@@ -2649,14 +2731,18 @@ describe('a stream that says nothing has changed', () => {
           throw new Error('the connection went away');
         }),
       ],
-      { cache, now: NOW },
+      { cache, now: NOW, reporter: report.reporter },
     );
 
     // The one it vouched for is still cached and still counted; the one it never
     // reached is short rather than empty.
     expect(summary.unchanged).toBe(1);
-    expect(summary.failed).toHaveLength(1);
-    expect(summary.failed[0]!.channelId).toBe('b');
+    expect(summary.failed).toBe(1);
+    // One channel-day lost, of a request that covered both — which is what
+    // `entries` says and the span it names does not.
+    expect(report.failures).toEqual([
+      expect.objectContaining({ type: 'request:failed', entries: 1 }),
+    ]);
     expect(
       cache.get({ site: 'stream.example', channelId: 'b', day: TODAY })?.programmes,
     ).toHaveLength(1);
@@ -2732,7 +2818,7 @@ describe('what a run reports', () => {
       failed: 1,
       level: 'info',
     });
-    expect(summary.failed).toHaveLength(1);
+    expect(summary.failed).toBe(1);
   });
 
   it('says a failed request once, however many channel-days it took down', async () => {
@@ -2753,7 +2839,7 @@ describe('what a run reports', () => {
 
     // Six channel-days lost, one event about it — which is the difference
     // between one line and six thousand for a site that is down.
-    expect(summary.failed).toHaveLength(6);
+    expect(summary.failed).toBe(6);
     expect(events.filter((event) => event.type === 'entry:failed')).toEqual([]);
     expect(events.filter((event) => event.type === 'request:failed')).toEqual([
       expect.objectContaining({
@@ -2793,16 +2879,5 @@ describe('what a run reports', () => {
     expect(events.filter((event) => event.type === 'site:warning')).toEqual([
       expect.objectContaining({ message: 'the source renamed a channel', level: 'warn' }),
     ]);
-  });
-
-  it('refuses to guess when handed both a reporter and a logger', async () => {
-    await expect(
-      grab([makeConfig({})], {
-        cache: new MemoryCache(),
-        now: NOW,
-        reporter: () => {},
-        logger: () => {},
-      }),
-    ).rejects.toThrow(/either reporter or logger/);
   });
 });

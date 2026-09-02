@@ -9,8 +9,7 @@
 
 import type { KyInstance } from 'ky';
 import PQueue from 'p-queue';
-import type { Emit } from '../core/events.js';
-import { emitter } from '../core/reporters.js';
+import { silent, type Emit } from '../core/events.js';
 import { siteHttp } from './channels.js';
 import type { AnySiteConfig, SiteBackoff } from './types.js';
 
@@ -103,15 +102,9 @@ export function sitePacing(
     signal?: AbortSignal;
     /** Say what the queue did — see `core/events.ts`. */
     emit?: Emit;
-    /**
-     * Progress, line by line.
-     *
-     * @deprecated Pass {@link emit} instead.
-     */
-    log?: (message: string) => void;
   } = {},
 ): SitePacing {
-  const emit = options.emit ?? emitter({ ...(options.log ? { logger: options.log } : {}) });
+  const emit = options.emit ?? silent;
   const queue = requestQueue(config);
   const backoff = config.backoff === false ? undefined : { ...DEFAULT_BACKOFF, ...config.backoff };
   const ceiling = queue.concurrency;

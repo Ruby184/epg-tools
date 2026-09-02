@@ -4,6 +4,8 @@ import type { KyInstance } from 'ky';
 import { describe, expect, it } from 'vitest';
 import { retryAfterMs, sitePacing } from '../src/grabber/pacing.js';
 import type { AnySiteConfig } from '../src/grabber/types.js';
+import { emitter } from '../src/core/reporters.js';
+import { collect } from './reporting.js';
 
 /** A site config with just enough on it for the pacing to be built. */
 function site(overrides: Partial<AnySiteConfig> = {}): AnySiteConfig {
@@ -97,8 +99,8 @@ describe('sitePacing', () => {
     const server = await scripted([{ status: 429 }]);
 
     try {
-      const logs: string[] = [];
-      // Stamped from inside the log callback, which runs in the same tick as
+      const report = collect();
+      // Stamped from inside the reporter, which runs in the same tick as
       // the hold's timer is scheduled. Reading the clock after the request
       // instead would time from somewhere in the middle of the hold — the
       // response still has to make its way back — and call a hold that worked
@@ -107,13 +109,15 @@ describe('sitePacing', () => {
       const { queue, http, dispose } = sitePacing(
         site({ backoff: { fallbackMs: 60, maxMs: 60 } }),
         {
-          log: (message) => {
-            logs.push(message);
+          emit: emitter({
+            reporter: (event) => {
+              report.reporter(event);
 
-            if (message.includes('holding requests')) {
-              heldFrom = Date.now();
-            }
-          },
+              if (event.type === 'pacing:held') {
+                heldFrom = Date.now();
+              }
+            },
+          }),
         },
       );
 
@@ -136,7 +140,7 @@ describe('sitePacing', () => {
 
       expect(queue.isPaused).toBe(true);
       expect(queue.size).toBe(2); // still queued, not thrown away
-      expect(logs).toContain('[example.tv] HTTP 429: holding requests for 60ms');
+      expect(report.messages).toContain('[example.tv] HTTP 429: holding requests for 60ms');
 
       openGate();
       await Promise.all([held, ...waiting]);
@@ -155,15 +159,15 @@ describe('sitePacing', () => {
     const server = await scripted([{ status: 429, headers: { 'retry-after': '600' } }]);
 
     try {
-      const logs: string[] = [];
+      const report = collect();
       const { http, dispose } = sitePacing(site({ backoff: { maxMs: 40 } }), {
-        log: (message) => logs.push(message),
+        emit: emitter({ reporter: report.reporter }),
       });
 
       await hit(http, server.url);
 
       // Ten minutes is what it asked for; a grab is not sitting still for that.
-      expect(logs).toContain('[example.tv] HTTP 429: holding requests for 40ms');
+      expect(report.messages).toContain('[example.tv] HTTP 429: holding requests for 40ms');
       dispose();
     } finally {
       server.close();
@@ -274,9 +278,9 @@ describe('sitePacing', () => {
   });
 
   it('rate-limits by a sliding window, reporting when it is waiting', async () => {
-    const logs: string[] = [];
+    const report = collect();
     const { queue, dispose } = sitePacing(site({ rateLimit: { requests: 2, perMs: 80 } }), {
-      log: (message) => logs.push(message),
+      emit: emitter({ reporter: report.reporter }),
     });
 
     const started: number[] = [];
@@ -288,7 +292,7 @@ describe('sitePacing', () => {
     expect(started).toHaveLength(4);
     // Two through at once, the rest only after the window moves on.
     expect(started[2]!).toBeGreaterThanOrEqual(70);
-    expect(logs).toContain('[example.tv] rate limit reached, waiting for the window');
+    expect(report.messages).toContain('[example.tv] rate limit reached, waiting for the window');
     dispose();
   });
 });

@@ -250,8 +250,7 @@ describe('textReporter', () => {
       { type: 'grab:done', fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 1 },
     ]);
 
-    // The block first, then the summary — the failures are part of what the run
-    // came to rather than a note after it.
+    // The summary first, then the block under it as the detail of "1 failed".
     expect(err.lines).toEqual(['  FAILED [a.tv] one 2026-09-01: the feed went away']);
     expect(out.lines).toEqual(['Grab done: 0 fetched, 0 from cache, 1 failed']);
   });
@@ -299,7 +298,10 @@ describe('textReporter', () => {
     expect(err.lines).toEqual(['FAILED [a.tv] one 2026-09-01: the feed went away']);
   });
 
-  it('flushes on a cancel as well, since a cancelled run is still over', () => {
+  it('drops the block on a cancel, rather than blaming the source for it', () => {
+    // What a cancelled run failed at is mostly the requests the cancel itself
+    // took away, and a screen of those under "Cancelled." would read as a
+    // broken source.
     const err = new Sink();
 
     run(textReporter({ stream: new Sink(), errorStream: err, level: 'error' }), [
@@ -307,7 +309,9 @@ describe('textReporter', () => {
       { type: 'run:cancelled', fetched: 2 },
     ]);
 
-    expect(err.lines).toEqual(['  FAILED [a.tv] one 2026-09-01: the feed went away']);
+    expect(err.lines).toEqual([
+      'Cancelled. 2 channel-day(s) reached the cache; no guide was written.',
+    ]);
   });
 });
 
@@ -403,32 +407,25 @@ describe('emitter', () => {
     expect(emitter({})).toBe(silent);
   });
 
-  it('renders each event back to a line for the logger it replaced', () => {
-    const lines: string[] = [];
+  it('stamps what it passes on, so a reporter is told how loudly', () => {
+    const seen: EpgEvent[] = [];
 
-    const emit = emitter({ logger: (line) => lines.push(line) });
-
-    emit({ type: 'entry:cached', site: 'a.tv', channelId: 'one', day: '2026-09-01' });
-    emit({
-      type: 'entry:failed',
+    emitter({ reporter: (event) => seen.push(event) })({
+      type: 'entry:cached',
       site: 'a.tv',
       channelId: 'one',
       day: '2026-09-01',
-      error: new Error('gone'),
     });
-    // Newer than `logger` ever was, so a caller who passed one does not start
-    // reading a summary its own CLI already prints.
-    emit({ type: 'grab:done', fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 1 });
 
-    expect(lines).toEqual([
-      '[a.tv] one 2026-09-01: fresh in cache, skipping',
-      'FAILED [a.tv] one 2026-09-01: gone',
+    expect(seen).toEqual([
+      {
+        type: 'entry:cached',
+        site: 'a.tv',
+        channelId: 'one',
+        day: '2026-09-01',
+        level: 'debug',
+        phase: 'grab',
+      },
     ]);
-  });
-
-  it('refuses to guess when given both', () => {
-    expect(() => emitter({ reporter: () => {}, logger: () => {} })).toThrow(
-      /either reporter or logger/,
-    );
   });
 });

@@ -203,12 +203,6 @@ export interface BuildGuideOptions {
    */
   reporter?: Reporter;
   /**
-   * Progress, line by line.
-   *
-   * @deprecated Pass {@link reporter} instead.
-   */
-  logger?: (message: string) => void;
-  /**
    * Pretty-print the guide with this indentation (a number of spaces or a
    * string like `'\t'`). Omit for compact output — the default.
    */
