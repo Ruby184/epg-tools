@@ -174,6 +174,22 @@ describe('validateXmltv', () => {
     expect(finding(report, 'unknown-channel')?.examples).toHaveLength(3);
   });
 
+  it('takes back an id past the cap that a later <channel> declares', async () => {
+    // Programmes first, channels after — legal XMLTV, and the order that used
+    // to produce a false `unknown-channel`: more than a thousand distinct ids
+    // overflowed the map of the ones being held, and nothing declared later
+    // could take those occurrences back.
+    const ids = Array.from({ length: 1200 }, (_, i) => `c-${i}`);
+    const report = await validate(
+      guide(ids.map((id) => programme(id, START)).join('') + ids.map((id) => channel(id)).join('')),
+    );
+
+    expect(finding(report, 'unknown-channel')).toBeUndefined();
+    expect(report.ok).toBe(true);
+    expect(report.channels).toBe(1200);
+    expect(report.programmes).toBe(1200);
+  });
+
   it('puts errors first, then whatever happened most', async () => {
     const report = await validate(
       guide(

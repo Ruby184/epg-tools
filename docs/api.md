@@ -248,15 +248,18 @@ await server.closed;          // resolves when it stops
 
 It resolves once listening, and gives back `{ url, port, close, closed }`.
 `options` takes `port`, `host`, `path`, `compress`, `concurrency`,
-`revalidateMs`, and the `signal`, `reporter`, `now`, `offset` and `cache` a run
-takes — a `cache` handed in stays the caller's, and one it opened is closed by
+`revalidateMs`, `sitesMaxAgeMs`, and the `signal`, `reporter`, `now`, `offset`
+and `cache` a run takes — a `cache` handed in stays the caller's, and one it opened is closed by
 `close()`.
 
 The validator is the cache's, not the document's: a guide is a generator, so
 hashing its bytes would mean buffering it. What is read per poll is the window's
 metadata — the same lookups a merge begins with, without the payload reads and
 serializing that follow — at most once per `revalidateMs`, and once for however
-many polls arrive together. See [serving the
+many polls arrive together. Those lookups are keyed by the channel list in hand,
+which is re-resolved when the fingerprint moves and at least every
+`sitesMaxAgeMs` (ten minutes), so that a grab which only adds a channel is not
+invisible until midnight. See [serving the
 guide](./configuration.md#serving-the-guide) for what that costs and saves.
 
 ## Entry points

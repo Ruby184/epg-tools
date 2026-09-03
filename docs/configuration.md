@@ -363,11 +363,18 @@ merge, and `--reporter text -v` shows which of the two a poll got.
 **What decides it.** A guide is a stream, so its bytes cannot be hashed without
 buffering the document this package exists not to buffer. The cache answers
 instead: the newest `grabbedAt` across the window, with how many entries are in
-it — nothing else can change what a merge would produce, because a merge reads
-exactly those entries. That reading is metadata only: the same lookups a merge
-*begins* with, and none of the payload reads, parsing or serializing that
-follow. It is worked out at most once a second (`revalidateMs`), and once for
-however many polls arrive together.
+it. That reading is metadata only: the same lookups a merge *begins* with, and
+none of the payload reads, parsing or serializing that follow. It is worked out
+at most once a second (`revalidateMs`), and once for however many polls arrive
+together.
+
+The one thing it cannot see is a channel that was not in the window when the
+reading was taken: the entries are looked up by the channel list already in
+hand, so a grab that adds a channel and refreshes nothing else writes a key
+nobody asks about. The list is therefore resolved again when the fingerprint
+moves, and in any case once its `sitesMaxAgeMs` (ten minutes) is up — a ceiling
+on how long a new channel can stay invisible, without letting a poll drive the
+request that resolving a fetched channel list can mean.
 
 The guide streams straight into the response, so nothing is held in memory; a
 consumer that hangs up mid-guide stops the merge feeding it. `compress` (`gzip`

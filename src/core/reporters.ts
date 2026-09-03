@@ -517,6 +517,9 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
       ...(counts.fromCache > 0 ? [`${counts.fromCache} cached`] : []),
       ...(counts.unchanged > 0 ? [`${counts.unchanged} unchanged`] : []),
       ...(counts.failed > 0 ? [`${counts.failed} failed`] : []),
+      // Said here too, so moving it out of `failed` does not make a site that
+      // answered nothing vanish from the line until the run is over.
+      ...(counts.sitesFailed > 0 ? [`${count(counts.sitesFailed, 'site')} answered nothing`] : []),
     ].join(' · ');
   };
 
@@ -562,10 +565,13 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
         counts.unchanged++;
         break;
       case 'entry:failed':
-      // A whole site counts once, as the summary counts it — without this the
-      // live line and `Grab done` disagreed about `failed`.
-      case 'site:failed':
         counts.failed++;
+        break;
+      // Not in `failed`: the summary counts a site that answered nothing in
+      // `sitesFailed` instead, and adding it here made the live line say
+      // `1 failed` where `Grab done` said `0 failed, 1 site answered nothing`.
+      case 'site:failed':
+        counts.sitesFailed++;
         break;
       case 'merge:channel':
         merging = true;

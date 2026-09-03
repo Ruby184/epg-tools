@@ -214,7 +214,19 @@ export async function validateXmltv(
   const declared = new Set<string>();
   /** Channels named by a programme before any `<channel>` described them. */
   const pending = new Map<string, number>();
-  let pendingDropped = 0;
+  /**
+   * Undeclared ids past the cap, held by id rather than as a bare count — a
+   * `<channel>` further down the document clears them, and a running total
+   * could not be told which of its occurrences to take back. Bounded the same
+   * way `pending` is, so the two together stay flat in the size of the guide.
+   */
+  const dropped = new Map<string, number>();
+  /**
+   * Occurrences past *both* maps. This one really is unrecoverable: nothing
+   * records which ids they belonged to, so a later `<channel>` cannot take
+   * them back. It takes over two thousand distinct undeclared ids to reach.
+   */
+  let overflow = 0;
   let channels = 0;
   let programmes = 0;
 
@@ -229,6 +241,7 @@ export async function validateXmltv(
     // Whatever named it earlier was right after all: a guide is allowed to put
     // its channels anywhere, whatever the DTD's order suggests.
     pending.delete(channel.id);
+    dropped.delete(channel.id);
 
     if ((channel.displayName ?? []).length === 0) {
       findings.add('channel-without-display-name', channel.id);
@@ -262,10 +275,16 @@ export async function validateXmltv(
       );
     }
 
-    if (!declared.has(programme.channel) && pending.size < MAX_PENDING_CHANNELS) {
-      pending.set(programme.channel, (pending.get(programme.channel) ?? 0) + 1);
-    } else if (!declared.has(programme.channel)) {
-      pendingDropped++;
+    if (!declared.has(programme.channel)) {
+      // An id already being held counts against it however full the map is;
+      // the cap is on how many *distinct* undeclared ids are remembered.
+      if (pending.has(programme.channel) || pending.size < MAX_PENDING_CHANNELS) {
+        pending.set(programme.channel, (pending.get(programme.channel) ?? 0) + 1);
+      } else if (dropped.has(programme.channel) || dropped.size < MAX_PENDING_CHANNELS) {
+        dropped.set(programme.channel, (dropped.get(programme.channel) ?? 0) + 1);
+      } else {
+        overflow++;
+      }
     }
 
     extensionsOf(findings, 'programme', programme);
@@ -315,10 +334,16 @@ export async function validateXmltv(
     }
   }
 
-  if (pendingDropped > 0) {
+  for (const [id, count] of dropped) {
+    for (let i = 0; i < count; i++) {
+      findings.add('unknown-channel', id);
+    }
+  }
+
+  if (overflow > 0) {
     findings.add(
       'unknown-channel',
-      `and ${pendingDropped} more past the first ${MAX_PENDING_CHANNELS}`,
+      `and ${overflow} more past the first ${MAX_PENDING_CHANNELS * 2}`,
     );
   }
 

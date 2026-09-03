@@ -515,6 +515,45 @@ describe('epg', () => {
       expect(stdout).toContain('nothing to report');
     });
 
+    it('reports a missing file as one line, compressed name or not', async () => {
+      const dir = await tempDir();
+      const config = await withGuide(dir);
+      const gone = join(dir, 'nowhere.xml.gz');
+
+      // The plain path always managed this. The compressed one piped the read
+      // into a decompressor, which forwards no error from its source: the
+      // ENOENT went uncaught and the command never settled.
+      const { code, stderr } = await run(['validate', gone, '--config', config]);
+
+      expect(code).not.toBe(0);
+      expect(stderr).toContain('ENOENT');
+      expect(stderr).not.toContain('at Object.');
+    });
+
+    it("reads the guide back with the config's compress, not the extension", async () => {
+      const dir = await tempDir();
+      const guide = join(dir, 'guide.xml');
+
+      // What `writeOutput` would have produced: gzip bytes under a plain name,
+      // because `compress` outranks the extension in both directions. Reading
+      // it back by the extension alone validated gzip as XML.
+      await writeFile(guide, gzipSync(Buffer.from(GUIDE, 'utf8')));
+
+      const config = await configFile(
+        dir,
+        `export default {
+      sites: [],
+      output: ${JSON.stringify(guide)},
+      compress: 'gzip',
+      cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+    };`,
+      );
+
+      const { stdout } = await run(['validate', '--config', config]);
+
+      expect(stdout).toContain('1 channel, 1 programme');
+    });
+
     it('writes one JSON document for --report json', async () => {
       const dir = await tempDir();
       const config = await withGuide(dir);
@@ -686,6 +725,32 @@ describe('epg', () => {
 
     expect(code).toBe(2);
     expect(stderr).toContain('Usage: epg');
+  });
+
+  it('refuses an allowMissing in the config before the run, not after it', async () => {
+    const dir = await tempDir();
+    const config = await configFile(
+      dir,
+      `export default {
+    sites: [${siteSource()}],
+    days: 1,
+    output: ${JSON.stringify(join(dir, 'guide.xml'))},
+    cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+    allowMissing: 'lots',
+  };`,
+    );
+
+    // The flag was checked up front and the config field was not: it was only
+    // resolved once something had already failed, so a bad value threw after
+    // the guide had been written, and only on the nights a day was lost.
+    const { code, stderr } = await run(['grab', '--config', config]);
+
+    // `1`, not the `2` the flag gives: a bad value in a config file is not a
+    // usage error, and nothing here can print a usage line that would help.
+    expect(code).toBe(1);
+    expect(stderr).toContain('Invalid allowMissing value');
+    expect(stderr).toContain('expected a number of channel-days');
+    await expect(stat(join(dir, 'guide.xml'))).rejects.toThrow();
   });
 
   it('picks what the guide keeps with --extensions and --no-extensions', async () => {

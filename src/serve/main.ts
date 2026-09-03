@@ -56,6 +56,18 @@ export const DEFAULT_SERVE_HOST = '127.0.0.1';
  */
 export const DEFAULT_REVALIDATE_MS = 1000;
 
+/**
+ * How long a resolved channel list is kept before it is asked for again.
+ *
+ * Much longer than {@link DEFAULT_REVALIDATE_MS} on purpose. Rereading the
+ * cache's metadata is cheap and happens per second; resolving the *sites* can
+ * mean a request per site, so a poll must never drive one. Between the two, a
+ * changed fingerprint still re-resolves immediately — this is only the floor
+ * under the case the fingerprint cannot see, a grab that adds a channel and
+ * touches nothing already in the grid.
+ */
+export const DEFAULT_SITES_MAX_AGE_MS = 10 * 60 * 1000;
+
 /** How many guides are generated at once, when nothing says. */
 const DEFAULT_CONCURRENCY = 2;
 
@@ -74,6 +86,8 @@ export interface ServeOptions {
    * the machine does.
    */
   concurrency?: number;
+  /** See {@link DEFAULT_SITES_MAX_AGE_MS}. */
+  sitesMaxAgeMs?: number;
   /** See {@link DEFAULT_REVALIDATE_MS}. */
   revalidateMs?: number;
   /**
@@ -213,13 +227,25 @@ function encodingFor(
     return undefined;
   }
 
-  const accepted = String(request.headers['accept-encoding'] ?? '')
-    .split(',')
-    .map((part) => part.split(';')[0]!.trim().toLowerCase());
+  // `gzip;q=0` is a refusal, not an offer — the token alone would read it as
+  // the opposite of what it says.
+  const accepted = new Set(
+    String(request.headers['accept-encoding'] ?? '')
+      .split(',')
+      .map((part) => {
+        const [token, ...params] = part.split(';');
+        const q = params.map((p) => /^\s*q=([\d.]+)\s*$/i.exec(p)).find((match) => match !== null);
+
+        return q !== undefined && Number.parseFloat(q[1]!) === 0
+          ? undefined
+          : token!.trim().toLowerCase();
+      })
+      .filter((name) => name !== undefined && name !== ''),
+  );
 
   const name = compress === 'brotli' ? 'br' : compress === 'zstd' ? 'zstd' : 'gzip';
 
-  return accepted.includes(name) || accepted.includes('*') ? compress : undefined;
+  return accepted.has(name) || accepted.has('*') ? compress : undefined;
 }
 
 /**
@@ -238,6 +264,7 @@ export async function serveGuide(
   const path = options.path ?? config.serve?.path ?? DEFAULT_SERVE_PATH;
   const compress = options.compress ?? config.serve?.compress ?? 'gzip';
   const revalidateMs = options.revalidateMs ?? DEFAULT_REVALIDATE_MS;
+  const sitesMaxAgeMs = options.sitesMaxAgeMs ?? DEFAULT_SITES_MAX_AGE_MS;
 
   const opened = options.cache === undefined;
   const cache = options.cache ?? (await createCacheStore(config, options.signal));
@@ -259,6 +286,7 @@ export async function serveGuide(
 
   let snapshot: Snapshot | undefined;
   let checkedAt = 0;
+  let resolvedAt = 0;
   let inFlight: Promise<Snapshot> | undefined;
 
   const windowOf = (now: Date): { days: string[]; startDay: string; id: string } => {
@@ -298,18 +326,34 @@ export async function serveGuide(
     }
 
     inFlight ??= (async () => {
-      // Over the grid already in hand: a channel list only changes when a grab
-      // has been, and a grab is exactly what the fingerprint detects.
-      const next = await take(now, snapshot?.sites);
+      // Over the grid already in hand: a channel list mostly changes when a
+      // grab has been, and a grab is what the fingerprint detects.
+      //
+      // Mostly, not always — which is the second condition. A grab that adds a
+      // channel and refreshes nothing else touches no key the held grid names,
+      // so the fingerprint over that grid is identical and the new channel
+      // would stay invisible until the day window rolled at midnight. Ageing
+      // the grid out puts a ceiling on that, without letting a poll drive a
+      // request the way resolving on every revalidation would.
+      const held = snapshot;
+      const stale = held === undefined || Date.now() - resolvedAt >= sitesMaxAgeMs;
+      const next = stale ? await take(now) : await take(now, held.sites);
 
-      // And if it has been, the list may have changed with it — so the sites
-      // are resolved again *now*, and the fingerprint taken over what results,
-      // rather than leaving this request with a grid that is out of date.
+      // And if a grab has been, the list may have changed with it — so the
+      // sites are resolved again *now*, and the fingerprint taken over what
+      // results, rather than leaving this request with a grid that is out of
+      // date.
       const fresh =
-        snapshot !== undefined && next.print.etag !== snapshot.print.etag ? await take(now) : next;
+        !stale && held !== undefined && next.print.etag !== held.print.etag
+          ? await take(now)
+          : next;
 
       snapshot = fresh;
       checkedAt = Date.now();
+
+      if (fresh !== next || stale) {
+        resolvedAt = checkedAt;
+      }
 
       return fresh;
     })().finally(() => {
@@ -464,21 +508,29 @@ export async function serveGuide(
   });
 
   const address = server.address() as AddressInfo;
-  const host = address.address === '::' ? '[::]' : address.address;
+  // Any literal IPv6, not just the wildcard: `::1` unbracketed makes an
+  // address no client can parse.
+  const host = address.address.includes(':') ? `[${address.address}]` : address.address;
   const url = `http://${host}:${address.port}${path}`;
 
   let closing: Promise<void> | undefined;
 
   const close = async (): Promise<void> => {
     closing ??= (async () => {
-      await new Promise<void>((resolve) => {
+      const shut = new Promise<void>((resolve) => {
         server.close(() => resolve());
       });
 
       // Every open connection, not just the idle ones: a consumer part way
       // through a guide would otherwise hold the process open for as long as it
       // took to finish reading one nobody is waiting for.
+      //
+      // Before the await, not after: `close` only calls back once the last
+      // response has ended, so a stalled consumer would hold this promise open
+      // forever and the cut-off would never be reached.
       server.closeAllConnections();
+
+      await shut;
       guides.clear();
 
       if (opened) {

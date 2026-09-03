@@ -1,5 +1,6 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { get } from 'node:http';
+import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
@@ -98,6 +99,127 @@ describe('serveGuide', () => {
     expect(again.headers.get('content-type')).toBeNull();
     // But it does carry the validators, which is how the next poll asks again.
     expect(again.headers.get('etag')).toBe(first.headers.get('etag'));
+  });
+
+  it('picks up a channel added by a grab that refreshed nothing else', async () => {
+    // The fingerprint is taken over the grid already in hand, so a grab that
+    // writes *only* a new channel touches no key it names and the etag does not
+    // move. Ageing the resolved list out is what catches it; without that the
+    // channel stayed invisible until the day window rolled at midnight.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    // A fetched list, so that resolving again is what produces a new one — a
+    // plain array would be the same object the snapshot already holds, and
+    // mutating it would hide the very staleness this is about.
+    let lineup = ['one'];
+    const config: EpgConfig = {
+      ...configFor([]),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: () => lineup.map((id) => ({ xmltvId: id, siteId: id, name: id })),
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+    };
+
+    const server = await serve(config, cache, { revalidateMs: 0, sitesMaxAgeMs: 0 });
+
+    expect(await (await fetch(server.url)).text()).not.toContain('<channel id="two">');
+
+    // A targeted grab: the new channel only, nothing rewritten for `one`, so
+    // every key the held grid names still has the `grabbedAt` it had.
+    lineup = ['one', 'two'];
+    await cache.write({ site: 'example.tv', channelId: 'two', day: DAY }, [programme('two', 6)], {
+      grabbedAt: '2026-09-03T04:00:00.000Z',
+    });
+
+    expect(await (await fetch(server.url)).text()).toContain('<channel id="two">');
+  });
+
+  it('brackets a literal IPv6 host in the url it advertises', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    let server: GuideServer;
+
+    try {
+      server = await serve(configFor(['one']), cache, { host: '::1' });
+    } catch {
+      // A machine with no IPv6 loopback has nothing to say about this.
+      return;
+    }
+
+    // `http://::1:8080/...` is not a url anything can parse — only `::` used to
+    // be bracketed, and every other literal went out bare.
+    expect(server.url).toContain('[::1]');
+    expect(new URL(server.url).hostname).toBe('[::1]');
+    expect((await fetch(server.url)).status).toBe(200);
+  });
+
+  it('does not compress for a client that refused it with q=0', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one']), cache);
+    // `gzip;q=0` names the format only to refuse it, which the token alone
+    // reads as the opposite of what it says.
+    const refused = await fetch(server.url, { headers: { 'accept-encoding': 'gzip;q=0' } });
+
+    expect(refused.headers.get('content-encoding')).toBeNull();
+    expect(await refused.text()).toContain('<channel id="one">');
+
+    const asked = await fetch(server.url, { headers: { 'accept-encoding': 'gzip;q=1.0' } });
+
+    expect(asked.headers.get('content-encoding')).toBe('gzip');
+  });
+
+  it('closes while a consumer is part way through a guide', async () => {
+    // Big enough that the body cannot fit in the socket buffers, which on
+    // loopback hold megabytes — at 2.5MB the write still completed and the
+    // connection went idle, which `close` handles on its own. This is about the
+    // one it does not: a write that is still going.
+    const ids = Array.from({ length: 2000 }, (_, i) => `c-${i}`);
+    const cache = cacheWith(
+      Object.fromEntries(
+        ids.map((id) => [
+          id,
+          Array.from({ length: 20 }, (_, h) => ({
+            channel: id,
+            start: new Date(new Date(`${DAY}T00:00:00.000Z`).getTime() + h * 3600000),
+            title: [{ value: `Show ${h} ${'x'.repeat(200)}` }],
+          })),
+        ]),
+      ),
+    );
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(ids), cache);
+
+    // A raw socket rather than an http client: nothing here ever reads, so the
+    // response is guaranteed to still be in flight. `server.close` calls back
+    // only once the last one has ended, so cutting the connections *after*
+    // awaiting it meant `close()` never resolved and `epg serve` hung until a
+    // second Ctrl-C.
+    const socket = connect(server.port, '127.0.0.1');
+
+    await new Promise<void>((resolve) => socket.once('connect', () => resolve()));
+    socket.write(`GET ${new URL(server.url).pathname} HTTP/1.1\r\nHost: localhost\r\n\r\n`);
+    // Long enough for the server to have started writing and filled the buffers.
+    await new Promise<void>((resolve) => setTimeout(resolve, 300));
+
+    try {
+      await expect(
+        Promise.race([
+          server.close().then(() => 'closed'),
+          new Promise((resolve) => setTimeout(() => resolve('hung'), 3000)),
+        ]),
+      ).resolves.toBe('closed');
+    } finally {
+      socket.destroy();
+    }
   });
 
   it('serves a guide with its channels in it on the poll right after a grab', async () => {

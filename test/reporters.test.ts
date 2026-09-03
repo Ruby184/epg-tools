@@ -551,8 +551,12 @@ describe('progressReporter', () => {
       { type: 'site:failed', site: 'a.tv', error: new Error('unreadable') },
     ]);
 
-    // Without this the live line said `0 failed` and `Grab done` said `1`.
-    expect(out.raw).toContain('1 failed');
+    // Where the summary counts it: `sitesFailed`, not `failed`. Adding it to
+    // `failed` was the older reading of "the same way", and it put the live
+    // line at `1 failed` against a `Grab done` that said `0 failed, 1 site
+    // answered nothing`.
+    expect(out.raw).toContain('1 site answered nothing');
+    expect(out.raw).not.toContain('1 failed');
   });
 
   it('is the text one on anything without a cursor to move', () => {

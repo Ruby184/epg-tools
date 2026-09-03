@@ -25,6 +25,7 @@ import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
 import { renderReport, REPORT_FORMATS, validateFile } from './validate.js';
 import type { ReportFormat } from './validate.js';
+import type { CompressionFormat } from '../core/output.js';
 import type { GrabSummary } from '../grabber/types.js';
 
 export const USAGE = `Usage: epg <command> [options]
@@ -255,16 +256,34 @@ async function writeGrabber(
   return 0;
 }
 
+/**
+ * What a config says its guide was written compressed with, if it says.
+ *
+ * `undefined` leaves the extension to decide, exactly as the writing side does
+ * when `compress` is absent.
+ */
+function compressionOf(config: EpgConfig): CompressionFormat | false | undefined {
+  const compress = config.compress;
+
+  if (compress === undefined || compress === false) {
+    return compress;
+  }
+
+  return typeof compress === 'object' ? compress.format : compress;
+}
+
 /** `epg validate [file]` — read a guide, write the report, say whether it passed. */
 async function validateGuide(
   file: string,
   values: { report?: ReportFormat; strict?: boolean },
   stdout: Writable,
   signal: AbortSignal | undefined,
+  compression?: CompressionFormat | false,
 ): Promise<number> {
   const report = await validateFile(file, {
     ...(values.strict === undefined ? {} : { strict: values.strict }),
     ...(signal ? { signal } : {}),
+    ...(compression === undefined ? {} : { compression }),
   });
 
   // On stdout, both formats: the report *is* this command's output, the way a
@@ -442,6 +461,14 @@ async function execute(
     config = { ...config, allowMissing: values['allow-missing'] };
   }
 
+  // Up front, whichever it came from. `fellShort` only resolves it when
+  // something has already failed, so a config with `allowMissing: '5 percent'`
+  // in it would otherwise throw after the guide was written, on the nights a
+  // day happened to be lost and not on the others.
+  if (config.allowMissing !== undefined) {
+    resolveAllowance(config.allowMissing, 'allowMissing');
+  }
+
   if (values.refresh) {
     // The reading of the cache is what this turns off, not the writing: the days
     // still land in it for the run after this one.
@@ -503,7 +530,11 @@ async function execute(
       // Only the no-file form reaches here; the other is answered above, before
       // a config was needed. Validating what this project writes is what the
       // command is usually for, so its `output` is the default.
-      return validateGuide(String(config.output), values, stdout, signal);
+      //
+      // With the config's own `compress`, which outranks the extension the
+      // same way it does on the way out — otherwise `output: 'guide.xml'`
+      // plus `compress: 'gzip'` would be read back as XML it is not.
+      return validateGuide(String(config.output), values, stdout, signal, compressionOf(config));
     case 'serve': {
       const { serveGuide } = await import('../serve/main.js');
       // `runOptions` already carries the reporter, the offset and the signal —
