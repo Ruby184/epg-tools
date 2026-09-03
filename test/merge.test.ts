@@ -686,6 +686,43 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     expect(indented.endsWith('</tv>\n')).toBe(true);
   });
 
+  it('carries the extensions option through to the writer', async () => {
+    const base = {
+      sites: [siteA],
+      cache: createFakeCache({
+        [`site-a.sk|X|${DAY}`]: [
+          prog('X', '2026-01-15T10:00:00Z', 'Správy', 'sk', {
+            extraAttributes: { uniqueID: 'ev-1' },
+            extra: [
+              { name: 'lcn', value: '12' },
+              { name: 'crid', value: 'abc' },
+            ],
+          }),
+        ],
+      }),
+      days: 1,
+      now: NOW,
+    };
+
+    // All of them by default, as a guide for tvheadend wants.
+    const full = await generate(base);
+    expect(full).toContain('uniqueID="ev-1"');
+    expect(full).toContain('<lcn>12</lcn>');
+    expect(full).toContain('<crid>abc</crid>');
+
+    // None of them, which is the DTD-valid document.
+    const plain = await generate({ ...base, extensions: false });
+    expect(plain).not.toContain('uniqueID');
+    expect(plain).not.toContain('<lcn>');
+    expect(plain).not.toContain('<crid>');
+
+    // Or a named few — one grab, three documents from the same cache.
+    const some = await generate({ ...base, extensions: ['lcn'] });
+    expect(some).toContain('<lcn>12</lcn>');
+    expect(some).not.toContain('<crid>');
+    expect(some).not.toContain('uniqueID');
+  });
+
   it("'first-wins' ignores the lower-priority site's programmes", async () => {
     const output = await generate({
       sites: [siteA, siteB],

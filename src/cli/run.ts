@@ -41,6 +41,10 @@ Options:
       --cache-driver <name>  Override where cached days are kept: ndjson, xmltv,
                         sqlite or memory
       --refresh         Refetch every day in the window, ignoring what is cached
+      --extensions <names>  build/merge only: keep only these provider
+                        extensions, comma-separated (e.g. lcn,uniqueID)
+      --no-extensions   build/merge only: leave every provider extension out,
+                        for a guide that validates against the DTD
       --before <day>    prune only: remove days before YYYY-MM-DD (default: today)
       --log-level <l>   How much to report: error, warn, info (default) or debug
   -v, --verbose         Same as --log-level debug
@@ -71,6 +75,26 @@ function dayString(raw: string, flag: string): string {
   }
 
   return raw;
+}
+
+/**
+ * The extension names of `--extensions a,b`, and at least one of them.
+ *
+ * An empty list would be `--no-extensions` said the long way round, and far
+ * more likely a shell that expanded a variable to nothing — which would
+ * silently strip every extension from the guide.
+ */
+function extensionNames(raw: string, flag: string): string[] {
+  const names = raw
+    .split(',')
+    .map((name) => name.trim())
+    .filter((name) => name !== '');
+
+  if (names.length === 0) {
+    throw new OptionError(`Invalid ${flag} value: ${raw} (expected names, or --no-extensions)`);
+  }
+
+  return names;
 }
 
 /** Something the user typed: the usage goes with it, as the grabber does. */
@@ -261,6 +285,10 @@ async function execute(
       // can do.
       'cache-driver': { type: 'string', choices: CACHE_DRIVER_NAMES },
       refresh: { type: 'boolean' },
+      // A list of names, or `--no-extensions` for none of them. A config can
+      // point at a filter of its own by passing a function, which is not
+      // something a command line can do.
+      extensions: { type: 'string', negatable: true, transform: extensionNames },
       before: { type: 'string', transform: dayString },
       quiet: { type: 'boolean', short: 'q' },
       verbose: { type: 'boolean', short: 'v' },
@@ -316,6 +344,12 @@ async function execute(
 
   if (values['cache-driver'] !== undefined) {
     config = { ...config, cache: { ...config.cache, driver: values['cache-driver'] } };
+  }
+
+  // `null` is `--no-extensions` — the third state a negatable option has, and
+  // the one that means "none" rather than "the config decides".
+  if (values.extensions !== undefined) {
+    config = { ...config, extensions: values.extensions ?? false };
   }
 
   if (values.refresh) {

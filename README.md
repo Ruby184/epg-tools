@@ -123,6 +123,7 @@ export default defineConfig({
   days: 14,
   output: 'public/epg.xml',
   // indent: 2,     // pretty-print the guide; omit for compact output (default)
+  // extensions: false,  // leave provider extensions out, for a DTD-valid guide
   cache: {
     dir: '.epg-cache',
     driver: 'ndjson', // or 'xmltv', 'sqlite', or a driver of your own

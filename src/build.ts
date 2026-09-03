@@ -200,6 +200,7 @@ function guideOptions(
     ...(config.merge ? { merge: config.merge } : {}),
     ...(config.meta ? { meta: config.meta } : {}),
     ...(config.indent !== undefined ? { indent: config.indent } : {}),
+    ...(config.extensions !== undefined ? { extensions: config.extensions } : {}),
     ...reported(options),
     ...(options.signal ? { signal: options.signal } : {}),
   };

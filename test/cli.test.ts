@@ -391,6 +391,63 @@ describe('epg', () => {
     expect(stderr).toContain('ndjson, xmltv, sqlite, memory');
   });
 
+  it('picks what the guide keeps with --extensions and --no-extensions', async () => {
+    const dir = await tempDir();
+    const config = await configFile(
+      dir,
+      `export default {
+    sites: [{
+      site: 'example.tv',
+      channels: [{ xmltvId: 'one.example.tv', siteId: '1', name: 'One' }],
+      request: async ({ day }) => ({ day }),
+      parseDay: ({ channel, day }) => [{
+        channel: channel.xmltvId,
+        start: new Date(day + 'T06:00:00.000Z'),
+        title: [{ value: 'Show' }],
+        extraAttributes: { uniqueID: 'ev-1' },
+        extra: [{ name: 'lcn', value: '12' }, { name: 'crid', value: 'abc' }],
+      }],
+    }],
+    days: 1,
+    extensions: ['lcn', 'crid'],
+    output: ${JSON.stringify(join(dir, 'guide.xml'))},
+    cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+  };`,
+    );
+
+    const args = ['build', '--config', config, '--quiet'];
+    const guide = async (): Promise<string> => readFile(join(dir, 'guide.xml'), 'utf8');
+
+    // What the config asked for.
+    expect((await run(args)).code).toBe(0);
+    expect(await guide()).toContain('<lcn>12</lcn>');
+    expect(await guide()).toContain('<crid>abc</crid>');
+    expect(await guide()).not.toContain('uniqueID');
+
+    // A flag overrides it, as everywhere else here.
+    expect((await run([...args, '--extensions', 'uniqueID,lcn'])).code).toBe(0);
+    expect(await guide()).toContain('uniqueID="ev-1"');
+    expect(await guide()).toContain('<lcn>12</lcn>');
+    expect(await guide()).not.toContain('<crid>');
+
+    // And `--no-extensions` is the third state: none, not "the config decides".
+    expect((await run([...args, '--no-extensions'])).code).toBe(0);
+    expect(await guide()).not.toContain('uniqueID');
+    expect(await guide()).not.toContain('<lcn>');
+    expect(await guide()).not.toContain('<crid>');
+  });
+
+  it('refuses an empty --extensions rather than silently stripping every one', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+
+    const { code, stderr } = await run(['build', '--config', config, '--extensions', ' , ']);
+
+    expect(code).toBe(2);
+    expect(stderr).toContain('Invalid --extensions value');
+    expect(stderr).toContain('--no-extensions');
+  });
+
   it('refetches the window for --refresh, and still caches what it fetched', async () => {
     const dir = await tempDir();
     const asked = join(dir, 'asked.txt');

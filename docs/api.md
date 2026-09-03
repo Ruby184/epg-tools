@@ -218,6 +218,13 @@ pretty-print, mirroring `JSON.stringify`: a number of spaces or a string like
 `serializeDocumentFooter`, `serializeProcessingInstruction`, `generateGuide` /
 `writeGuide`, and `defineConfig`.
 
+`extensions` travels with it, through all the same entry points: `false` writes
+a guide with no [provider extensions](./xmltv.md#provider-extensions) in it and
+so one that validates against the DTD, an array of names keeps those, and a
+filter decides one at a time. The cache keeps everything either way, so two
+documents come out of one grab — see [leaving extensions
+out](./xmltv.md#leaving-extensions-out).
+
 ## Entry points
 
 ```ts
