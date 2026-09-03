@@ -1,7 +1,10 @@
 import ky, { type KyInstance } from 'ky';
 import PQueue from 'p-queue';
+import type { CacheStore } from '../cache/types.js';
 import { ChannelBuilder } from '../xmltv/builder.js';
 import type { XmltvChannel } from '../xmltv/types.js';
+import { revalidationHooks } from './revalidate.js';
+import { channelsMaxAgeMs, SiteStateHandle } from './state.js';
 import type { AnySiteConfig, GrabberChannel } from './types.js';
 
 /**
@@ -23,10 +26,31 @@ export function siteHttp(config: AnySiteConfig, signal?: AbortSignal): KyInstanc
 
   return ky.create({
     ...config.ky,
+    // Only for a site that asked. ky hands each `afterResponse` hook a clone of
+    // the response, so a site with no use for conditional requests should not be
+    // paying for one — even a cheap one.
+    ...(config.conditionalGet === true ? { hooks: revalidationHooks(config.ky?.hooks) } : {}),
     ...(signals.length > 0
       ? { signal: signals.length === 1 ? signals[0]! : AbortSignal.any(signals) }
       : {}),
   });
+}
+
+/** What a caller can offer {@link resolveChannels} beyond the site itself. */
+export interface ResolveChannelsOptions {
+  /** The site's client, when the caller already has one. Built otherwise. */
+  http?: KyInstance;
+  signal?: AbortSignal;
+  /**
+   * This site's state, when the caller has opened it — where a cached channel
+   * list is read from and written to. Without one, a site that asked for
+   * `cacheChannels` is simply asked for its list like any other.
+   */
+  state?: SiteStateHandle;
+  /** Fetch the list whatever is cached — what `--refresh` amounts to here. */
+  refresh?: boolean;
+  /** "Now", for reckoning how old a cached list is. Defaults to the real one. */
+  now?: Date;
 }
 
 /**
@@ -40,20 +64,54 @@ export function siteHttp(config: AnySiteConfig, signal?: AbortSignal): KyInstanc
  *
  * Every caller resolves channels through this — the grab, the merge,
  * `--list-channels`, `--configure` and the lineups capability — so a fetched
- * list reaches all of them the same way.
+ * list reaches all of them the same way. Which is also where a site's
+ * `cacheChannels` is honoured: given a state handle, a list still inside its max
+ * age comes back without the source being asked, and a freshly fetched one is
+ * remembered for the next command. The handle is *not* saved here — whoever
+ * opened it saves it once, when it is done with the site.
  */
 export async function resolveChannels(
   config: AnySiteConfig,
-  options: { http?: KyInstance; signal?: AbortSignal } = {},
+  options: ResolveChannelsOptions = {},
 ): Promise<GrabberChannel[]> {
-  if (typeof config.channels !== 'function') {
-    return config.channels;
+  // In a local, so the narrowing survives into the closure below.
+  const source = config.channels;
+
+  if (typeof source !== 'function') {
+    return source;
   }
 
-  return config.channels({
-    http: options.http ?? siteHttp(config, options.signal),
-    ...(options.signal ? { signal: options.signal } : {}),
-  });
+  const fromSource = async (): Promise<GrabberChannel[]> =>
+    source({
+      http: options.http ?? siteHttp(config, options.signal),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+
+  const maxAgeMs = channelsMaxAgeMs(config);
+  const { state } = options;
+
+  // Nothing to read and nothing to keep: the site did not ask for its list to be
+  // cached, or this caller has nowhere to put it.
+  if (maxAgeMs === undefined || state === undefined) {
+    return fromSource();
+  }
+
+  const now = options.now ?? new Date();
+  const group = await state.channels();
+
+  if (options.refresh !== true) {
+    const held = group.fresh(maxAgeMs, now);
+
+    if (held !== undefined) {
+      return held;
+    }
+  }
+
+  const channels = await fromSource();
+
+  group.set(channels, now);
+
+  return channels;
 }
 
 /**
@@ -68,21 +126,43 @@ export async function resolveChannels(
  * `concurrency` defaults to all of them at once — one request each, to one host
  * each; pass the run's `siteConcurrency` to hold it to the same bound the grab
  * itself uses.
+ *
+ * Given a `store`, a site that asked for `cacheChannels` reads its list from
+ * there and writes a fetched one back — one state handle per site, opened and
+ * saved here, since resolving is the whole of what this call does with a site.
  */
 export async function resolveSites(
   sites: AnySiteConfig[],
-  options: { signal?: AbortSignal; concurrency?: number } = {},
+  options: {
+    signal?: AbortSignal;
+    concurrency?: number;
+    /** Where a cached channel list lives. Without it, every list is fetched. */
+    store?: CacheStore;
+    /** Fetch every list whatever is cached — `--refresh`. */
+    refresh?: boolean;
+    now?: Date;
+  } = {},
 ): Promise<AnySiteConfig[]> {
   const queue = new PQueue({ concurrency: Math.max(1, options.concurrency ?? sites.length) });
+  const { store } = options;
 
   return Promise.all(
     sites.map((site) =>
-      queue.add(async (): Promise<AnySiteConfig> => ({
-        ...site,
-        channels: await resolveChannels(site, {
+      queue.add(async (): Promise<AnySiteConfig> => {
+        const state = store === undefined ? undefined : SiteStateHandle.open(store, site.site);
+        const channels = await resolveChannels(site, {
           ...(options.signal ? { signal: options.signal } : {}),
-        }),
-      })),
+          ...(state ? { state } : {}),
+          ...(options.refresh === undefined ? {} : { refresh: options.refresh }),
+          ...(options.now ? { now: options.now } : {}),
+        });
+
+        // Only a list that was fetched is one to write, and the handle knows
+        // whether that happened — so a merge over a cached list touches nothing.
+        await state?.save();
+
+        return { ...site, channels };
+      }),
     ),
   );
 }

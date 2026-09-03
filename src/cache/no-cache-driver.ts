@@ -14,7 +14,7 @@
  */
 
 import { CacheDriverBase } from './driver.js';
-import type { CacheDriver, FoundEntry, FoundMeta, StoredProgramme } from './types.js';
+import type { CacheDriver, FoundEntry, FoundMeta, FoundState, StoredProgramme } from './types.js';
 
 export class NoCacheDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
   async readMeta(): Promise<FoundMeta | undefined> {
@@ -32,4 +32,17 @@ export class NoCacheDriver extends CacheDriverBase implements CacheDriver<Stored
   async prune(): Promise<number> {
     return 0;
   }
+
+  /**
+   * Nothing is remembered here either, which is the honest answer to the state
+   * trio rather than a gap: a site asking what it knew last run learns nothing,
+   * and goes and finds out.
+   */
+  async readState(): Promise<FoundState | undefined> {
+    return;
+  }
+
+  async writeState(): Promise<void> {}
+
+  async deleteState(): Promise<void> {}
 }

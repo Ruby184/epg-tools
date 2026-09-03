@@ -57,7 +57,36 @@ Writing back out mirrors it — `writeXmltvStream` (async generator of string ch
 
 ## Quick start
 
-Create `epg.config.ts`:
+Already have a guide to point at? Someone else's `xmltv.xml.gz` is a source with
+nothing to write:
+
+```ts
+import { defineConfig, defineXmltvSite } from 'epg-tools';
+
+export default defineConfig({
+  sites: [defineXmltvSite({ site: 'published.example', url: 'https://example.test/guide.xml.gz' })],
+  output: 'public/epg.xml',
+});
+```
+
+The document is streamed through the parser and split into the cache a
+channel-day at a time, never held whole. On a 43 MiB guide — 1,000 channels over
+a week, 126,000 programmes:
+
+| | smallest heap it finishes in |
+|---|---|
+| streamed and split | **40 MiB** |
+| parsed whole, then split | **192 MiB** |
+
+The first number stays where it is as the guide grows; the second follows the
+document. Channels come from the guide's own head rather than a list you
+maintain, the next run [asks whether anything
+changed](./docs/site-config.md#asking-only-when-it-is-worth-it) instead of
+downloading again, and what comes out merges with any hand-written site below.
+See [a published guide as a source](./docs/site-config.md#a-published-guide-as-a-source).
+
+For a source with no guide to publish, write the site yourself. Create
+`epg.config.ts`:
 
 ```ts
 import { defineConfig, defineSiteConfig } from 'epg-tools';
@@ -141,8 +170,11 @@ into place, so a reader never sees half a guide.
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
-| `-q, --quiet` | no progress on stdout; failures still go to stderr |
-| `-v, --version` | print the package name and version |
+| `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
+| `-v, --verbose` | same as `--log-level debug`; `-q, --quiet` is `--log-level error` |
+| `--reporter <name>` | `progress` (default — a live line on a terminal, `text` anywhere else), `text`, or `json` for one object per line |
+| `--failures <how>` | `block` (default) — one capped block at the end — or `inline` |
+| `-V, --version` | print the package name and version |
 | `-h, --help` | print the usage |
 | `--description`, `--grabber-version`, `--force` | `init-grabber` only — see [XMLTV grabber](./docs/tv-grab.md) |
 

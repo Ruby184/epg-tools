@@ -4,6 +4,7 @@ Everything the `epg` CLI does is available as a library. The package is
 **ESM-only** and ships types for every entry point.
 
 - [Running a build](#running-a-build)
+- [Reporting what a run is doing](#reporting-what-a-run-is-doing)
 - [Streaming a guide](#streaming-a-guide)
 - [Entry points](#entry-points)
 - [Export map](#export-map)
@@ -11,10 +12,10 @@ Everything the `epg` CLI does is available as a library. The package is
 ## Running a build
 
 ```ts
-import { build, runGrab, runMerge } from 'epg-tools';
+import { build, runGrab, runMerge, textReporter } from 'epg-tools';
 import config from './epg.config.ts';
 
-const summary = await build(config, { logger: console.log });
+const summary = await build(config, { reporter: textReporter({ stream: process.stdout }) });
 console.log(summary); // { fetched, fromCache, failed }
 ```
 
@@ -26,15 +27,23 @@ console.log(summary); // { fetched, fromCache, failed }
 | `guideStream(source, options?)` | The merged guide as an async generator of XML chunks. |
 | `createCacheStore(config)` | The cache a config describes: a `CacheManager` over the driver its `driver` names or builds. |
 
-`GrabSummary` counts `fetched` (channel-days that went to the network) and
-`fromCache` (skipped because the cache was fresh); `failed` is the **list** of
-errors, not a count, so `summary.failed.length` is what to check.
+`GrabSummary` counts `fetched` (channel-days that went to the network),
+`fromCache` (skipped because the cache was fresh), `empty`, `unchanged` and
+`failed` — five numbers, and nothing that grows with the size of the guide.
 
-A `failed` entry names the channel-day it is about, except where the failure is
-the whole site's — a site that cannot be read at all, because it is missing
-`site`, `channels`, `request` or `parseDay`, is one entry with `channelId` and
-`day` as `*`. That is checked before the site's first request, and it fails only
-that site: the others in the same run carry on.
+`failed` is a **count** — one per channel-day that could not be fetched, and
+one per site that could not be run at all. A site counts once rather than per
+channel-day because there is no grid to spread it over: a site that could not be
+read has no channel list, so what it would have covered is not knowable. Which
+makes it "things that went wrong" rather than strictly channel-days, and is why
+non-zero is the exit code either way.
+
+It used to be the errors themselves, which for a site that is down meant seven
+thousand live `Error`s with stacks retained for the length of the run. What each
+failure *was* arrives as it happens, as an `entry:failed`, `request:failed` or
+`site:failed` event — see [reporting what a run is doing](#reporting-what-a-run-is-doing)
+— so a caller that wants the list keeps one of its own and decides how long it
+may grow.
 
 `build`, `runGrab`, `runMerge` and `guideStream` all take either shape — a
 plain `EpgConfig` or a `defineConfig` factory still waiting for its answers —
@@ -58,9 +67,124 @@ await using cache = await createCacheStore(config);
 |---|---|---|---|
 | `now` | `Date` | the current time | The reference for staleness and the `grabbedAt` stamp — and, unless `offset` says otherwise, the first day of the window. Pass one to make a run reproducible in a test. |
 | `offset` | `number` | `0` | Shift the window this many days from `now`'s day; may be negative. `now` itself is unchanged, so staleness and pruning keep using the real current time. |
-| `logger` | `(line: string) => void` | none | Progress, line by line. Omit for silence. |
+| `reporter` | `(event: EpgEvent) => void` | none | Where the run's events go — see [reporting what a run is doing](#reporting-what-a-run-is-doing). Omit for silence. |
 | `cache` | `CacheStore` | the one the config describes | Use this store instead. It stays the caller's — nothing here closes what it did not open — which is for a process running several builds, or a test with a store already in hand. |
 | `signal` | `AbortSignal` | none | Cancel the run — see [Cancelling a run](./configuration.md#cancelling-a-run). A grab resolves with the partial summary; a merge rejects, and the guide it was writing is discarded rather than replacing the one in place. `build` skips the merge entirely if the grab was cancelled. |
+
+## Reporting what a run is doing
+
+A run does not print anything. It **emits events**, and what to do with them is
+the caller's:
+
+```ts
+import { build, textReporter } from 'epg-tools';
+
+await build(config, {
+  reporter: textReporter({ stream: process.stdout, level: 'debug' }),
+});
+```
+
+A reporter is a function of one argument, so anything can be one:
+
+```ts
+await build(config, {
+  reporter: (event) => {
+    if (event.type === 'entry:failed') {
+      metrics.increment('epg.failed', { site: event.site });
+    }
+  },
+});
+```
+
+Every event carries a `type`, the fields that type is about, a `level`
+(`error`, `warn`, `info`, `debug`) and a `phase` (`run`, `grab`, `merge`,
+`prune`). The level and phase follow from the type rather than being chosen at
+the call site — `EVENT_KINDS` is the whole table, and it is the whole answer to
+"what does the default verbosity show?".
+
+| group | types |
+|---|---|
+| the run | `run:cancelled`, `grab:done` |
+| a site | `site:started`, `site:done`, `site:failed`, `site:note`, `site:warning` |
+| one channel-day | `entry:cached`, `entry:fetched`, `entry:appended`, `entry:unchanged`, `entry:failed` |
+| one request | `request:started`, `request:done` (with `ms`), `request:failed` |
+| a whole-document source | `stream:gaps`, `stream:ignored` |
+| pacing | `pacing:held`, `pacing:slowed`, `pacing:recovered`, `pacing:rateLimit` |
+| merging, tidying | `merge:channel`, `merge:done`, `prune:done` |
+
+Two things about the shape are deliberate, and both are the difference between a
+structured sink and a string one. **A failed request is one event, not one per
+channel-day it covered** — `request:failed` carries `entries`, so a site that is
+down says so once rather than seven thousand times, and no `entry:failed` is
+emitted for those. And **`site` is a field**, never a prefix: a reporter that
+shows it decides how, and a single-site grabber leaves it out.
+
+**Filtering is a reporter's job and happens nowhere else.** A sink of your own
+is told everything, which is what makes one worth writing; the ones below take a
+`level` and drop what is under it.
+
+### The ones this package ships
+
+Each is built by a function that takes options, so naming one and configuring it
+are the same act:
+
+| built by | writes |
+|---|---|
+| `textReporter({ stream, errorStream?, level?, failures?, failureCap?, prefix? })` | lines of text — what a person reads and a CI log keeps |
+| `jsonReporter({ stream, level?, pretty? })` | one JSON object per line, for a pipeline |
+| `progressReporter({ stream, … })` | one line, rewritten in place — `textReporter`'s options, plus a cursor |
+
+### Naming one in a config
+
+`cache.driver` takes a name or a factory, and a reporter works the same way, so
+a config file can choose without the caller writing code:
+
+```ts
+export default defineConfig({
+  reporter: 'json',
+  // or, configured:
+  reporter: ({ stdout, level }) => textReporter({ stream: stdout, level, failures: 'inline' }),
+  // …
+});
+```
+
+A factory is handed `{ stdout, stderr, level, failures? }` — the streams the
+command itself was given and what it was asked for, which is what keeps a
+command something a test can drive. `REPORTER_NAMES` is the list of names, and
+`reporterFor(nameOrFactory, runtime)` does the resolving; `--reporter` overrides
+the config, as a flag does everywhere else here, but only among the names, since
+a command line cannot pass a function.
+
+`textReporter` owns the one policy `render` cannot: what to do with a failure.
+`failures: 'block'` (the default) holds them and writes one block, capped at
+`failureCap` (20, `0` for all), when the run finishes — which keeps a site that
+is down from burying the progress it interleaved with. `failures: 'inline'`
+writes each where it happens and holds nothing, for a log where interleaving is
+the point. The collecting and the flushing happen whatever the `level` is: asking
+for errors only must still end with the errors.
+
+`progressReporter` is what `site:started` exists for: by the time it fires the
+planner has resolved the channel list and swept the cache, so `entries` — the
+channel-days that will actually be fetched — is a denominator that is real. It
+measures against those and not against `requests`, because a whole-document
+source makes *one* request and two thousand channel-days out of it. Underneath
+it is a `textReporter`, because a warning, a failure, a site's own message and
+the summary are all things to keep: the line is erased, they are written, and it
+is drawn again. It draws only at `level: 'info'` and only on a stream with a
+cursor to move; anywhere else — a pipe, a file, `TERM=dumb`, `--verbose` — it
+*is* that text reporter, so what a script reads never depends on whether someone
+was watching.
+
+`render(event, prefix?)` is the line by itself, for a caller who wants the text
+and not the policy — it answers `undefined` for a failure, which
+`renderFailure(event, prefix?, cause?)` covers.
+
+At `debug`, a failure line carries its `cause` chain. It is not there by default
+because a chain per failure is noise until you are looking for one — but the run
+builds them, and `errorMessage` reads `.message` alone, so "this channel-day is
+unchanged, but nothing is cached for it" used to arrive without the `304` that
+said so. `errorChain(error)` is the same walk, exported for a caller doing its
+own rendering.
 
 ## Streaming a guide
 
@@ -119,7 +243,9 @@ want is to read or write XMLTV; and a handful of names live only on a subpath
 |---|---|
 | Config | `defineConfig`, `resolveConfigSource` |
 | Answers | `createConfigContext`, `defaultsReader`, `envReader` |
-| Errors | `GrabberError` |
+| Errors | `GrabberError`, `errorMessage`, `errorChain` |
+| Events | `LEVELS`, `EVENT_KINDS`, `atLevel` |
+| Reporters | `textReporter`, `jsonReporter`, `render`, `renderFailure`, `isFailure`, `reporterFor`, `REPORTER_NAMES`, `DEFAULT_FAILURE_CAP` |
 | Runners | `build`, `runGrab`, `runMerge`, `guideStream`, `createCacheStore` |
 | Days | `toDayString`, `dayToDate`, `addDays`, `diffDays`, `dayRange` |
 | Options parsing | `parseOptions`, `OptionError` |
@@ -149,9 +275,10 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 
 `CacheManager`, the drivers `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`,
 `MemoryCacheDriver` and `NoCacheDriver` with the abstract `FsCacheDriver` and
-`CacheDriverBase` they build on, `CACHE_SCHEMA`, `isStale`,
+`CacheDriverBase` they build on, `CACHE_SCHEMA`, `STATE_SCHEMA`, `isStale`,
 `DEFAULT_STALENESS`, and the `CacheStore` / `CacheDriver` /
 `ChannelDayKey` / `CacheEntryMeta` / `StoredEntryMeta` / `StoredProgramme` /
+`StateEntry` / `StoredStateMeta` / `FoundState` /
 `StalenessPolicy` / `CacheDriverName` types.
 
 A cache is two pieces. A **driver** answers for one store — a directory of
@@ -167,8 +294,10 @@ const cache = new CacheManager({ driver: new FsNdjsonCacheDriver({ dir }) });
 ```
 
 A driver is a small thing to write: `readMeta`, `read`, `write`, `delete`,
-`prune`, `toStored` / `fromStored`, and — if it has them to offer — `readMetas`
-and `close`. It reads and writes programmes in whatever form it keeps them —
+`prune`, `toStored` / `fromStored`, the three that keep [a site's
+state](#what-a-site-remembers-between-runs) — `readState`, `writeState`,
+`deleteState` — and, if it has them to offer, `readMetas` and `close`. It reads
+and writes programmes in whatever form it keeps them —
 `TStored`, which only it knows about — and the manager is what calls `toStored` /
 `fromStored`, at the two moments a programme crosses into the store and back, so
 no driver has to remember to. `read` and `readMeta` return `undefined` when there
@@ -185,6 +314,44 @@ underneath: **one batch is one piece of work**, so an implementation must not
 answer fourteen keys by starting fourteen reads at once — the caller has already
 decided how many of these to have in flight, and for a cache of files that bound
 is what keeps the descriptors down.
+
+### What a site remembers between runs
+
+A cache holds one more thing besides listings: what a site would otherwise have
+to fetch again to get back to where it was — a channel list it was given once, an
+`ETag` for a document it has already read, a token, a cursor. `CacheStore` keeps
+it as one small blob per `(site, key)`:
+
+```ts
+await cache.setState('webtv.sk', 'channels', channels);
+
+const held = await cache.getState('webtv.sk', 'channels');
+// { data: [...], meta: { writtenAt, schema, writtenBy } }
+```
+
+`getState` answers `undefined` for a group nothing has written — and for one the
+store cannot vouch for, which it removes on the way, so the group reads as never
+written and whoever wanted it fetches it again. The envelope is stamped by the
+manager exactly as an entry's meta is; `writtenAt` is the one field a caller may
+set, so a run can stamp what it remembers with its own "now". Its `schema` is
+`STATE_SCHEMA`, a smaller question than `CACHE_SCHEMA`: it describes the
+*wrapper*, so what is inside a group can move on without voiding cached listings
+or the group next to it.
+
+Grouped by key rather than kept as one object per site, and the third reason is
+the one that matters: a `merge` reading a channel list should not have to parse
+every url the last grab revalidated; refreshing one group must not rewrite the
+megabytes beside it; and two runs writing different groups cannot stand on each
+other. A driver stores the bytes and never learns what is in them — which also
+leaves it free to keep a group however it likes, an append-log replayed on read
+included, so long as `readState` answers with what the last `writeState` was
+given.
+
+`FsCacheDriver` puts each group in `<dir>/<site>/<key>.json`, beside the
+channel directories of the same site; a prune only ever looks at the day files,
+so state outlives every listing a site has. `SqliteCacheDriver` keeps a row per
+group. `MemoryCacheDriver` copies in and out, as it does with programmes.
+`NoCacheDriver` remembers nothing, which is the honest answer rather than a gap.
 
 Start from **`CacheDriverBase`** and the storing is already answered. It offers
 two overridable pairs, because they are two questions:
@@ -318,16 +485,47 @@ grabbed again.
 
 ### `epg-tools/grabber`
 
-`grab`, `defineSiteConfig`, `resolveChannels`, `resolveSites`, `siteHttp`,
-`sitePacing`, `retryAfterMs`, `channelElement`, `defaultChannelInfo`.
+`grab`, `defineSiteConfig`, `defineStreamSiteConfig`, `resolveChannels`,
+`resolveSites`, `siteHttp`, `sitePacing`, `retryAfterMs`, `channelElement`,
+`defaultChannelInfo`, `SiteStateHandle`, `StateKey`,
+`TrackedMap`, `channelsMaxAgeMs`, `DEFAULT_CHANNELS_MAX_AGE_DAYS`,
+`UnchangedError`, `isUnchanged`.
 
-`resolveChannels(site, { http?, signal? })` returns a site's channels whichever
-form they came in — a list or a fetched one — and `resolveSites(sites, {
-signal?, concurrency? })` does it for several, which is what `build` uses to
-fix the list across the grab and the merge. `siteHttp(config, signal?)` builds
-the site's ky instance, and `sitePacing(config, { signal?, log? })` its queue.
-`channelElement(config, channel)` is what every `<channel>` in the output goes
-through — the site's `channelInfo` if it has one, `defaultChannelInfo` if not.
+A site comes in two shapes and `grab` takes either: `defineSiteConfig` for one
+that fetches a request at a time and parses each channel-day out of it, and
+`defineStreamSiteConfig` for one that [answers its whole window in one
+pass](./site-config.md#sites-that-answer-in-one-pass). `AnySiteConfig` is the
+union, which is what a list of sites holds.
+
+`resolveChannels(site, { http?, signal?, state?, refresh?, now? })` returns a
+site's channels whichever form they came in — a list or a fetched one — and
+`resolveSites(sites, { signal?, concurrency?, store?, refresh?, now? })` does it
+for several, which is what `build` uses to fix the list across the grab and the
+merge. Given a `store`, both honour a site's
+[`cacheChannels`](./site-config.md#keeping-a-fetched-list): a list still inside
+its max age comes back without the source being asked. `siteHttp(config,
+signal?)` builds the site's ky instance, and `sitePacing(config, { signal?, emit?
+})` its queue. `channelElement(config, channel)` is what every `<channel>` in the
+output goes through — the site's `channelInfo` if it has one,
+`defaultChannelInfo` if not.
+
+**`SiteStateHandle`** is how [what a site
+remembers](#what-a-site-remembers-between-runs) is held for the length of a run —
+`grab` opens one per site, and code driving a grab of its own can too:
+
+```ts
+const state = SiteStateHandle.open(cache, 'example.tv');
+const maxAge = channelsMaxAgeMs(site);                     // what the site asked for
+
+(await state.channels()).fresh(maxAge ?? 0, new Date());   // the list, while it lasts
+(await state.bag()).set('cursor', 42);                     // the site's own Map
+await state.save();                                        // the changed groups only
+```
+
+Each group is read on first ask and remembered, so asking twice — or from two
+places at once — costs one read, and `save` writes only what changed. `bag(key?)`
+names another group when one bag is not enough; both hand back a **`TrackedMap`**,
+a `Map` that records which keys were touched so nothing untouched is rewritten.
 
 ### `epg-tools/merge`
 

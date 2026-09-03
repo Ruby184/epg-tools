@@ -18,6 +18,7 @@ accepted) and the type of a channel's `data` from what `channels` returns.
 - [Requests and parsing](#requests-and-parsing)
   - [Building programmes](#building-programmes)
   - [The `<channel>` element](#the-channel-element)
+  - [Saying something](#saying-something)
 - [Batching](#batching-how-much-one-request-covers)
 - [HTTP settings and proxies](#http-settings-and-proxies)
 - [Rate limits and backoff](#rate-limits-and-backoff)
@@ -28,8 +29,11 @@ accepted) and the type of a channel's `data` from what `channels` returns.
 |---|---|---|---|
 | `site` | `string` | **required** | Unique site identifier, e.g. `webtv.sk`. Used as the cache namespace. |
 | `channels` | `GrabberChannel[]` or `(ctx) => GrabberChannel[] \| Promise<…>` | **required** | The channels to grab, written out or [fetched](#a-channel-list-that-has-to-be-fetched). |
-| `request` | `(ctx) => Promise<TRaw>` | **required** | Fetch one request's raw data. The context's shape comes from `batching`. |
-| `parseDay` | `(ctx) => ParsedProgramme[] \| Promise<…>` | **required** | Turn part of a response into one channel-day's programmes. Called once per channel-day. May return builders, plain objects, or a mix. |
+| `cacheChannels` | `boolean \| { maxAgeDays? }` | off | Keep a **fetched** channel list in the cache, so the next command reads it instead of asking the source — see [keeping a fetched list](#keeping-a-fetched-list). `true` means a day. |
+| `conditionalGet` | `boolean` | off | Ask the source whether anything has changed, and keep what is cached when it says no — see [asking only when it is worth it](#asking-only-when-it-is-worth-it). No code changes in the site. |
+| `request` | `(ctx) => Promise<TRaw>` | **required**\* | Fetch one request's raw data. The context's shape comes from `batching`. |
+| `parseDay` | `(ctx) => ParsedProgramme[] \| Promise<…>` | **required**\* | Turn part of a response into one channel-day's programmes. Called once per channel-day. May return builders, plain objects, or a mix. |
+| `stream` | `(ctx) => AsyncIterable<StreamedChannelDay>` | — | \*Instead of `request` and `parseDay`: answer the whole window in one pass, yielding each channel-day as it is complete — see [sites that answer in one pass](#sites-that-answer-in-one-pass). |
 | `channelInfo` | `(channel, element) => XmltvChannel \| ChannelBuilder` | `defaultChannelInfo` — id, display name and logo | Build the `<channel>` element for a channel. |
 | `transform` | `(programme, ctx) => XmltvProgramme \| null` | — | A last say over each of this site's programmes as the cache is **read** — see [fixing up one source](#fixing-up-one-source). |
 | `days` | `number` | the config's `days`, then `7` | Override how many days this site grabs. |
@@ -113,6 +117,34 @@ themselves, as does `--list-channels`; [`resolveChannels` and
 `resolveSites`](./api.md#epg-toolsgrabber) are exported for code of your own
 that wants a site's channels without caring which form they came in.
 
+### Keeping a fetched list
+
+One process resolving once is not the same as one *machine* resolving once:
+`epg grab` and then `epg merge` are two commands and each asks. `cacheChannels`
+puts the list in the cache instead, [beside the
+listings](./api.md#what-a-site-remembers-between-runs):
+
+```ts
+const example = defineSiteConfig({
+  site: 'example.tv',
+  cacheChannels: true,             // a day; { maxAgeDays: 7 } for longer
+  async channels({ http }) { /* … */ },
+  // …
+});
+```
+
+Worth turning on when fetching the list is not free — a paginated API, a list of
+thousands, a request that has to be paid for some other way — and worth leaving
+off when it is, since a channel added to the source then turns up on the next run
+rather than a day later. It applies to the function form only; a list written out
+in the config is already there.
+
+Two things to know. The list goes through JSON, so a channel's `data` must
+survive that: a `Date` or a `Map` in there comes back a string or `{}`, and every
+run but the one that fetched it sees the round-tripped form. And `--refresh`
+fetches the list whatever is cached, because asking the source is what that flag
+means.
+
 ## Requests and parsing
 
 `request` fetches, `parseDay` interprets. They are separate because one
@@ -130,6 +162,7 @@ What a `parseDay` call is given:
 | `programme` | `(start, title, options?) => ProgrammeBuilder` | A [builder bound to this channel-day](#building-programmes). |
 | `http` | `KyInstance` | The site's client — the very instance `request` was handed. See [a parse that needs another request](#a-parse-that-needs-another-request). |
 | `paced` | `<T>(task) => Promise<T>` | Run a request through the site's queue, so its `concurrency`, `rateLimit` and backoff apply to it. |
+| `state` | `Map<string, unknown>` | What this site [remembers between runs](#remembering-something-between-runs). |
 | `signal` | `AbortSignal \| undefined` | Already applied to `http`; here for work that does not go through it. |
 
 ```ts
@@ -167,6 +200,46 @@ programme(zonedXmltvDate(item.start, 'Europe/Bratislava'), item.title);
 
 A failed `request` fails every channel-day it covered; one channel-day's
 `parseDay` error only drops that channel-day.
+
+### Remembering something between runs
+
+`request` and `parseDay` are both handed `state`, an ordinary `Map` the site can
+put things in — read from the cache at the start of the site's run, written back
+at the end if anything changed:
+
+```ts
+async request({ channel, day, http, state }) {
+  let token = state.get('token') as string | undefined;
+
+  if (token === undefined) {
+    token = (await http.post('session').json<{ token: string }>()).token;
+    state.set('token', token);          // synchronous; saved once, for next time
+  }
+
+  return http.get(`epg/${channel.siteId}/${day}`, {
+    headers: { authorization: `Bearer ${token}` },
+  }).json();
+}
+```
+
+For what a site would otherwise fetch again to get back to where it was: a
+token, a cursor, a page count, an id it has already dealt with. Four things are
+worth knowing.
+
+- It is **one `Map` per site for the whole run**, not one per channel-day. A
+  value written by one request is there for every later request and for every
+  `parseDay`, and two of this site's pipelines running at once share it.
+- Whatever goes in must survive `JSON.stringify` — it is a cache file.
+- A store that remembers nothing (`NoCacheDriver`, a read-only filesystem) hands
+  over an empty `Map` at the start of every run. Nothing breaks; nothing carries
+  over.
+- Two `epg grab` processes over the same site do not queue behind each other, so
+  the last one to finish is the one whose state is kept. It is a cache, not a
+  database.
+
+Nothing else in the package reads it, and it is stored [beside the
+listings](./api.md#what-a-site-remembers-between-runs) — `state.json` in the
+site's cache directory.
 
 ### A parse that needs another request
 
@@ -305,6 +378,48 @@ Everything that emits a `<channel>` goes through this — the merge and the
 grabber's `--list-channels` — so a channel is described identically wherever it
 turns up.
 
+### Saying something
+
+Every context — `channels`, `request`, `parseDay`, `stream` — carries `log` and
+`warn`. They take one line each and the site's name is added for you, so say
+what happened rather than who it happened to:
+
+```ts
+const example = defineSiteConfig({
+  site: 'example.tv',
+  async request({ channel, day, http, log }) {
+    log(`asking for ${channel.siteId}`);
+
+    return http.get(`epg/${channel.siteId}/${day}`).json();
+  },
+  parseDay({ payload, programme, warn }) {
+    return payload.items.flatMap((item) => {
+      if (item.start === undefined) {
+        warn(`skipped an item with no start time`);
+
+        return [];
+      }
+
+      return programme(new Date(item.start), item.title);
+    });
+  },
+});
+```
+
+The difference between them is what survives a run asked to be quiet:
+
+| | shown at | for |
+|---|---|---|
+| `log` | the run's default verbosity | progress — what is being asked for, what came back |
+| `warn` | always, down to errors only | a signal — the source has changed shape, something was skipped |
+
+Neither is `console.log`, and that is the point: there is no `console` call
+anywhere in this package, because a `tv_grab_*` writes its guide to stdout and
+one stray line in the middle of it is a broken document. Both of these go
+wherever the run's own messages go, which the caller chose — a
+[reporter](./api.md#reporting-what-a-run-is-doing), a file, `--quiet`, or
+nothing at all.
+
 ## Batching: how much one request covers
 
 A site has one `request`, and `batching` says how much of the channel × day
@@ -390,6 +505,205 @@ throttle whole requests. Batching both axes at once is the one case where a
 request can span a channel-day that was already fresh — narrow the query with
 `channelDays`, or answer the whole rectangle and let the extra be ignored: a
 fresh channel-day is neither parsed nor rewritten either way.
+
+## Asking only when it is worth it
+
+A stale channel-day is not a missing one: it is usually there and merely old
+enough to ask about again. `conditionalGet` asks *whether* rather than *for*,
+and the site writes no code for it:
+
+```ts
+const example = defineSiteConfig({
+  site: 'example.tv',
+  conditionalGet: true,
+  async request({ channel, day, http }) {
+    return http.get(`epg/${channel.siteId}/${day}`).json(); // unchanged
+  },
+  // …
+});
+```
+
+Two hooks go into the site's own client. One sends `If-None-Match` or
+`If-Modified-Since`; the other turns a `304` into an `UnchangedError`, which
+reaches out of `request` — or `stream` — without either of them mentioning it,
+and tells the run to keep every channel-day that request was for. They are
+counted in `unchanged` rather than `fetched`, nothing is written, and `grabbedAt`
+is left where it was, so the next run asks the same cheap question:
+
+```
+Grab done: 0 fetched, 0 from cache, 3 unchanged, 0 failed
+```
+
+What it asks with, in order: an `ETag` the source gave last time, then a
+`Last-Modified`, then — with neither stored — the **`grabbedAt` of the entries
+themselves**, which is a fair thing to ask "has it changed since?" with and needs
+nothing remembered at all. Whatever a source answers with is kept in the cache
+[beside the listings](./api.md#what-a-site-remembers-between-runs) and is dropped
+when the channel-days it covered leave the window.
+
+**A validator is never sent where a 304 could not be honoured**, and each of
+those is a way one could do damage:
+
+| the run refuses when | because a 304 would otherwise |
+|---|---|
+| a channel-day this request covers has nothing cached | leave a hole in the guide, silently |
+| one is past `maxAgeDays` | let a source with a lying `Last-Modified` freeze the guide for good rather than for a week |
+| the run is `--refresh` | be the opposite of what the flag asks for |
+
+The first of those has a consequence worth knowing in advance: **a window that
+has rolled onto a new day asks outright.** Run daily and the last day of the
+window is one nothing is cached for, so the request covering it cannot honour a
+304 — which for a [whole-document source](#a-published-guide-as-a-source) means
+the document is downloaded. What `conditionalGet` saves is every *other* run:
+the second and third grab of the same day, a `build` after a `grab`, a retry
+after a failure. Run it every few hours, as a guide that changes once a day
+deserves, and all but one of those runs costs a `304`.
+
+**Off by default, and worth understanding before turning it on.** It makes any
+304 from any request inside `request` mean "nothing changed for these
+channel-days" — true of a source whose channel-day comes from one request, wrong
+for one that pages through several. Send `context: { revalidate: false }` with a
+request that should never be asked conditionally:
+
+```ts
+async request({ channel, day, http }) {
+  const index = await http.get(`epg/${channel.siteId}/${day}`).json<Index>();
+  const pages = await Promise.all(
+    index.pages.map((page) =>
+      // A 304 here would say nothing about the channel-day as a whole.
+      http.get(page, { context: { revalidate: false } }).json<Page>()),
+  );
+
+  return { index, pages };
+}
+```
+
+A request made from inside `parseDay` is never revalidated at all: a 304 on a
+detail page cannot mean "keep this channel-day" when the channel-day itself was
+just refetched.
+
+A site doing its own revalidating can `throw new UnchangedError()` and get the
+same treatment — which is also how a [streaming site](#sites-that-answer-in-one-pass)
+says a whole document is unchanged.
+
+## A published guide as a source
+
+Someone else's `xmltv.xml.gz` is a source with no site config to write — the
+format is the one this package already parses, and the only questions are where
+it is and which of its channels you want:
+
+```ts
+import { defineConfig, defineXmltvSite } from 'epg-tools';
+
+export default defineConfig({
+  sites: [defineXmltvSite({ site: 'published.example', url: 'https://example.test/guide.xml.gz' })],
+  output: 'guide.xml',
+});
+```
+
+That is the whole of it. The document is **streamed** through the parser and
+**split** by channel-day, so its entries merge with any other site's and the
+guide is never held whole: 43 MiB of XML — 1,000 channels over a week, 7,000
+channel-days — grabs under a **40 MiB heap**, where parsing the same document to
+split it afterwards needs **192 MiB**. The first number stays put as a guide
+grows; the second follows it. Its **channels come from its own head**: the DTD puts every
+`<channel>` before the first `<programme>`, so the list is read and the download
+stopped there, and each channel's element is kept and written back out whole —
+every display name, icon and url, not just the three fields a default `<channel>`
+holds. On later runs it [asks whether anything has
+changed](#asking-only-when-it-is-worth-it), so an unchanged guide is a `304`
+rather than a download.
+
+| option | default | what it is |
+|---|---|---|
+| `url` | **required** | Where the document is. |
+| `channels` | every channel the document declares | The channels to take, mapping `siteId` (its `<channel id>`) to the id you want out. A list narrows *and* renames. |
+| `dayZone` | `'source'` | Which day a programme belongs to: the day it falls on in the offset the document wrote it with (`source`), the day of its UTC instant (`utc`), or the day in a named zone (`Europe/Bratislava`). |
+| `compression` | sniffed | `'gzip'`, `'brotli'`, `'zstd'`, or `false` for none. |
+| `parse` | — | `XmltvParseOptions`: `timezones` for a document using named zones, `tolerateMissingId`. |
+| `order` | `'grouped'` | Whether the document groups each channel's programmes together — see below. |
+
+Everything a site config takes is taken here too: `days`, `staleness`,
+`concurrency`, `rateLimit`, `backoff`, `ky`, `transform`, `channelInfo`, and both
+`cacheChannels` and `conditionalGet`, which are **on by default** here because a
+published guide is one file that changes at most daily.
+
+**Compression is sniffed, not asked about.** `Content-Encoding` says what the
+origin claimed rather than what the bytes are: `fetch` decodes gzip, `br` and
+`zstd` before this ever sees them and leaves the header on, and does *not* decode
+a coding it does not know — so its presence and its absence are equally
+uninformative. A `.gz` name is no better, since servers serve `.gz` files as
+`Content-Encoding: gzip` and hand over plain XML. A magic number is a fact.
+Brotli has none, so a brotli document is the one that must be named — by
+`compression: 'brotli'`, a `.br` url, or an `application/x-brotli` type — and
+anything else unreadable is an error rather than a guess.
+
+**If a document is not grouped by channel**, which the DTD allows and some
+publishers do, it is noticed at the first channel that comes round again: the
+rest is held to the end and nothing is lost, with a line in the log saying so.
+`order: 'any'` starts held, for a source known to be ordered by time — no
+warning, no second write, and the whole document in memory while it parses.
+
+## Sites that answer in one pass
+
+Some sources publish the lot in one document — a `xmltv.xml.gz`, a dump behind
+one endpoint. Batching says how much of the grid one request covers, and for
+these the answer is "all of it", which `request` cannot express: `parseDay` is
+only called once the request has returned, so the whole window would have to be
+in memory before the first entry could be written.
+
+Such a site defines `stream` **instead of** `request` and `parseDay`, and says
+what it found as it goes:
+
+```ts
+const published = defineStreamSiteConfig({
+  site: 'published.example',
+  channels: [/* … */],
+  async *stream({ channelDays, http, log }) {
+    const byChannel = new Map(channelDays.map(({ channel, day }) => [`${channel.siteId}|${day}`, channel]));
+    const response = await http.get('guide.xml');
+
+    for await (const { channel, day, programmes } of splitByChannelDay(response, log)) {
+      const known = byChannel.get(`${channel}|${day}`);
+
+      if (known) {
+        yield { channel: known, day, programmes };
+      }
+    }
+  },
+});
+```
+
+It is called **once per run**, with every stale channel-day of the site in
+`channelDays` — the same context a `'both'`-batched request gets, which includes
+the [`log` and `warn`](#saying-something) a pass through a document has plenty of
+use for: a warning from the parser, a channel the list did not mention. Nothing
+waits for the pass to finish before the first
+channel-day it yields is written, and the writing holds the split back rather
+than the other way round, so memory stays flat however large the document is.
+
+What the grab does with each channel-day:
+
+| the channel-day is | what happens |
+|---|---|
+| one it **asked** for | written, counted and logged, exactly as a parsed one is |
+| one it did **not** ask for — already fresh, or a channel nobody asked about | ignored, and counted in one line at the end |
+| yielded **again** | added to what the earlier emission wrote, so a document that is not grouped by channel costs a second write rather than the programmes it already reported |
+| yielded as `{ channel, day, unchanged: true }` | left exactly as it is — see [asking only when it is worth it](#asking-only-when-it-is-worth-it). Counted in `unchanged`; a channel-day with nothing cached cannot be kept and is reported as a failure |
+| **never** yielded, after a clean end | written **empty** — the source went through its whole answer and had nothing to say, which is what `parseDay` returning `[]` means too |
+
+That last row is the one to design around: **a stream that cannot finish must
+throw.** Ending quietly is read as "that was the whole answer", so a download cut
+off half way would cache "nothing on" for every channel-day it never reached.
+Throwing fails exactly those and writes nothing — which, for anything built on
+Node streams, means being careful that a broken pipe surfaces as a rejection
+rather than as an end of iteration.
+
+Everything else about a site is the same: `channels`, `cacheChannels`,
+`concurrency`, `rateLimit`, `backoff`, `ky`, `staleness`, `transform`,
+`channelInfo` and `state` all mean what they mean anywhere else, and caching
+stays per channel-day, so a run still only asks about what is missing or stale.
+A site cannot do both — `stream` is what makes it this shape.
 
 ## HTTP settings and proxies
 

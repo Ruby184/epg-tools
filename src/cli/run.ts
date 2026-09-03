@@ -14,11 +14,12 @@ import type { Writable } from 'node:stream';
 import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../config.js';
 import { build, createCacheStore, runGrab, runMerge } from '../build.js';
 import { CACHE_DRIVER_NAMES } from '../cache/main.js';
-import type { CacheDriverName } from '../cache/main.js';
 import { GrabberError } from '../core/error.js';
 import { OptionError, parseOptions } from '../core/options.js';
 import { dayToDate, toDayString } from '../core/days.js';
-import { drain, queueLine, writeFlushed, writeLines } from '../core/streams.js';
+import { silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
+import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
+import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
 import type { GrabSummary } from '../grabber/types.js';
 
@@ -41,8 +42,13 @@ Options:
                         sqlite or memory
       --refresh         Refetch every day in the window, ignoring what is cached
       --before <day>    prune only: remove days before YYYY-MM-DD (default: today)
-  -q, --quiet           Suppress progress output
-  -v, --version         Print this package's version
+      --log-level <l>   How much to report: error, warn, info (default) or debug
+  -v, --verbose         Same as --log-level debug
+  -q, --quiet           Same as --log-level error. Beats --verbose if both are given
+      --reporter <name> How to report it: progress (default, a live line on a
+                        terminal and text elsewhere), text or json
+      --failures <how>  block (default) — one capped block at the end; or inline
+  -V, --version         Print this package's version
   -h, --help            Show this help
 
 init-grabber options:
@@ -52,22 +58,6 @@ init-grabber options:
                         version, else 0.1.0)
       --force           Replace an existing file
 `;
-
-/**
- * A cache driver this package ships, by name.
- *
- * Only a name: a config can point at a driver of its own by passing a function,
- * which is not something a command line can do.
- */
-function cacheDriverName(raw: string, flag: string): CacheDriverName {
-  if (!(CACHE_DRIVER_NAMES as readonly string[]).includes(raw)) {
-    throw new OptionError(
-      `Invalid ${flag} value: ${raw} (expected ${CACHE_DRIVER_NAMES.join(', ')})`,
-    );
-  }
-
-  return raw as CacheDriverName;
-}
 
 /**
  * A `YYYY-MM-DD` day, and a real one.
@@ -166,36 +156,16 @@ function isRealDay(day: string): boolean {
 }
 
 /**
- * Report a grab, and say whether it counts as a failure: a channel-day that
- * could not be fetched leaves the guide short, which is news even though the
- * rest of it was written.
+ * Whether a grab counts as a failure: a channel-day that could not be fetched
+ * leaves the guide short, which is news even though the rest of it was written.
+ *
+ * Only the code. What the run *came to* — the summary line, and the failures
+ * under it — is a `grab:done` event, and the reporter's business: it used to be
+ * assembled here and the failures printed a second time in a format of their
+ * own, which is how the same failure came to be said twice and differently.
  */
-async function report(
-  summary: GrabSummary,
-  log: ((message: string) => void) | undefined,
-  stderr: Writable,
-): Promise<number> {
-  // A day that came back with nothing is not a failure — a channel with no
-  // listings is a legitimate answer — but it is the one thing a run cannot
-  // otherwise see, so it is named beside the fetches it is part of.
-  const fetched =
-    summary.empty > 0
-      ? `${summary.fetched} fetched (${summary.empty} empty)`
-      : `${summary.fetched} fetched`;
-
-  log?.(`Grab done: ${fetched}, ${summary.fromCache} from cache, ${summary.failed.length} failed`);
-
-  // Failures, so they are reported even under --quiet.
-  await writeLines(
-    stderr,
-    ...summary.failed.map((failure) => {
-      const message =
-        failure.error instanceof Error ? failure.error.message : String(failure.error);
-      return `  FAILED [${failure.site}] ${failure.channelId} ${failure.day}: ${message}`;
-    }),
-  );
-
-  return summary.failed.length > 0 ? EXIT_FAILED : 0;
+function exitCode(summary: GrabSummary): number {
+  return summary.failed > 0 ? EXIT_FAILED : 0;
 }
 
 /** `epg init-grabber <name>` — write the executable and say what to do with it. */
@@ -261,11 +231,11 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
 
     return EXIT_FAILED;
   } finally {
-    // Everything this writes itself is awaited; the progress lines are not,
-    // because `RunOptions.logger` is synchronous and a grab must not wait on
-    // one. So the run ends by draining, which is what lets a caller exit the
-    // moment it resolves — `process.exit()` discards whatever is still
-    // buffered, and a run logging every channel-day outgrows a pipe's 64 KB.
+    // Everything this writes itself is awaited; the reporter's lines are not,
+    // because a reporter is synchronous and a grab must not wait on one. So the
+    // run ends by draining, which is what lets a caller exit the moment it
+    // resolves — `process.exit()` discards whatever is still buffered, and a run
+    // at `--log-level debug` outgrows a pipe's 64 KB.
     await Promise.all([drain(stdout), drain(stderr)]);
   }
 }
@@ -286,12 +256,19 @@ async function execute(
       // absolute — a grabber runs from wherever it was called.
       output: { type: 'string', short: 'o', transform: (raw) => path.resolve(raw) },
       'cache-dir': { type: 'string', transform: (raw) => path.resolve(raw) },
-      'cache-driver': { type: 'string', transform: cacheDriverName },
+      // Only a name for the driver and the reporter: a config can point at one
+      // of its own by passing a function, which is not something a command line
+      // can do.
+      'cache-driver': { type: 'string', choices: CACHE_DRIVER_NAMES },
       refresh: { type: 'boolean' },
       before: { type: 'string', transform: dayString },
       quiet: { type: 'boolean', short: 'q' },
+      verbose: { type: 'boolean', short: 'v' },
+      'log-level': { type: 'string', choices: LEVELS },
+      reporter: { type: 'string', choices: REPORTER_NAMES },
+      failures: { type: 'string', choices: FAILURE_MODES },
       help: { type: 'boolean', short: 'h' },
-      version: { type: 'boolean', short: 'v' },
+      version: { type: 'boolean', short: 'V' },
       description: { type: 'string' },
       'grabber-version': { type: 'string' },
       force: { type: 'boolean' },
@@ -350,47 +327,52 @@ async function execute(
     };
   }
 
-  const log = values.quiet ? undefined : (message: string) => queueLine(stdout, message);
+  // `--log-level` is the explicit answer and wins; between the two shorthands
+  // the quieter one does, so `-qv` in a script cannot turn silence into fourteen
+  // thousand lines.
+  const level: EventLevel =
+    values['log-level'] ?? (values.quiet ? 'error' : values.verbose ? 'debug' : 'info');
+  // `progress` rather than `text` by default, and it is the text one on anything
+  // that is not a terminal — a pipe, a file, a CI log — so what a script reads
+  // is unchanged and only an interactive run gets the line.
+  const reporter = reporterFor(values.reporter ?? config.reporter ?? 'progress', {
+    stdout,
+    stderr,
+    level,
+    ...(values.failures ? { failures: values.failures } : {}),
+  });
+  const emit = reporter ? stamped(reporter) : silent;
   const runOptions = {
-    ...(log ? { logger: log } : {}),
+    ...(reporter ? { reporter } : {}),
     ...(values.offset !== undefined ? { offset: values.offset } : {}),
     ...(signal ? { signal } : {}),
-  };
-
-  /**
-   * What a cancelled grab amounts to: it resolves with what it managed rather
-   * than throwing, so the interruption has to be noticed here — and it outranks
-   * the failures, which are mostly requests the cancel itself dropped.
-   */
-  const cancelled = async (summary: GrabSummary): Promise<number> => {
-    await writeLines(
-      stderr,
-      `Cancelled. ${summary.fetched} channel-day(s) reached the cache; no guide was written.`,
-    );
-
-    return EXIT_CANCELLED;
   };
 
   switch (command) {
     case 'build': {
       const summary = await build(config, runOptions);
 
+      // A cancelled grab resolves with what it managed rather than throwing, so
+      // the interruption is noticed here — the grab has already said so as a
+      // `run:cancelled`, which is also what tells a reporter to drop the
+      // failures the cancel itself caused.
       if (signal?.aborted) {
-        return cancelled(summary);
+        return EXIT_CANCELLED;
       }
 
-      const code = await report(summary, log, stderr);
-      log?.(`Guide written to ${config.output}`);
-      return code;
+      emit({ type: 'merge:done', output: String(config.output) });
+
+      return exitCode(summary);
     }
     case 'grab': {
       const summary = await runGrab(config, runOptions);
 
-      return signal?.aborted ? cancelled(summary) : await report(summary, log, stderr);
+      return signal?.aborted ? EXIT_CANCELLED : exitCode(summary);
     }
     case 'merge': {
       await runMerge(config, runOptions);
-      log?.(`Guide written to ${config.output}`);
+      emit({ type: 'merge:done', output: String(config.output) });
+
       return 0;
     }
     default: {
@@ -399,7 +381,7 @@ async function execute(
       await using cache = await createCacheStore(config, signal);
       const removed = await cache.prune({ before });
 
-      log?.(`Pruned ${removed} cached entr${removed === 1 ? 'y' : 'ies'} before ${before}`);
+      emit({ type: 'prune:done', removed, before });
 
       return 0;
     }

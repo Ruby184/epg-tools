@@ -210,6 +210,131 @@ describe('epg', () => {
     expect(stderr).toContain('the feed went away');
   });
 
+  describe('how much it reports, and how', () => {
+    it('says one line per site by default, not one per channel-day', async () => {
+      const dir = await tempDir();
+      const config = await plainConfig(dir);
+
+      const { stdout } = await run(['grab', '--config', config]);
+
+      // The per-channel-day chatter is what drowned the four lines that matter,
+      // and what `--quiet` was the only defence against.
+      expect(stdout).not.toContain('1 programme');
+      expect(stdout).toContain('[example.tv] 1 channel(s) × 1 day(s): 1 to fetch in 1 request(s)');
+      expect(stdout).toContain('Grab done: 1 fetched');
+    });
+
+    it('says it per channel-day with --verbose, and the same with -v', async () => {
+      const dir = await tempDir();
+
+      for (const flag of ['--verbose', '-v']) {
+        const config = await plainConfig(await tempDir());
+        const { stdout } = await run(['grab', '--config', config, flag]);
+
+        expect(stdout).toContain('[example.tv] one.example.tv');
+        expect(stdout).toContain('1 programme');
+      }
+
+      expect(dir).toBeTruthy();
+    });
+
+    it('takes a level outright, and says so when it is not one', async () => {
+      const config = await plainConfig(await tempDir());
+
+      const { stdout } = await run(['grab', '--config', config, '--log-level', 'error']);
+      const bad = await run(['grab', '--config', config, '--log-level', 'loud']);
+
+      expect(stdout).toBe('');
+      expect(bad.code).toBe(2);
+      expect(bad.stderr).toContain(
+        'Invalid --log-level value: loud (expected error, warn, info, debug)',
+      );
+    });
+
+    it('lets --quiet win over --verbose, so a script cannot be surprised', async () => {
+      const config = await plainConfig(await tempDir());
+
+      const { stdout } = await run(['grab', '--config', config, '-v', '-q']);
+
+      expect(stdout).toBe('');
+    });
+
+    it('writes one JSON object per line for --reporter json', async () => {
+      const config = await plainConfig(await tempDir(), { fail: true });
+
+      const { code, stdout } = await run([
+        'grab',
+        '--config',
+        config,
+        '--reporter',
+        'json',
+        '--log-level',
+        'debug',
+      ]);
+      const events = stdout
+        .split('\n')
+        .filter(Boolean)
+        .map(
+          (line) =>
+            JSON.parse(line) as { type: string; level: string; error?: { message: string } },
+        );
+
+      expect(code).toBe(1);
+      expect(events.map((event) => event.type)).toContain('site:started');
+      // The one thing a line of text cannot be asked.
+      expect(events.filter((event) => event.level === 'error')).toEqual([
+        expect.objectContaining({
+          type: 'request:failed',
+          error: expect.objectContaining({ message: 'the feed went away' }),
+        }),
+      ]);
+    });
+
+    it('writes each failure where it happened for --failures inline', async () => {
+      const config = await plainConfig(await tempDir(), { fail: true });
+
+      const { stderr } = await run(['grab', '--config', config, '--failures', 'inline']);
+
+      // Unindented, since it is not part of a block at the end.
+      expect(stderr).toContain('FAILED [example.tv] one.example.tv');
+      expect(stderr).not.toContain('  FAILED');
+    });
+
+    it('takes a reporter named in the config, and lets the flag override it', async () => {
+      const dir = await tempDir();
+      const config = await configFile(
+        dir,
+        `export default {
+          sites: [${siteSource()}],
+          days: 1,
+          reporter: 'json',
+          output: ${JSON.stringify(join(dir, 'guide.xml'))},
+          cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+        };`,
+      );
+
+      const named = await run(['grab', '--config', config]);
+      const overridden = await run(['grab', '--config', config, '--reporter', 'text']);
+
+      expect(JSON.parse(named.stdout.split('\n')[0]!)).toMatchObject({ type: 'site:started' });
+      expect(overridden.stdout).toContain('[example.tv] 1 channel(s)');
+    });
+
+    it('says so when a reporter or a failure mode is not one it has', async () => {
+      const config = await plainConfig(await tempDir());
+
+      const reporter = await run(['grab', '--config', config, '--reporter', 'yaml']);
+      const failures = await run(['grab', '--config', config, '--failures', 'sometimes']);
+
+      expect(reporter.stderr).toContain(
+        'Invalid --reporter value: yaml (expected text, json, progress)',
+      );
+      expect(failures.stderr).toContain(
+        'Invalid --failures value: sometimes (expected block, inline)',
+      );
+    });
+  });
+
   it('applies --days, --output and --cache-dir over the config', async () => {
     const dir = await tempDir();
     const config = await plainConfig(dir);
@@ -520,6 +645,14 @@ describe('epg init-grabber', () => {
 });
 
 describe('epg --version', () => {
+  it('is -V now, since -v became --verbose', async () => {
+    const short = await run(['-V']);
+    const long = await run(['--version']);
+
+    expect(short.stdout).toBe(long.stdout);
+    expect(short.stdout).toContain(__PKG_VERSION__);
+  });
+
   it('prints the package name and version', async () => {
     const { code, stdout, stderr } = await run(['--version']);
 

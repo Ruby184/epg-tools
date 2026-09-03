@@ -1,5 +1,6 @@
 import { dayRange, dayToDate, toDayString } from '../core/days.js';
 import { writeOutput, type OutputOptions, type OutputTarget } from '../core/output.js';
+import { emitter } from '../core/events.js';
 import { channelElement, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
@@ -112,15 +113,22 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   const days = [...dayRange(options.startDay ?? toDayString(now), options.days ?? 7)];
   const channelStrategy = options.merge?.channelStrategy ?? 'merge-programmes';
   const programmeStrategy = options.merge?.programmeStrategy ?? 'merge';
-  const { cache, logger } = options;
+  const { cache } = options;
+  const emit = emitter(options);
 
   // Through the same helper the grab uses, so a site that fetches its channel
   // list is asked the same way by both — and every site at once rather than one
   // after another, since each is a single request to a host of its own.
+  //
+  // The cache goes with it: a site that keeps its channel list there has one the
+  // grab just wrote, and a merge asking the source again could only disagree
+  // with what it is about to read.
   const resolved = (
     await resolveSites(options.sites, {
       ...(options.siteConcurrency !== undefined ? { concurrency: options.siteConcurrency } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
+      store: cache,
+      now,
     })
   ).map((config) => ({ config, channels: config.channels as GrabberChannel[] }));
 
@@ -361,7 +369,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       }
 
       if (last) {
-        logger?.(`merge: channel ${entry.xmltvId} done`);
+        emit({ type: 'merge:channel', channelId: entry.xmltvId });
       }
     }
   }

@@ -55,6 +55,7 @@ hardcode — a username, a password, a region. See
 | `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true }` | How several sites covering one channel are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
+| `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'text'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
 
 ### Root `<tv>` attributes
 
@@ -120,15 +121,67 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
-| `-q, --quiet` | no progress on stdout; failures still go to stderr |
-| `-v, --version` | print the package name and version |
+| `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
+| `-v, --verbose` | same as `--log-level debug` — every channel-day |
+| `-q, --quiet` | same as `--log-level error` — failures only. Beats `--verbose` if both are given |
+| `--reporter <name>` | how to report it: `progress` (default — a live line on a terminal, `text` anywhere else), `text` or `json` |
+| `--failures <how>` | `block` (default) — one capped block at the end — or `inline` |
+| `-V, --version` | print the package name and version |
 | `-h, --help` | print the usage |
 | `--description`, `--grabber-version`, `--force` | `init-grabber` only — see [XMLTV grabber](./tv-grab.md) |
+
+`-v` is verbosity, not the version: the version is `-V`.
 
 It exits **0** on success, **1** when the run failed or the guide is short a
 channel-day, **2** for anything you typed wrong — an unknown option, command, or
 `--before` value, each printed with the usage — and **130** when it was
 [cancelled](#cancelling-a-run).
+
+### How much it says
+
+By default a run reports one line per site plus the summary. `--verbose` adds a
+line per channel-day, which for 500 channels over a fortnight is about fourteen
+thousand of them; `--quiet` leaves only failures. Between those, `warn` is the
+level for a signal rather than progress — a source that has started refusing, a
+channel a published guide has stopped carrying.
+
+A failure is said once, in a block under the summary, capped so a source that is
+down does not bury what did work:
+
+```
+Grab done: 40 fetched, 10 from cache, 84 failed
+  FAILED [example.tv] 3 channels 2026-09-01..2026-09-07 (21 channel-day(s)): 503
+  … 20 shown, 64 more
+```
+
+`--failures inline` writes each where it happens instead and holds nothing, for
+a log read as it is written.
+
+On a terminal that summary is preceded by a **single line, rewritten in place**,
+off totals the planner has already worked out:
+
+```
+example.tv · 84/350 channel-days · 10 cached · 2 failed
+```
+
+It is erased whenever there is something worth keeping — a warning, a failure,
+the summary — and again when the run ends, so nothing is left behind. Only on a
+terminal, and only at the default verbosity: through a pipe, into a file, under
+`--verbose` or `--quiet`, `--reporter progress` *is* the text reporter, so what
+a script reads never depends on whether anyone was watching. `--reporter text`
+asks for the lines outright.
+
+And `--reporter json` writes one JSON object per line rather than text, which is
+the thing a formatted line cannot be asked:
+
+```console
+$ epg grab --reporter json --log-level debug | jq -c 'select(.level == "error")'
+{"type":"request:failed","site":"example.tv","entries":21,"error":{"name":"HTTPError", …
+```
+
+A config can name the reporter instead of the command line — or pass one of its
+own, a function told everything the run knows. See [reporting what a run is
+doing](./api.md#reporting-what-a-run-is-doing).
 
 ### Cancelling a run
 
@@ -247,7 +300,10 @@ never removes a day inside the window. Negative values work in both the
 
 Each `site + channel + day` is one cache entry — one file,
 `<dir>/<site>/<channel>/<day>.ndjson`, beginning with when it was grabbed and
-how much it holds. A staleness check reads that much of it and no more. On every
+how much it holds. A staleness check reads that much of it and no more. Beside
+those, a site may keep a little of [what it remembers between
+runs](./api.md#what-a-site-remembers-between-runs) — `<dir>/<site>/<key>.json`,
+one file per group, holding no listings and left alone by a prune. On every
 run a channel-day is refetched only when:
 
 - it is not cached yet (e.g. day 14 after a day passed), or
@@ -267,6 +323,13 @@ Everything else is served from disk. A run says how many channel-days came back
 empty (`Grab done: 42 fetched (3 empty), …`), since nothing else would: no
 request failed, and the entries are cached like any other. Old days are pruned automatically after a
 grab (disable with `cache.prune: false`).
+
+A refetched channel-day need not mean a download. A site with
+[`conditionalGet`](./site-config.md#asking-only-when-it-is-worth-it) asks the
+source whether anything has changed — with an `ETag`, a `Last-Modified`, or the
+entry's own `grabbedAt` — and a `304` keeps what is cached: nothing written,
+`grabbedAt` unmoved, and counted separately (`…, 3 unchanged, …`) from the
+channel-days a run never asked about at all.
 
 Passing a `signal` cancels a run: what is still queued — requests, staleness
 checks, cache writes — is dropped rather than started, and what is in flight

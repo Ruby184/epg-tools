@@ -56,6 +56,39 @@ export interface StoredEntryMeta extends CacheEntryMeta {
   writtenBy: string;
 }
 
+/**
+ * What a remembered thing records about itself, which is when and by what.
+ *
+ * The same care as {@link StoredEntryMeta} and for the same reason — a cache
+ * outlives the code that wrote it — but a different set of questions, so a
+ * different number. {@link schema} is this envelope's shape and nothing else:
+ * what is *inside* a group is between whoever wrote it and whoever reads it, and
+ * a group whose contents have moved on is rebuilt by the one that wants it
+ * rather than by the cache.
+ */
+export interface StoredStateMeta {
+  /** ISO timestamp of when this group was last written. */
+  writtenAt: string;
+  /** Version of the envelope — `STATE_SCHEMA` as this code writes it. */
+  schema: number;
+  /** The package version that wrote it. */
+  writtenBy: string;
+}
+
+/**
+ * One group of a site's state, as a {@link CacheStore} hands it over: whatever
+ * was put there, and the envelope the store vouches for.
+ *
+ * The meta comes along because it answers the question a reader usually has
+ * next — how old is this? — so a group needs no timestamp of its own inside it,
+ * and the one that decides is stamped by the cache rather than by a caller who
+ * might forget.
+ */
+export interface StateEntry {
+  data: unknown;
+  meta: StoredStateMeta;
+}
+
 export interface CacheStore {
   /** Metadata for an entry, or `undefined` when not cached. */
   getMeta(key: ChannelDayKey): Promise<CacheEntryMeta | undefined>;
@@ -84,6 +117,27 @@ export interface CacheStore {
   delete(key: ChannelDayKey): Promise<void>;
   /** Remove entries for days before `before` (`YYYY-MM-DD`). Returns removed count. */
   prune(options: { before: string }): Promise<number>;
+  /**
+   * What a site last remembered under `key`, or `undefined` when it has
+   * remembered nothing this code can vouch for.
+   *
+   * A site's state is not its listings: it is what a site would otherwise have
+   * to fetch again to get back to where it was — a channel list it was given
+   * once, an `ETag` for a document it has already read, a token, a cursor.
+   * Grouped under a key rather than kept as one object per site so that the
+   * groups are read, written and dropped independently: whoever wants a channel
+   * list should not have to read every url the last grab revalidated, and a run
+   * writing one group must not stand on another's.
+   */
+  getState(site: string, key: string): Promise<StateEntry | undefined>;
+  /**
+   * Remember `data` for this site under `key`, replacing whatever was there.
+   *
+   * `writtenAt` is the one thing a caller may say — a run stamps what it
+   * remembers with its own "now", the way it does a `grabbedAt` — and the rest
+   * of the envelope is a fact about the writing rather than anyone's to choose.
+   */
+  setState(site: string, key: string, data: unknown, meta?: { writtenAt?: string }): Promise<void>;
   /**
    * Let go of whatever the store holds open. Nothing is asked of it after.
    *
@@ -125,6 +179,22 @@ export interface FoundMeta {
 /** An entry as a driver found it: what it says about itself, and its programmes. */
 export interface FoundEntry<T> extends FoundMeta {
   programmes: T[];
+}
+
+/**
+ * A group of a site's state as a driver found it, with the same distinction
+ * {@link FoundMeta} draws: `undefined` for a group nothing has ever written, and
+ * this — with `meta` undefined — for one that is there and says nothing anybody
+ * can read. The second is worth removing, and only the {@link CacheManager}
+ * above decides that.
+ *
+ * A driver reports an unreadable *payload* the same way as an unreadable meta,
+ * by leaving the meta out: an envelope is only worth anything if what it wraps
+ * survived with it.
+ */
+export interface FoundState {
+  meta: Partial<StoredStateMeta> | undefined;
+  data: unknown;
 }
 
 /**
@@ -177,6 +247,28 @@ export interface CacheDriver<TStored = unknown> {
   delete(key: ChannelDayKey): Promise<void>;
   /** Remove entries for days before `before` (`YYYY-MM-DD`). Returns removed count. */
   prune(options: { before: string }): Promise<number>;
+  /**
+   * The three that keep a site's state — one small blob per `(site, key)`,
+   * holding whatever the grabber put there.
+   *
+   * Opaque on purpose: a driver stores bytes and hands them back, and never
+   * learns what a channel list or an `ETag` is. Which is also what leaves the
+   * *encoding* to the store — a driver is free to keep a group as an append-log
+   * and replay it on read, so long as `readState` answers with what the last
+   * `writeState` was given.
+   *
+   * Required rather than optional, unlike {@link readMetas}: a store that
+   * silently cannot remember anything would have every caller asking whether it
+   * can, forever. Remembering nothing is a legitimate answer and it is three
+   * one-line bodies — `NoCacheDriver` is exactly that.
+   *
+   * `key` is a short name of the grabber's choosing (`channels`, `validators`),
+   * so a driver that puts it in a path or a column must make it safe there the
+   * same way it does a site or a channel id.
+   */
+  readState(site: string, key: string): Promise<FoundState | undefined>;
+  writeState(site: string, key: string, data: unknown, meta: StoredStateMeta): Promise<void>;
+  deleteState(site: string, key: string): Promise<void>;
   /** Let go of whatever is held open — a database handle, a connection. */
   close?(): Promise<void>;
 }

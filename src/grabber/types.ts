@@ -2,7 +2,8 @@ import type { KyInstance, Options as KyOptions } from 'ky';
 import type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from '../xmltv/builder.js';
 import type { DateInput } from '../xmltv/date.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
-import type { CacheStore, StalenessPolicy } from '../cache/types.js';
+import type { CacheEntryMeta, CacheStore, StalenessPolicy } from '../cache/types.js';
+import type { GrabCounts, Reporter } from '../core/events.js';
 
 /**
  * A channel to grab: maps an output XMLTV id to a site-specific id.
@@ -59,9 +60,40 @@ export interface ChannelDay<TData = unknown> {
   day: string;
   /** The same day as UTC midnight. */
   date: Date;
+  /**
+   * What the cache already holds for this channel-day, or `undefined` when it
+   * holds nothing.
+   *
+   * A stale channel-day is not the same as a missing one: it may be there and
+   * simply old enough to ask about again. `grabbedAt` is what a source can be
+   * asked "has it changed since?" with, and `programmeCount` says what would be
+   * kept if the answer is no.
+   *
+   * Every channel-day here is one this request is *for*, so a cached one is a
+   * candidate for `conditionalGet` rather than something to skip — the run has
+   * already left out what is still fresh.
+   */
+  cached?: CacheEntryMeta;
 }
 
-interface BaseRequestContext<TData> {
+/**
+ * What a site remembers between runs, as a site sees it: a `Map` of its own,
+ * read once at the start of the run and written back at the end if it changed.
+ *
+ * For what a site would otherwise fetch again to get back to where it was — a
+ * token, a cursor, a page count, an id it has already dealt with. One per site
+ * for the whole run rather than per channel-day, so anything put here by one
+ * request is there for every later request and every `parseDay`. Whatever goes
+ * in must survive `JSON.stringify`, this being a cache file, and a store that
+ * remembers nothing (`NoCacheDriver`) leaves it empty at the start of every run.
+ */
+export type SiteState = Map<string, unknown>;
+
+/**
+ * What every context carries, whichever shape the rest of it takes: the
+ * channel-days it is for, the site's client, its state, and the run's signal.
+ */
+export interface BaseRequestContext<TData = unknown> {
   /**
    * Exactly the channel-days this request is being made for — every one of
    * them stale, in channel order and then day order.
@@ -82,6 +114,25 @@ interface BaseRequestContext<TData> {
    * through it: another client, or a check between two pages of your own.
    */
   signal?: AbortSignal;
+  /** What this site remembers between runs — see {@link SiteState}. */
+  state: SiteState;
+  /**
+   * Say something about what this site is doing, wherever the run's own
+   * messages go.
+   *
+   * Progress, so it is shown at the run's default verbosity and hidden when the
+   * run is asked to be quiet. The site's name is added for you — say what
+   * happened, not who it happened to.
+   */
+  log(message: string): void;
+  /**
+   * The same, for something the reader has to see.
+   *
+   * A warning is a signal rather than progress: it survives a run asked to
+   * report errors only, because "the source moved this channel" is worth
+   * hearing even then. Throw instead when the channel-day should also fail.
+   */
+  warn(message: string): void;
 }
 
 /**
@@ -345,6 +396,21 @@ export interface ParseContext<TRaw, TData = unknown> {
    * simply not queued, so nothing spaces them.
    */
   paced: PacedRequest;
+  /**
+   * What this site remembers between runs — see {@link SiteState}. The same
+   * `Map` every request and every parse of this site is handed.
+   */
+  state: SiteState;
+  /**
+   * Say something about this channel-day — as on a request context.
+   *
+   * Here because a parse is where a site notices things: a field the source has
+   * started leaving out, a programme it had to skip. Before this there was
+   * nowhere at all to put that, and no `console` in the package to borrow.
+   */
+  log(message: string): void;
+  /** The same, for something the reader has to see — as on a request context. */
+  warn(message: string): void;
 }
 
 /**
@@ -365,14 +431,16 @@ export type ParsedProgramme = XmltvProgramme | ProgrammeBuilder;
 export type ChannelElement = (displayName?: string) => ChannelBuilder;
 
 /**
- * A site: where to fetch from, how much of the grid one request covers, and how
- * to turn a response into programmes.
+ * What is true of a site whichever way it fetches: who it is, what channels it
+ * covers, how politely to ask it, and what it has to say about its own
+ * programmes on the way back out.
+ *
+ * The two ways part company below — {@link SiteConfig} fetches a request at a
+ * time and parses each channel-day out of it, {@link StreamSiteConfig} streams a
+ * whole document and says what it found as it goes — and everything either of
+ * them has in common is here.
  */
-export interface SiteConfig<
-  TRaw = unknown,
-  TBatching extends BatchingOption = 'none',
-  TData = unknown,
-> {
+export interface BaseSiteConfig<TData = unknown> {
   /** Unique site identifier, e.g. `webtv.sk`. Used as cache namespace. */
   site: string;
   /**
@@ -381,6 +449,27 @@ export interface SiteConfig<
    * when channels are actually needed, never by `--capabilities` and friends.
    */
   channels: ChannelsSource<TData>;
+  /**
+   * Keep a fetched channel list in the cache, so the next command reads it
+   * instead of asking the source again.
+   *
+   * For the function form of {@link channels} only — a list written out in the
+   * config is already there. Worth turning on when fetching it is not free: a
+   * paginated API, a list of thousands, or a request that has to be paid for in
+   * some other way. `epg grab` and then `epg merge` are two processes and each
+   * resolves the list, so caching it also stops the two disagreeing about which
+   * channels the run was for.
+   *
+   * `true` keeps it for a day; `{ maxAgeDays }` for as long as you like. Off by
+   * default, since a list that is cheap to fetch is better fetched — a channel
+   * added to a source then turns up on the next run rather than a day later.
+   * `--refresh` fetches it whatever this says.
+   *
+   * It goes through JSON, so a channel's `data` must survive that: a `Date` or a
+   * `Map` in there comes back a string or `{}`, and every run but the one that
+   * fetched it sees the round-tripped form.
+   */
+  cacheChannels?: boolean | { maxAgeDays?: number };
   /** Override the number of days to grab for this site. */
   days?: number;
   /** Max concurrent requests for this site. Defaults to 1. */
@@ -404,16 +493,6 @@ export interface SiteConfig<
    */
   backoff?: false | SiteBackoff;
   /**
-   * How much of the channel × day grid one {@link request} call covers: a bare
-   * {@link BatchMode}, or that mode with a cap on the request's size
-   * (`{ mode: 'days', daysPerRequest: 7 }`). Defaults to `none`, one
-   * channel-day per request.
-   *
-   * The mode shapes the request context and decides which caps are accepted;
-   * `parseDay` stays per channel-day whatever it is.
-   */
-  batching?: TBatching;
-  /**
    * Base options for this site's own ky instance (`prefix`, `headers`,
    * `hooks`, `retry`, `timeout`, …). Each site gets its own, so nothing here
    * reaches another site — including a `dispatcher`, which is how one site
@@ -423,19 +502,33 @@ export interface SiteConfig<
   /** Per-site override of the staleness policy. */
   staleness?: Partial<StalenessPolicy>;
   /**
-   * Fetch this request's raw data. What one request covers — and so which
-   * fields its context carries — is decided by {@link batching}.
+   * Ask the source whether anything has changed, and keep what is cached when it
+   * says no.
    *
-   * A failed request fails every channel-day it covered; one channel-day's
-   * `parseDay` error only drops that channel-day.
+   * A site writes no code for this. Turning it on puts two hooks in the site's
+   * own client: one sends `If-None-Match` or `If-Modified-Since` with a request,
+   * the other turns a `304` into an {@link UnchangedError} — which reaches out of
+   * `request` or `stream` without either of them mentioning it, and tells the run
+   * to keep every channel-day that request was for. They are counted in
+   * `unchanged` rather than `fetched`, and nothing is rewritten.
+   *
+   * What it asks with, in order: an `ETag` the source gave last time, then a
+   * `Last-Modified`, then — with neither stored — the `grabbedAt` of the entries
+   * themselves, which is a fair thing to ask "has it changed since?" with and
+   * needs nothing remembered at all.
+   *
+   * **Off by default, and worth understanding before turning on.** It makes any
+   * 304 from any request inside `request` mean "nothing changed for these
+   * channel-days", which is true of a source whose channel-day comes from one
+   * request and wrong for one that pages through several. Send
+   * `context: { revalidate: false }` with a request that should never be asked
+   * conditionally — a page after the first, a lookup that is not the listings.
+   *
+   * A validator is never sent where a `304` could not be honoured: not when a
+   * channel-day it covers has nothing cached, not when one is past
+   * `maxAgeDays`, and not under `--refresh`.
    */
-  request(ctx: RequestContextFor<ModeOf<TBatching>, TData>): Promise<TRaw>;
-  /**
-   * Parse one channel-day out of a response — called once per channel-day the
-   * request covered, each with the same `payload`. `programme.channel` is
-   * normalized to `xmltvId` afterwards.
-   */
-  parseDay(ctx: ParseContext<TRaw, TData>): ParsedProgramme[] | Promise<ParsedProgramme[]>;
+  conditionalGet?: boolean;
   /**
    * A last look at each of this site's programmes on the way *out* of the
    * cache: return it, a different one, or nothing at all to leave it out.
@@ -479,10 +572,131 @@ export interface SiteConfig<
 }
 
 /**
- * A site config whatever its batching — what a list of sites holds, since each
- * site picks its own and they need not agree.
+ * A site: where to fetch from, how much of the grid one request covers, and how
+ * to turn a response into programmes.
  */
-export type AnySiteConfig = SiteConfig<any, BatchingOption, any>;
+export interface SiteConfig<
+  TRaw = unknown,
+  TBatching extends BatchingOption = 'none',
+  TData = unknown,
+> extends BaseSiteConfig<TData> {
+  /**
+   * How much of the channel × day grid one {@link request} call covers: a bare
+   * {@link BatchMode}, or that mode with a cap on the request's size
+   * (`{ mode: 'days', daysPerRequest: 7 }`). Defaults to `none`, one
+   * channel-day per request.
+   *
+   * The mode shapes the request context and decides which caps are accepted;
+   * `parseDay` stays per channel-day whatever it is.
+   */
+  batching?: TBatching;
+  /**
+   * Fetch this request's raw data. What one request covers — and so which
+   * fields its context carries — is decided by {@link batching}.
+   *
+   * A failed request fails every channel-day it covered; one channel-day's
+   * `parseDay` error only drops that channel-day.
+   */
+  request(ctx: RequestContextFor<ModeOf<TBatching>, TData>): Promise<TRaw>;
+  /**
+   * Parse one channel-day out of a response — called once per channel-day the
+   * request covered, each with the same `payload`. `programme.channel` is
+   * normalized to `xmltvId` afterwards.
+   */
+  parseDay(ctx: ParseContext<TRaw, TData>): ParsedProgramme[] | Promise<ParsedProgramme[]>;
+}
+
+/**
+ * What a {@link StreamSiteConfig.stream} says it found: one channel-day, and
+ * either the programmes on it or word that what is cached still stands.
+ *
+ * The channel is one of the context's own — the site looks up whatever its source
+ * called the channel and hands back the {@link GrabberChannel} it belongs to, so
+ * nothing has to be matched up by id afterwards.
+ */
+export type StreamedChannelDay<TData = unknown> =
+  | {
+      channel: GrabberChannel<TData>;
+      /** The day as `YYYY-MM-DD`. */
+      day: string;
+      programmes: ParsedProgramme[];
+      unchanged?: false;
+    }
+  | {
+      channel: GrabberChannel<TData>;
+      day: string;
+      programmes?: undefined;
+      /**
+       * Nothing has changed here: keep the cached entry as it is.
+       *
+       * For a pass that can tell — a document with a per-channel revision, a
+       * source answering `304` for part of what was asked. The entry is left
+       * alone, `grabbedAt` and all, and counted in `unchanged` rather than
+       * `fetched`. A channel-day with nothing cached cannot be kept, and is
+       * reported as a failure rather than quietly left out of the guide.
+       */
+      unchanged: true;
+    };
+
+/**
+ * What a stream is given: the same context a `both`-batched request gets —
+ * every channel and day it is being asked about at once.
+ *
+ * Which now includes {@link BaseRequestContext.log} and
+ * {@link BaseRequestContext.warn}, so it is an alias rather than a shape of its
+ * own: a whole-document source is the one place a parse has plenty to report —
+ * a warning from the parser, a channel the list did not mention, a document not
+ * sorted the way it usually is — but it stopped being the only place that has
+ * anything.
+ */
+export type StreamContext<TData = unknown> = ChannelsDaysRequestContext<TData>;
+
+/**
+ * A site that answers its whole window in one pass: it streams, and says what it
+ * found as it goes.
+ *
+ * For a source that publishes the lot in one document rather than a request per
+ * channel-day — a `xmltv.xml.gz`, a dump behind one endpoint. Splitting that with
+ * {@link SiteConfig.request} would mean holding all of it in memory before the
+ * first entry could be written, since `parseDay` is only called once the request
+ * has returned; a stream writes each channel-day as it becomes complete and
+ * keeps whatever is still open.
+ *
+ * What the grab does with what it yields:
+ *
+ * - a channel-day it was **asked** for is written, counted and logged, exactly as
+ *   a parsed one is;
+ * - one it was **not** asked for — a channel-day already fresh in the cache, or a
+ *   channel nobody asked about — is ignored;
+ * - one yielded **again** has its programmes added to what the earlier emission
+ *   wrote, so a document that turns out not to be grouped by channel costs a
+ *   second write rather than the programmes it already reported;
+ * - one **never** yielded, once the stream ends cleanly, is written empty — the
+ *   source has been through its whole answer and had nothing to say about it,
+ *   which is what `parseDay` returning `[]` means too.
+ *
+ * That last one is why a stream that could not finish must **throw**: ending
+ * quietly is read as "that was the whole answer", and every channel-day it never
+ * reached would be cached as having nothing on. Throwing fails exactly those and
+ * writes nothing.
+ */
+export interface StreamSiteConfig<TData = unknown> extends BaseSiteConfig<TData> {
+  /**
+   * Fetch and split this site's whole window, yielding each channel-day as it is
+   * complete.
+   *
+   * Called once per run — with every stale channel-day the site has, in
+   * `channelDays` — and nothing waits for it to finish before the first of its
+   * channel-days is written.
+   */
+  stream(ctx: StreamContext<TData>): AsyncIterable<StreamedChannelDay<TData>>;
+}
+
+/**
+ * A site config whichever shape it is — what a list of sites holds, since each
+ * site picks its own way of fetching and they need not agree.
+ */
+export type AnySiteConfig = SiteConfig<any, BatchingOption, any> | StreamSiteConfig<any>;
 
 /**
  * Identity helper for type inference in config files. The batching is inferred
@@ -493,6 +707,16 @@ export type AnySiteConfig = SiteConfig<any, BatchingOption, any>;
 export function defineSiteConfig<TRaw, TBatching extends BatchingOption = 'none', TData = unknown>(
   config: SiteConfig<TRaw, TBatching, TData>,
 ): SiteConfig<TRaw, TBatching, TData> {
+  return config;
+}
+
+/**
+ * The same, for a site that streams — a channel's `data` inferred from what
+ * `channels` returns, so `stream` sees the real shape.
+ */
+export function defineStreamSiteConfig<TData = unknown>(
+  config: StreamSiteConfig<TData>,
+): StreamSiteConfig<TData> {
   return config;
 }
 
@@ -524,7 +748,14 @@ export interface GrabOptions {
   staleness?: Partial<StalenessPolicy>;
   /** "Now" reference, for tests. Defaults to `new Date()`. */
   now?: Date;
-  logger?: (message: string) => void;
+  /**
+   * Where this run's events go — see {@link Reporter}.
+   *
+   * A function told what happened as it happens. `textReporter` and
+   * `jsonReporter` are the ones this package ships; anything of your own is a
+   * function of one argument.
+   */
+  reporter?: Reporter;
   /**
    * Cancel the run. Anything still queued — requests, staleness checks, cache
    * writes — is dropped rather than started, and whatever is already in flight
@@ -538,28 +769,12 @@ export interface GrabOptions {
   signal?: AbortSignal;
 }
 
-export interface GrabTaskError {
-  site: string;
-  channelId: string;
-  day: string;
-  error: unknown;
-}
-
-export interface GrabSummary {
-  /** Channel-days fetched from the network. */
-  fetched: number;
-  /**
-   * Of those, the ones that parsed to no programmes at all — counted here as
-   * well as in {@link fetched}, since the request did happen.
-   *
-   * A day that comes back empty is the one failure a run cannot see: nothing
-   * threw, and the entry is cached like any other. It is reported rather than
-   * treated as a failure because a channel with nothing on is a legitimate
-   * answer; a number that climbs is what says otherwise. `emptyMaxAgeDays`
-   * governs how soon such an entry is asked about again.
-   */
-  empty: number;
-  /** Channel-days skipped because the cache was fresh. */
-  fromCache: number;
-  failed: GrabTaskError[];
-}
+/**
+ * What a run answers with: the five counts, and nothing that grows with the
+ * size of the guide.
+ *
+ * The shape is {@link GrabCounts}, which is also what a `*:done` event carries —
+ * one declaration, so a site's total and the run's cannot describe themselves
+ * differently. What each of them means is documented there.
+ */
+export interface GrabSummary extends GrabCounts {}

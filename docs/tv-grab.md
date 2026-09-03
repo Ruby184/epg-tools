@@ -101,7 +101,7 @@ sudo -u hts tv_grab_sk_example --configure   # → /home/hts/.xmltv/tv_grab_sk_e
 | `--offset N` | days from today; may be negative |
 | `--output FILE` | defaults to stdout; a path that is a Unix **socket** is connected to and streamed into |
 | `--quiet` | stderr carries errors only |
-| `--debug` | per-channel-day progress on stderr |
+| `--debug` | per-channel-day progress on stderr — the same [levels](./configuration.md#how-much-it-says) `epg` has, under this protocol's two words for them |
 | `--cache [DIR]` | override the cache directory; bare `--cache` means "as configured" |
 | `--no-cache` | grab into a scratch directory and discard it — every day refetched, nothing left on disk |
 | `--preferredmethod` | prints `allatonce`: ask once for a wide window rather than looping over `--offset` |

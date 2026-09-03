@@ -12,6 +12,8 @@ import { generateGuide, writeGuide } from './merge/main.js';
 import type { BuildGuideOptions } from './merge/types.js';
 import { addDays, toDayString } from './core/days.js';
 import { GrabberError } from './core/error.js';
+import type { Reporter } from './core/events.js';
+import { emitter } from './core/events.js';
 import {
   resolveConfigSource,
   type ConfigSource,
@@ -50,7 +52,14 @@ export interface RunOptions {
    * so staleness and the `grabbedAt` stamp keep using the real current time.
    */
   offset?: number;
-  logger?: (message: string) => void;
+  /**
+   * Where this run's events go — see {@link Reporter}.
+   *
+   * A function told what happened as it happens, which is what both halves of a
+   * run and every site in it report through. `textReporter` and `jsonReporter`
+   * are the ones this package ships.
+   */
+  reporter?: Reporter;
 }
 
 /**
@@ -191,9 +200,20 @@ function guideOptions(
     ...(config.merge ? { merge: config.merge } : {}),
     ...(config.meta ? { meta: config.meta } : {}),
     ...(config.indent !== undefined ? { indent: config.indent } : {}),
-    ...(options.logger ? { logger: options.logger } : {}),
+    ...reported(options),
     ...(options.signal ? { signal: options.signal } : {}),
   };
+}
+
+/**
+ * The sink, passed on as it was.
+ *
+ * Not resolved to an `Emit` here: each half builds its own from the same
+ * function, so a run's two halves report through one reporter without either
+ * knowing about the other.
+ */
+function reported(options: RunOptions): Pick<RunOptions, 'reporter'> {
+  return options.reporter ? { reporter: options.reporter } : {};
 }
 
 /** Grab all sites into the cache (only stale/missing channel-days are fetched). */
@@ -216,7 +236,7 @@ export async function runGrab(
         : {}),
       ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
       now,
-      ...(options.logger ? { logger: options.logger } : {}),
+      ...reported(options),
       ...(options.signal ? { signal: options.signal } : {}),
     });
 
@@ -231,7 +251,7 @@ export async function runGrab(
       const removed = await cache.prune({ before });
 
       if (removed > 0) {
-        options.logger?.(`Pruned ${removed} cached day(s) older than ${before}`);
+        emitter(options)({ type: 'prune:done', removed, before });
       }
     }
 
@@ -287,22 +307,31 @@ export async function build(source: ConfigSource, options: RunOptions = {}): Pro
   const config = await resolveConfigSource(source);
   const now = options.now ?? new Date();
 
-  // Channel lists too, and for the same reason one level down: a site that
-  // fetches its channels would otherwise be asked twice, and a list that
-  // changed in between would leave the guide describing channels the grab
-  // never went for.
-  const resolved: EpgConfig = {
-    ...config,
-    sites: await resolveSites(config.sites, {
-      ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
-    }),
-  };
-
   // One cache for both halves, rather than each of them asking the config for
   // its own: a driver that opens a database opens it once, and one that keeps
   // entries in memory is still holding them when the merge comes to read.
-  return withCache(resolved, options, async (cache) => {
+  //
+  // Opened before the channel lists are resolved, rather than after, because
+  // that is where a site's cached list lives — a `cacheChannels` site then makes
+  // no request for a list this cache already has.
+  return withCache(config, options, async (cache) => {
+    // Channel lists resolved once too, and for the same reason one level down: a
+    // site that fetches its channels would otherwise be asked twice, and a list
+    // that changed in between would leave the guide describing channels the grab
+    // never went for.
+    const resolved: EpgConfig = {
+      ...config,
+      sites: await resolveSites(config.sites, {
+        ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+        store: cache,
+        // `--refresh` means ask the source, and a channel list is something the
+        // source says.
+        ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
+        now,
+      }),
+    };
+
     const summary = await runGrab(resolved, { ...options, now, cache });
 
     if (options.signal?.aborted !== true) {

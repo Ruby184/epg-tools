@@ -1,5 +1,5 @@
 export { isStale } from './staleness.js';
-export { CacheManager, CACHE_SCHEMA } from './manager.js';
+export { CacheManager, CACHE_SCHEMA, STATE_SCHEMA } from './manager.js';
 export { CacheDriverBase } from './driver.js';
 export { FsCacheDriver } from './fs-driver.js';
 export { MemoryCacheDriver } from './memory-driver.js';

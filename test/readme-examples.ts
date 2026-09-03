@@ -14,16 +14,24 @@ import {
   CacheDriverBase,
   defineConfig,
   defineSiteConfig,
+  defineStreamSiteConfig,
+  defineXmltvSite,
   guideStream,
+  SiteStateHandle,
+  textReporter,
 } from '../src/main.js';
 import type {
   CacheDriver,
   CacheDriverFactory,
+  CacheStore,
   ChannelDayKey,
+  XmltvProgramme,
   FoundEntry,
   FoundMeta,
+  FoundState,
   StoredEntryMeta,
   StoredProgramme,
+  StoredStateMeta,
 } from '../src/main.js';
 import { envReader } from '../src/core/answers.js';
 import {
@@ -230,6 +238,114 @@ const fetchedChannels = defineSiteConfig({
 
 export const fetched = defineConfig({ sites: [fetchedChannels], output: 'guide.xml' });
 
+// --- docs/site-config.md: Keeping a fetched list ----------------------------
+export const keptChannels = defineSiteConfig({
+  site: 'example.tv',
+  cacheChannels: true, // a day; { maxAgeDays: 7 } for longer
+  async channels({ http }) {
+    return (await http.get('channels').json<{ id: string }[]>()).map((item) => ({
+      xmltvId: `${item.id}.example.tv`,
+      siteId: item.id,
+    }));
+  },
+  async request() {
+    return {};
+  },
+  parseDay: () => [],
+});
+
+// --- README.md / docs/site-config.md: A published guide as a source ---------
+export const fromPublishedGuide = defineConfig({
+  sites: [defineXmltvSite({ site: 'published.example', url: 'https://example.test/guide.xml.gz' })],
+  output: 'public/epg.xml',
+});
+
+// --- docs/site-config.md: Asking only when it is worth it -------------------
+export const revalidating = defineSiteConfig({
+  site: 'example.tv',
+  conditionalGet: true,
+  channels: [],
+  async request({ channel, day, http }) {
+    return http.get(`epg/${channel.siteId}/${day}`).json(); // unchanged
+  },
+  parseDay: () => [],
+});
+
+interface Index {
+  pages: string[];
+}
+
+interface Page {
+  items: RawProgramme[];
+}
+
+export const paginated = defineSiteConfig({
+  site: 'example.tv',
+  conditionalGet: true,
+  channels: [],
+  async request({ channel, day, http }) {
+    const index = await http.get(`epg/${channel.siteId}/${day}`).json<Index>();
+    const pages = await Promise.all(
+      index.pages.map((page) =>
+        // A 304 here would say nothing about the channel-day as a whole.
+        http.get(page, { context: { revalidate: false } }).json<Page>(),
+      ),
+    );
+
+    return { index, pages };
+  },
+  parseDay: () => [],
+});
+
+// --- docs/site-config.md: Sites that answer in one pass ---------------------
+
+/** Stands in for whatever splits the document — the real one is the parser. */
+async function* splitByChannelDay(
+  response: Response,
+  log: (message: string) => void,
+): AsyncGenerator<{ channel: string; day: string; programmes: XmltvProgramme[] }> {
+  log(`splitting ${response.url}`);
+  yield { channel: '1', day: '2026-08-28', programmes: [] };
+}
+
+export const published = defineStreamSiteConfig({
+  site: 'published.example',
+  channels: [{ xmltvId: 'one.published.example', siteId: '1' }],
+  async *stream({ channelDays, http, log }) {
+    const byChannel = new Map(
+      channelDays.map(({ channel, day }) => [`${channel.siteId}|${day}`, channel]),
+    );
+    const response = await http.get('guide.xml');
+
+    for await (const { channel, day, programmes } of splitByChannelDay(response, log)) {
+      const known = byChannel.get(`${channel}|${day}`);
+
+      if (known) {
+        yield { channel: known, day, programmes };
+      }
+    }
+  },
+});
+
+// --- docs/site-config.md: Remembering something between runs ----------------
+export const remembering = defineSiteConfig({
+  site: 'example.tv',
+  channels: [],
+  async request({ channel, day, http, state }) {
+    let token = state.get('token') as string | undefined;
+
+    if (token === undefined) {
+      token = (await http.post('session').json<{ token: string }>()).token;
+      state.set('token', token); // synchronous; saved once, for next time
+    }
+
+    return http
+      .get(`epg/${channel.siteId}/${day}`, { headers: { authorization: `Bearer ${token}` } })
+      .json();
+  },
+  parseDay: () => [],
+});
+
 // The mode decides which caps are accepted, and the shape of the context.
 export const wrongCap = defineSiteConfig({
   site: 'example.tv',
@@ -375,6 +491,7 @@ export const configured = defineConfig({
  * documentation is promising is the shape of the driver rather than the client.
  */
 const rows = new Map<string, { meta: StoredEntryMeta; programmes: StoredProgramme[] }>();
+const groups = new Map<string, { meta: StoredStateMeta; data: unknown }>();
 
 class KeyValueCacheDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
   readonly #prefix: string;
@@ -423,8 +540,31 @@ class KeyValueCacheDriver extends CacheDriverBase implements CacheDriver<StoredP
     return removed;
   }
 
+  // What a site remembers between runs: one row per (site, key), opaque to the
+  // driver. A store that cannot keep it answers `undefined` and ignores writes.
+  async readState(site: string, key: string): Promise<FoundState | undefined> {
+    return groups.get(`${this.#prefix}:${site}:${key}`);
+  }
+
+  async writeState(site: string, key: string, data: unknown, meta: StoredStateMeta): Promise<void> {
+    groups.set(`${this.#prefix}:${site}:${key}`, { meta, data });
+  }
+
+  async deleteState(site: string, key: string): Promise<void> {
+    groups.delete(`${this.#prefix}:${site}:${key}`);
+  }
+
   async close(): Promise<void> {}
 }
+
+// --- docs/api.md: What a site remembers between runs ------------------------
+export const siteState = async (cache: CacheStore): Promise<void> => {
+  const state = SiteStateHandle.open(cache, 'example.tv');
+
+  (await state.channels()).fresh(86_400_000, new Date()); // the list, while it lasts
+  (await state.bag()).set('cursor', 42); // the site's own Map
+  await state.save(); // the changed groups only
+};
 
 /** The builder the documentation recommends exporting, rather than the class. */
 export function keyValueCache(options: { prefix?: string }): CacheDriverFactory {
@@ -446,8 +586,43 @@ export const compressed = defineConfig({
 
 // --- docs/api.md: Running a build ------------------------------------------
 export const run = async (): Promise<number> => {
-  const summary = await build(configured, { logger: console.log });
-  return summary.fetched + summary.fromCache + summary.failed.length;
+  const summary = await build(configured, {
+    reporter: textReporter({ stream: process.stdout }),
+  });
+
+  return summary.fetched + summary.fromCache + summary.failed;
+};
+
+// --- docs/api.md: Naming one in a config ------------------------------------
+export const reporting = defineConfig({
+  sites: [example],
+  output: 'guide.xml',
+  reporter: 'json',
+});
+
+export const reportingInline = defineConfig({
+  sites: [example],
+  output: 'guide.xml',
+  reporter: ({ stdout, level }) => textReporter({ stream: stdout, level, failures: 'inline' }),
+});
+
+// --- docs/api.md: Reporting what a run is doing -----------------------------
+export const reported = async (): Promise<void> => {
+  await build(configured, { reporter: textReporter({ stream: process.stdout, level: 'debug' }) });
+};
+
+export const counted = async (): Promise<number> => {
+  let failed = 0;
+
+  await build(configured, {
+    reporter: (event) => {
+      if (event.type === 'entry:failed') {
+        failed++;
+      }
+    },
+  });
+
+  return failed;
 };
 
 export const streamed = async (): Promise<string> => {

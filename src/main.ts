@@ -10,7 +10,42 @@ export type {
 } from './config.js';
 export { createConfigContext, defaultsReader, envReader } from './core/answers.js';
 export type { ConfigContext, ConfigReader, StageDefaults } from './core/answers.js';
-export { GrabberError } from './core/error.js';
+export { errorChain, errorMessage, GrabberError } from './core/error.js';
+export { atLevel, emitter, EVENT_KINDS, LEVELS } from './core/events.js';
+export type {
+  Emit,
+  EpgEvent,
+  EpgEventInput,
+  EpgEventType,
+  EventKind,
+  EventLevel,
+  GrabCounts,
+  ReportedOptions,
+  Reporter,
+  RunPhase,
+} from './core/events.js';
+export {
+  DEFAULT_FAILURE_CAP,
+  FAILURE_MODES,
+  isFailure,
+  jsonReporter,
+  progressReporter,
+  render,
+  renderFailure,
+  reporterFor,
+  REPORTER_NAMES,
+  textReporter,
+} from './core/reporters.js';
+export type {
+  FailureEvent,
+  FailureMode,
+  JsonReporterOptions,
+  ProgressReporterOptions,
+  ReporterFactory,
+  ReporterName,
+  ReporterRuntime,
+  TextReporterOptions,
+} from './core/reporters.js';
 export type { CompressionFormat, CompressionOptions } from './core/output.js';
 export { build, runGrab, runMerge, guideStream, createCacheStore } from './build.js';
 export type { RunOptions } from './build.js';
@@ -73,12 +108,21 @@ export type * from './cache/types.js';
 export {
   grab,
   channelElement,
+  channelsMaxAgeMs,
   defineSiteConfig,
+  defineStreamSiteConfig,
+  defineXmltvSite,
+  DEFAULT_CHANNELS_MAX_AGE_DAYS,
   resolveChannels,
   resolveSites,
   retryAfterMs,
+  isUnchanged,
   siteHttp,
   sitePacing,
+  SiteStateHandle,
+  StateKey,
+  TrackedMap,
+  UnchangedError,
 } from './grabber/main.js';
 export type * from './grabber/types.js';
 

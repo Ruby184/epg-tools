@@ -40,8 +40,10 @@ import type {
   ChannelDayKey,
   FoundEntry,
   FoundMeta,
+  FoundState,
   StoredEntryMeta,
   StoredProgramme,
+  StoredStateMeta,
 } from './types.js';
 
 interface MemoryEntry {
@@ -57,6 +59,13 @@ export class MemoryCacheDriver extends CacheDriverBase implements CacheDriver<St
    * called can be mistaken for a separator.
    */
   readonly #sites = new Map<string, Map<string, Map<string, MemoryEntry>>>();
+
+  /**
+   * What each site remembers, by group — site to key, nested for the same
+   * reason the entries are: a site's groups are one object to hold, hand out and
+   * drop, and no key can be mistaken for a separator.
+   */
+  readonly #state = new Map<string, Map<string, { data: unknown; meta: StoredStateMeta }>>();
 
   /** How many entries are held, for a test that wants to say so. */
   get size(): number {
@@ -74,6 +83,7 @@ export class MemoryCacheDriver extends CacheDriverBase implements CacheDriver<St
   /** Forget everything, so one instance can serve a suite of tests. */
   clear(): void {
     this.#sites.clear();
+    this.#state.clear();
   }
 
   #days(key: ChannelDayKey): Map<string, MemoryEntry> | undefined {
@@ -114,6 +124,51 @@ export class MemoryCacheDriver extends CacheDriverBase implements CacheDriver<St
 
   async delete(key: ChannelDayKey): Promise<void> {
     this.#days(key)?.delete(key.day);
+  }
+
+  async readState(site: string, key: string): Promise<FoundState | undefined> {
+    const group = this.#state.get(site)?.get(key);
+
+    return group && { meta: group.meta, data: this.#copy(group.data) };
+  }
+
+  async writeState(site: string, key: string, data: unknown, meta: StoredStateMeta): Promise<void> {
+    let groups = this.#state.get(site);
+
+    if (groups === undefined) {
+      groups = new Map();
+      this.#state.set(site, groups);
+    }
+
+    groups.set(key, { meta, data: this.#copy(data) });
+  }
+
+  async deleteState(site: string, key: string): Promise<void> {
+    const groups = this.#state.get(site);
+
+    groups?.delete(key);
+
+    if (groups?.size === 0) {
+      this.#state.delete(site);
+    }
+  }
+
+  /**
+   * A copy, on the way in and again on the way out — the same care the record
+   * pair takes with programmes, for the same reason.
+   *
+   * Every other driver serializes, so what a caller wrote and what a later read
+   * hands back are already separate objects. A caller that kept hold of what it
+   * remembered, or of what it read back, would otherwise be editing the cache
+   * under this driver and no other — the sort of difference a test would never
+   * find.
+   *
+   * Through JSON rather than `structuredClone`, because JSON is what the other
+   * drivers put a group through: a `Date` or a `Map` in there comes back as a
+   * string or `{}` here too, rather than surviving only in memory.
+   */
+  #copy(data: unknown): unknown {
+    return data === undefined ? undefined : (JSON.parse(JSON.stringify(data)) as unknown);
   }
 
   async prune(options: { before: string }): Promise<number> {

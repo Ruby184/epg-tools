@@ -23,6 +23,8 @@ import {
   type GrabberConf,
 } from './config-file.js';
 import { GrabberError } from '../core/error.js';
+import { atLevel, type EventLevel } from '../core/events.js';
+import { textReporter } from '../core/reporters.js';
 import { help, parseGrabberOptions, usage, type GrabberValues } from './options.js';
 import { applyChannelSelection } from './select.js';
 import { appendStage, resolveStages, type ConfigStage } from './stages.js';
@@ -176,7 +178,12 @@ async function execute(
   }
 
   const configFile = values['config-file'] ?? defaultConfigFile(grabberName);
-  const log = values.quiet ? undefined : (message: string) => queueLine(stderr, message);
+  // `--quiet` and `--debug` are this protocol's two words for a level, and they
+  // now mean one: the run reports through the same reporter `epg` uses, on
+  // stderr, because stdout is the guide.
+  const level: EventLevel = values.quiet ? 'error' : values.debug ? 'debug' : 'info';
+  const reporter = textReporter({ stream: stderr, level });
+  const log = atLevel('info', level) ? (message: string) => queueLine(stderr, message) : undefined;
 
   // --output redirects stdout wholesale in the reference, so it applies to the
   // configuration documents a capability may print as well as to the guide.
@@ -281,30 +288,18 @@ async function execute(
   const runOptions = {
     offset: values.offset,
     ...(options.now ? { now: options.now } : {}),
-    // Per-channel-day chatter is debug-level; the summary is not.
-    ...(values.debug && log ? { logger: log } : {}),
+    reporter,
     ...(options.signal ? { signal: options.signal } : {}),
   };
 
   let failed = 0;
 
   if (options.grab !== false) {
-    const summary = await runGrab(selected, runOptions);
-    failed = summary.failed.length;
-
-    for (const failure of summary.failed) {
-      const message =
-        failure.error instanceof Error ? failure.error.message : String(failure.error);
-      // An error, so it is printed even under --quiet.
-      queueLine(stderr, `${failure.site} ${failure.channelId} ${failure.day}: ${message}`);
-    }
-
-    // Empty channel-days are a subset of what was grabbed, so they are named
-    // beside it — and only when there are any, since none is the normal case.
-    const grabbed =
-      summary.empty > 0 ? `${summary.fetched} (${summary.empty} empty)` : `${summary.fetched}`;
-
-    log?.(`grabbed ${grabbed}, from cache ${summary.fromCache}, failed ${failed}`);
+    // The summary line and the failures under it are the reporter's, which is
+    // what stops this grabber saying both in a format of its own — and is why
+    // it now mentions what a source said was unchanged, which its own line
+    // silently dropped.
+    failed = (await runGrab(selected, runOptions)).failed;
   }
 
   // A cancelled run writes nothing: the reference grabbers are read by a

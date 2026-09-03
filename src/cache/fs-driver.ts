@@ -3,8 +3,13 @@
  * like inside.
  *
  * Layout: `<dir>/<site>/<channelId>/<day>.<ext>`, one file per channel-day
- * holding its own meta as well as its programmes. Site and channel path
- * segments are sanitized with `encodeURIComponent`.
+ * holding its own meta as well as its programmes, and `<dir>/<site>/<key>.json`
+ * for each group of what the site remembers between runs. Site, channel and key
+ * path segments are sanitized with `encodeURIComponent`.
+ *
+ * A prune only ever looks at the day files, so a site's state outlives every
+ * listing it has — including a site dropped from the config, whose directory
+ * stays behind holding nothing else.
  *
  * Where a driver puts entries and what it keeps them *as* are separate
  * problems, so the second one belongs to a subclass: `FsNdjsonCacheDriver` and
@@ -27,9 +32,11 @@ import type {
   ChannelDayKey,
   FoundEntry,
   FoundMeta,
+  FoundState,
   FsCacheDriverOptions,
   StoredEntryMeta,
   StoredProgramme,
+  StoredStateMeta,
 } from './types.js';
 
 /** How much of a prune's directory walk is in flight at once. */
@@ -265,12 +272,28 @@ export abstract class FsCacheDriver<TStored = StoredProgramme>
   }
 
   async write(key: ChannelDayKey, programmes: TStored[], meta: StoredEntryMeta): Promise<void> {
-    const file = this.#entryFilePath(key);
     // One file, so an entry is either there with its meta or not there at all:
     // two writes left a window where it had already been written and could not
     // yet be told apart from one that had never been grabbed.
-    const data = this.entryData(programmes, meta);
+    await this.#writeFile(this.#entryFilePath(key), this.entryData(programmes, meta));
+  }
 
+  /**
+   * Write a file atomically, making its directory only if that turns out to be
+   * what was missing.
+   *
+   * Written before the directory is made sure of, rather than after, which is
+   * what keeps a grab from asking for a directory that has been there since its
+   * first day — 7,000 entries is a quarter of a second of learning what we
+   * already knew. A missing path component is the only thing `ENOENT` can mean
+   * here, so the recovery is to make it and write again: the same answer whether
+   * this is the channel's first day or another process took the directory away
+   * since its last.
+   *
+   * Asked before making anything, so that a write cancelled in the moment
+   * between the two leaves no directory behind either.
+   */
+  async #writeFile(file: string, data: string): Promise<void> {
     try {
       await writeFileAtomic(file, data, this.signal);
     } catch (error) {
@@ -278,24 +301,56 @@ export abstract class FsCacheDriver<TStored = StoredProgramme>
         throw error;
       }
 
-      // Written before the directory is made sure of, rather than after, which
-      // is what keeps a grab from asking for a directory that has been there
-      // since its first day — 7,000 entries is a quarter of a second of
-      // learning what we already knew. A missing path component is the only
-      // thing `ENOENT` can mean here, so the recovery is to make it and write
-      // again: the same answer whether this is the channel's first day or
-      // another process took the directory away since its last.
-      //
-      // Asked before making anything, so that a write cancelled in the moment
-      // between the two leaves no directory behind either.
       this.signal?.throwIfAborted();
-      await fs.mkdir(this.#channelDir(key), { recursive: true });
+      await fs.mkdir(path.dirname(file), { recursive: true });
       await writeFileAtomic(file, data, this.signal);
     }
   }
 
   async delete(key: ChannelDayKey): Promise<void> {
     await fs.rm(this.#entryFilePath(key), { force: true });
+  }
+
+  /** The file one group of a site's state is kept in. */
+  #stateFilePath(site: string, key: string): string {
+    return path.join(this.dir, this.#segment(site), `${this.#segment(key)}.json`);
+  }
+
+  async readState(site: string, key: string): Promise<FoundState | undefined> {
+    let content: string;
+
+    try {
+      content = await fs.readFile(this.#stateFilePath(site, key), this.readOptions());
+    } catch (error) {
+      if (this.#isNotFound(error)) {
+        return;
+      }
+
+      throw error;
+    }
+
+    try {
+      // Whatever is in there, at its word: judging the envelope belongs to the
+      // manager, which does it the same way for every store there is.
+      const { meta, data } = JSON.parse(content) as FoundState;
+
+      return { meta, data };
+    } catch {
+      // A file that is there and holds nothing anybody can read — the second
+      // kind of nothing, and the only one worth removing.
+      return { meta: undefined, data: undefined };
+    }
+  }
+
+  async writeState(site: string, key: string, data: unknown, meta: StoredStateMeta): Promise<void> {
+    // Compact, unlike an xmltv entry: a group is written for this code rather
+    // than for a reader, and one of them can hold thousands of records. `jq .`
+    // is what to point at it.
+    await this.#writeFile(this.#stateFilePath(site, key), JSON.stringify({ meta, data }));
+  }
+
+  async deleteState(site: string, key: string): Promise<void> {
+    await fs.rm(this.#stateFilePath(site, key), { force: true });
   }
 
   async prune(options: { before: string }): Promise<number> {

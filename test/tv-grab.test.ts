@@ -2024,6 +2024,41 @@ describe('grabbing', () => {
 
     expect(code).toBe(1);
     expect(stderr).toContain('upstream is down');
+    // The same block `epg` writes, rather than a format of this grabber's own.
+    expect(stderr).toContain('FAILED [example.tv] one.example.tv');
+  });
+
+  it('reports the summary on stderr, and says what a source called unchanged', async () => {
+    const dir = await tempDir();
+    const configFile = await configured(dir);
+
+    const { code, stdout, stderr } = await run(config(dir), [
+      '--config-file',
+      configFile,
+      '--debug',
+    ]);
+
+    expect(code).toBe(0);
+    // Its own summary line silently dropped `unchanged`; the shared one cannot.
+    expect(stderr).toContain('Grab done: 1 fetched, 0 from cache, 0 failed');
+    // `--debug` is the per-channel-day level, and stdout is still only the guide.
+    expect(stderr).toContain('one.example.tv');
+    expect(stdout).toContain('<?xml');
+  });
+
+  it('says nothing but the guide under --quiet', async () => {
+    const dir = await tempDir();
+    const configFile = await configured(dir);
+
+    const { code, stdout, stderr } = await run(config(dir), [
+      '--config-file',
+      configFile,
+      '--quiet',
+    ]);
+
+    expect(code).toBe(0);
+    expect(stderr).toBe('');
+    expect(stdout).toContain('<programme');
   });
 
   it('--cache redirects the cache directory, and bare --cache leaves it alone', async () => {

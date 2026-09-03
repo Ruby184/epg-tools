@@ -10,6 +10,7 @@ import { mergeProgrammeLists, mergeProgrammes } from '../src/merge/programme.js'
 import { parseXmltvDate } from '../src/xmltv/main.js';
 import type { BuildGuideOptions } from '../src/merge/types.js';
 import type { XmltvChannel, XmltvProgramme } from '../src/xmltv/types.js';
+import { collect as collectEvents } from './reporting.js';
 
 // The xmltv module is developed concurrently; guide tests are skipped when it
 // (or its writeXmltvStream export) is not available yet.
@@ -58,6 +59,11 @@ function createFakeCache(entries: Record<string, XmltvProgramme[]> = {}): CacheS
     async prune() {
       return 0;
     },
+    // A merge asks nothing of a site's state, so this one remembers nothing.
+    async getState() {
+      return undefined;
+    },
+    async setState() {},
     async close() {},
   };
 }
@@ -1245,18 +1251,20 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     });
   });
 
-  it('logs progress per channel', async () => {
-    const messages: string[] = [];
+  it('reports each channel as it is finished', async () => {
+    const report = collectEvents();
 
     await generate({
       sites: [siteA, siteB],
       cache: cacheForBothSites(),
       days: 1,
       now: NOW,
-      logger: (message) => messages.push(message),
+      reporter: report.reporter,
     });
 
-    expect(messages.some((message) => message.includes('X'))).toBe(true);
+    expect(report.of('merge:channel')).toEqual([
+      expect.objectContaining({ channelId: 'X', level: 'debug', phase: 'merge' }),
+    ]);
   });
 
   it('writeGuide streams to <output>.tmp and renames atomically', async () => {
