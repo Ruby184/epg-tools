@@ -32,6 +32,7 @@ export type FindingCode =
   | 'unknown-channel'
   | 'duplicate-channel'
   | 'stop-before-start'
+  | 'programme-overlap'
   | 'extensions';
 
 /**
@@ -132,6 +133,10 @@ const RULES: Record<FindingCode, { severity: FindingSeverity; message: string }>
   },
   'duplicate-channel': { severity: 'error', message: 'two <channel> elements share an id' },
   'stop-before-start': { severity: 'error', message: 'a <programme> stops before it starts' },
+  'programme-overlap': {
+    severity: 'error',
+    message: 'two programmes on one channel are on at the same moment',
+  },
   extensions: {
     severity: 'warning',
     message: 'a provider extension, which no DTD describes — extensions: false removes them',
@@ -144,7 +149,7 @@ class Findings {
 
   constructor(private readonly maxExamples: number) {}
 
-  add(code: FindingCode, example: string): void {
+  add(code: FindingCode, example: string, occurrences = 1): void {
     let entry = this.#byCode.get(code);
 
     if (entry === undefined) {
@@ -152,7 +157,11 @@ class Findings {
       this.#byCode.set(code, entry);
     }
 
-    entry.count++;
+    // Counted by how many there were, not by how many times this was called:
+    // the tallies held per undeclared channel arrive here as one call each, and
+    // a rule reported once for a thousand occurrences would leave the report
+    // saying `1` where it means a thousand.
+    entry.count += occurrences;
 
     // Kept only while there is room, and only when it is something not already
     // named: a thousand programmes missing a title are one finding, and naming
@@ -177,18 +186,73 @@ function extensionExample(kind: 'attribute' | 'element', name: string, on: strin
   return `${kind} ${name} on <${on}>`;
 }
 
-/** Every extension an element carries, named for the report. */
-function extensionsOf(
-  findings: Findings,
-  on: string,
-  element: { extraAttributes?: Record<string, string>; extra?: XmltvExtraElement[] },
-): void {
-  for (const name of Object.keys(element.extraAttributes ?? {})) {
-    findings.add('extensions', extensionExample('attribute', name, on));
+/**
+ * The element a model field is written as, where the two names differ.
+ *
+ * Only for the report's wording. A field missing from here is labelled by its
+ * own name, which is a worse sentence and not a wrong answer.
+ */
+const ELEMENT_NAMES: Record<string, string> = {
+  subTitle: 'sub-title',
+  origLanguage: 'orig-language',
+  episodeNum: 'episode-num',
+  previouslyShown: 'previously-shown',
+  lastChance: 'last-chance',
+  starRating: 'star-rating',
+  displayName: 'display-name',
+};
+
+/**
+ * Every extension anywhere under `value`, named for the report.
+ *
+ * A walk rather than a list of the places extensions can be, and the difference
+ * is the point: the model has two dozen of them — every text element, every
+ * icon, every credit person, both ratings — and a hand-written list had already
+ * missed most. Worse, it missed them *quietly*: a guide full of extensions in
+ * `<desc>` and `<category>` came back clean, from the very command that exists
+ * to prove `extensions: false` worked.
+ *
+ * A walk cannot drift. A field added to the model later is found by this
+ * without anyone remembering to come here, which a list can never promise.
+ *
+ * It does not descend into an extension itself — a kept one is kept whole, as
+ * the serializer keeps it, so what is inside is the provider's business.
+ */
+function walkExtensions(findings: Findings, on: string, value: unknown): void {
+  // A `Date` is an object with no fields worth walking, and every date in the
+  // model is one.
+  if (value === null || typeof value !== 'object' || value instanceof Date) {
+    return;
   }
 
-  for (const extra of element.extra ?? []) {
-    findings.add('extensions', extensionExample('element', extra.name, on));
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      walkExtensions(findings, on, item);
+    }
+
+    return;
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'extraAttributes') {
+      for (const name of Object.keys((child ?? {}) as Record<string, string>)) {
+        findings.add('extensions', extensionExample('attribute', name, on));
+      }
+
+      continue;
+    }
+
+    if (key === 'extra') {
+      for (const extra of (child ?? []) as XmltvExtraElement[]) {
+        findings.add('extensions', extensionExample('element', extra.name, on));
+      }
+
+      continue;
+    }
+
+    // The key names the element its children hang off, which is what makes
+    // `icon` inside a `rating` report as `<icon>` rather than as the rating.
+    walkExtensions(findings, ELEMENT_NAMES[key] ?? key, child);
   }
 }
 
@@ -222,6 +286,17 @@ export async function validateXmltv(
    */
   const dropped = new Map<string, number>();
   /**
+   * The furthest any programme on a channel has been seen to run to.
+   *
+   * One number per channel, so this is bounded by the channels a guide has
+   * rather than by the programmes on them — and it is what makes an overlap
+   * findable in a single pass. It catches an overlap between neighbours, which
+   * is what a guide sorted by time has; a document that interleaves its
+   * channels in some other order is still handled, since the reading is kept
+   * per channel.
+   */
+  const runsTo = new Map<string, number>();
+  /**
    * Occurrences past *both* maps. This one really is unrecoverable: nothing
    * records which ids they belonged to, so a later `<channel>` cannot take
    * them back. It takes over two thousand distinct undeclared ids to reach.
@@ -247,15 +322,7 @@ export async function validateXmltv(
       findings.add('channel-without-display-name', channel.id);
     }
 
-    extensionsOf(findings, 'channel', channel);
-
-    for (const icon of channel.icon ?? []) {
-      extensionsOf(findings, 'icon', icon);
-    }
-
-    for (const name of channel.displayName ?? []) {
-      extensionsOf(findings, 'display-name', name);
-    }
+    walkExtensions(findings, 'channel', channel);
   };
 
   const programmeSeen = (programme: XmltvProgramme): void => {
@@ -275,6 +342,29 @@ export async function validateXmltv(
       );
     }
 
+    if (programme.stop !== undefined) {
+      const started = programme.start.getTime();
+      const previous = runsTo.get(programme.channel);
+
+      // Strictly before, because the DTD makes a programme a half-closed
+      // interval: on at its start and off just before its stop, so one ending
+      // at 12:00 and the next starting at 12:00 do not overlap "not even for a
+      // moment". The DTD says as much and then says it cannot express the
+      // constraint — which is the whole reason a validator is the place for it.
+      if (previous !== undefined && started < previous) {
+        findings.add(
+          'programme-overlap',
+          `${programme.channel} at ${programme.start.toISOString()}`,
+        );
+      }
+
+      // The furthest, not the latest seen: a short programme nested inside a
+      // long one must not shorten what the channel is known to run to.
+      const stopped = programme.stop.getTime();
+
+      runsTo.set(programme.channel, previous === undefined ? stopped : Math.max(previous, stopped));
+    }
+
     if (!declared.has(programme.channel)) {
       // An id already being held counts against it however full the map is;
       // the cap is on how many *distinct* undeclared ids are remembered.
@@ -287,23 +377,7 @@ export async function validateXmltv(
       }
     }
 
-    extensionsOf(findings, 'programme', programme);
-
-    if (programme.credits) {
-      extensionsOf(findings, 'credits', programme.credits);
-    }
-
-    if (programme.video) {
-      extensionsOf(findings, 'video', programme.video);
-    }
-
-    if (programme.audio) {
-      extensionsOf(findings, 'audio', programme.audio);
-    }
-
-    for (const rating of [...(programme.rating ?? []), ...(programme.starRating ?? [])]) {
-      extensionsOf(findings, 'rating', rating);
-    }
+    walkExtensions(findings, 'programme', programme);
   };
 
   for await (const event of parseXmltvStream(source, parseOptions)) {
@@ -318,7 +392,7 @@ export async function validateXmltv(
         findings.add(event.value.code, warningExample(event.value));
         break;
       case 'meta':
-        extensionsOf(findings, 'tv', event.value);
+        walkExtensions(findings, 'tv', event.value);
         break;
       default:
         // A processing instruction is well-formed XML that no DTD constrains,
@@ -328,22 +402,15 @@ export async function validateXmltv(
   }
 
   // Now that every `<channel>` has had its chance to describe them.
-  for (const [id, count] of pending) {
-    for (let i = 0; i < count; i++) {
-      findings.add('unknown-channel', id);
-    }
-  }
-
-  for (const [id, count] of dropped) {
-    for (let i = 0; i < count; i++) {
-      findings.add('unknown-channel', id);
-    }
+  for (const [id, count] of [...pending, ...dropped]) {
+    findings.add('unknown-channel', id, count);
   }
 
   if (overflow > 0) {
     findings.add(
       'unknown-channel',
-      `and ${overflow} more past the first ${MAX_PENDING_CHANNELS * 2}`,
+      `and more past the first ${MAX_PENDING_CHANNELS * 2} undeclared channels`,
+      overflow,
     );
   }
 

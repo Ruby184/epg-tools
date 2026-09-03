@@ -190,6 +190,137 @@ describe('validateXmltv', () => {
     expect(report.programmes).toBe(1200);
   });
 
+  it('counts a bulk finding by how many there were', async () => {
+    // The tallies held per undeclared channel are reported one call each, so a
+    // rule counted per *call* said `2` where it meant two thousand — and the
+    // report's `errors` total was short by the difference.
+    const many = Array.from({ length: 300 }, () => programme('ghost', START)).join('');
+    const report = await validate(guide(channel('one') + many));
+
+    expect(finding(report, 'unknown-channel')).toMatchObject({ count: 300, examples: ['ghost'] });
+    expect(report.errors).toBe(300);
+  });
+
+  it('finds an extension wherever the model can hold one', async () => {
+    // A hand-written list of the places had missed most of them, and missed
+    // them quietly: a guide full of extensions in <desc> and <category> came
+    // back clean, from the command that exists to prove they were stripped.
+    const report = await validate(
+      guide(
+        `<channel id="one"><display-name lang="en" primary="yes">One</display-name>` +
+          `<icon src="a.png" cdn="edge"/></channel>` +
+          `<programme start="${START}" channel="one">` +
+          `<title>T</title>` +
+          `<sub-title alt="yes">S</sub-title>` +
+          `<desc source="feed">D</desc>` +
+          `<credits><director medal="gold">Jane</director></credits>` +
+          `<category eit="0x23">News</category>` +
+          `<keyword weight="3">live</keyword>` +
+          `<episode-num system="xmltv_ns" verified="no">0.1.</episode-num>` +
+          `<icon src="p.png" hash="abc"/>` +
+          `<rating system="MPAA" body="fcc"><value>PG</value><icon src="r.png" cdn="edge"/></rating>` +
+          `<review type="text" stars="4">Good</review>` +
+          `</programme>`,
+      ),
+    );
+
+    // Twelve, at every depth the model has: the channel's own display-name and
+    // icon, seven on the programme's children, and the icon nested inside the
+    // rating. A hand-written list found four of them.
+    expect(finding(report, 'extensions')?.count).toBe(12);
+
+    const all = (
+      await validate(
+        guide(
+          `<channel id="one"><display-name primary="yes">One</display-name></channel>` +
+            `<programme start="${START}" channel="one"><title>T</title>` +
+            `<desc source="feed">D</desc><category eit="0x23">News</category>` +
+            `<credits><director medal="gold">Jane</director></credits></programme>`,
+        ),
+        { maxExamples: 100 },
+      )
+    ).findings.find((item) => item.code === 'extensions')?.examples;
+
+    expect(all).toContain('attribute primary on <display-name>');
+    expect(all).toContain('attribute source on <desc>');
+    expect(all).toContain('attribute eit on <category>');
+    expect(all).toContain('attribute medal on <director>');
+  });
+
+  it('does not descend into an extension it has already named', async () => {
+    // A kept extension is kept whole, as the serializer keeps it, so what is
+    // inside one is the provider's business and not a second finding.
+    const report = await validate(
+      guide(
+        channel('one') +
+          `<programme start="${START}" channel="one"><title>T</title>` +
+          `<crid kind="series"><series deep="yes">abc</series></crid></programme>`,
+      ),
+    );
+
+    expect(finding(report, 'extensions')).toMatchObject({
+      count: 1,
+      examples: ['element crid on <programme>'],
+    });
+  });
+
+  it('reports two programmes on one channel that are on at once', async () => {
+    const report = await validate(
+      guide(
+        channel('one') +
+          `<programme start="20260903060000 +0000" stop="20260903080000 +0000" channel="one"><title>A</title></programme>` +
+          `<programme start="20260903070000 +0000" stop="20260903090000 +0000" channel="one"><title>B</title></programme>`,
+      ),
+    );
+
+    expect(finding(report, 'programme-overlap')).toMatchObject({ severity: 'error', count: 1 });
+  });
+
+  it('lets programmes touch, which the DTD says is not an overlap', async () => {
+    // A half-closed interval: on at its start, off just before its stop, so
+    // 11:00–12:00 and 12:00–13:00 do not overlap "not even for a moment".
+    const report = await validate(
+      guide(
+        channel('one') +
+          `<programme start="20260903060000 +0000" stop="20260903070000 +0000" channel="one"><title>A</title></programme>` +
+          `<programme start="20260903070000 +0000" stop="20260903080000 +0000" channel="one"><title>B</title></programme>`,
+      ),
+    );
+
+    expect(finding(report, 'programme-overlap')).toBeUndefined();
+    expect(report.ok).toBe(true);
+  });
+
+  it("keeps one channel's overlaps out of another's", async () => {
+    // Interleaved channels, which a guide from elsewhere may well be: the
+    // reading is per channel, so `two` starting inside `one` is not an overlap.
+    const report = await validate(
+      guide(
+        channel('one') +
+          channel('two') +
+          `<programme start="20260903060000 +0000" stop="20260903080000 +0000" channel="one"><title>A</title></programme>` +
+          `<programme start="20260903070000 +0000" stop="20260903090000 +0000" channel="two"><title>B</title></programme>`,
+      ),
+    );
+
+    expect(finding(report, 'programme-overlap')).toBeUndefined();
+  });
+
+  it('does not let a short programme inside a long one hide the next overlap', async () => {
+    // The furthest a channel runs to, not the latest seen: A runs to 10:00, so
+    // C at 09:00 overlaps it even though B ended at 07:00.
+    const report = await validate(
+      guide(
+        channel('one') +
+          `<programme start="20260903060000 +0000" stop="20260903100000 +0000" channel="one"><title>A</title></programme>` +
+          `<programme start="20260903060000 +0000" stop="20260903070000 +0000" channel="one"><title>B</title></programme>` +
+          `<programme start="20260903090000 +0000" stop="20260903110000 +0000" channel="one"><title>C</title></programme>`,
+      ),
+    );
+
+    expect(finding(report, 'programme-overlap')?.count).toBe(2);
+  });
+
   it('puts errors first, then whatever happened most', async () => {
     const report = await validate(
       guide(

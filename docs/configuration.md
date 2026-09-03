@@ -548,8 +548,16 @@ it.
 
 | severity | what it means |
 |---|---|
-| `error` | the guide is wrong: a `<programme>` naming a channel nothing describes, a `<channel>` with no `<display-name>`, two channels sharing an id, a programme that stops before it starts, or a document that ends mid-element |
+| `error` | the guide is wrong: a `<programme>` naming a channel nothing describes, two programmes on one channel on at the same moment, a `<channel>` with no `<display-name>`, two channels sharing an id, a programme that stops before it starts, or a document that ends mid-element |
 | `warning` | the parser found something and coped: a dropped attribute, a duplicated element, markup it skipped — and [provider extensions](#provider-extensions), which are deliberate and are what `--no-extensions` removes |
+
+Two programmes overlap when one starts strictly before the other has stopped.
+Touching is not overlapping: the DTD makes a programme a half-closed interval —
+on at its start, off just before its stop — so 11:00–12:00 and 12:00–13:00 do
+not clash "not even for a moment". It is the constraint the DTD describes and
+then says it has no way to express, which is why it lives here; a merge's
+[`clipOverlaps`](#cleaning-up-the-output) is what keeps guides *this* package
+writes clear of it.
 
 What it does **not** check is element *order*. Parsing produces a model, and a
 model has no order, so `<desc>` before `<title>` is invisible here. For that,

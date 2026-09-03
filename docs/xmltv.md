@@ -324,9 +324,10 @@ if (!report.ok) {
 It reports two kinds of thing: [the warnings the parser already
 emits](#warnings), with the line and column each was found at, and what only the
 whole document shows — a `<programme>` naming a channel no `<channel>`
-describes, two channels sharing an id, a `<programme>` with no `<title>`, a
-programme that stops before it starts, and [provider
-extensions](#provider-extensions).
+describes, two programmes on one channel on at the same moment, two channels
+sharing an id, a `<programme>` with no `<title>`, a programme that stops before
+it starts, and [provider extensions](#provider-extensions), found by walking the
+model rather than by a list of the places they can hide.
 
 Findings are grouped **by rule, not by occurrence**, and each keeps a few
 deduplicated `examples` (`maxExamples`, five by default). That is what keeps a
