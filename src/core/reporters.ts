@@ -547,6 +547,9 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
         counts.unchanged++;
         break;
       case 'entry:failed':
+      // A whole site counts once, as the summary counts it — without this the
+      // live line and `Grab done` disagreed about `failed`.
+      case 'site:failed':
         counts.failed++;
         break;
       case 'merge:channel':

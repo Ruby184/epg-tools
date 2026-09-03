@@ -224,7 +224,19 @@ export function revalidationHooks(hooks: KyOptions['hooks']): NonNullable<KyOpti
     ],
     afterResponse: [
       ...(hooks?.afterResponse ?? []),
-      ({ request, response }) => {
+      ({ request, options, response }) => {
+        // The same opt-out the outbound hook honours, and it has to be honoured
+        // on the way back too. Without it a paginated site's page urls — the
+        // documented case for saying `revalidate: false` — had their `ETag`s
+        // stored anyway: a persisted group filling with urls nobody will ever
+        // ask conditionally about, evicting under {@link MAX_VALIDATORS} the one
+        // validator that was worth keeping. And a `304` on a page cannot mean
+        // "keep this channel-day" when that is exactly what the flag denies, so
+        // it is not turned into one either.
+        if (options.context.revalidate === false) {
+          return response;
+        }
+
         remember(request.url, response);
 
         if (response.status === 304) {

@@ -795,16 +795,23 @@ export interface GrabSummary {
    */
   unchanged: number;
   /**
-   * Channel-days that could not be fetched.
+   * What did not come back: one for each channel-day that could not be fetched,
+   * and one for each site that could not be run at all.
+   *
+   * A site counts once rather than per channel-day because there is no grid to
+   * spread it over — a site that could not be read has no channel list, so the
+   * number of channel-days it *would* have covered is not knowable. Which makes
+   * this "things that went wrong" rather than strictly channel-days, and is why
+   * a non-zero value is the run's exit code either way.
    *
    * A count, not a list. It used to be the errors themselves, and it was the
    * one thing a run retained that grew with the size of the guide: a site that
    * is down leaves seven thousand live `Error`s with stacks, against the
    * flat-in-the-size-of-the-guide discipline everything else here keeps.
    *
-   * What each of them *was* arrives as an `entry:failed` or `request:failed`
-   * event while it happens — see `reporter`. A caller wanting the list keeps
-   * one of its own, and gets to decide how long it may grow.
+   * What each of them *was* arrives as an `entry:failed`, `request:failed` or
+   * `site:failed` event while it happens — see `reporter`. A caller wanting the
+   * list keeps one of its own, and gets to decide how long it may grow.
    */
   failed: number;
 }

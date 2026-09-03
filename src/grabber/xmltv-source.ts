@@ -491,6 +491,18 @@ export function defineXmltvSite<TData = XmltvChannel>(
 
         const programme = event.value;
         const siteId = programme.channel;
+        const channels = wanted.get(siteId);
+
+        // Before the ordering below, not after it: a channel nobody asked for
+        // must not take part in deciding whether the document is grouped. It
+        // used to, and `a … x … a` — a wanted channel split by an unwanted one —
+        // made the pass give up and hold the *whole rest of the document* in
+        // memory, when dropping `x` leaves `a` one contiguous run needing
+        // neither a hold nor a second write. Memory being the point of this
+        // adapter, that was the expensive way round.
+        if (channels === undefined) {
+          continue;
+        }
 
         if (!holding && siteId !== current) {
           if (flushed.has(siteId)) {
@@ -509,12 +521,6 @@ export function defineXmltvSite<TData = XmltvChannel>(
           }
         } else if (current === undefined) {
           current = siteId;
-        }
-
-        const channels = wanted.get(siteId);
-
-        if (channels === undefined) {
-          continue;
         }
 
         const day = dayOf(programme.start, dayZone);

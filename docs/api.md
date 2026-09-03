@@ -31,15 +31,19 @@ console.log(summary); // { fetched, fromCache, failed }
 `fromCache` (skipped because the cache was fresh), `empty`, `unchanged` and
 `failed` — five numbers, and nothing that grows with the size of the guide.
 
-`failed` is a **count**. It used to be the errors themselves, which for a site
-that is down meant seven thousand live `Error`s with stacks retained for the
-length of the run. What each failure *was* arrives as it happens, as an
-`entry:failed`, `request:failed` or `site:failed` event — see [reporting what a
-run is doing](#reporting-what-a-run-is-doing) — so a caller that wants the list
-keeps one of its own and decides how long it may grow. A site that cannot be
-read at all, because it is missing `site`, `channels`, `request` or `parseDay`,
-is one `site:failed` and one added to the count; that is checked before the
-site's first request, and it fails only that site.
+`failed` is a **count** — one per channel-day that could not be fetched, and
+one per site that could not be run at all. A site counts once rather than per
+channel-day because there is no grid to spread it over: a site that could not be
+read has no channel list, so what it would have covered is not knowable. Which
+makes it "things that went wrong" rather than strictly channel-days, and is why
+non-zero is the exit code either way.
+
+It used to be the errors themselves, which for a site that is down meant seven
+thousand live `Error`s with stacks retained for the length of the run. What each
+failure *was* arrives as it happens, as an `entry:failed`, `request:failed` or
+`site:failed` event — see [reporting what a run is doing](#reporting-what-a-run-is-doing)
+— so a caller that wants the list keeps one of its own and decides how long it
+may grow.
 
 `build`, `runGrab`, `runMerge` and `guideStream` all take either shape — a
 plain `EpgConfig` or a `defineConfig` factory still waiting for its answers —

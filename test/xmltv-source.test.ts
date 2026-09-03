@@ -240,6 +240,43 @@ describe('defineXmltvSite', () => {
     expect(report.messages.some((line) => line.includes('not grouped by channel'))).toBe(true);
   });
 
+  it('is not thrown off by a channel nobody asked for coming between two runs', async () => {
+    // `a … x … a`, with `x` outside the list. For the channels actually wanted
+    // this is one contiguous run of `a`, so nothing needs holding — but the
+    // ordering used to be decided before the list was consulted, and `x` made
+    // the pass give up and hold the whole rest of the document.
+    const source = await serveGzip(
+      document(
+        [
+          programme('a', '20260829060000'),
+          programme('x', '20260829060000'),
+          programme('a', '20260829070000'),
+        ].join(''),
+        ['a', 'x'],
+      ),
+    );
+    const cache = store();
+    const report = collect();
+
+    const summary = await grab(
+      [
+        defineXmltvSite({
+          site: 'published.example',
+          url: source.url,
+          channels: [{ xmltvId: 'a', siteId: 'a' }],
+        }),
+      ],
+      { cache, now: NOW, days: 1, reporter: report.reporter },
+    );
+
+    expect(await entries(cache, 'a', TODAY)).toHaveLength(2);
+    // One write, not a write and an append — and no warning about a document
+    // that is grouped as far as this site is concerned.
+    expect(summary.fetched).toBe(1);
+    expect(report.of('entry:appended')).toEqual([]);
+    expect(report.messages.some((line) => line.includes('not grouped'))).toBe(false);
+  });
+
   it('holds everything from the start when told the order is anything', async () => {
     const interleaved = document(
       [

@@ -132,6 +132,22 @@ export class SiteRun {
    */
   readonly #written = new Set<string>();
 
+  /**
+   * Writes in flight, by channel-day, so two for one entry cannot overlap.
+   *
+   * The append path is a read-modify-write — read what is there, concatenate,
+   * write it back — and `localWork` runs sixteen tasks at once. Two emissions of
+   * one channel-day landing together would have the second read before the
+   * first's write landed and then overwrite it: programmes lost, silently, in
+   * the cache. Which is reachable through the documented `stream` contract,
+   * since saying a channel-day twice is what append-on-repeat is *for*.
+   *
+   * A chain per id rather than a lock over all of them: nothing waits except
+   * another write for the same channel-day, and the map holds only what is in
+   * flight rather than growing with the guide.
+   */
+  readonly #writing = new Map<string, Promise<void>>();
+
   /** Whether this site asked to be told when nothing has changed. */
   readonly #revalidates: boolean;
 
@@ -210,10 +226,44 @@ export class SiteRun {
     this.#run.tally[field] += delta;
   }
 
-  /** Everything this site does, start to finish. */
+  /**
+   * Everything this site does, start to finish.
+   *
+   * All of it inside the `try`, including the reads and the channel list: those
+   * are a network call and a cache call, either of which can throw, and the
+   * `finally` is what lets go of a `setTimeout` that is deliberately not
+   * unref'd. A site whose channel list failed after a `429` used to leave that
+   * timer running and hold the process open for up to a minute after the run
+   * had resolved.
+   */
   async run(): Promise<void> {
     const { enqueue } = this.#run;
 
+    try {
+      await this.#work(enqueue);
+    } catch (error) {
+      // Counted and said here rather than left to the run, and that ordering is
+      // load-bearing: p-queue rejects a cancelled task's promise while the task
+      // itself carries on, so the summary can be read the moment the cancel
+      // lands. Anything recorded after the awaits below would be recorded into a
+      // total nobody is going to read.
+      this.#count('failed');
+      this.#run.emit({ type: 'site:failed', site: this.#site, error });
+    } finally {
+      this.#dispose();
+      // Beside `dispose`, and for the same reason: a site that threw, or was
+      // cancelled part way, has as much to hand back as one that finished — the
+      // channel list it fetched, and whatever its own code remembered. Only the
+      // groups that changed are written.
+      await this.#state.save();
+      // For a failed site too, where every count is nought — which is the truth,
+      // and reads correctly beside the `site:failed` that says why.
+      this.#run.emit({ type: 'site:done', site: this.#site, ...this.#counts });
+    }
+  }
+
+  /** The work itself, so {@link run} is only about letting go of things. */
+  async #work(enqueue: Run['enqueue']): Promise<void> {
     // Both groups at once, and before anything asks the source: a site's own code
     // expects its bag from the first request onwards, and what is stored about a
     // url decides what that request even looks like. Two small reads with nothing
@@ -278,20 +328,10 @@ export class SiteRun {
       );
     }
 
-    try {
-      // Everything this site does happens inside one of those pipelines — the
-      // fetch, the parse, the write, and any request a parse made of its own —
-      // and none of them is ever abandoned, so this is the site being done.
-      await this.#pipelines.onIdle();
-    } finally {
-      this.#dispose();
-      // Beside `dispose`, and for the same reason: a site that threw, or was
-      // cancelled part way, has as much to hand back as one that finished — the
-      // channel list it fetched, and whatever its own code remembered. Only the
-      // groups that changed are written.
-      await this.#state.save();
-      this.#run.emit({ type: 'site:done', site: this.#site, ...this.#counts });
-    }
+    // Everything this site does happens inside one of those pipelines — the
+    // fetch, the parse, the write, and any request a parse made of its own —
+    // and none of them is ever abandoned, so this is the site being done.
+    await this.#pipelines.onIdle();
   }
 
   /**
@@ -478,10 +518,40 @@ export class SiteRun {
     // for it, and be counted into a total nobody is going to read.
     taskSignal?.throwIfAborted();
 
+    const id = `${channel.xmltvId}|${day}`;
+    const prior = this.#writing.get(id);
+    const mine = (prior ?? Promise.resolve()).then(() =>
+      this.#writeEntry(channel, day, parsed, id),
+    );
+    // Its failure is the caller's to report, so what the *next* write waits on
+    // is a promise that only ever settles.
+    const settled = mine.then(
+      () => {},
+      () => {},
+    );
+
+    this.#writing.set(id, settled);
+    void settled.then(() => {
+      // Only if nobody chained behind us, so the map stays the size of what is
+      // in flight rather than of the guide.
+      if (this.#writing.get(id) === settled) {
+        this.#writing.delete(id);
+      }
+    });
+
+    return mine;
+  }
+
+  /** One channel-day's write, with this entry's turn already waited for. */
+  async #writeEntry(
+    channel: GrabberChannel,
+    day: string,
+    parsed: ParsedProgramme[],
+    id: string,
+  ): Promise<void> {
     const { cache, emit, grabbedAt } = this.#run;
     const site = this.#site;
     const key = { site, channelId: channel.xmltvId, day };
-    const id = `${channel.xmltvId}|${day}`;
     const mine = parsed
       .map((entry) => ({ ...built(entry), channel: channel.xmltvId }))
       .sort((a, b) => a.start.getTime() - b.start.getTime());

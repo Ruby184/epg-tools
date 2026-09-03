@@ -88,9 +88,14 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
           // has a queue or a client to let go of.
           await new SiteRun(config, run).run();
         } catch (error) {
+          // Only what the constructor threw reaches here: a site that could not
+          // be *read* — a missing `site`, `channels`, `request` or `parseDay` —
+          // which happens before it has a queue or a client to let go of. A
+          // site that failed while running says so itself, where it can do it
+          // before its own cleanup awaits anything.
+          //
           // One, not one per channel-day: nothing of this site was reached, so
-          // there is no grid to attribute it across — and `site:failed` is what
-          // says which source it was.
+          // there is no grid to attribute it across.
           tally.failed++;
           emit({ type: 'site:failed', site: config.site, error });
         }

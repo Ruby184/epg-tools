@@ -140,6 +140,18 @@ function channel(id: string): GrabberChannel {
   return { xmltvId: id, siteId: `site-${id}` };
 }
 
+/**
+ * Timers this process is still holding open.
+ *
+ * A hold's `setTimeout` is deliberately not unref'd — a run in the middle of one
+ * has to stay alive — so one left behind keeps the whole process alive with it.
+ * A count either side of a run is the only way to see that from inside a test
+ * runner, which tears its workers down whatever they are still waiting for.
+ */
+function pendingTimers(): number {
+  return process.getActiveResourcesInfo().filter((resource) => resource === 'Timeout').length;
+}
+
 function makeConfig(overrides: Partial<SiteConfig<unknown>> = {}): SiteConfig<unknown> {
   return {
     site: 'example.com',
@@ -2562,7 +2574,10 @@ describe('asking whether anything has changed', () => {
 
   it('lets one request opt out while the site is asking on the rest', async () => {
     const source = await server((request, response) => {
-      response.writeHead(200, { etag: 'W/"v1"', 'content-type': 'application/json' });
+      response.writeHead(200, {
+        etag: `W/"${request.url}"`,
+        'content-type': 'application/json',
+      });
       response.end('{}');
     });
 
@@ -2577,16 +2592,34 @@ describe('asking whether anything has changed', () => {
         [
           conditional(source.url, {
             async request({ http }) {
-              // A page after the first, a lookup that is not the listings: a 304
-              // on one of these says nothing about the channel-day.
-              return http.get('guide', { context: { revalidate: false } }).json();
+              const index = await http.get('guide').json();
+
+              // A page after the first: a 304 on one of these says nothing
+              // about the channel-day, which is what the flag denies.
+              await http.get('page/2', { context: { revalidate: false } }).json();
+
+              return index;
             },
           }),
         ],
         { cache, now: NOW },
       );
 
-      expect(source.asked[0]!.headers['if-none-match']).toBeUndefined();
+      const [index, page] = source.asked;
+
+      expect(index!.headers['if-none-match']).toBe('W/"v1"');
+      expect(page!.headers['if-none-match']).toBeUndefined();
+
+      // And nothing was remembered about the page either. The opt-out used to be
+      // honoured on the way out and ignored on the way back, so a paginated
+      // site's page urls filled the group it was told to stay out of — and
+      // evicted, under MAX_VALIDATORS, the one validator worth keeping.
+      const stored = (await cache.getState('example.com', 'validators'))?.data as [
+        string,
+        unknown,
+      ][];
+
+      expect(stored.map(([url]) => url)).toEqual([`${source.url}guide`]);
     } finally {
       await source.close();
     }
@@ -2847,6 +2880,94 @@ describe('what a run reports', () => {
         level: 'error',
       }),
     ]);
+  });
+
+  it('does not lose programmes when one channel-day is said twice at once', async () => {
+    // Append-on-repeat is a read-modify-write, and `localWork` runs sixteen
+    // tasks at once — so two emissions of one channel-day landing together used
+    // to have the second read before the first's write landed, and overwrite
+    // it. A store whose writes take a turn is what a real one does.
+    const cache = new MemoryCache();
+    const slow = cache.write.bind(cache);
+
+    cache.write = async (key, programmes, meta) => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      return slow(key, programmes, meta);
+    };
+
+    const report = collect();
+    const site: StreamSiteConfig = {
+      site: 'stream.example',
+      channels: [channel('a')],
+      days: 1,
+      async *stream({ channelDays }) {
+        const { channel: ch, day } = channelDays[0]!;
+
+        yield { channel: ch, day, programmes: [programme(`${TODAY}T06:00:00.000Z`)] };
+        yield { channel: ch, day, programmes: [programme(`${TODAY}T07:00:00.000Z`)] };
+      },
+    };
+
+    const summary = await grab([site], { cache, now: NOW, reporter: report.reporter });
+
+    expect(summary.failed).toBe(0);
+    // Both, in order — and counted as one channel-day however often it was said.
+    expect(
+      cache.get({ site: 'stream.example', channelId: 'a', day: TODAY })?.programmes,
+    ).toHaveLength(2);
+    expect(summary.fetched).toBe(1);
+    expect(report.of('entry:appended')).toEqual([
+      expect.objectContaining({ channelId: 'a', day: TODAY, added: 1, total: 2 }),
+    ]);
+  });
+
+  it('lets go of its pacing timer when the channel list is what failed', async () => {
+    // A 429 sets a hold with a `setTimeout` that is deliberately *not* unref'd,
+    // so a site that is never disposed holds the process open for the rest of
+    // it. The channel list is a network call like any other, and it used to sit
+    // outside the `try` that disposes.
+    const server = createServer((_request, response) => {
+      response.writeHead(429, { 'retry-after': '30' });
+      response.end('{}');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+
+    try {
+      const report = collect();
+      const timersBefore = pendingTimers();
+      const config = makeConfig({
+        backoff: { fallbackMs: 30_000, maxMs: 30_000 },
+        async channels({ http }) {
+          await http.get(`http://127.0.0.1:${port}/channels`, { retry: 0 }).json();
+
+          return [channel('one.example')];
+        },
+      });
+
+      const summary = await grab([config], {
+        cache: new MemoryCache(),
+        now: NOW,
+        reporter: report.reporter,
+      });
+
+      // A hold really was set — otherwise this test proves nothing — and
+      // nothing is left counting down towards its release. Measured outside a
+      // test runner, the leak held the process open for the whole
+      // `Retry-After`: 20,039ms to exit against 45ms.
+      expect(report.of('pacing:held')).toEqual([
+        expect.objectContaining({ site: 'example.com', status: 429 }),
+      ]);
+      expect(pendingTimers()).toBe(timersBefore);
+      expect(summary.failed).toBe(1);
+      expect(report.of('site:failed')).toHaveLength(1);
+      expect(report.of('site:done')).toEqual([
+        expect.objectContaining({ site: 'example.com', fetched: 0, failed: 1 }),
+      ]);
+    } finally {
+      server.close();
+    }
   });
 
   it('says what a request cost, timed from inside its slot', async () => {

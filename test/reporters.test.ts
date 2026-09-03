@@ -479,6 +479,18 @@ describe('progressReporter', () => {
     expect(out.raw).toContain('2/6 channel-days · 2 failed');
   });
 
+  it('counts a whole site the way the summary counts it', () => {
+    const out = new Tty();
+
+    run(progressReporter({ stream: out, errorStream: new Sink() }), [
+      started,
+      { type: 'site:failed', site: 'a.tv', error: new Error('unreadable') },
+    ]);
+
+    // Without this the live line said `0 failed` and `Grab done` said `1`.
+    expect(out.raw).toContain('1 failed');
+  });
+
   it('is the text one on anything without a cursor to move', () => {
     const pipe = new Sink();
 
