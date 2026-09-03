@@ -159,9 +159,9 @@ export type EpgEventInput =
   /** The site could not be read or run at all, so none of it was grabbed. */
   | { type: 'site:failed'; site: string; error: unknown }
   /** The site's own code, saying something — `ctx.log`. */
-  | { type: 'site:note'; site: string; message: string }
+  | { type: 'site:note'; site: string; message: string; data?: Record<string, unknown> }
   /** The site's own code, saying something that matters — `ctx.warn`. */
-  | { type: 'site:warning'; site: string; message: string }
+  | { type: 'site:warning'; site: string; message: string; data?: Record<string, unknown> }
   // ── one channel-day ──────────────────────────────────────────────────────
   /** Fresh in the cache, so it was never asked for. */
   | ({ type: 'entry:cached' } & EntryRef)

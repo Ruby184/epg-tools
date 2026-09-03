@@ -112,7 +112,7 @@ the call site — `EVENT_KINDS` is the whole table, and it is the whole answer t
 | group | types |
 |---|---|
 | the run | `run:cancelled`, `grab:done` |
-| a site | `site:started`, `site:done`, `site:failed`, `site:note`, `site:warning` |
+| a site | `site:started`, `site:done`, `site:failed`, `site:note`, `site:warning` (the last two carrying whatever [fields the site attached](./site-config.md#saying-something)) |
 | one channel-day | `entry:cached`, `entry:fetched`, `entry:appended`, `entry:unchanged`, `entry:failed` |
 | one request | `request:started`, `request:done` (with `ms`), `request:failed` |
 | a whole-document source | `stream:gaps`, `stream:ignored` |

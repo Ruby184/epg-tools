@@ -215,6 +215,7 @@ export async function tryChannelDay(
 
   const channels = await resolveChannels(site, {
     http,
+    says,
     ...(options.signal ? { signal: options.signal } : {}),
   });
   const channel = channelNamed(channels, channelName);

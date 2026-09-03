@@ -389,6 +389,7 @@ export async function serveGuide(
     const sites =
       known ??
       (await resolveSites(config.sites, {
+        emit,
         ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
         store: cache,

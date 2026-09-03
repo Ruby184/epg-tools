@@ -93,7 +93,7 @@ export type SiteState = Map<string, unknown>;
  * What every context carries, whichever shape the rest of it takes: the
  * channel-days it is for, the site's client, its state, and the run's signal.
  */
-export interface BaseRequestContext<TData = unknown> {
+export interface BaseRequestContext<TData = unknown> extends SiteSays {
   /**
    * Exactly the channel-days this request is being made for — every one of
    * them stale, in channel order and then day order.
@@ -116,30 +116,13 @@ export interface BaseRequestContext<TData = unknown> {
   signal?: AbortSignal;
   /** What this site remembers between runs — see {@link SiteState}. */
   state: SiteState;
-  /**
-   * Say something about what this site is doing, wherever the run's own
-   * messages go.
-   *
-   * Progress, so it is shown at the run's default verbosity and hidden when the
-   * run is asked to be quiet. The site's name is added for you — say what
-   * happened, not who it happened to.
-   */
-  log(message: string): void;
-  /**
-   * The same, for something the reader has to see.
-   *
-   * A warning is a signal rather than progress: it survives a run asked to
-   * report errors only, because "the source moved this channel" is worth
-   * hearing even then. Throw instead when the channel-day should also fail.
-   */
-  warn(message: string): void;
 }
 
 /**
  * Context for the function form of {@link SiteConfig.channels} — a channel list
  * that is fetched rather than written out.
  */
-export interface ChannelsContext {
+export interface ChannelsContext extends SiteSays {
   /**
    * The site's ky instance, the very one its requests use: same prefix,
    * headers, retry, proxy and abort signal.
@@ -148,6 +131,49 @@ export interface ChannelsContext {
   /** As on a request context: already applied to {@link http}. */
   signal?: AbortSignal;
 }
+
+/**
+ * How a site's own code says something — the pair every context carries.
+ *
+ * Named because four of them carry it and one place builds it, and because it
+ * is the answer to the question a site author otherwise answers with
+ * `console.log`: there is somewhere to say things, it goes wherever the run's
+ * own messages go, and it is quietened by the same flags.
+ */
+export interface SiteSays {
+  /**
+   * Say something about what this site is doing, wherever the run's own
+   * messages go.
+   *
+   * Progress, so it is shown at the run's default verbosity and hidden when the
+   * run is asked to be quiet. The site's name is added for you — say what
+   * happened, not who it happened to.
+   */
+  log(message: string, data?: SiteSaid): void;
+  /**
+   * The same, for something the reader has to see.
+   *
+   * A warning is a signal rather than progress: it survives a run asked to
+   * report errors only, because "the source moved this channel" is worth
+   * hearing even then. Throw instead when the whole thing should also fail.
+   */
+  warn(message: string, data?: SiteSaid): void;
+}
+
+/**
+ * The fields a site attaches to what it says — `{ page: 3, of: 12 }`.
+ *
+ * The message is the sentence a person reads; this is what a machine reads,
+ * and it is why `--reporter json` is worth pointing at a pipeline: a consumer
+ * gets the ids and the counts as fields rather than parsing them back out of
+ * prose. A text reporter appends it compactly, which is what makes this a
+ * replacement for the `console.log` a site author would otherwise reach for.
+ *
+ * It must survive `JSON.stringify`. A reporter that cannot serialize it says so
+ * in place of the value rather than throwing — a run is not worth ending over a
+ * log line — but a cycle in here is still a bug worth not writing.
+ */
+export type SiteSaid = Record<string, unknown>;
 
 /**
  * Where a site's channels come from: a list, or a function fetching one with
@@ -321,7 +347,12 @@ export type PacedRequest = <T>(
   task: (options: { signal?: AbortSignal | undefined }) => Promise<T>,
 ) => Promise<T>;
 
-export interface ParseContext<TRaw, TData = unknown> {
+/**
+ * What a parse is handed. `log` and `warn` come from {@link SiteSays}, and a
+ * parse is where a site most often has something to say — a field the source
+ * has started leaving out, a programme it had to skip.
+ */
+export interface ParseContext<TRaw, TData = unknown> extends SiteSays {
   /** The channel this call is parsing, as the site declared it. */
   channel: GrabberChannel<TData>;
   /** The day as UTC midnight, a `Date` of this call's own. */
@@ -401,16 +432,6 @@ export interface ParseContext<TRaw, TData = unknown> {
    * `Map` every request and every parse of this site is handed.
    */
   state: SiteState;
-  /**
-   * Say something about this channel-day — as on a request context.
-   *
-   * Here because a parse is where a site notices things: a field the source has
-   * started leaving out, a programme it had to skip. Before this there was
-   * nowhere at all to put that, and no `console` in the package to borrow.
-   */
-  log(message: string): void;
-  /** The same, for something the reader has to see — as on a request context. */
-  warn(message: string): void;
 }
 
 /**

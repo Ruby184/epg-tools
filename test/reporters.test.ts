@@ -48,6 +48,72 @@ function event<T extends EpgEventInput>(input: T): T & EventKind {
   return stampedEvent as T & EventKind;
 }
 
+describe('what a site attaches to what it says', () => {
+  it('shows the fields on the line, so -v replaces a console.log', () => {
+    expect(
+      render(
+        event({ type: 'site:note', site: 'a.tv', message: 'asking', data: { page: 1, of: 3 } }),
+      ),
+    ).toBe('[a.tv] asking { page: 1, of: 3 }');
+    // Nothing added when a site attached nothing.
+    expect(render(event({ type: 'site:note', site: 'a.tv', message: 'asking' }))).toBe(
+      '[a.tv] asking',
+    );
+  });
+
+  it('renders what JSON cannot, rather than dropping or dying on it', () => {
+    // `inspect`, not `JSON.stringify`: a reporter runs synchronously inside a
+    // grab, so a throw here would end a run over a log line.
+    const cyclic: Record<string, unknown> = { name: 'loop' };
+
+    cyclic.self = cyclic;
+
+    expect(
+      render(event({ type: 'site:note', site: 'a.tv', message: 'x', data: cyclic })),
+    ).toContain('[Circular *1]');
+    expect(
+      render(
+        event({
+          type: 'site:note',
+          site: 'a.tv',
+          message: 'x',
+          data: { tags: new Set(['moved']), at: new Date('2026-09-03T05:00:00.000Z') },
+        }),
+      ),
+    ).toContain("Set(1) { 'moved' }");
+  });
+
+  it('carries the fields into the JSON a pipeline reads', () => {
+    const out = new Sink();
+
+    jsonReporter({ stream: out })(
+      event({ type: 'site:note', site: 'a.tv', message: 'asking', data: { page: 1 } }),
+    );
+
+    expect(JSON.parse(out.lines[0]!)).toMatchObject({
+      type: 'site:note',
+      message: 'asking',
+      data: { page: 1 },
+    });
+  });
+
+  it('keeps the event when the fields will not serialize', () => {
+    // The JSON reporter has to produce JSON, so it keeps `JSON.stringify` and
+    // its one failure mode — and names what it could not write rather than
+    // writing nothing at all, or throwing into the middle of a grab.
+    const out = new Sink();
+    const cyclic: Record<string, unknown> = { name: 'loop' };
+
+    cyclic.self = cyclic;
+
+    jsonReporter({ stream: out })(
+      event({ type: 'site:note', site: 'a.tv', message: 'x', data: cyclic }),
+    );
+
+    expect(JSON.parse(out.lines[0]!)).toMatchObject({ message: 'x', data: '[unserializable]' });
+  });
+});
+
 describe('the event union', () => {
   it('stamps every type with a level and a phase', () => {
     // Which is the whole reason an emitter says only what happened: there is

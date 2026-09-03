@@ -10,7 +10,13 @@ import type {
   StoredStateMeta,
 } from '../src/cache/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
-import { fellShort, grab, resolveAllowance, UnchangedError } from '../src/grabber/main.js';
+import {
+  fellShort,
+  grab,
+  resolveAllowance,
+  resolveChannels,
+  UnchangedError,
+} from '../src/grabber/main.js';
 import type { EpgEvent } from '../src/core/events.js';
 import { collect } from './reporting.js';
 import type {
@@ -3060,6 +3066,100 @@ describe('what a run reports', () => {
     expect(events.filter((event) => event.type === 'site:warning')).toEqual([
       expect.objectContaining({ message: 'the source renamed a channel', level: 'warn' }),
     ]);
+  });
+});
+
+describe('what a site can say, and from where', () => {
+  it('lets a fetched channel list speak, which it had no way to before', async () => {
+    // `request` and `parseDay` always had `log`/`warn`; `channels` was handed
+    // nothing but `http` and a signal, so an author debugging a lineup had
+    // console.log and nothing else.
+    const cache = new MemoryCache();
+    const report = collect();
+
+    await grab(
+      [
+        {
+          site: 'example.com',
+          channels: ({ log, warn }) => {
+            log('read the lineup', { page: 1, of: 2 });
+            warn('a channel moved', { from: 'old', to: 'new' });
+
+            return [channel('a')];
+          },
+          request: async () => ({}),
+          parseDay: () => [],
+        } as SiteConfig<unknown>,
+      ],
+      { cache, now: NOW, days: 1, reporter: report.reporter },
+    );
+
+    expect(report.of('site:note')).toContainEqual(
+      expect.objectContaining({
+        site: 'example.com',
+        message: 'read the lineup',
+        data: { page: 1, of: 2 },
+      }),
+    );
+    expect(report.of('site:warning')).toContainEqual(
+      expect.objectContaining({ message: 'a channel moved', data: { from: 'old', to: 'new' } }),
+    );
+  });
+
+  it('carries the fields from a request and a parse too', async () => {
+    const cache = new MemoryCache();
+    const report = collect();
+
+    await grab(
+      [
+        {
+          site: 'example.com',
+          channels: [channel('a')],
+          request: async ({ log }) => {
+            log('asking', { attempt: 1 });
+
+            return {};
+          },
+          parseDay: ({ warn }) => {
+            warn('short day', { programmes: 0 });
+
+            return [];
+          },
+        } as SiteConfig<unknown>,
+      ],
+      { cache, now: NOW, days: 1, reporter: report.reporter },
+    );
+
+    expect(report.of('site:note')).toContainEqual(
+      expect.objectContaining({ message: 'asking', data: { attempt: 1 } }),
+    );
+    expect(report.of('site:warning')).toContainEqual(
+      expect.objectContaining({ message: 'short day', data: { programmes: 0 } }),
+    );
+  });
+
+  it('says nothing at all when a caller has nowhere to put it', async () => {
+    // `--list-channels` writes a document to stdout and has no room for a
+    // commentary in the middle of it, so a caller without a reporter drops
+    // them rather than the site having to know who is asking.
+    let said = 0;
+    const channels = await resolveChannels({
+      site: 'example.com',
+      channels: ({ log, warn }) => {
+        log('read the lineup');
+        warn('and a warning');
+        said += 2;
+
+        return [channel('a')];
+      },
+      request: async () => ({}),
+      parseDay: () => [],
+    } as SiteConfig<unknown>);
+
+    // Called, and dropped — not refused, which would make a site crash for
+    // saying something.
+    expect(said).toBe(2);
+    expect(channels).toHaveLength(1);
   });
 });
 

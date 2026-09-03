@@ -189,8 +189,10 @@ export class SiteRun {
     this.#revalidates = config.conditionalGet === true;
     this.#state = SiteStateHandle.open(run.cache, resolved.site);
     this.#says = {
-      log: (message: string) => run.emit({ type: 'site:note', site: resolved.site, message }),
-      warn: (message: string) => run.emit({ type: 'site:warning', site: resolved.site, message }),
+      log: (message, data) =>
+        run.emit({ type: 'site:note', site: resolved.site, message, ...(data ? { data } : {}) }),
+      warn: (message, data) =>
+        run.emit({ type: 'site:warning', site: resolved.site, message, ...(data ? { data } : {}) }),
     };
 
     // The queue and the client together: the signal rides on the instance, so
@@ -303,6 +305,9 @@ export class SiteRun {
     // work in it.
     this.#channels = await enqueue(this.#requests, ({ signal }) =>
       resolveChannels(this.#config, {
+        // The same pair its requests and parses get: a channel list that has to
+        // be fetched is the first place a site has anything to say.
+        says: this.#says,
         http: this.#http,
         ...(signal ? { signal } : {}),
         state: this.#state,
