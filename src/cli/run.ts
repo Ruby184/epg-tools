@@ -36,6 +36,7 @@ Commands:
   merge         Generate the merged guide from the cache only
   validate      Read a guide and report what is wrong with it
   serve         Hold the merged guide behind HTTP for a consumer that polls
+  try           Put one site, channel and day through, showing every step
   prune         Remove cached days older than a given day
   init-grabber  Write a tv_grab_* executable for the config, next to it
 
@@ -63,6 +64,9 @@ Options:
       --failures <how>  block (default) — one capped block at the end; or inline
   -V, --version         Print this package's version
   -h, --help            Show this help
+
+try options:
+      --raw             Print the whole payload, not the first 2000 characters
 
 serve options:
       --port <n>        Port to listen on (default: 8080)
@@ -147,7 +151,7 @@ const EXIT_CANCELLED = 130;
 
 const CONFIG_CANDIDATES = ['epg.config.ts', 'epg.config.js', 'epg.config.mjs'];
 
-const COMMANDS = ['build', 'grab', 'merge', 'serve', 'validate', 'prune', 'init-grabber'];
+const COMMANDS = ['build', 'grab', 'merge', 'serve', 'try', 'validate', 'prune', 'init-grabber'];
 
 export interface CliOptions {
   /** Defaults to `process.stdout` — progress, and the help. */
@@ -364,6 +368,7 @@ async function execute(
       port: { type: 'number', min: 0, max: 65_535 },
       host: { type: 'string' },
       'serve-path': { type: 'string' },
+      raw: { type: 'boolean' },
       report: { type: 'string', choices: REPORT_FORMATS },
       strict: { type: 'boolean' },
       // A list of names, or `--no-extensions` for none of them. A config can
@@ -549,6 +554,23 @@ async function execute(
       // and nothing was left half done — which is why this is 0 and not the
       // 130 a cancelled grab answers with.
       return 0;
+    }
+    case 'try': {
+      const [, siteName, channelName, when] = positionals;
+
+      if (siteName === undefined || channelName === undefined) {
+        throw new UsageError(
+          'try needs a site and a channel, e.g. epg try example.tv one.example.tv',
+        );
+      }
+
+      const { tryChannelDay } = await import('./try.js');
+
+      return tryChannelDay(config, siteName, channelName, stdout, {
+        ...(when === undefined ? {} : { day: dayString(when, 'day') }),
+        ...(values.raw === undefined ? {} : { raw: values.raw }),
+        ...(signal ? { signal } : {}),
+      });
     }
     case 'prune': {
       const before = values.before ?? toDayString(new Date());

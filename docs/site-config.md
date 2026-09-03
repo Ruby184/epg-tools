@@ -12,6 +12,12 @@ Use `defineSiteConfig` rather than a bare object literal — it infers the
 batching mode (which types `request`'s context and decides which size caps are
 accepted) and the type of a channel's `data` from what `channels` returns.
 
+While writing one, `epg try <site> <channel>` puts a single channel-day through
+the whole path and shows the request that went out, the payload that came back
+and the programmes it parsed to — see [trying one
+channel-day](./configuration.md#trying-one-channel-day). It writes nothing, so
+it cannot leave a half-built site's output in the cache.
+
 - [Reference](#reference)
 - [Channels](#channels)
   - [A channel list that has to be fetched](#a-channel-list-that-has-to-be-fetched)

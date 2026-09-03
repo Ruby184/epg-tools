@@ -106,6 +106,7 @@ epg build            # grab stale/missing days, then write the merged guide
 epg grab             # grab only
 epg merge            # write the guide from cache only
 epg serve            # hold the guide behind HTTP for a consumer that polls
+epg try example.tv one.example.tv   # one channel-day, with the working shown
 epg validate         # read the guide and report what is wrong with it
 epg prune            # drop cached days older than today
 epg init-grabber tv_grab_sk_example   # write an XMLTV grabber for this config
@@ -131,6 +132,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--port <n>` | `serve` only: port to listen on, default `8080` |
 | `--host <h>` | `serve` only: address to bind, default `127.0.0.1` — see [serving the guide](#serving-the-guide) |
 | `--serve-path <p>` | `serve` only: the path that answers with the guide, default `/guide.xml` |
+| `--raw` | `try` only: print the whole payload, not the first 2000 characters |
 | `--report <how>` | `validate` only: `text` (default) or `json` — see [validating a guide](#validating-a-guide) |
 | `--strict` | `validate` only: count warnings as failures too |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
@@ -338,6 +340,53 @@ epg merge --no-extensions -o plain.xml     # and a DTD-valid one, no refetching
 An element left holding nothing collapses to what the DTD allows rather than
 being written empty: `<credits>` with only extensions in it is not written at
 all, and `<video>` becomes `<video/>`.
+
+### Trying one channel-day
+
+`epg try <site> <channel> [day]` puts one channel-day through the whole path and
+shows every step of it — what a site author needs while writing one, and what a
+grab cannot show:
+
+```sh
+epg try example.tv one.example.tv          # today
+epg try example.tv one.example.tv 2026-09-05
+epg try example.tv 1 --raw                 # by site id, whole payload
+```
+
+```
+example.tv → one.example.tv on 2026-09-03
+
+  GET https://example.tv/api?ch=1&d=2026-09-03
+    → 200, 143ms, 4.2 KB, application/json
+
+  payload
+    { "items": [ { "start": "06:00", "title": "Breakfast" } ] }
+
+    [log]  the source sent 2 items
+
+  2 programmes in 38ms
+    <programme start="20260903060000 +0000" channel="one.example.tv">
+      <title lang="en">Breakfast</title>
+    </programme>
+```
+
+**The url is the point.** A grab cannot print one: a site builds its own inside
+its own `request`, through the client it was given, so nothing above it ever
+sees a url. `try` instruments that client instead — hooks around the site's own,
+never instead of them — which is the only place a url exists.
+
+The channel is taken by either of its ids, `xmltvId` or `siteId`. Batching is
+honoured, so a site that asks for a week at a time is asked for a week here too
+and what it does with one day of it is the thing being tried; `ctx.log` and
+`ctx.warn` appear where the site said them.
+
+**Nothing is written** and no cache is opened, so trying a site cannot poison
+the guide a run would build, or make the next run think the day is already done.
+A site that keeps its channel list between runs is asked for it afresh.
+
+It exits **0** when programmes came out and **1** when none did — not an error,
+since a channel with nothing on is an answer, but the commonest thing you are
+here to look at, and enough for a shell loop over channels to tell.
 
 ### Serving the guide
 
