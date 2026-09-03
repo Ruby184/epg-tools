@@ -13,7 +13,7 @@ import type { BuildGuideOptions } from './merge/types.js';
 import { addDays, toDayString } from './core/days.js';
 import { GrabberError } from './core/error.js';
 import type { Reporter } from './core/events.js';
-import { emitter } from './core/reporters.js';
+import { emitter } from './core/events.js';
 import {
   resolveConfigSource,
   type ConfigSource,

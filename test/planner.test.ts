@@ -1,11 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  describeRequest,
-  planRequests,
-  resolveBatching,
-  type Pair,
-  type Request,
-} from '../src/grabber/planner.js';
+import { planRequests, resolveBatching, type Pair, type Request } from '../src/grabber/planner.js';
 import type { GrabberChannel } from '../src/grabber/main.js';
 
 const WINDOW = ['2026-08-27', '2026-08-28', '2026-08-29', '2026-08-30'];
@@ -238,19 +232,5 @@ describe('planRequests', () => {
   it('plans nothing when nothing is stale', () => {
     expect(plan([channel('a')], 'both', [])).toEqual([]);
     expect(plan([], 'both')).toEqual([]);
-  });
-});
-
-describe('describeRequest', () => {
-  it('names one channel-day by its channel and day', () => {
-    const [request] = plan([channel('one.example')], 'none');
-
-    expect(describeRequest(request!)).toBe('one.example 2026-08-27');
-  });
-
-  it('counts channels and spans days when a request covers many', () => {
-    const [request] = plan([channel('a'), channel('b'), channel('c')], 'both');
-
-    expect(describeRequest(request!)).toBe('3 channels 2026-08-27..2026-08-30 (4 days)');
   });
 });

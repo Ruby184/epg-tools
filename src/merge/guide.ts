@@ -1,6 +1,6 @@
 import { dayRange, dayToDate, toDayString } from '../core/days.js';
 import { writeOutput, type OutputOptions, type OutputTarget } from '../core/output.js';
-import { emitter } from '../core/reporters.js';
+import { emitter } from '../core/events.js';
 import { channelElement, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';

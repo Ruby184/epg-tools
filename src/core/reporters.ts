@@ -19,9 +19,6 @@
 import type { Writable } from 'node:stream';
 import {
   atLevel,
-  silent,
-  stamped,
-  type Emit,
   type EpgEvent,
   type EventLevel,
   type GrabCounts,
@@ -396,16 +393,6 @@ export function jsonReporter(options: JsonReporterOptions): Reporter {
   };
 }
 
-/** What a caller says when asked where the events go. */
-export interface ReportedOptions {
-  reporter?: Reporter;
-}
-
-/** Where a run's events go — nowhere, when nobody is listening. */
-export function emitter(options: ReportedOptions): Emit {
-  return options.reporter === undefined ? silent : stamped(options.reporter);
-}
-
 /**
  * The events a live line stands in for, so they are not also written out.
  *
@@ -432,7 +419,10 @@ const SUMMARIZED = new Set<EpgEvent['type']>([
 function isTerminal(stream: Writable): boolean {
   const { isTTY, columns } = stream as Writable & { isTTY?: boolean; columns?: number };
 
-  // `TERM=dumb` is how a terminal says it cannot do this, and CI sets it.
+  // `isTTY` is what rules out a pipe, a file and most CI. `TERM=dumb` is the
+  // other answer: a terminal that is attached and says it cannot do this — Emacs
+  // `shell-mode`, some serial consoles — where the cursor codes would be printed
+  // rather than obeyed.
   return isTTY === true && columns !== undefined && process.env['TERM'] !== 'dumb';
 }
 

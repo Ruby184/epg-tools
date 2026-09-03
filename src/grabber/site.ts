@@ -106,7 +106,7 @@ function received(value: unknown): string {
  */
 export function resolveSite(
   config: AnySiteConfig,
-  options: GrabOptions,
+  defaults: Pick<GrabOptions, 'days' | 'staleness'>,
   startDay: string,
 ): ResolvedSite {
   if (typeof config.site !== 'string' || config.site === '') {
@@ -125,9 +125,27 @@ export function resolveSite(
 
   const common = {
     site: config.site,
-    window: [...dayRange(startDay, config.days ?? options.days ?? DEFAULT_DAYS)],
-    staleness: { ...DEFAULT_STALENESS, ...options.staleness, ...config.staleness },
+    window: [...dayRange(startDay, config.days ?? defaults.days ?? DEFAULT_DAYS)],
+    staleness: { ...DEFAULT_STALENESS, ...defaults.staleness, ...config.staleness },
   };
+
+  // Before the two shapes are told apart, because a config with both has not
+  // said which it is: `isStreamSite` would pick `stream` and its `request` would
+  // never be called, silently.
+  //
+  // Checked rather than made impossible in the types. `request?: never` on
+  // `StreamSiteConfig` does give a compile error, and it also turns `request`
+  // into a discriminant — which makes the two checks below provably dead code,
+  // narrows `config` to `never` inside them, and needs a cast to write at all.
+  // Those checks are the whole defence for a config written in JavaScript, and
+  // this one catches that config too.
+  if (isStreamSite(config) && typeof (config as { request?: unknown }).request === 'function') {
+    throw new TypeError(
+      `Site "${config.site}" defines both stream and request, so it has not said which shape ` +
+        `it is: stream answers the whole window in one pass, request answers one at a time. ` +
+        `Keep one.`,
+    );
+  }
 
   if (isStreamSite(config)) {
     return {

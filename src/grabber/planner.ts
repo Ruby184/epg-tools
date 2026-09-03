@@ -164,12 +164,3 @@ export function planRequests(options: {
     });
   });
 }
-
-/** How a request is named in the log: a channel-day, or the span it covers. */
-export function describeRequest({ channels, days }: Request): string {
-  const channelPart = channels.length === 1 ? channels[0]!.xmltvId : `${channels.length} channels`;
-  const dayPart =
-    days.length === 1 ? days[0]! : `${days[0]}..${days[days.length - 1]} (${days.length} days)`;
-
-  return `${channelPart} ${dayPart}`;
-}

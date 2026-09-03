@@ -4,7 +4,7 @@ import type { KyInstance } from 'ky';
 import { describe, expect, it } from 'vitest';
 import { retryAfterMs, sitePacing } from '../src/grabber/pacing.js';
 import type { AnySiteConfig } from '../src/grabber/types.js';
-import { emitter } from '../src/core/reporters.js';
+import { emitter } from '../src/core/events.js';
 import { collect } from './reporting.js';
 
 /** A site config with just enough on it for the pacing to be built. */

@@ -9,8 +9,8 @@
 
 import PQueue from 'p-queue';
 import { toDayString } from '../core/days.js';
-import { emitter } from '../core/reporters.js';
-import { SiteRun, type Run, type RunTally } from './site-run.js';
+import { emitter, type GrabCounts } from '../core/events.js';
+import { SiteRun, type Run } from './site-run.js';
 import type { AnySiteConfig, GrabOptions, GrabSummary } from './types.js';
 
 /**
@@ -25,7 +25,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
   const now = options.now ?? new Date();
   const emit = emitter(options);
   const { cache, signal } = options;
-  const tally: RunTally = { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0 };
+  const tally: GrabCounts = { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0 };
 
   /**
    * Everything that is not a request: the staleness sweep, and parsing a
@@ -66,7 +66,10 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     });
 
   const run: Run = {
-    options,
+    defaults: {
+      ...(options.days === undefined ? {} : { days: options.days }),
+      ...(options.staleness === undefined ? {} : { staleness: options.staleness }),
+    },
     cache,
     now,
     grabbedAt: now.toISOString(),

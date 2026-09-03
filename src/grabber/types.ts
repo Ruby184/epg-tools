@@ -3,7 +3,7 @@ import type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from '../xmlt
 import type { DateInput } from '../xmltv/date.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheEntryMeta, CacheStore, StalenessPolicy } from '../cache/types.js';
-import type { Reporter } from '../core/events.js';
+import type { GrabCounts, Reporter } from '../core/events.js';
 
 /**
  * A channel to grab: maps an output XMLTV id to a site-specific id.
@@ -769,49 +769,12 @@ export interface GrabOptions {
   signal?: AbortSignal;
 }
 
-export interface GrabSummary {
-  /** Channel-days fetched from the network. */
-  fetched: number;
-  /**
-   * Of those, the ones that parsed to no programmes at all — counted here as
-   * well as in {@link fetched}, since the request did happen.
-   *
-   * A day that comes back empty is the one failure a run cannot see: nothing
-   * threw, and the entry is cached like any other. It is reported rather than
-   * treated as a failure because a channel with nothing on is a legitimate
-   * answer; a number that climbs is what says otherwise. `emptyMaxAgeDays`
-   * governs how soon such an entry is asked about again.
-   */
-  empty: number;
-  /** Channel-days skipped because the cache was fresh. */
-  fromCache: number;
-  /**
-   * Channel-days the source said were unchanged, so the cached entry stands.
-   *
-   * Different from {@link fromCache}, which is what a run never asked about: this
-   * is what it *did* ask about and was told to keep — one conditional request
-   * instead of a download. Nothing was written, so `grabbedAt` is unmoved and the
-   * next run asks again, which is the cheap question it should be asking.
-   */
-  unchanged: number;
-  /**
-   * What did not come back: one for each channel-day that could not be fetched,
-   * and one for each site that could not be run at all.
-   *
-   * A site counts once rather than per channel-day because there is no grid to
-   * spread it over — a site that could not be read has no channel list, so the
-   * number of channel-days it *would* have covered is not knowable. Which makes
-   * this "things that went wrong" rather than strictly channel-days, and is why
-   * a non-zero value is the run's exit code either way.
-   *
-   * A count, not a list. It used to be the errors themselves, and it was the
-   * one thing a run retained that grew with the size of the guide: a site that
-   * is down leaves seven thousand live `Error`s with stacks, against the
-   * flat-in-the-size-of-the-guide discipline everything else here keeps.
-   *
-   * What each of them *was* arrives as an `entry:failed`, `request:failed` or
-   * `site:failed` event while it happens — see `reporter`. A caller wanting the
-   * list keeps one of its own, and gets to decide how long it may grow.
-   */
-  failed: number;
-}
+/**
+ * What a run answers with: the five counts, and nothing that grows with the
+ * size of the guide.
+ *
+ * The shape is {@link GrabCounts}, which is also what a `*:done` event carries —
+ * one declaration, so a site's total and the run's cannot describe themselves
+ * differently. What each of them means is documented there.
+ */
+export interface GrabSummary extends GrabCounts {}

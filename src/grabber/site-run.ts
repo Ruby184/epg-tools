@@ -53,14 +53,6 @@ import type {
   StreamSiteConfig,
 } from './types.js';
 
-/**
- * What a run counts as it goes, and answers with when it is done.
- *
- * The same five numbers a site keeps for itself, which is what makes summing
- * them a matter of adding rather than of merging two shapes.
- */
-export type RunTally = GrabCounts;
-
 /** Queue one task on `queue`, cancellable with the run — see {@link grab}. */
 export type Enqueue = <T>(
   queue: PQueue,
@@ -70,8 +62,13 @@ export type Enqueue = <T>(
 
 /** What the run lends each of its sites. */
 export interface Run {
-  /** The options as given, for the defaults a site may fall back to. */
-  options: GrabOptions;
+  /**
+   * The two run-level values a site may fall back to, and no others.
+   *
+   * Named rather than the whole `GrabOptions`: everything else a site needs off
+   * the run is resolved below, and carrying both was two ways to read one value.
+   */
+  defaults: Pick<GrabOptions, 'days' | 'staleness'>;
   cache: CacheStore;
   /** The reference for staleness, settled once for the whole run. */
   now: Date;
@@ -85,7 +82,8 @@ export interface Run {
   /** The run-wide queue for work that never leaves the machine. */
   localWork: PQueue;
   enqueue: Enqueue;
-  tally: RunTally;
+  /** What the run has counted so far — a site adds to it as it goes. */
+  tally: GrabCounts;
 }
 
 /** A parse may hand back either form; the cache only knows the object. */
@@ -109,6 +107,15 @@ export class SiteRun {
 
   /** This site's name, which every log line and cache key starts with. */
   readonly #site: string;
+
+  /**
+   * What a site says, as its contexts are handed it.
+   *
+   * Two closures for the site rather than two per context: a request context is
+   * built per request and a parse context per channel-day, so a 500-channel
+   * fortnight was building fourteen thousand of these to hand out.
+   */
+  readonly #says: Pick<BaseRequestContext, 'log' | 'warn'>;
 
   /** The site's own client and request queue, and how to let them go. */
   readonly #http: KyInstance;
@@ -170,7 +177,7 @@ export class SiteRun {
   constructor(config: AnySiteConfig, run: Run) {
     // Before its queue exists, let alone a request: a site that cannot be
     // resolved is one nothing else here can be asked about.
-    const resolved = resolveSite(config, run.options, run.startDay);
+    const resolved = resolveSite(config, run.defaults, run.startDay);
 
     this.#run = run;
     this.#config = config;
@@ -178,6 +185,10 @@ export class SiteRun {
     this.#site = resolved.site;
     this.#revalidates = config.conditionalGet === true;
     this.#state = SiteStateHandle.open(run.cache, resolved.site);
+    this.#says = {
+      log: (message: string) => run.emit({ type: 'site:note', site: resolved.site, message }),
+      warn: (message: string) => run.emit({ type: 'site:warning', site: resolved.site, message }),
+    };
 
     // The queue and the client together: the signal rides on the instance, so
     // every call a site makes through it is abortable without the site having to
@@ -439,9 +450,7 @@ export class SiteRun {
       })),
       http: this.#http,
       state: this.#siteState,
-      log: (message: string) => this.#run.emit({ type: 'site:note', site: this.#site, message }),
-      warn: (message: string) =>
-        this.#run.emit({ type: 'site:warning', site: this.#site, message }),
+      ...this.#says,
       ...(signal ? { signal } : {}),
     };
   }
@@ -627,10 +636,7 @@ export class SiteRun {
           payload,
           http: this.#http,
           state: this.#siteState,
-          log: (message: string) =>
-            this.#run.emit({ type: 'site:note', site: this.#site, message }),
-          warn: (message: string) =>
-            this.#run.emit({ type: 'site:warning', site: this.#site, message }),
+          ...this.#says,
           ...(taskSignal ? { signal: taskSignal } : {}),
           // A request of the parse's own goes through the site's queue, like the
           // request being parsed did — ahead of the planned ones, so a channel-day
@@ -798,18 +804,21 @@ export class SiteRun {
 
         const began = Date.now();
 
-        return revalidation
-          .run(asking, () => config.request(this.#contextFor(request, taskSignal)))
-          .then((raw) => {
-            this.#run.emit({
-              type: 'request:done',
-              site: this.#site,
-              ...span,
-              ms: Date.now() - began,
-            });
+        // No ambient store for a site that never asks: the hooks are not even
+        // installed, and an `AsyncLocalStorage` context per request is a real
+        // cost for a `none`-batched site with one request per channel-day.
+        const fetch = (): Promise<unknown> => config.request(this.#contextFor(request, taskSignal));
 
-            return raw;
+        return (this.#revalidates ? revalidation.run(asking, fetch) : fetch()).then((raw) => {
+          this.#run.emit({
+            type: 'request:done',
+            site: this.#site,
+            ...span,
+            ms: Date.now() - began,
           });
+
+          return raw;
+        });
       });
       // The run's own, and a different question: was this cancelled while it was
       // in flight? p-queue's task signal governs the slot, not the work in it, so

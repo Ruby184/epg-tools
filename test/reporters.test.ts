@@ -14,7 +14,7 @@ import {
 } from '../src/main.js';
 import type { EpgEvent, EpgEventInput, EventKind, EventLevel, Reporter } from '../src/main.js';
 import { silent, stamped } from '../src/core/events.js';
-import { emitter } from '../src/core/reporters.js';
+import { emitter } from '../src/core/events.js';
 
 /** Collects lines, so what a reporter wrote can be read back. */
 class Sink extends Writable {

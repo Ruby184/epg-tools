@@ -9,7 +9,6 @@ export {
 export { retryAfterMs, sitePacing } from './pacing.js';
 export {
   channelsMaxAgeMs,
-  ChannelsGroup,
   DEFAULT_CHANNELS_MAX_AGE_DAYS,
   SiteStateHandle,
   StateKey,

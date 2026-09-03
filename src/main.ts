@@ -11,7 +11,7 @@ export type {
 export { createConfigContext, defaultsReader, envReader } from './core/answers.js';
 export type { ConfigContext, ConfigReader, StageDefaults } from './core/answers.js';
 export { errorChain, errorMessage, GrabberError } from './core/error.js';
-export { atLevel, EVENT_KINDS, LEVELS } from './core/events.js';
+export { atLevel, emitter, EVENT_KINDS, LEVELS } from './core/events.js';
 export type {
   Emit,
   EpgEvent,
@@ -20,6 +20,7 @@ export type {
   EventKind,
   EventLevel,
   GrabCounts,
+  ReportedOptions,
   Reporter,
   RunPhase,
 } from './core/events.js';
@@ -40,7 +41,6 @@ export type {
   FailureMode,
   JsonReporterOptions,
   ProgressReporterOptions,
-  ReportedOptions,
   ReporterFactory,
   ReporterName,
   ReporterRuntime,
@@ -109,7 +109,6 @@ export {
   grab,
   channelElement,
   channelsMaxAgeMs,
-  ChannelsGroup,
   defineSiteConfig,
   defineStreamSiteConfig,
   defineXmltvSite,

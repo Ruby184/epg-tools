@@ -50,12 +50,56 @@ interface EntryRef {
   day: string;
 }
 
-/** What a run counts, and what {@link EpgEventInput} `*:done` events carry. */
+/**
+ * What a run counts — of a site, and of the whole run.
+ *
+ * One declaration for both, and for what a `*:done` event carries, so a site's
+ * total and the run's cannot describe themselves differently. `GrabSummary` is
+ * this shape under the name a run answers with.
+ */
 export interface GrabCounts {
+  /** Channel-days fetched from the network. */
   fetched: number;
+  /**
+   * Of those, the ones that parsed to no programmes at all — counted here as
+   * well as in {@link fetched}, since the request did happen.
+   *
+   * A day that comes back empty is the one failure a run cannot see: nothing
+   * threw, and the entry is cached like any other. It is reported rather than
+   * treated as a failure because a channel with nothing on is a legitimate
+   * answer; a number that climbs is what says otherwise. `emptyMaxAgeDays`
+   * governs how soon such an entry is asked about again.
+   */
   empty: number;
+  /** Channel-days skipped because the cache was fresh. */
   fromCache: number;
+  /**
+   * Channel-days the source said were unchanged, so the cached entry stands.
+   *
+   * Neither fetched nor stale: the request happened and answered `304`, so
+   * nothing was written and `grabbedAt` is where it was. The opposite of a
+   * missing channel-day, and must not be counted as one.
+   */
   unchanged: number;
+  /**
+   * What did not come back: one for each channel-day that could not be fetched,
+   * and one for each site that could not be run at all.
+   *
+   * A site counts once rather than per channel-day because there is no grid to
+   * spread it over — a site that could not be read has no channel list, so the
+   * number of channel-days it *would* have covered is not knowable. Which makes
+   * this "things that went wrong" rather than strictly channel-days, and is why
+   * a non-zero value is the run's exit code either way.
+   *
+   * A count, not a list. It used to be the errors themselves, and it was the
+   * one thing a run retained that grew with the size of the guide: a site that
+   * is down leaves seven thousand live `Error`s with stacks, against the
+   * flat-in-the-size-of-the-guide discipline everything else here keeps.
+   *
+   * What each of them *was* arrives as an `entry:failed`, `request:failed` or
+   * `site:failed` event while it happens. A caller wanting the list keeps one
+   * of its own, and gets to decide how long it may grow.
+   */
   failed: number;
 }
 
@@ -253,6 +297,23 @@ export function stamped(reporter: Reporter): Emit {
 
 /** A run nobody is listening to. */
 export const silent: Emit = () => {};
+
+/** What a caller says when asked where the events go. */
+export interface ReportedOptions {
+  reporter?: Reporter;
+}
+
+/**
+ * Where a run's events go — nowhere, when nobody is listening.
+ *
+ * Here rather than beside the reporters, though that is where it reads as
+ * belonging: `grab` needs it, and importing it from `reporters.ts` made the
+ * `epg-tools/grabber` entry point pull in the text, JSON and progress
+ * renderers, and `node:stream` with them, for three lines.
+ */
+export function emitter(options: ReportedOptions): Emit {
+  return options.reporter === undefined ? silent : stamped(options.reporter);
+}
 
 /**
  * Whether an event at `level` is worth showing to someone asking for `threshold`.

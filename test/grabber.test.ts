@@ -2198,6 +2198,35 @@ describe('a site that streams its whole window', () => {
     expect(cache.state.get('stream.example|state')?.data).toEqual([['passes', 1]]);
   });
 
+  it('is refused when it defines both a stream and a request', async () => {
+    // Two answers to one question: `stream` would win and `request` would never
+    // be called, which is the kind of thing that looks like a working site.
+    const cache = new MemoryCache();
+    const report = collect();
+    const summary = await grab(
+      [
+        {
+          site: 'stream.example',
+          channels: [channel('a')],
+          days: 1,
+          async *stream() {
+            // eslint-disable-next-line no-empty-function
+          },
+          async request() {
+            return {};
+          },
+          parseDay: () => [],
+        } as unknown as StreamSiteConfig,
+      ],
+      { cache, now: NOW, reporter: report.reporter },
+    );
+
+    expect(summary.failed).toBe(1);
+    expect((report.of('site:failed')[0]!.error as Error).message).toContain(
+      'defines both stream and request',
+    );
+  });
+
   it('is refused without a stream or a request, and named either way', async () => {
     const cache = new MemoryCache();
     const report = collect();

@@ -487,7 +487,7 @@ grabbed again.
 
 `grab`, `defineSiteConfig`, `defineStreamSiteConfig`, `resolveChannels`,
 `resolveSites`, `siteHttp`, `sitePacing`, `retryAfterMs`, `channelElement`,
-`defaultChannelInfo`, `SiteStateHandle`, `StateKey`, `ChannelsGroup`,
+`defaultChannelInfo`, `SiteStateHandle`, `StateKey`,
 `TrackedMap`, `channelsMaxAgeMs`, `DEFAULT_CHANNELS_MAX_AGE_DAYS`,
 `UnchangedError`, `isUnchanged`.
 
@@ -515,8 +515,9 @@ remembers](#what-a-site-remembers-between-runs) is held for the length of a run 
 
 ```ts
 const state = SiteStateHandle.open(cache, 'example.tv');
+const maxAge = channelsMaxAgeMs(site);                     // what the site asked for
 
-(await state.channels()).fresh(86_400_000, new Date());   // the list, while it lasts
+(await state.channels()).fresh(maxAge ?? 0, new Date());   // the list, while it lasts
 (await state.bag()).set('cursor', 42);                     // the site's own Map
 await state.save();                                        // the changed groups only
 ```

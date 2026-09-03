@@ -15,7 +15,7 @@
  */
 
 import type { CacheStore, StateEntry } from '../cache/types.js';
-import type { AnySiteConfig, GrabberChannel, SiteState } from './types.js';
+import type { AnySiteConfig, GrabberChannel } from './types.js';
 
 /**
  * The groups this package keeps on a site's behalf, by the key each is stored
@@ -321,11 +321,6 @@ export class SiteStateHandle {
     const group = await this.#use(key, (found) => new BagGroup<V>(key, asEntries<V>(found?.data)));
 
     return group.map;
-  }
-
-  /** The site's bag as a plain `Map`, which is all a site is promised. */
-  async siteState(): Promise<SiteState> {
-    return this.bag();
   }
 
   /** Write back the groups that changed, and nothing else. */
