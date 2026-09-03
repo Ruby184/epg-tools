@@ -117,7 +117,7 @@ the call site — `EVENT_KINDS` is the whole table, and it is the whole answer t
 | one request | `request:started`, `request:done` (with `ms`), `request:failed` |
 | a whole-document source | `stream:gaps`, `stream:ignored` |
 | pacing | `pacing:held`, `pacing:slowed`, `pacing:recovered`, `pacing:rateLimit` |
-| merging, tidying | `merge:channel`, `merge:done`, `prune:done` |
+| merging, tidying | `merge:channel`, `merge:done`, `merge:note`, `merge:warning`, `prune:done` |
 
 Two things about the shape are deliberate, and both are the difference between a
 structured sink and a string one. **A failed request is one event, not one per

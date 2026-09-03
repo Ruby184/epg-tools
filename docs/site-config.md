@@ -386,8 +386,8 @@ turns up.
 
 ### Saying something
 
-Every context — `channels`, `request`, `parseDay`, `stream` — carries `log` and
-`warn`. They take one line each and the site's name is added for you, so say
+Every context — `channels`, `request`, `parseDay`, `stream` and `transform` —
+carries `log` and `warn`. They take one line each and the site's name is added for you, so say
 what happened rather than who it happened to:
 
 ```ts

@@ -735,7 +735,7 @@ fix both because it has the programme that follows:
 | `fillStop` | `true` (cap 6 h) | A programme with no `stop` gets the next one's start — capped, so the gap where a channel goes off air for the night stays a gap instead of becoming one nine-hour programme. `{ maxMs: 1_800_000 }` for a cap of your own, `false` to leave ends missing. |
 | `clipOverlaps` | `true` | A `stop` that reaches past the next programme's start is pulled back to it. |
 | `clampToWindow` | `false` | Leave out programmes starting outside the guide's window. Off, because a source handing back a few hours past the last day is giving you something. |
-| `transform` | — | The last word on every programme: `(programme, { xmltvId, next }) => programme \| null`. |
+| `transform` | — | The last word on every programme: `(programme, { xmltvId, next, log, warn }) => programme \| null`. |
 
 A programme with no end is what a consumer can do least with — tvheadend shows
 a zero-length event, some players nothing at all — and two programmes claiming
@@ -762,6 +762,25 @@ Returning `null` or `undefined` leaves the programme out, but the rules have
 already run, so the gap stays. To drop something and have the gap close, use
 [a site's own `transform`](./site-config.md#fixing-up-one-source), which runs
 before them — or `clampToWindow` for what falls outside the window.
+
+It also carries `log` and `warn`, for the thing a mapping like the one above
+always turns out to need — saying which category it had no mapping for:
+
+```ts
+transform: (programme, { xmltvId, warn }) => {
+  const unmapped = programme.category?.filter((c) => GENRES[c.value] === undefined);
+
+  if (unmapped?.length) {
+    warn('no genre mapping', { xmltvId, categories: unmapped.map((c) => c.value) });
+  }
+
+  return programme;
+}
+```
+
+These arrive as `merge:note` and `merge:warning` rather than the `site:note` a
+site's own code sends, and carry no site — the code is the config's own, so
+there is nobody to attribute it to.
 
 ### Across the day boundary
 

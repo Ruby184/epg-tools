@@ -686,6 +686,64 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     expect(indented.endsWith('</tv>\n')).toBe(true);
   });
 
+  it("lets a site's transform say something, under that site's name", async () => {
+    // It runs as the cache is read, which is where a site notices what only the
+    // whole of a channel-day shows — and until now it had nowhere to say so.
+    const report = collectEvents();
+
+    await generate({
+      sites: [
+        {
+          ...siteA,
+          transform: (programme, { channel, day, warn }) => {
+            warn('a padding programme', { channel: channel.xmltvId, day });
+
+            return programme;
+          },
+        },
+      ],
+      cache: cacheForBothSites(),
+      days: 1,
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    expect(report.of('site:warning')).toContainEqual(
+      expect.objectContaining({
+        site: 'site-a.sk',
+        message: 'a padding programme',
+        data: { channel: 'X', day: DAY },
+      }),
+    );
+  });
+
+  it('lets a merge transform say something, with no site on it', async () => {
+    // The config's own code rather than any site's, so there is nobody to
+    // attribute it to — which is why these are their own two event kinds.
+    const report = collectEvents();
+
+    await generate({
+      sites: [siteA],
+      cache: cacheForBothSites(),
+      days: 1,
+      now: NOW,
+      merge: {
+        transform: (programme, { xmltvId, log }) => {
+          log('unmapped category', { xmltvId });
+
+          return programme;
+        },
+      },
+      reporter: report.reporter,
+    });
+
+    const notes = report.of('merge:note');
+
+    expect(notes.length).toBeGreaterThan(0);
+    expect(notes[0]).toMatchObject({ message: 'unmapped category', data: { xmltvId: 'X' } });
+    expect(notes[0]).not.toHaveProperty('site');
+  });
+
   it('carries the extensions option through to the writer', async () => {
     const base = {
       sites: [siteA],
