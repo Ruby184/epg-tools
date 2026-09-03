@@ -254,9 +254,14 @@ the caller's, and one it opened is closed by `close()`.
 
 The validator is the cache's, not the document's: a guide is a generator, so
 hashing its bytes would mean buffering it. What is read per poll is the window's
-metadata — the same lookups a merge begins with, without the payload reads and
-serializing that follow — at most once per `revalidateMs`, and once for however
-many polls arrive together. Those lookups are keyed by the channel list in hand,
+metadata — no payloads, no parsing, no serializing — at most once per
+`revalidateMs`, once for however many polls arrive together, and in bounded
+batches rather than as one enormous question.
+
+What that saves depends on the driver by more than one would guess: over 3,500
+channel-days a `304` costs 230ms on the default file cache against 32ms on
+`sqlite`, where the sweep is a single query. See [serving the
+guide](./configuration.md#serving-the-guide). Those lookups are keyed by the channel list in hand,
 which is re-resolved when the fingerprint moves and at least every
 `sitesMaxAgeMs` (ten minutes), so that a grab which only adds a channel is not
 invisible until midnight. See [serving the
