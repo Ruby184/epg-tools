@@ -391,6 +391,95 @@ describe('epg', () => {
     expect(stderr).toContain('ndjson, xmltv, sqlite, memory');
   });
 
+  it('exits 0 with what --allow-missing tolerates, and 1 past it', async () => {
+    const dir = await tempDir();
+    // Four channel-days, of which one channel's two always fail.
+    const config = await configFile(
+      dir,
+      `const flaky = (site, fails) => ({
+      site,
+      channels: [{ xmltvId: 'a.' + site, siteId: 'a' }, { xmltvId: 'b.' + site, siteId: 'b' }],
+      async request({ channel }) {
+        if (fails.includes(channel.siteId)) throw new Error('the feed went away');
+        return {};
+      },
+      parseDay: ({ channel, day }) => [{
+        channel: channel.xmltvId,
+        start: new Date(day + 'T06:00:00.000Z'),
+        title: [{ value: 'Show' }],
+      }],
+    });
+
+    export default {
+      sites: [flaky('example.tv', ['b'])],
+      days: 2,
+      output: ${JSON.stringify(join(dir, 'guide.xml'))},
+      cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+    };`,
+    );
+
+    const args = ['grab', '--config', config, '--quiet', '--refresh'];
+
+    // Two of four channel-days lost: a failure by default.
+    expect((await run(args)).code).toBe(1);
+
+    // A count, and a share of the four it accounted for — 50% exactly, which
+    // passes as "up to".
+    expect((await run([...args, '--allow-missing', '2'])).code).toBe(0);
+    expect((await run([...args, '--allow-missing', '1'])).code).toBe(1);
+    expect((await run([...args, '--allow-missing', '50%'])).code).toBe(0);
+    expect((await run([...args, '--allow-missing', '49%'])).code).toBe(1);
+  });
+
+  it('refuses to let any allowance cover a site that answered nothing', async () => {
+    const dir = await tempDir();
+    // No `request` at all: the site cannot be read, so nothing of it is reached
+    // and there is no grid to weigh the loss against.
+    const config = await configFile(
+      dir,
+      `export default {
+      sites: [{ site: 'example.tv', channels: [{ xmltvId: 'one', siteId: '1' }] }],
+      days: 1,
+      output: ${JSON.stringify(join(dir, 'guide.xml'))},
+      cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+    };`,
+    );
+
+    const { code, stdout, stderr } = await run([
+      'grab',
+      '--config',
+      config,
+      '--allow-missing',
+      '100%',
+      '--reporter',
+      'text',
+    ]);
+
+    // Not "1 failed", which would read as one channel-day out of one: the
+    // summary names it apart, as the exit code treats it apart.
+    expect(code).toBe(1);
+    expect(stdout).toContain('1 site answered nothing');
+    expect(stdout).toContain('0 failed');
+    expect(stderr).toContain('site failed');
+  });
+
+  it('refuses an --allow-missing value that is not one, with the usage', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+    const bad = async (value: string): Promise<string> =>
+      (await run(['grab', '--config', config, '--allow-missing', value])).stderr;
+
+    expect(await bad('lots')).toContain('expected a number of channel-days');
+    expect(await bad('101%')).toContain('cannot exceed 100%');
+    // The likeliest slip: a share written as a fraction.
+    expect(await bad('0.05')).toContain('did you mean 0.05%');
+
+    const { code, stderr } = await run(['grab', '--config', config, '--allow-missing', 'lots']);
+
+    expect(code).toBe(2);
+    expect(stderr).toContain('Usage: epg');
+  });
+
   it('picks what the guide keeps with --extensions and --no-extensions', async () => {
     const dir = await tempDir();
     const config = await configFile(

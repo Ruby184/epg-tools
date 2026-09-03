@@ -13,6 +13,7 @@ import {
   type StageDefaults,
 } from './core/answers.js';
 import type { CompressionFormat, CompressionOptions } from './core/output.js';
+import type { MissingAllowance } from './grabber/missing.js';
 import type { AnySiteConfig } from './grabber/types.js';
 import type { MergeOptions } from './merge/types.js';
 import type { SerializeOptions } from './xmltv/serialize.js';
@@ -116,6 +117,19 @@ export interface EpgConfig {
    * command line cannot pass a function.
    */
   extensions?: SerializeOptions['extensions'];
+  /**
+   * How much of the guide may be missing and the run still exit **0**: a number
+   * of channel-days, or a share of the ones it accounted for (`'5%'`). Defaults
+   * to none — anything missing is a failure.
+   *
+   * For a nightly build, where one flaky channel out of two thousand is weather
+   * and a fortnight of holes is news. A site that answered *nothing* is outside
+   * this whatever it says: there is no grid to weigh it against, so it is
+   * always a run to look at.
+   *
+   * `--allow-missing` overrides it.
+   */
+  allowMissing?: MissingAllowance;
   /**
    * How a run reports what it is doing. Defaults to `'text'`.
    *

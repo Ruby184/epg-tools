@@ -16,7 +16,7 @@ import { build, runGrab, runMerge, textReporter } from 'epg-tools';
 import config from './epg.config.ts';
 
 const summary = await build(config, { reporter: textReporter({ stream: process.stdout }) });
-console.log(summary); // { fetched, fromCache, failed }
+console.log(summary); // { fetched, fromCache, failed, ... }
 ```
 
 | function | does |
@@ -28,15 +28,22 @@ console.log(summary); // { fetched, fromCache, failed }
 | `createCacheStore(config)` | The cache a config describes: a `CacheManager` over the driver its `driver` names or builds. |
 
 `GrabSummary` counts `fetched` (channel-days that went to the network),
-`fromCache` (skipped because the cache was fresh), `empty`, `unchanged` and
-`failed` — five numbers, and nothing that grows with the size of the guide.
+`fromCache` (skipped because the cache was fresh), `empty`, `unchanged`,
+`failed` and `sitesFailed` — six numbers, and nothing that grows with the size
+of the guide.
 
-`failed` is a **count** — one per channel-day that could not be fetched, and
-one per site that could not be run at all. A site counts once rather than per
-channel-day because there is no grid to spread it over: a site that could not be
-read has no channel list, so what it would have covered is not knowable. Which
-makes it "things that went wrong" rather than strictly channel-days, and is why
-non-zero is the exit code either way.
+`failed` is a **count** of channel-days that did not come back. `sitesFailed`
+counts sites that answered nothing at all — one that could not be read, or whose
+channel list never arrived. They are apart because a site has no grid to spread
+it over: a site that could not be read has no channel list, so what it *would*
+have covered is not knowable, and adding one to a count of channel-days would
+make a dead source look like a rounding error beside a guide of thousands.
+
+Which is the difference [`allowMissing`](./configuration.md#allowing-some-of-the-guide-to-be-missing)
+turns on: a threshold forgives scattered channel-days, and never a site that
+answered nothing. `fellShort(summary, allowMissing)` is that rule, exported so a
+caller of `runGrab` decides an exit code exactly as the CLI and a `tv_grab_*`
+shim do.
 
 It used to be the errors themselves, which for a site that is down meant seven
 thousand live `Error`s with stacks retained for the length of the run. What each

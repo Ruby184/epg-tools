@@ -116,6 +116,8 @@ export {
   defineStreamSiteConfig,
   defineXmltvSite,
   DEFAULT_CHANNELS_MAX_AGE_DAYS,
+  fellShort,
+  resolveAllowance,
   resolveChannels,
   resolveSites,
   retryAfterMs,
@@ -127,6 +129,7 @@ export {
   TrackedMap,
   UnchangedError,
 } from './grabber/main.js';
+export type { MissingAllowance, ResolvedAllowance } from './grabber/main.js';
 export type * from './grabber/types.js';
 
 export {

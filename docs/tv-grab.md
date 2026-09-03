@@ -111,8 +111,9 @@ sudo -u hts tv_grab_sk_example --configure   # → /home/hts/.xmltv/tv_grab_sk_e
 
 The XMLTV document is the only thing on stdout; progress and errors go to
 stderr. Exit codes are 0 on success, 1 for a bad command line, a missing
-configuration, or partial data (a channel-day that failed to grab), and 130 when
-the grabber was stopped by a signal. New channels are reported but do not change
+configuration, or partial data — a channel-day that failed to grab, unless the
+config's [`allowMissing`](./configuration.md#allowing-some-of-the-guide-to-be-missing)
+forgives that much — and 130 when the grabber was stopped by a signal. New channels are reported but do not change
 the exit code unless you ask for it with `--channel-updates signal`, which uses
 2 (see below).
 

@@ -56,6 +56,7 @@ hardcode — a username, a password, a region. See
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 | `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — all of them | Which provider extensions the guide carries — see [Provider extensions](#provider-extensions). `false` leaves every one out, which is what makes the guide valid against the DTD. |
+| `allowMissing` | `number \| string` | none — anything missing fails | How much of the guide may be missing and the run still exit **0**: a number of channel-days, or a share like `'5%'` — see [allowing some of the guide to be missing](#allowing-some-of-the-guide-to-be-missing). |
 | `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'text'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
 
 ### Root `<tv>` attributes
@@ -121,6 +122,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--cache-dir <dir>` | override the cache directory |
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
+| `--allow-missing <n>` | exit 0 with up to this much of the guide missing: a number of channel-days, or a share like `5%` |
 | `--extensions <names>` | `build`/`merge` only: keep only these [provider extensions](#provider-extensions), comma-separated — `--extensions lcn,uniqueID` |
 | `--no-extensions` | `build`/`merge` only: leave every one out, for a guide that validates against the DTD |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
@@ -135,9 +137,10 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 
 `-v` is verbosity, not the version: the version is `-V`.
 
-It exits **0** on success, **1** when the run failed or the guide is short a
-channel-day, **2** for anything you typed wrong — an unknown option, command, or
-`--before` value, each printed with the usage — and **130** when it was
+It exits **0** on success, **1** when the run failed or the guide is short more
+than [`--allow-missing`](#allowing-some-of-the-guide-to-be-missing) forgives,
+**2** for anything you typed wrong — an unknown option, command, `--before` or
+`--allow-missing` value, each printed with the usage — and **130** when it was
 [cancelled](#cancelling-a-run).
 
 ### How much it says
@@ -327,6 +330,45 @@ epg merge --no-extensions -o plain.xml     # and a DTD-valid one, no refetching
 An element left holding nothing collapses to what the DTD allows rather than
 being written empty: `<credits>` with only extensions in it is not written at
 all, and `<video>` becomes `<video/>`.
+
+### Allowing some of the guide to be missing
+
+A grab that lost a few channel-days out of thousands has produced a guide; one
+that lost half of them has produced a hole. Both exit **1** by default, which
+leaves a nightly build either crying wolf over one flaky channel or — if you
+stop looking — publishing a fortnight of gaps without a word.
+
+`allowMissing` draws the line, as a count of channel-days or a share of the ones
+the run accounted for:
+
+```ts
+export default defineConfig({
+  // ...
+  allowMissing: '5%',   // or allowMissing: 20
+});
+```
+
+```sh
+epg build --allow-missing 5%   # overrides the config field
+epg build --allow-missing 20
+```
+
+Exactly the allowance passes, as "up to" reads: `--allow-missing 5%` on a run
+that lost 5% exits 0. The share is of everything the run has an answer about —
+fetched, taken from the cache, and kept as unchanged — so a run that fetched
+almost nothing because the cache was fresh is not thereby judged to have lost
+most of its guide. A day that came back **empty** is not missing: a channel with
+nothing on is an answer.
+
+**A site that answered nothing is outside this, whatever it says.** A site that
+could not be read, or whose channel list never arrived, has no channel list — so
+the channel-days it would have covered are not knowable, and weighing "one site"
+against a guide of thousands would score a source that is entirely down as a
+rounding error. The summary names those apart (`1 site answered nothing`), and
+they always exit 1.
+
+A `tv_grab_*` shim reads the same field, for the same reason: it is the config's
+answer, not the command's.
 
 ### `--offset`
 
