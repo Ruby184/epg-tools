@@ -580,7 +580,9 @@ describe('provider extensions on the way out', () => {
       { extensions: false },
     );
 
-    // <credits> requires at least one person, so an empty one may not be written.
+    // Not a DTD requirement — `credits` stars every child, so `<credits/>` would
+    // validate. It is dropped because an empty one says nothing, which is the
+    // same reason `creditsElement` has always written nothing for no people.
     expect(xml).not.toContain('<credits');
     // These two may be empty, and are.
     expect(xml).toContain('<video/>');
