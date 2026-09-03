@@ -14,6 +14,7 @@ import {
 } from './core/answers.js';
 import type { CompressionFormat, CompressionOptions } from './core/output.js';
 import type { MissingAllowance } from './grabber/missing.js';
+import type { EpgServeConfig } from './serve/config.js';
 import type { AnySiteConfig } from './grabber/types.js';
 import type { MergeOptions } from './merge/types.js';
 import type { SerializeOptions } from './xmltv/serialize.js';
@@ -117,6 +118,13 @@ export interface EpgConfig {
    * command line cannot pass a function.
    */
   extensions?: SerializeOptions['extensions'];
+  /**
+   * Where `epg serve` listens, and what it serves — see
+   * [serving the guide](../docs/configuration.md#serving-the-guide).
+   *
+   * Loopback and port 8080 by default. The flags override each field.
+   */
+  serve?: EpgServeConfig;
   /**
    * How much of the guide may be missing and the run still exit **0**: a number
    * of channel-days, or a share of the ones it accounted for (`'5%'`). Defaults

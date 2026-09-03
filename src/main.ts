@@ -11,7 +11,7 @@ export type {
 export { createConfigContext, defaultsReader, envReader } from './core/answers.js';
 export type { ConfigContext, ConfigReader, StageDefaults } from './core/answers.js';
 export { errorChain, errorMessage, GrabberError } from './core/error.js';
-export { atLevel, emitter, EVENT_KINDS, LEVELS } from './core/events.js';
+export { atLevel, emitter, EVENT_KINDS, LEVELS, PHASES } from './core/events.js';
 export type {
   Emit,
   EpgEvent,
@@ -137,6 +137,9 @@ export {
 } from './grabber/main.js';
 export type { MissingAllowance, ResolvedAllowance } from './grabber/main.js';
 export type * from './grabber/types.js';
+
+export { serveGuide } from './serve/main.js';
+export type { EpgServeConfig, GuideServer, ServeOptions } from './serve/main.js';
 
 export {
   DEFAULT_MATCH,

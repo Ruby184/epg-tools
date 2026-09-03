@@ -180,6 +180,20 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       return `merge: channel ${event.channelId} done`;
     case 'merge:done':
       return `Guide written to ${event.output}`;
+    case 'serve:started':
+      return `Serving the guide at ${event.url}`;
+    case 'serve:response':
+      // The status is the news: 304 is the poll that cost nothing, which is the
+      // whole point of answering conditionally, and a log that did not say so
+      // would leave nobody able to tell whether it was working.
+      return `${event.method} ${event.path} → ${event.status} in ${event.ms}ms`;
+    case 'serve:failed':
+      // Rendered here rather than collected as a `FailureEvent`: those are held
+      // back and flushed when the run ends, and a server's run ends when
+      // somebody stops it — possibly in a fortnight.
+      return `${event.path}: ${errorChain(event.error)}`;
+    case 'serve:stopped':
+      return 'Stopped serving';
     case 'prune:done':
       // One wording where there were two: a prune after a grab used to say
       // "Pruned N cached day(s) older than X" and `epg prune` "Pruned N cached

@@ -34,6 +34,7 @@ Commands:
   grab          Grab all sites into the cache only
   merge         Generate the merged guide from the cache only
   validate      Read a guide and report what is wrong with it
+  serve         Hold the merged guide behind HTTP for a consumer that polls
   prune         Remove cached days older than a given day
   init-grabber  Write a tv_grab_* executable for the config, next to it
 
@@ -61,6 +62,11 @@ Options:
       --failures <how>  block (default) — one capped block at the end; or inline
   -V, --version         Print this package's version
   -h, --help            Show this help
+
+serve options:
+      --port <n>        Port to listen on (default: 8080)
+      --host <h>        Address to bind (default: 127.0.0.1 — loopback only)
+      --serve-path <p>  Path that answers with the guide (default: /guide.xml)
 
 validate options:
       --report <how>    text (default) or json — one document, not a run log
@@ -140,7 +146,7 @@ const EXIT_CANCELLED = 130;
 
 const CONFIG_CANDIDATES = ['epg.config.ts', 'epg.config.js', 'epg.config.mjs'];
 
-const COMMANDS = ['build', 'grab', 'merge', 'validate', 'prune', 'init-grabber'];
+const COMMANDS = ['build', 'grab', 'merge', 'serve', 'validate', 'prune', 'init-grabber'];
 
 export interface CliOptions {
   /** Defaults to `process.stdout` — progress, and the help. */
@@ -336,6 +342,9 @@ async function execute(
       'cache-driver': { type: 'string', choices: CACHE_DRIVER_NAMES },
       refresh: { type: 'boolean' },
       'allow-missing': { type: 'string', transform: allowance },
+      port: { type: 'number', min: 0, max: 65_535 },
+      host: { type: 'string' },
+      'serve-path': { type: 'string' },
       report: { type: 'string', choices: REPORT_FORMATS },
       strict: { type: 'boolean' },
       // A list of names, or `--no-extensions` for none of them. A config can
@@ -413,6 +422,22 @@ async function execute(
     config = { ...config, extensions: values.extensions ?? false };
   }
 
+  if (
+    values.port !== undefined ||
+    values.host !== undefined ||
+    values['serve-path'] !== undefined
+  ) {
+    config = {
+      ...config,
+      serve: {
+        ...config.serve,
+        ...(values.port !== undefined ? { port: values.port } : {}),
+        ...(values.host !== undefined ? { host: values.host } : {}),
+        ...(values['serve-path'] !== undefined ? { path: values['serve-path'] } : {}),
+      },
+    };
+  }
+
   if (values['allow-missing'] !== undefined) {
     config = { ...config, allowMissing: values['allow-missing'] };
   }
@@ -479,7 +504,22 @@ async function execute(
       // a config was needed. Validating what this project writes is what the
       // command is usually for, so its `output` is the default.
       return validateGuide(String(config.output), values, stdout, signal);
-    default: {
+    case 'serve': {
+      const { serveGuide } = await import('../serve/main.js');
+      // `runOptions` already carries the reporter, the offset and the signal —
+      // the same three a grab or a merge is given, and for the same reasons.
+      const server = await serveGuide(config, runOptions);
+
+      // The one command that outlives its own work: everything else has
+      // finished by the time it returns, and this has only started.
+      await server.closed;
+
+      // A server that was asked to stop did what it was asked. Nothing failed,
+      // and nothing was left half done — which is why this is 0 and not the
+      // 130 a cancelled grab answers with.
+      return 0;
+    }
+    case 'prune': {
       const before = values.before ?? toDayString(new Date());
 
       await using cache = await createCacheStore(config, signal);
@@ -488,6 +528,14 @@ async function execute(
       emit({ type: 'prune:done', removed, before });
 
       return 0;
+    }
+    default: {
+      // Unreachable: `COMMANDS` is checked above, so a command with no case
+      // here fails to compile rather than silently pruning the cache — which
+      // is what the old `default:` would have done with it.
+      const named: never = command as never;
+
+      throw new UsageError(`Unknown command: ${String(named)}`);
     }
   }
 }

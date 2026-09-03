@@ -232,6 +232,33 @@ filter decides one at a time. The cache keeps everything either way, so two
 documents come out of one grab — see [leaving extensions
 out](./xmltv.md#leaving-extensions-out).
 
+## Serving a guide
+
+`serveGuide(config, options)` is `guideStream` behind an HTTP server that
+answers conditionally, for a consumer that polls:
+
+```ts
+import { serveGuide } from 'epg-tools';
+
+const server = await serveGuide(config, { port: 8080 });
+
+console.log(`serving ${server.url}`);
+await server.closed;          // resolves when it stops
+```
+
+It resolves once listening, and gives back `{ url, port, close, closed }`.
+`options` takes `port`, `host`, `path`, `compress`, `concurrency`,
+`revalidateMs`, and the `signal`, `reporter`, `now`, `offset` and `cache` a run
+takes — a `cache` handed in stays the caller's, and one it opened is closed by
+`close()`.
+
+The validator is the cache's, not the document's: a guide is a generator, so
+hashing its bytes would mean buffering it. What is read per poll is the window's
+metadata — the same lookups a merge begins with, without the payload reads and
+serializing that follow — at most once per `revalidateMs`, and once for however
+many polls arrive together. See [serving the
+guide](./configuration.md#serving-the-guide) for what that costs and saves.
+
 ## Entry points
 
 ```ts
@@ -240,6 +267,7 @@ import { parseXmltvFile, writeXmltvStream } from 'epg-tools/xmltv';
 import { CacheManager, FsNdjsonCacheDriver, isStale } from 'epg-tools/cache';
 import { grab, resolveChannels, siteHttp } from 'epg-tools/grabber';
 import { generateGuide, writeGuide, mergeProgrammes } from 'epg-tools/merge';
+import { serveGuide } from 'epg-tools/serve';
 import { runXmltvGrabber, defineCapability } from 'epg-tools/tv-grab';
 ```
 
@@ -568,6 +596,13 @@ the config: `siteConcurrency`, how many sites resolve a fetched channel list at
 once, and `readAhead` (from `localConcurrency`, default 16), how many
 channel-days are read from the cache ahead of the writer. `readAhead: 1` reads
 strictly one at a time.
+
+### `epg-tools/serve`
+
+`serveGuide` and the `GuideServer` / `ServeOptions` / `EpgServeConfig` types,
+with `DEFAULT_SERVE_PORT`, `DEFAULT_SERVE_HOST`, `DEFAULT_SERVE_PATH` and
+`DEFAULT_REVALIDATE_MS`. Loaded only when named, so nothing else pulls in
+`node:http`.
 
 ### `epg-tools/tv-grab`
 

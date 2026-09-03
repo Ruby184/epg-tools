@@ -68,11 +68,45 @@ async function run(
   argv: string[],
   signal?: AbortSignal,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
+  const { code, stdout, stderr } = start(argv, signal);
+
+  return { code: await code, stdout: stdout.text, stderr: stderr.text };
+}
+
+/**
+ * The same, without waiting for it to finish.
+ *
+ * For `serve`, which does not: its output has to be readable *while* it runs,
+ * since where it is listening is the first thing it says and the only way to
+ * find out which port the OS handed it.
+ */
+function start(
+  argv: string[],
+  signal?: AbortSignal,
+): { code: Promise<number>; stdout: Sink; stderr: Sink } {
   const stdout = new Sink();
   const stderr = new Sink();
-  const code = await runCli(argv, { stdout, stderr, ...(signal ? { signal } : {}) });
 
-  return { code, stdout: stdout.text, stderr: stderr.text };
+  return { code: runCli(argv, { stdout, stderr, ...(signal ? { signal } : {}) }), stdout, stderr };
+}
+
+/** Wait for `read` to return something, or give up saying what was wanted. */
+async function eventually<T>(what: string, read: () => T | undefined): Promise<T> {
+  const until = Date.now() + 5000;
+
+  for (;;) {
+    const value = read();
+
+    if (value !== undefined) {
+      return value;
+    }
+
+    if (Date.now() > until) {
+      throw new Error(`timed out waiting for ${what}`);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 describe('epg', () => {
@@ -390,6 +424,40 @@ describe('epg', () => {
     expect(code).toBe(2);
     expect(stderr).toContain('Invalid --cache-driver value: postgres');
     expect(stderr).toContain('ndjson, xmltv, sqlite, memory');
+  });
+
+  it('serves the guide until it is told to stop', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+
+    // Grabbed first, so there is something to serve.
+    expect((await run(['grab', '--config', config, '--quiet'])).code).toBe(0);
+
+    const controller = new AbortController();
+    // The one command that does not finish on its own: it resolves when the
+    // signal fires, which is what a service manager sends to stop the job.
+    const serving = start(
+      ['serve', '--config', config, '--port', '0', '--reporter', 'text'],
+      controller.signal,
+    );
+
+    // Port 0 means the OS picks, so where it is listening is read from what it
+    // said rather than assumed — which is also the reason it says it.
+    const url = await eventually(
+      'the server to say where it is listening',
+      () => /http:\/\/\S+/.exec(serving.stdout.text)?.[0],
+    );
+
+    const response = await fetch(url);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('<programme');
+
+    controller.abort();
+
+    // Nothing failed and nothing was left half done, so 0 rather than the 130
+    // a cancelled grab answers with.
+    expect(await serving.code).toBe(0);
   });
 
   describe('validate', () => {

@@ -13,7 +13,7 @@ import {
   textReporter,
 } from '../src/main.js';
 import type { EpgEvent, EpgEventInput, EventKind, EventLevel, Reporter } from '../src/main.js';
-import { silent, stamped } from '../src/core/events.js';
+import { silent, stamped, PHASES } from '../src/core/events.js';
 import { emitter } from '../src/core/events.js';
 
 /** Collects lines, so what a reporter wrote can be read back. */
@@ -54,7 +54,7 @@ describe('the event union', () => {
     // one place that decides how loudly, and this is it.
     for (const [type, kind] of Object.entries(EVENT_KINDS)) {
       expect(LEVELS).toContain(kind.level);
-      expect(['run', 'grab', 'merge', 'prune']).toContain(kind.phase);
+      expect(PHASES).toContain(kind.phase);
       expect(type).toMatch(/^[a-z]+:[a-zA-Z]+$/);
     }
   });

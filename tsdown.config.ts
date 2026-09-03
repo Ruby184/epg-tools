@@ -14,6 +14,7 @@ export default defineConfig({
     'cache/sqlite': 'src/cache/sqlite-driver.ts',
     'grabber/main': 'src/grabber/main.ts',
     'merge/main': 'src/merge/main.ts',
+    'serve/main': 'src/serve/main.ts',
     'tv-grab/main': 'src/tv-grab/main.ts',
     'cli/main': 'src/cli/main.ts',
   },

@@ -56,6 +56,7 @@ hardcode — a username, a password, a region. See
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 | `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — all of them | Which provider extensions the guide carries — see [Provider extensions](#provider-extensions). `false` leaves every one out, which is what makes the guide valid against the DTD. |
+| `serve` | `{ port?, host?, path?, compress? }` | `8080`, `127.0.0.1`, `/guide.xml`, `gzip` | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). |
 | `allowMissing` | `number \| string` | none — anything missing fails | How much of the guide may be missing and the run still exit **0**: a number of channel-days, or a share like `'5%'` — see [allowing some of the guide to be missing](#allowing-some-of-the-guide-to-be-missing). |
 | `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'text'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
 
@@ -104,6 +105,7 @@ Non-DTD attributes go in `extraAttributes` and are emitted verbatim.
 epg build            # grab stale/missing days, then write the merged guide
 epg grab             # grab only
 epg merge            # write the guide from cache only
+epg serve            # hold the guide behind HTTP for a consumer that polls
 epg validate         # read the guide and report what is wrong with it
 epg prune            # drop cached days older than today
 epg init-grabber tv_grab_sk_example   # write an XMLTV grabber for this config
@@ -126,6 +128,9 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--allow-missing <n>` | exit 0 with up to this much of the guide missing: a number of channel-days, or a share like `5%` |
 | `--extensions <names>` | `build`/`merge` only: keep only these [provider extensions](#provider-extensions), comma-separated — `--extensions lcn,uniqueID` |
 | `--no-extensions` | `build`/`merge` only: leave every one out, for a guide that validates against the DTD |
+| `--port <n>` | `serve` only: port to listen on, default `8080` |
+| `--host <h>` | `serve` only: address to bind, default `127.0.0.1` — see [serving the guide](#serving-the-guide) |
+| `--serve-path <p>` | `serve` only: the path that answers with the guide, default `/guide.xml` |
 | `--report <how>` | `validate` only: `text` (default) or `json` — see [validating a guide](#validating-a-guide) |
 | `--strict` | `validate` only: count warnings as failures too |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
@@ -333,6 +338,57 @@ epg merge --no-extensions -o plain.xml     # and a DTD-valid one, no refetching
 An element left holding nothing collapses to what the DTD allows rather than
 being written empty: `<credits>` with only extensions in it is not written at
 all, and `<video>` becomes `<video/>`.
+
+### Serving the guide
+
+`epg serve` holds the merged guide behind HTTP for a consumer that polls — the
+serving half of what [`conditionalGet`](./site-config.md) does on the fetching
+side, and for the same reason. A consumer asking hourly for a guide that changes
+nightly spends twenty-three of those asks receiving a document it already has.
+
+```sh
+epg serve                          # http://127.0.0.1:8080/guide.xml
+epg serve --port 9000 --host 0.0.0.0
+epg serve --serve-path /xmltv.xml
+```
+
+```
+GET /guide.xml → 200 in 412ms
+GET /guide.xml → 304 in 1ms
+```
+
+That second line is the point. A `304 Not Modified` costs a header instead of a
+merge, and `--reporter text -v` shows which of the two a poll got.
+
+**What decides it.** A guide is a stream, so its bytes cannot be hashed without
+buffering the document this package exists not to buffer. The cache answers
+instead: the newest `grabbedAt` across the window, with how many entries are in
+it — nothing else can change what a merge would produce, because a merge reads
+exactly those entries. That reading is metadata only: the same lookups a merge
+*begins* with, and none of the payload reads, parsing or serializing that
+follow. It is worked out at most once a second (`revalidateMs`), and once for
+however many polls arrive together.
+
+The guide streams straight into the response, so nothing is held in memory; a
+consumer that hangs up mid-guide stops the merge feeding it. `compress` (`gzip`
+by default) is used when the request's `Accept-Encoding` names it, and
+`concurrency` (2) bounds how many guides are generated at once — a slot is held
+for the whole response, a slow consumer included, since a merge reads the whole
+cache and a burst of polls that each started one would make a cheap poll the
+most expensive thing on the machine.
+
+**It binds to loopback.** A guide is not a secret, but which sites you grab and
+which channels you watch is not nothing, and a command that listened on every
+interface because a flag was left off would be the wrong default to have chosen
+once. `--host 0.0.0.0` is one word, and is a decision.
+
+`SIGINT` or `SIGTERM` stops it, and it exits **0**: a server that was asked to
+stop did what it was asked, so this is not the **130** a cancelled grab answers
+with. It does not grab — it serves what is in the cache, so run `epg grab` on
+whatever schedule suits and leave this listening.
+
+`serveGuide(config, options)` is the same thing as a library, returning
+`{ url, port, close, closed }` — see [the API reference](./api.md).
 
 ### Validating a guide
 

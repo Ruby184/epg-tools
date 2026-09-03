@@ -35,8 +35,16 @@ export const LEVELS = ['error', 'warn', 'info', 'debug'] as const;
 
 export type EventLevel = (typeof LEVELS)[number];
 
-/** Which half of a run an event is about — what a JSON consumer filters on. */
-export type RunPhase = 'run' | 'grab' | 'merge' | 'prune';
+/**
+ * Which part of a run an event is about — what a JSON consumer filters on.
+ *
+ * A list rather than a bare union, as {@link LEVELS} is: a test that checks
+ * every kind carries a real phase should be checking against the phases, not
+ * against a copy of them it has to be remembered to update.
+ */
+export const PHASES = ['run', 'grab', 'merge', 'serve', 'prune'] as const;
+
+export type RunPhase = (typeof PHASES)[number];
 
 /**
  * What one channel-day amounts to, as three of these say it.
@@ -217,7 +225,22 @@ export type EpgEventInput =
   // ── merging, and tidying up ──────────────────────────────────────────────
   | { type: 'merge:channel'; channelId: string }
   | { type: 'merge:done'; output: string }
-  | { type: 'prune:done'; removed: number; before: string };
+  | { type: 'prune:done'; removed: number; before: string }
+  /** The server is listening, and this is where. */
+  | { type: 'serve:started'; url: string }
+  /**
+   * One answered request.
+   *
+   * `status` is the whole of what happened — a `304` is the poll that cost
+   * nothing, which is what the conditional GET exists for, and telling the two
+   * apart in a log is how anyone knows it is working. `ms` is from the request
+   * arriving to the response being finished, so a streamed guide's time is the
+   * time it took to reach the consumer.
+   */
+  | { type: 'serve:response'; method: string; path: string; status: number; ms: number }
+  /** A request that could not be answered — the merge threw, or the client went. */
+  | { type: 'serve:failed'; path: string; error: unknown }
+  | { type: 'serve:stopped' };
 
 export type EpgEventType = EpgEventInput['type'];
 
@@ -265,6 +288,10 @@ export const EVENT_KINDS = {
   'merge:channel': { level: 'debug', phase: 'merge' },
   'merge:done': { level: 'info', phase: 'merge' },
   'prune:done': { level: 'info', phase: 'prune' },
+  'serve:started': { level: 'info', phase: 'serve' },
+  'serve:response': { level: 'debug', phase: 'serve' },
+  'serve:failed': { level: 'error', phase: 'serve' },
+  'serve:stopped': { level: 'info', phase: 'serve' },
 } as const satisfies Record<EpgEventType, EventKind>;
 
 /**
