@@ -139,6 +139,93 @@ describe('serveGuide', () => {
     expect(await (await fetch(server.url)).text()).toContain('<channel id="two">');
   });
 
+  it('picks the channel up at once when told to reload, ceiling or no ceiling', async () => {
+    // The ceiling is a guess at how long a new channel may stay invisible; this
+    // is the operator saying they know. `sitesMaxAgeMs` is an hour here, so
+    // nothing but the reload can be what produced the second channel.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    let lineup = ['one'];
+    const config: EpgConfig = {
+      ...configFor([]),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: () => lineup.map((id) => ({ xmltvId: id, siteId: id, name: id })),
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+    };
+
+    const reloadOn = new EventTarget();
+    const server = await serve(config, cache, {
+      revalidateMs: 0,
+      sitesMaxAgeMs: 3_600_000,
+      reloadOn,
+    });
+
+    expect(await (await fetch(server.url)).text()).not.toContain('<channel id="two">');
+
+    lineup = ['one', 'two'];
+    await cache.write({ site: 'example.tv', channelId: 'two', day: DAY }, [programme('two', 6)], {
+      grabbedAt: '2026-09-03T04:00:00.000Z',
+    });
+
+    // Still nothing: the ceiling is an hour away and the fingerprint cannot see
+    // a key the grid never named.
+    expect(await (await fetch(server.url)).text()).not.toContain('<channel id="two">');
+
+    const event = new Event('reload', { cancelable: true });
+
+    // Cancelled, which is how the bin learns the reload was taken and that
+    // SIGHUP should not fall through to ending the process.
+    expect(reloadOn.dispatchEvent(event)).toBe(false);
+    expect(await (await fetch(server.url)).text()).toContain('<channel id="two">');
+
+    // And the method behind it, which is what the event target drives.
+    lineup = ['one', 'two', 'three'];
+    await cache.write({ site: 'example.tv', channelId: 'three', day: DAY }, [programme('two', 6)], {
+      grabbedAt: '2026-09-03T04:00:00.000Z',
+    });
+    server.reload();
+
+    expect(await (await fetch(server.url)).text()).toContain('<channel id="three">');
+  });
+
+  it('does not re-send a guide for a reload that changed nothing', async () => {
+    // A stray signal must not cost every consumer a full guide: reloading asks
+    // a question, and an unchanged answer keeps the etag it had.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one']), cache, { revalidateMs: 0 });
+    const first = await fetch(server.url);
+
+    await first.text();
+    server.reload();
+
+    const again = await fetch(server.url, {
+      headers: { 'if-none-match': first.headers.get('etag')! },
+    });
+
+    expect(again.status).toBe(304);
+  });
+
+  it('lets go of a reload target it was given when it closes', async () => {
+    // The target is the caller's and may outlive the server — a listener left
+    // on one would hold the whole closure, cache and all.
+    const cache = cacheWith({});
+    const reloadOn = new EventTarget();
+    const server = await serve(configFor(['one']), cache, { reloadOn });
+
+    await server.close();
+
+    // Nothing is listening, so nothing cancels it.
+    expect(reloadOn.dispatchEvent(new Event('reload', { cancelable: true }))).toBe(true);
+  });
+
   it('brackets a literal IPv6 host in the url it advertises', async () => {
     const cache = cacheWith({ one: [programme('one', 6)] });
     await cache.seed('2026-09-03T04:00:00.000Z');

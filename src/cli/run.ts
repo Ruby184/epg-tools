@@ -164,6 +164,17 @@ export interface CliOptions {
    * test can run.
    */
   signal?: AbortSignal;
+  /**
+   * Reload on demand — the repeatable counterpart to {@link signal}, which
+   * fires once and is over. The bin points `SIGHUP` at one.
+   *
+   * A command with something to reload listens for `'reload'` and calls
+   * `preventDefault()` to say it took it; today that is `serve` and nothing
+   * else. A command that ends by itself has nothing to reload, leaves the event
+   * alone, and the bin then does what `SIGHUP` has always meant — which is why
+   * this is handed in rather than the bin deciding from what was typed.
+   */
+  reloadOn?: EventTarget;
 }
 
 /** Anything the user can be told about and can fix. Not for programming errors. */
@@ -306,7 +317,7 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
   const stderr = options.stderr ?? process.stderr;
 
   try {
-    return await execute(argv, stdout, stderr, options.signal);
+    return await execute(argv, stdout, stderr, options);
   } catch (error) {
     // Whatever the interruption surfaced as — a merge's own abort, a request
     // dropped mid-flight — a cancelled run is not a failure to describe.
@@ -347,8 +358,10 @@ async function execute(
   argv: string[],
   stdout: Writable,
   stderr: Writable,
-  signal: AbortSignal | undefined,
+  options: CliOptions,
 ): Promise<number> {
+  const { signal } = options;
+
   const { values, positionals } = parseOptions(
     argv,
     {
@@ -544,7 +557,13 @@ async function execute(
       const { serveGuide } = await import('../serve/main.js');
       // `runOptions` already carries the reporter, the offset and the signal —
       // the same three a grab or a merge is given, and for the same reasons.
-      const server = await serveGuide(config, runOptions);
+      // The reload target goes with them, and only here: it is the one command
+      // that can act on one, which is what keeps `SIGHUP` meaning what it
+      // always did everywhere else.
+      const server = await serveGuide(config, {
+        ...runOptions,
+        ...(options.reloadOn ? { reloadOn: options.reloadOn } : {}),
+      });
 
       // The one command that outlives its own work: everything else has
       // finished by the time it returns, and this has only started.

@@ -101,6 +101,18 @@ export interface ServeOptions {
   compress?: CompressionFormat | false;
   /** Stop serving. The returned promise resolves once the server has closed. */
   signal?: AbortSignal;
+  /**
+   * Where a `'reload'` event means {@link GuideServer.reload}.
+   *
+   * The repeatable counterpart to {@link signal}, which fires once and is over:
+   * an `EventTarget` can say the same thing again next week, which is what a
+   * server that outlives its own start needs. The `epg` bin points `SIGHUP` at
+   * one.
+   *
+   * The listener calls `preventDefault()`, which is how a caller dispatching a
+   * cancelable event learns the reload was taken by someone.
+   */
+  reloadOn?: EventTarget;
   reporter?: Reporter;
   now?: Date;
   /** Shift the window, as a run's `offset` does. */
@@ -118,6 +130,20 @@ export interface GuideServer {
   /** Where it is listening, with the path — what to hand a consumer. */
   url: string;
   port: number;
+  /**
+   * Resolve the channel lists again on the next poll, whatever the clocks say.
+   *
+   * The ceiling under {@link ServeOptions.sitesMaxAgeMs} is a guess at how long
+   * a new channel may stay invisible; this is the operator saying they know.
+   * The `epg` bin wires `SIGHUP` to it, which is the shape a long-lived server
+   * usually takes: `kill -HUP` after adding a channel, rather than waiting out
+   * a timer or restarting.
+   *
+   * Lazy on purpose — it marks, and the next request does the work. There is no
+   * consumer to serve in between, and doing it eagerly would make a signal cost
+   * a request per site whether or not anyone was still asking.
+   */
+  reload(): void;
   /** Stop listening and let go of the cache, if this opened one. */
   close(): Promise<void>;
   /** Resolves when it has stopped, however it was stopped. */
@@ -363,6 +389,23 @@ export async function serveGuide(
     return inFlight;
   };
 
+  /** Taken rather than ignored, which is what tells the bin not to fall back. */
+  const onReload = (event: Event): void => {
+    event.preventDefault();
+    reload();
+  };
+
+  /** See {@link GuideServer.reload}. */
+  const reload = (): void => {
+    // Both clocks, and nothing else. What is held stays the answer until the
+    // next poll asks for one, and if resolving then finds the same channels the
+    // fingerprint is the same and a poller still gets its 304 — a reload asks a
+    // question rather than asserting that anything changed. Dropping the
+    // snapshot instead would turn every stray signal into a full re-send.
+    resolvedAt = 0;
+    checkedAt = 0;
+  };
+
   const guides = new PQueue({
     concurrency: Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY),
   });
@@ -532,6 +575,9 @@ export async function serveGuide(
 
       await shut;
       guides.clear();
+      // A target is the caller's and may outlive this server — one left
+      // listening would hold the whole closure, cache and all.
+      options.reloadOn?.removeEventListener('reload', onReload);
 
       if (opened) {
         await cache.close();
@@ -552,6 +598,8 @@ export async function serveGuide(
 
   emit({ type: 'serve:started', url });
 
+  options.reloadOn?.addEventListener('reload', onReload);
+
   // One or the other, because a listener answers only a signal that fires
   // *after* it is added: one already aborted never emits again, and one that
   // fired while the port was being bound has emitted already. Asking first is
@@ -570,7 +618,7 @@ export async function serveGuide(
     options.signal?.addEventListener('abort', () => void close(), { once: true });
   }
 
-  return { url, port: address.port, close, closed };
+  return { url, port: address.port, reload, close, closed };
 }
 
 export type { EpgServeConfig } from './config.js';

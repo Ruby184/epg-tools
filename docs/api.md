@@ -246,11 +246,11 @@ console.log(`serving ${server.url}`);
 await server.closed;          // resolves when it stops
 ```
 
-It resolves once listening, and gives back `{ url, port, close, closed }`.
+It resolves once listening, and gives back `{ url, port, reload, close, closed }`.
 `options` takes `port`, `host`, `path`, `compress`, `concurrency`,
-`revalidateMs`, `sitesMaxAgeMs`, and the `signal`, `reporter`, `now`, `offset`
-and `cache` a run takes — a `cache` handed in stays the caller's, and one it opened is closed by
-`close()`.
+`revalidateMs`, `sitesMaxAgeMs`, `reloadOn`, and the `signal`, `reporter`,
+`now`, `offset` and `cache` a run takes — a `cache` handed in stays the
+caller's, and one it opened is closed by `close()`.
 
 The validator is the cache's, not the document's: a guide is a generator, so
 hashing its bytes would mean buffering it. What is read per poll is the window's
@@ -261,6 +261,27 @@ which is re-resolved when the fingerprint moves and at least every
 `sitesMaxAgeMs` (ten minutes), so that a grab which only adds a channel is not
 invisible until midnight. See [serving the
 guide](./configuration.md#serving-the-guide) for what that costs and saves.
+
+`reload()` resolves the channel lists again on the next poll, whatever those
+clocks say — the ceiling is a guess, and this is the caller saying they know. It
+is lazy (it marks; the next request does the work) and it asserts nothing: if
+resolving finds the same channels, the ETag is unchanged and pollers still get
+`304`s.
+
+`reloadOn` is where that comes from as an event — the repeatable counterpart to
+`signal`, which fires once and is over:
+
+```ts
+const reloadOn = new EventTarget();
+
+await serveGuide(config, { reloadOn });
+reloadOn.dispatchEvent(new Event('reload', { cancelable: true })); // false: taken
+```
+
+The listener cancels the event, which is how a dispatcher learns somebody acted
+on it. That is what lets the `epg` bin point `SIGHUP` at one target for every
+command and still leave `SIGHUP` meaning what it always did for the commands
+that end by themselves.
 
 ## Entry points
 

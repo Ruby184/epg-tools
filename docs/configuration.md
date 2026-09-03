@@ -425,6 +425,40 @@ moves, and in any case once its `sitesMaxAgeMs` (ten minutes) is up — a ceilin
 on how long a new channel can stay invisible, without letting a poll drive the
 request that resolving a fetched channel list can mean.
 
+**`SIGHUP` skips the wait.** The ceiling is a guess at how long a new channel
+may stay unseen; `kill -HUP` is you saying you know:
+
+```sh
+epg serve &
+epg grab              # which adds a channel
+kill -HUP %1          # served from the next request on, rather than in ten minutes
+```
+
+It asks a question rather than asserting an answer. If resolving finds the same
+channels the guide is unchanged, the ETag is the one it had, and a poller still
+gets its `304` — so a stray signal costs nothing. Every other command keeps what
+`SIGHUP` has always meant: a grab whose terminal closed still stops.
+
+It does not re-read the config file. Adding a *site*, or changing `days`, still
+needs a restart.
+
+What the ceiling costs depends on how a site gives its channels, and the
+difference is worth knowing before leaving a server up for a fortnight:
+
+| `channels` | what resolving again does | how a new channel appears |
+|---|---|---|
+| an array | returns it — free | only by editing the config, which means restarting anyway |
+| a function with [`cacheChannels`](./site-config.md#a-channel-list-that-has-to-be-fetched) | reads the list the grab wrote to the cache; no request | within `sitesMaxAgeMs`, or at once on `SIGHUP` |
+| a function without it | **asks the source**, every time the ceiling is reached | the same, at the price of a round trip |
+
+The last row is the one to avoid on a long-lived server: an hourly poller turns
+into a channel-list request per site per poll, where a grab makes one a day.
+`cacheChannels` is the answer — the grab writes the list, `serve` reads it, and
+the ceiling costs a cache lookup instead. One wrinkle even then: a stored list
+older than `cacheChannels`'s own max age is refetched by whoever asks for it
+next, `serve` included, so a server left running while the grabs stop still asks
+once a day.
+
 The guide streams straight into the response, so nothing is held in memory; a
 consumer that hangs up mid-guide stops the merge feeding it. `compress` (`gzip`
 by default) is used when the request's `Accept-Encoding` names it, and
@@ -440,11 +474,12 @@ once. `--host 0.0.0.0` is one word, and is a decision.
 
 `SIGINT` or `SIGTERM` stops it, and it exits **0**: a server that was asked to
 stop did what it was asked, so this is not the **130** a cancelled grab answers
-with. It does not grab — it serves what is in the cache, so run `epg grab` on
-whatever schedule suits and leave this listening.
+with. `SIGHUP` reloads rather than stops, as [above](#serving-the-guide). It
+does not grab — it serves what is in the cache, so run `epg grab` on whatever
+schedule suits and leave this listening.
 
 `serveGuide(config, options)` is the same thing as a library, returning
-`{ url, port, close, closed }` — see [the API reference](./api.md).
+`{ url, port, reload, close, closed }` — see [the API reference](./api.md).
 
 ### Validating a guide
 
