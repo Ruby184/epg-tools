@@ -10,7 +10,7 @@ import type {
   StoredStateMeta,
 } from '../src/cache/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
-import { grab, UnchangedError } from '../src/grabber/main.js';
+import { fellShort, grab, resolveAllowance, UnchangedError } from '../src/grabber/main.js';
 import type { EpgEvent } from '../src/core/events.js';
 import { collect } from './reporting.js';
 import type {
@@ -18,6 +18,7 @@ import type {
   ChannelsDaysBatching,
   DaysBatching,
   GrabberChannel,
+  GrabSummary,
   SiteConfig,
   StreamedChannelDay,
   StreamSiteConfig,
@@ -1128,10 +1129,10 @@ describe('grab', () => {
       });
 
       expect(summary.fetched).toBe(0);
-      expect(summary.failed).toBe(1);
       // The whole site, not a channel-day of it: nothing was reached, so there
-      // is no grid to attribute it across — which the old `*` sentinels stood in
-      // for and this says outright.
+      // is no grid to attribute it across — which its own count says outright,
+      // and which is why no `allowMissing` forgives it.
+      expect(summary).toMatchObject({ failed: 0, sitesFailed: 1 });
       expect(report.failures).toEqual([
         expect.objectContaining({ type: 'site:failed', site: 'example.com', error: boom }),
       ]);
@@ -1194,7 +1195,14 @@ describe('grab', () => {
     const summary = await grab([config], { cache, now: NOW, signal: controller.signal });
 
     expect(calls).toBe(0);
-    expect(summary).toEqual({ fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0 });
+    expect(summary).toEqual({
+      fetched: 0,
+      empty: 0,
+      fromCache: 0,
+      unchanged: 0,
+      failed: 0,
+      sitesFailed: 0,
+    });
   });
 
   it('leaves nothing unhandled when the abort lands after the run is over', async () => {
@@ -1817,7 +1825,7 @@ describe('grab with a site that is missing a mandatory member', () => {
 
     expect(summary.fetched).toBe(0);
     expect(cache.entries.size).toBe(0);
-    expect(summary.failed).toBe(1);
+    expect(summary).toMatchObject({ failed: 0, sitesFailed: 1 });
 
     const failed = report.of('site:failed')[0]!;
 
@@ -2221,7 +2229,7 @@ describe('a site that streams its whole window', () => {
       { cache, now: NOW, reporter: report.reporter },
     );
 
-    expect(summary.failed).toBe(1);
+    expect(summary.sitesFailed).toBe(1);
     expect((report.of('site:failed')[0]!.error as Error).message).toContain(
       'defines both stream and request',
     );
@@ -2241,7 +2249,7 @@ describe('a site that streams its whole window', () => {
       { cache, now: NOW, reporter: report.reporter },
     );
 
-    expect(summary.failed).toBe(1);
+    expect(summary.sitesFailed).toBe(1);
 
     const { message } = report.of('site:failed')[0]!.error as Error;
 
@@ -2989,10 +2997,10 @@ describe('what a run reports', () => {
         expect.objectContaining({ site: 'example.com', status: 429 }),
       ]);
       expect(pendingTimers()).toBe(timersBefore);
-      expect(summary.failed).toBe(1);
+      expect(summary).toMatchObject({ failed: 0, sitesFailed: 1 });
       expect(report.of('site:failed')).toHaveLength(1);
       expect(report.of('site:done')).toEqual([
-        expect.objectContaining({ site: 'example.com', fetched: 0, failed: 1 }),
+        expect.objectContaining({ site: 'example.com', fetched: 0, failed: 0, sitesFailed: 1 }),
       ]);
     } finally {
       server.close();
@@ -3052,5 +3060,105 @@ describe('what a run reports', () => {
     expect(events.filter((event) => event.type === 'site:warning')).toEqual([
       expect.objectContaining({ message: 'the source renamed a channel', level: 'warn' }),
     ]);
+  });
+});
+
+describe('how much of a guide may be missing', () => {
+  /** A summary of `failed` losses out of `total` channel-days accounted for. */
+  function summary(failed: number, total: number, sitesFailed = 0): GrabSummary {
+    return {
+      fetched: total - failed,
+      empty: 0,
+      fromCache: 0,
+      unchanged: 0,
+      failed,
+      sitesFailed,
+    };
+  }
+
+  it('counts nothing missing as a success, and anything missing as a failure by default', () => {
+    expect(fellShort(summary(0, 100))).toBe(false);
+    expect(fellShort(summary(1, 100))).toBe(true);
+  });
+
+  it('allows up to a count of channel-days, inclusive', () => {
+    expect(fellShort(summary(19, 100), 20)).toBe(false);
+    // Exactly the allowance passes, which is how "up to 20" reads.
+    expect(fellShort(summary(20, 100), 20)).toBe(false);
+    expect(fellShort(summary(21, 100), 20)).toBe(true);
+
+    // A count from a command line arrives as a string, and means the same.
+    expect(fellShort(summary(20, 100), '20')).toBe(false);
+  });
+
+  it('allows up to a share of what the run accounted for', () => {
+    expect(fellShort(summary(5, 100), '5%')).toBe(false);
+    expect(fellShort(summary(6, 100), '5%')).toBe(true);
+
+    // The same share of a much larger guide is a much larger number of days —
+    // which is the point of asking for it as a share.
+    expect(fellShort(summary(300, 10_000), '5%')).toBe(false);
+    expect(fellShort(summary(600, 10_000), '5%')).toBe(true);
+  });
+
+  it('counts what came from the cache or was unchanged towards the total', () => {
+    // A run that fetched almost nothing because the cache was fresh has not
+    // therefore lost most of its guide: the denominator is everything the run
+    // has an answer about, not just what it asked the network for.
+    const mostlyCached: GrabSummary = {
+      fetched: 10,
+      empty: 0,
+      fromCache: 900,
+      unchanged: 80,
+      failed: 10,
+      sitesFailed: 0,
+    };
+
+    expect(fellShort(mostlyCached, '5%')).toBe(false);
+    // 10 of the 1,000 it accounted for, so exactly 1% — inclusive, as a count is.
+    expect(fellShort(mostlyCached, '1%')).toBe(false);
+    // And a share may be fractional, since 1% of a large guide is a lot of days.
+    expect(fellShort(mostlyCached, '0.5%')).toBe(true);
+  });
+
+  it('does not count a day that came back empty as missing', () => {
+    // A channel with nothing on is an answer, and `empty` is already part of
+    // `fetched` — counting it again would say the run went better than it did.
+    const quiet: GrabSummary = {
+      fetched: 100,
+      empty: 40,
+      fromCache: 0,
+      unchanged: 0,
+      failed: 0,
+      sitesFailed: 0,
+    };
+
+    expect(fellShort(quiet)).toBe(false);
+    expect(fellShort(quiet, 0)).toBe(false);
+  });
+
+  it('never forgives a site that answered nothing, whatever the allowance', () => {
+    // There is no grid to weigh it against, so a source that is entirely down
+    // would otherwise score as one lost channel-day in thousands.
+    expect(fellShort(summary(0, 1000, 1), '50%')).toBe(true);
+    expect(fellShort(summary(0, 1000, 1), 1000)).toBe(true);
+    expect(fellShort(summary(0, 1000, 1))).toBe(true);
+  });
+
+  it('says what is wrong with a value that is not an allowance', () => {
+    expect(() => resolveAllowance('', '--allow-missing')).toThrow(/expected a number/);
+    expect(() => resolveAllowance('lots', '--allow-missing')).toThrow(/expected a number/);
+    expect(() => resolveAllowance('-1', '--allow-missing')).toThrow(/expected a number/);
+    expect(() => resolveAllowance('101%', '--allow-missing')).toThrow(/cannot exceed 100%/);
+    // The likeliest slip of all, and the one worth naming: a share written as
+    // a fraction would otherwise be a count of zero-point-something days.
+    expect(() => resolveAllowance('0.05', '--allow-missing')).toThrow(/did you mean 0.05%/);
+  });
+
+  it('reads both forms the way they are written', () => {
+    expect(resolveAllowance(20, 'allowMissing')).toEqual({ of: 'days', value: 20 });
+    expect(resolveAllowance('20', 'allowMissing')).toEqual({ of: 'days', value: 20 });
+    expect(resolveAllowance(' 5% ', 'allowMissing')).toEqual({ of: 'share', value: 0.05 });
+    expect(resolveAllowance('100%', 'allowMissing')).toEqual({ of: 'share', value: 1 });
   });
 });

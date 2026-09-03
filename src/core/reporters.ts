@@ -64,7 +64,7 @@ function count(n: number, one: string, many = `${one}s`): string {
 }
 
 /** What a run or a site came to, in the one form both say it. */
-function counts({ fetched, empty, fromCache, unchanged, failed }: GrabCounts): string {
+function counts({ fetched, empty, fromCache, unchanged, failed, sitesFailed }: GrabCounts): string {
   // A day that came back with nothing is not a failure — a channel with no
   // listings is a legitimate answer — but it is the one thing a run cannot
   // otherwise see, so it is named beside the fetches it is part of. What the
@@ -75,6 +75,10 @@ function counts({ fetched, empty, fromCache, unchanged, failed }: GrabCounts): s
     `${fromCache} from cache`,
     ...(unchanged > 0 ? [`${unchanged} unchanged`] : []),
     `${failed} failed`,
+    // Named only when there are any, and named apart: a site that answered
+    // nothing is not the same news as a channel-day that did not come back,
+    // and it is the one no `--allow-missing` forgives.
+    ...(sitesFailed > 0 ? [`${count(sitesFailed, 'site')} answered nothing`] : []),
   ].join(', ');
 }
 
@@ -457,7 +461,14 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
     return lines;
   }
 
-  const counts: GrabCounts = { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0 };
+  const counts: GrabCounts = {
+    fetched: 0,
+    empty: 0,
+    fromCache: 0,
+    unchanged: 0,
+    failed: 0,
+    sitesFailed: 0,
+  };
   const sites = new Set<string>();
   let finishedSites = 0;
   let planned = 0;
