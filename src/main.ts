@@ -86,7 +86,10 @@ export {
 } from './xmltv/main.js';
 export type {
   DateInput,
+  ExtensionFilter,
+  ExtensionRef,
   FormatXmltvDateOptions,
+  SerializeOptions,
   XmltvDate,
   XmltvDateOptions,
   XmltvTimezoneOffsets,

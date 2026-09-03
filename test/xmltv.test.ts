@@ -30,6 +30,8 @@ import {
   XmltvSerializeStream,
 } from '../src/xmltv/main.js';
 import type {
+  ExtensionRef,
+  SerializeOptions,
   XmltvChannel,
   XmltvParseEvent,
   XmltvProgramme,
@@ -444,6 +446,207 @@ describe('serialize', () => {
   });
 });
 
+/**
+ * The same fixtures, carrying a provider extension at every level that can
+ * hold one — attributes and elements, nested and flat.
+ */
+const extendedProgramme: XmltvProgramme = {
+  ...maximalProgramme,
+  extraAttributes: { uniqueID: 'ev-123456' },
+  title: [
+    { value: 'Večerné správy & šport', lang: 'sk', extraAttributes: { source: 'feed' } },
+    { value: 'Evening News', lang: 'en' },
+  ],
+  category: [{ value: 'News', lang: 'en', extraAttributes: { eit: '0x23' } }],
+  icon: [{ src: 'https://example.tv/e.png', extraAttributes: { cdn: 'edge' } }],
+  url: [{ value: 'https://tvdb.example/1', system: 'thetvdb', extraAttributes: { rel: 'alt' } }],
+  credits: {
+    director: [{ value: 'Jana Novak', extra: [{ name: 'medal', value: 'gold' }] }],
+    extra: [{ name: 'award', value: 'Emmy' }],
+  },
+  length: { units: 'minutes', value: 90, extraAttributes: { approx: 'yes' } },
+  episodeNum: [{ system: 'xmltv_ns', value: '0.5.', extraAttributes: { verified: 'no' } }],
+  video: {
+    present: true,
+    extraAttributes: { pipeline: 'hw' },
+    extra: [{ name: 'hdr', value: 'dolby-vision' }],
+  },
+  audio: { present: true, extra: [{ name: 'codec', value: 'eac3' }] },
+  previouslyShown: { channel: 'one.example.tv', extraAttributes: { certain: 'no' } },
+  subtitles: [
+    {
+      type: 'teletext',
+      extraAttributes: { page: '888' },
+      extra: [{ name: 'note', value: 'live' }],
+    },
+  ],
+  rating: [
+    {
+      system: 'VCHIP',
+      value: 'TV-PG',
+      extraAttributes: { body: 'fcc' },
+      extra: [{ name: 'why', value: 'language' }],
+    },
+  ],
+  review: [{ type: 'text', value: 'Výborné', extraAttributes: { stars: '4' } }],
+  image: [{ value: 'https://example.tv/p.jpg', extraAttributes: { hash: 'abc' } }],
+  extra: [
+    { name: 'lcn', value: '12' },
+    { name: 'crid', attributes: { kind: 'series' }, children: [{ name: 'series', value: 'abc' }] },
+  ],
+};
+
+const extendedChannel: XmltvChannel = {
+  id: 'one.example.tv',
+  displayName: [{ value: 'Example One', lang: 'en', extraAttributes: { primary: 'yes' } }],
+  icon: [{ src: 'https://example.tv/one.png', extraAttributes: { cdn: 'edge' } }],
+  extraAttributes: { 'data-src': 'acme' },
+  extra: [{ name: 'lcn', value: '101' }],
+};
+
+/** Where a parsed document still carries an extension, as a list of paths. */
+function extensionsIn(value: unknown, path = ''): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => extensionsIn(item, `${path}[${index}]`));
+  }
+
+  if (value === null || typeof value !== 'object' || value instanceof Date) {
+    return [];
+  }
+
+  return Object.entries(value).flatMap(([key, child]) =>
+    key === 'extra' || key === 'extraAttributes'
+      ? [`${path}.${key}`]
+      : extensionsIn(child, `${path}.${key}`),
+  );
+}
+
+describe('provider extensions on the way out', () => {
+  /** One document by hand, so every serializer sees the same policy. */
+  function write(extensions?: SerializeOptions['extensions']): string {
+    // Built conditionally rather than passed as `undefined`: the default is
+    // "the option was not given", which is not the same value.
+    const options = extensions === undefined ? undefined : { extensions };
+
+    return (
+      serializeDocumentHeader(
+        { generatorInfoName: 'epg-tools', extraAttributes: { mine: '1' } },
+        options,
+      ) +
+      serializeChannel(extendedChannel, options) +
+      serializeProgramme(extendedProgramme, options) +
+      serializeDocumentFooter(options)
+    );
+  }
+
+  it('writes every one by default', () => {
+    const xml = write();
+
+    expect(xml).toContain('<tv generator-info-name="epg-tools" mine="1">');
+    expect(xml).toContain('<channel id="one.example.tv" data-src="acme">');
+    expect(xml).toContain('uniqueID="ev-123456"');
+    expect(xml).toContain('<category lang="en" eit="0x23">News</category>');
+    expect(xml).toContain('<crid kind="series"><series>abc</series></crid>');
+    // Which is what makes the negative assertions below mean something.
+    expect(extensionsIn(parseXmltvString(xml)).length).toBeGreaterThan(15);
+  });
+
+  it('leaves every one out with extensions: false, and nothing else', () => {
+    const plain = parseXmltvString(write(false));
+
+    expect(extensionsIn(plain)).toEqual([]);
+
+    // The document the DTD does describe is untouched: same channel, same
+    // programme, minus what was never in the DTD.
+    expect(plain.meta).toEqual({ generatorInfoName: 'epg-tools' });
+    expect(plain.channels[0]?.displayName).toEqual([{ value: 'Example One', lang: 'en' }]);
+    expect(plain.programmes[0]?.title).toEqual([
+      { value: 'Večerné správy & šport', lang: 'sk' },
+      { value: 'Evening News', lang: 'en' },
+    ]);
+    expect(plain.programmes[0]?.rating).toEqual([{ system: 'VCHIP', value: 'TV-PG' }]);
+  });
+
+  it('lets an element left holding nothing collapse to what the DTD allows', () => {
+    const xml = serializeProgramme(
+      {
+        channel: 'one.example.tv',
+        start: new Date('2026-07-17T20:30:00Z'),
+        title: [{ value: 'News' }],
+        credits: { extra: [{ name: 'award', value: 'Emmy' }] },
+        video: { extra: [{ name: 'hdr', value: 'dolby-vision' }] },
+        subtitles: [{ type: 'teletext', extra: [{ name: 'page', value: '888' }] }],
+      },
+      { extensions: false },
+    );
+
+    // <credits> requires at least one person, so an empty one may not be written.
+    expect(xml).not.toContain('<credits');
+    // These two may be empty, and are.
+    expect(xml).toContain('<video/>');
+    expect(xml).toContain('<subtitles type="teletext"/>');
+  });
+
+  it('keeps only the names an allowlist gives, attributes and elements alike', () => {
+    const xml = write(['lcn', 'uniqueID']);
+
+    expect(xml).toContain('uniqueID="ev-123456"');
+    expect(xml).toContain('<lcn>101</lcn>');
+    expect(xml).toContain('<lcn>12</lcn>');
+    expect(xml).not.toContain('data-src');
+    expect(xml).not.toContain('eit=');
+    expect(xml).not.toContain('<crid');
+    expect(xml).not.toContain('<award>');
+
+    // The same array again: the resolved set is cached per array, not per call.
+    const names = ['lcn'];
+    expect(write(names)).toBe(write(names));
+  });
+
+  it('tells a filter what each extension is and which element carries it', () => {
+    const seen: ExtensionRef[] = [];
+
+    write((extension) => {
+      seen.push(extension);
+      return extension.on === 'programme';
+    });
+
+    expect(seen).toContainEqual({ kind: 'attribute', name: 'mine', on: 'tv' });
+    expect(seen).toContainEqual({ kind: 'attribute', name: 'data-src', on: 'channel' });
+    expect(seen).toContainEqual({ kind: 'attribute', name: 'eit', on: 'category' });
+    expect(seen).toContainEqual({ kind: 'element', name: 'medal', on: 'director' });
+    expect(seen).toContainEqual({ kind: 'element', name: 'hdr', on: 'video' });
+    expect(seen).toContainEqual({ kind: 'element', name: 'lcn', on: 'channel' });
+    expect(seen).toContainEqual({ kind: 'element', name: 'lcn', on: 'programme' });
+
+    // And the answer is honoured per owner: one `lcn` survives, not the other.
+    const kept = write((extension) => extension.on === 'programme');
+
+    expect(kept).toContain('uniqueID="ev-123456"');
+    expect(kept).toContain('<lcn>12</lcn>');
+    expect(kept).not.toContain('<lcn>101</lcn>');
+    expect(kept).not.toContain('data-src');
+  });
+
+  it('keeps a kept extension whole — its own attributes and children with it', () => {
+    // The filter is asked about the extension, never about what is inside it:
+    // `series` and `kind` are the provider's, and go out as they came in.
+    const xml = write(['crid']);
+
+    expect(xml).toContain('<crid kind="series"><series>abc</series></crid>');
+  });
+
+  it('leaves processing instructions alone — no DTD constrains one', () => {
+    const instruction = { target: 'epg-cache', data: '{"n":1}', position: 'root' } as const;
+    const xml = serializeDocumentHeader(undefined, {
+      extensions: false,
+      processingInstructions: [instruction],
+    });
+
+    expect(xml).toContain('<?epg-cache {"n":1}?>');
+  });
+});
+
 describe('writeXmltvStream', () => {
   it('produces a full document with meta attributes', async () => {
     const xml = await collect(
@@ -551,6 +754,42 @@ describe.skipIf(!xmllintAvailable)('DTD validity (xmllint against official xmltv
       expect(() =>
         execFileSync('xmllint', ['--noout', '--valid', file], { encoding: 'utf8' }),
       ).not.toThrow();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a document carrying extensions validates once they are left out', async () => {
+    const input = {
+      meta: { generatorInfoName: 'epg-tools', extraAttributes: { mine: '1' } },
+      channels: [extendedChannel],
+      programmes: [extendedProgramme],
+    };
+
+    const dir = await mkdtemp(join(tmpdir(), 'epg-dtd-'));
+
+    try {
+      await copyFile(join(import.meta.dirname, 'fixtures', 'xmltv.dtd'), join(dir, 'xmltv.dtd'));
+
+      const validate = async (options?: SerializeOptions): Promise<void> => {
+        const file = join(dir, 'guide.xml');
+
+        await writeFile(file, await collect(writeXmltvStream(input, options)), 'utf8');
+        // Captured rather than inherited: two of the three calls below are
+        // meant to fail, and their complaints are the assertion, not output.
+        execFileSync('xmllint', ['--noout', '--valid', file], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      };
+
+      // Which is the whole point of the option: the extensions a consumer like
+      // tvheadend reads are exactly what no DTD can describe.
+      await expect(validate()).rejects.toThrow();
+      await expect(validate({ extensions: false })).resolves.toBeUndefined();
+
+      // An allowlist is not a way around that — a kept extension is still one.
+      await expect(validate({ extensions: ['lcn'] })).rejects.toThrow();
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
