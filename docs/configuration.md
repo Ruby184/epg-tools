@@ -104,6 +104,7 @@ Non-DTD attributes go in `extraAttributes` and are emitted verbatim.
 epg build            # grab stale/missing days, then write the merged guide
 epg grab             # grab only
 epg merge            # write the guide from cache only
+epg validate         # read the guide and report what is wrong with it
 epg prune            # drop cached days older than today
 epg init-grabber tv_grab_sk_example   # write an XMLTV grabber for this config
 epg build -d 14 -o public/epg.xml
@@ -125,6 +126,8 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--allow-missing <n>` | exit 0 with up to this much of the guide missing: a number of channel-days, or a share like `5%` |
 | `--extensions <names>` | `build`/`merge` only: keep only these [provider extensions](#provider-extensions), comma-separated — `--extensions lcn,uniqueID` |
 | `--no-extensions` | `build`/`merge` only: leave every one out, for a guide that validates against the DTD |
+| `--report <how>` | `validate` only: `text` (default) or `json` — see [validating a guide](#validating-a-guide) |
+| `--strict` | `validate` only: count warnings as failures too |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
 | `-v, --verbose` | same as `--log-level debug` — every channel-day |
@@ -330,6 +333,61 @@ epg merge --no-extensions -o plain.xml     # and a DTD-valid one, no refetching
 An element left holding nothing collapses to what the DTD allows rather than
 being written empty: `<credits>` with only extensions in it is not written at
 all, and `<video>` becomes `<video/>`.
+
+### Validating a guide
+
+`epg validate` reads a guide and says what is wrong with it — the config's own
+`output` by default, or a file named on the command line. A `.gz`, `.br` or
+`.zst` name is decompressed on the way in, since that is what the name promised.
+
+```sh
+epg validate                       # the guide this config writes
+epg validate public/epg.xml.gz     # or any other
+epg validate --report json         # one document for CI to read
+epg validate --strict              # warnings count as failures too
+```
+
+```
+guide.xml — 200 channels, 33,600 programmes
+
+  error   unknown-channel (14): a <programme> names a channel no <channel> describes
+      sport2.example
+      film4.example
+  warning extensions (67,210): a provider extension, which no DTD describes — extensions: false removes them
+      attribute uniqueID on <programme>
+      element lcn on <channel>
+
+14 errors, 67,210 warnings
+```
+
+It exits **1** when there is an error — or any warning, under `--strict`.
+
+Findings are grouped **by rule, not by occurrence**: a guide where every
+programme carries an extension is one line with a count, not a hundred thousand
+lines. The names under each are examples, deduplicated and capped, so a report
+stays the same size whatever the guide's — and so does the memory reading it: a
+41 MB guide with 336,000 programmes validates in the same 8 MiB heap a 10 MB one
+does.
+
+A guide named on the command line needs **no config**: `epg validate
+some/guide.xml` works in a directory with no project in it. Without a name it is
+the config's `output`, and the config is then exactly what says where that is.
+
+**`--report` is not `--reporter`.** They sound alike and answer different
+questions: `--reporter` is how a *run* says what it is doing while it does it, a
+stream of events with no end until the run has one. A report is one document,
+written once, about a file that already exists — which is what a CI step wants:
+an `ok` to branch on and a list to print.
+
+| severity | what it means |
+|---|---|
+| `error` | the guide is wrong: a `<programme>` naming a channel nothing describes, a `<channel>` with no `<display-name>`, two channels sharing an id, a programme that stops before it starts, or a document that ends mid-element |
+| `warning` | the parser found something and coped: a dropped attribute, a duplicated element, markup it skipped — and [provider extensions](#provider-extensions), which are deliberate and are what `--no-extensions` removes |
+
+What it does **not** check is element *order*. Parsing produces a model, and a
+model has no order, so `<desc>` before `<title>` is invisible here. For that,
+`xmllint --valid` beside a copy of `xmltv.dtd` is the tool — and a guide written
+with `--no-extensions` is what makes that check pass.
 
 ### Allowing some of the guide to be missing
 

@@ -41,6 +41,14 @@ export type {
   ExtensionRef,
 } from './serialize.js';
 export { parseXmltvStream, parseXmltvFile, parseXmltvString, XmltvParseStream } from './parse.js';
+export { validateXmltv } from './validate.js';
+export type {
+  FindingCode,
+  FindingSeverity,
+  ValidateOptions,
+  ValidationFinding,
+  ValidationReport,
+} from './validate.js';
 export { ChannelBuilder, ProgrammeBuilder, XmltvDocumentBuilder } from './builder.js';
 export type {
   ActorOptions,

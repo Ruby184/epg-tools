@@ -2,6 +2,7 @@ import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
+import { gzipSync } from 'node:zlib';
 import { describe, expect, it, vi } from 'vitest';
 import { runCli } from '../src/cli/run.js';
 import { defaultDescription } from '../src/cli/scaffold.js';
@@ -389,6 +390,145 @@ describe('epg', () => {
     expect(code).toBe(2);
     expect(stderr).toContain('Invalid --cache-driver value: postgres');
     expect(stderr).toContain('ndjson, xmltv, sqlite, memory');
+  });
+
+  describe('validate', () => {
+    const GUIDE =
+      `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE tv SYSTEM "xmltv.dtd"><tv>` +
+      `<channel id="one" data-src="acme"><display-name>One</display-name></channel>` +
+      `<programme start="20260903060000 +0000" channel="ghost"><title>T</title></programme>` +
+      `</tv>`;
+
+    /** A config whose `output` is the guide, since that is what it validates. */
+    async function withGuide(dir: string, xml = GUIDE): Promise<string> {
+      await writeFile(join(dir, 'guide.xml'), xml, 'utf8');
+
+      return configFile(
+        dir,
+        `export default {
+      sites: [],
+      output: ${JSON.stringify(join(dir, 'guide.xml'))},
+      cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+    };`,
+      );
+    }
+
+    it("validates the config's own guide when no file is named", async () => {
+      const dir = await tempDir();
+      const config = await withGuide(dir);
+
+      const { code, stdout } = await run(['validate', '--config', config]);
+
+      // The unknown channel is an error; the extension is not.
+      expect(code).toBe(1);
+      expect(stdout).toContain('1 channel, 1 programme');
+      expect(stdout).toContain('error   unknown-channel (1)');
+      expect(stdout).toContain('warning extensions (1)');
+      expect(stdout).toContain('1 error, 1 warning');
+    });
+
+    it('validates a file named on the command line instead', async () => {
+      const dir = await tempDir();
+      const config = await withGuide(dir);
+      const other = join(dir, 'other.xml');
+
+      await writeFile(
+        other,
+        `<?xml version="1.0" encoding="UTF-8"?><tv>` +
+          `<channel id="one"><display-name>One</display-name></channel>` +
+          `<programme start="20260903060000 +0000" channel="one"><title>T</title></programme>` +
+          `</tv>`,
+        'utf8',
+      );
+
+      const { code, stdout } = await run(['validate', other, '--config', config]);
+
+      expect(code).toBe(0);
+      expect(stdout).toContain('nothing to report');
+    });
+
+    it('writes one JSON document for --report json', async () => {
+      const dir = await tempDir();
+      const config = await withGuide(dir);
+
+      const { stdout } = await run(['validate', '--config', config, '--report', 'json']);
+      const report = JSON.parse(stdout);
+
+      // One object with an `ok` to branch on — not the NDJSON of run events
+      // that `--reporter json` produces, which answers a different question.
+      expect(report).toMatchObject({ ok: false, channels: 1, programmes: 1, errors: 1 });
+      expect(report.file).toContain('guide.xml');
+      expect(report.findings[0]).toMatchObject({ code: 'unknown-channel', severity: 'error' });
+    });
+
+    it('fails a guide that only carries extensions when --strict says so', async () => {
+      const dir = await tempDir();
+      const config = await withGuide(
+        dir,
+        `<?xml version="1.0" encoding="UTF-8"?><tv>` +
+          `<channel id="one" data-src="acme"><display-name>One</display-name></channel>` +
+          `</tv>`,
+      );
+
+      expect((await run(['validate', '--config', config])).code).toBe(0);
+      expect((await run(['validate', '--config', config, '--strict'])).code).toBe(1);
+    });
+
+    it('reads a compressed guide, since that is what the name promised', async () => {
+      const dir = await tempDir();
+      const config = await withGuide(dir);
+      const gz = join(dir, 'guide.xml.gz');
+
+      await writeFile(gz, gzipSync(Buffer.from(GUIDE, 'utf8')));
+
+      const { code, stdout } = await run(['validate', gz, '--config', config]);
+
+      expect(code).toBe(1);
+      expect(stdout).toContain('unknown-channel');
+    });
+
+    it('needs no config at all when the guide is named', async () => {
+      // A guide named on the command line is the whole of what this needs;
+      // refusing to read one because the working directory has no project in
+      // it would be absurd. Note there is no `--config`, and none to find.
+      const dir = await tempDir();
+      const file = join(dir, 'standalone.xml');
+
+      await writeFile(file, GUIDE, 'utf8');
+
+      const { code, stdout, stderr } = await run(['validate', file]);
+
+      expect(code).toBe(1);
+      expect(stderr).toBe('');
+      expect(stdout).toContain('unknown-channel');
+    });
+
+    it('reports a guide that is not there as one line', async () => {
+      const dir = await tempDir();
+      const config = await withGuide(dir);
+
+      const { code, stderr } = await run([
+        'validate',
+        join(dir, 'nowhere.xml'),
+        '--config',
+        config,
+      ]);
+
+      expect(code).toBe(1);
+      expect(stderr.trimEnd().split('\n')).toHaveLength(1);
+      expect(stderr).toContain('nowhere.xml');
+    });
+
+    it('refuses a --report format it does not have, with the usage', async () => {
+      const dir = await tempDir();
+      const config = await withGuide(dir);
+
+      const { code, stderr } = await run(['validate', '--config', config, '--report', 'yaml']);
+
+      expect(code).toBe(2);
+      expect(stderr).toContain('Invalid --report value: yaml');
+      expect(stderr).toContain('text, json');
+    });
   });
 
   it('exits 0 with what --allow-missing tolerates, and 1 past it', async () => {

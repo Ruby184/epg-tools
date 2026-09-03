@@ -281,6 +281,7 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 - **Builders*** — `ProgrammeBuilder`, `ChannelBuilder`, `XmltvDocumentBuilder`
 - **Dates** — `parseXmltvDate`, `formatXmltvDate`, `xmltvDate`, `getXmltvOffset`, `setXmltvOffset`, `getXmltvPrecision`, `setXmltvPrecision`, `XMLTV_OFFSET`, `XMLTV_PRECISION`, `XmltvDateError`
 - **Zones** — `zonedXmltvDate`, `xmltvZone`, `setXmltvZone`, `xmltvZoneOffset` — see [named zones](./xmltv.md#named-zones)
+- **Validate** — `validateXmltv` — see [validating a guide](./configuration.md#validating-a-guide)
 - **Other** — `escapeXml`
 
 `*` this subpath only — not re-exported from the root.

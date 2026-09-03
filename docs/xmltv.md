@@ -302,6 +302,46 @@ serializeProgramme(programme);              // compact (default)
 serializeProgramme(programme, { extensions: false });   // and nothing off-DTD
 ```
 
+## Validating
+
+`validateXmltv(source, options?)` reads a guide and answers with what is wrong
+with it — the same streaming parse, so a guide of any size is read in the memory
+one chunk needs:
+
+```ts
+import { validateXmltv } from 'epg-tools/xmltv';
+import { createReadStream } from 'node:fs';
+
+const report = await validateXmltv(createReadStream('guide.xml'));
+
+if (!report.ok) {
+  for (const finding of report.findings) {
+    console.error(`${finding.severity} ${finding.code} (${finding.count}): ${finding.message}`);
+  }
+}
+```
+
+It reports two kinds of thing: [the warnings the parser already
+emits](#warnings), with the line and column each was found at, and what only the
+whole document shows — a `<programme>` naming a channel no `<channel>`
+describes, two channels sharing an id, a `<programme>` with no `<title>`, a
+programme that stops before it starts, and [provider
+extensions](#provider-extensions).
+
+Findings are grouped **by rule, not by occurrence**, and each keeps a few
+deduplicated `examples` (`maxExamples`, five by default). That is what keeps a
+report flat in the size of the guide: a document where every programme trips the
+same rule is one finding with a large `count`. Measured, on guides whose every
+programme carries two extensions and half of which name a channel that does not
+exist: 84,000 programmes and 336,000 programmes both validate in an **8 MiB
+heap**, the second in 2.8s against the first's 0.8s.
+
+`options.strict` counts warnings against `report.ok` as well. Element *order* is
+not checked — a parse produces a model, and a model has none.
+
+`epg validate` is this behind a command line, with `--report json` for CI — see
+[validating a guide](./configuration.md#validating-a-guide).
+
 ## Node stream Transforms
 
 Both directions also come as `Transform` classes for `stream.pipeline()`.

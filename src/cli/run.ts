@@ -23,6 +23,8 @@ import { silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
 import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
 import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
+import { renderReport, REPORT_FORMATS, validateFile } from './validate.js';
+import type { ReportFormat } from './validate.js';
 import type { GrabSummary } from '../grabber/types.js';
 
 export const USAGE = `Usage: epg <command> [options]
@@ -31,6 +33,7 @@ Commands:
   build         Grab all sites into the cache, then generate the merged guide (default)
   grab          Grab all sites into the cache only
   merge         Generate the merged guide from the cache only
+  validate      Read a guide and report what is wrong with it
   prune         Remove cached days older than a given day
   init-grabber  Write a tv_grab_* executable for the config, next to it
 
@@ -58,6 +61,10 @@ Options:
       --failures <how>  block (default) — one capped block at the end; or inline
   -V, --version         Print this package's version
   -h, --help            Show this help
+
+validate options:
+      --report <how>    text (default) or json — one document, not a run log
+      --strict          Count warnings as failures too
 
 init-grabber options:
       --description <s> What --description prints (default: the country and name)
@@ -133,7 +140,7 @@ const EXIT_CANCELLED = 130;
 
 const CONFIG_CANDIDATES = ['epg.config.ts', 'epg.config.js', 'epg.config.mjs'];
 
-const COMMANDS = ['build', 'grab', 'merge', 'prune', 'init-grabber'];
+const COMMANDS = ['build', 'grab', 'merge', 'validate', 'prune', 'init-grabber'];
 
 export interface CliOptions {
   /** Defaults to `process.stdout` — progress, and the help. */
@@ -242,6 +249,25 @@ async function writeGrabber(
   return 0;
 }
 
+/** `epg validate [file]` — read a guide, write the report, say whether it passed. */
+async function validateGuide(
+  file: string,
+  values: { report?: ReportFormat; strict?: boolean },
+  stdout: Writable,
+  signal: AbortSignal | undefined,
+): Promise<number> {
+  const report = await validateFile(file, {
+    ...(values.strict === undefined ? {} : { strict: values.strict }),
+    ...(signal ? { signal } : {}),
+  });
+
+  // On stdout, both formats: the report *is* this command's output, the way a
+  // guide is `merge`'s, so it goes where a shell can redirect it.
+  await writeFlushed(stdout, renderReport(report, file, values.report ?? 'text'));
+
+  return report.ok ? 0 : EXIT_FAILED;
+}
+
 /**
  * Run the `epg` command line. Resolves to the exit code; nothing here reads or
  * writes `process`, so a test drives it exactly as a shell does.
@@ -310,6 +336,8 @@ async function execute(
       'cache-driver': { type: 'string', choices: CACHE_DRIVER_NAMES },
       refresh: { type: 'boolean' },
       'allow-missing': { type: 'string', transform: allowance },
+      report: { type: 'string', choices: REPORT_FORMATS },
+      strict: { type: 'boolean' },
       // A list of names, or `--no-extensions` for none of them. A config can
       // point at a filter of its own by passing a function, which is not
       // something a command line can do.
@@ -343,6 +371,14 @@ async function execute(
 
   if (!COMMANDS.includes(command)) {
     throw new UsageError(`Unknown command: ${command}`);
+  }
+
+  // Before the config is even looked for: a guide named on the command line is
+  // the whole of what this needs, and refusing to read one because there is no
+  // project in the working directory would be absurd. Without a name it is the
+  // config's own `output`, and the config is then exactly what says where.
+  if (command === 'validate' && positionals[1] !== undefined) {
+    return validateGuide(positionals[1], values, stdout, signal);
   }
 
   const configFile = await findConfig(values.config);
@@ -438,6 +474,11 @@ async function execute(
 
       return 0;
     }
+    case 'validate':
+      // Only the no-file form reaches here; the other is answered above, before
+      // a config was needed. Validating what this project writes is what the
+      // command is usually for, so its `output` is the default.
+      return validateGuide(String(config.output), values, stdout, signal);
     default: {
       const before = values.before ?? toDayString(new Date());
 
