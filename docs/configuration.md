@@ -133,7 +133,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--host <h>` | `serve` only: address to bind, default `127.0.0.1` — see [serving the guide](#serving-the-guide) |
 | `--serve-path <p>` | `serve` only: the path that answers with the guide, default `/guide.xml` |
 | `--raw` | `try` only: print the whole payload, not the first 2000 characters |
-| `--report <how>` | `validate` only: `text` (default) or `json` — see [validating a guide](#validating-a-guide) |
+| `--format <how>` | `validate` only: `text` (default) or `json` — see [validating a guide](#validating-a-guide) |
 | `--strict` | `validate` only: count warnings as failures too |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
@@ -455,7 +455,7 @@ whatever schedule suits and leave this listening.
 ```sh
 epg validate                       # the guide this config writes
 epg validate public/epg.xml.gz     # or any other
-epg validate --report json         # one document for CI to read
+epg validate --format json         # one document for CI to read
 epg validate --strict              # warnings count as failures too
 ```
 
@@ -485,11 +485,13 @@ A guide named on the command line needs **no config**: `epg validate
 some/guide.xml` works in a directory with no project in it. Without a name it is
 the config's `output`, and the config is then exactly what says where that is.
 
-**`--report` is not `--reporter`.** They sound alike and answer different
-questions: `--reporter` is how a *run* says what it is doing while it does it, a
-stream of events with no end until the run has one. A report is one document,
-written once, about a file that already exists — which is what a CI step wants:
-an `ok` to branch on and a list to print.
+**`--format` is not `--reporter`.** They answer different questions.
+`--format` is the shape of this command's output — one document, written once,
+about a file that already exists, which is what a CI step wants: an `ok` to
+branch on and a list to print. `--reporter` is how a *run* narrates itself while
+it works, a stream of events with no end until the run has one. `validate` reads
+a file rather than running anything, so `--reporter` has nothing to say about
+it.
 
 | severity | what it means |
 |---|---|

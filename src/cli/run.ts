@@ -74,7 +74,7 @@ serve options:
       --serve-path <p>  Path that answers with the guide (default: /guide.xml)
 
 validate options:
-      --report <how>    text (default) or json — one document, not a run log
+      --format <how>    text (default) or json
       --strict          Count warnings as failures too
 
 init-grabber options:
@@ -279,7 +279,7 @@ function compressionOf(config: EpgConfig): CompressionFormat | false | undefined
 /** `epg validate [file]` — read a guide, write the report, say whether it passed. */
 async function validateGuide(
   file: string,
-  values: { report?: ReportFormat; strict?: boolean },
+  values: { format?: ReportFormat; strict?: boolean },
   stdout: Writable,
   signal: AbortSignal | undefined,
   compression?: CompressionFormat | false,
@@ -292,7 +292,7 @@ async function validateGuide(
 
   // On stdout, both formats: the report *is* this command's output, the way a
   // guide is `merge`'s, so it goes where a shell can redirect it.
-  await writeFlushed(stdout, renderReport(report, file, values.report ?? 'text'));
+  await writeFlushed(stdout, renderReport(report, file, values.format ?? 'text'));
 
   return report.ok ? 0 : EXIT_FAILED;
 }
@@ -369,7 +369,7 @@ async function execute(
       host: { type: 'string' },
       'serve-path': { type: 'string' },
       raw: { type: 'boolean' },
-      report: { type: 'string', choices: REPORT_FORMATS },
+      format: { type: 'string', choices: REPORT_FORMATS },
       strict: { type: 'boolean' },
       // A list of names, or `--no-extensions` for none of them. A config can
       // point at a filter of its own by passing a function, which is not

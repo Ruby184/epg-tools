@@ -5,12 +5,14 @@
  * a command adds to it: where the document is, what to decompress it with, and
  * the two shapes the answer comes in.
  *
- * **`--report` is not `--reporter`.** They sound alike and are for different
- * readers, which is worth being blunt about: `--reporter` is how a *run* says
- * what it is doing as it does it, a stream of events with no end until the run
- * has one. A report is the opposite — one document, written once, about a file
- * that already exists. A CI step wants the second: an `ok` to branch on and a
- * list to print, not a log to parse.
+ * `--format` is the shape of *this command's* output, which is a different
+ * question from `--reporter` — how a run narrates itself as it goes, a stream
+ * of events with no end until the run has one. A report is the opposite: one
+ * document, written once, about a file that already exists, and what a CI step
+ * wants is that — an `ok` to branch on and a list to print, not a log to parse.
+ *
+ * The flag was `--report` first, one letter from `--reporter` and asking to be
+ * confused with it.
  */
 
 import { createReadStream } from 'node:fs';

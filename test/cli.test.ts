@@ -554,15 +554,16 @@ describe('epg', () => {
       expect(stdout).toContain('1 channel, 1 programme');
     });
 
-    it('writes one JSON document for --report json', async () => {
+    it('writes one JSON document for --format json', async () => {
       const dir = await tempDir();
       const config = await withGuide(dir);
 
-      const { stdout } = await run(['validate', '--config', config, '--report', 'json']);
+      const { stdout } = await run(['validate', '--config', config, '--format', 'json']);
       const report = JSON.parse(stdout);
 
       // One object with an `ok` to branch on — not the NDJSON of run events
-      // that `--reporter json` produces, which answers a different question.
+      // that `--reporter json` produces. Two flags, two questions: the shape of
+      // this command's output, and how a run narrates itself.
       expect(report).toMatchObject({ ok: false, channels: 1, programmes: 1, errors: 1 });
       expect(report.file).toContain('guide.xml');
       expect(report.findings[0]).toMatchObject({ code: 'unknown-channel', severity: 'error' });
@@ -626,14 +627,14 @@ describe('epg', () => {
       expect(stderr).toContain('nowhere.xml');
     });
 
-    it('refuses a --report format it does not have, with the usage', async () => {
+    it('refuses a --format it does not have, with the usage', async () => {
       const dir = await tempDir();
       const config = await withGuide(dir);
 
-      const { code, stderr } = await run(['validate', '--config', config, '--report', 'yaml']);
+      const { code, stderr } = await run(['validate', '--config', config, '--format', 'yaml']);
 
       expect(code).toBe(2);
-      expect(stderr).toContain('Invalid --report value: yaml');
+      expect(stderr).toContain('Invalid --format value: yaml');
       expect(stderr).toContain('text, json');
     });
   });

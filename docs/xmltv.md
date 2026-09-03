@@ -339,7 +339,7 @@ heap**, the second in 2.8s against the first's 0.8s.
 `options.strict` counts warnings against `report.ok` as well. Element *order* is
 not checked — a parse produces a model, and a model has none.
 
-`epg validate` is this behind a command line, with `--report json` for CI — see
+`epg validate` is this behind a command line, with `--format json` for CI — see
 [validating a guide](./configuration.md#validating-a-guide).
 
 ## Node stream Transforms
