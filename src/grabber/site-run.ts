@@ -167,7 +167,14 @@ export class SiteRun {
    * actually wants — "which of my six sources is the one that failed" has no
    * answer in a single total.
    */
-  readonly #counts: GrabCounts = { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0 };
+  readonly #counts: GrabCounts = {
+    fetched: 0,
+    empty: 0,
+    fromCache: 0,
+    unchanged: 0,
+    failed: 0,
+    sitesFailed: 0,
+  };
 
   /** Filled in by {@link run}, since each of them has to be waited for. */
   #siteState: SiteState = new Map();
@@ -258,7 +265,10 @@ export class SiteRun {
       // itself carries on, so the summary can be read the moment the cancel
       // lands. Anything recorded after the awaits below would be recorded into a
       // total nobody is going to read.
-      this.#count('failed');
+      // The site's own count, not one of its channel-days: what failed here is
+      // the site — its channel list, or its whole turn — and none of the grid
+      // it would have covered was ever asked for.
+      this.#count('sitesFailed');
       this.#run.emit({ type: 'site:failed', site: this.#site, error });
     } finally {
       this.#dispose();

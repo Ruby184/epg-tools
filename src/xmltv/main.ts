@@ -37,6 +37,8 @@ export type {
   SerializeOptions,
   SerializeStreamOptions,
   DocumentBoundaryOptions,
+  ExtensionFilter,
+  ExtensionRef,
 } from './serialize.js';
 export { parseXmltvStream, parseXmltvFile, parseXmltvString, XmltvParseStream } from './parse.js';
 export { ChannelBuilder, ProgrammeBuilder, XmltvDocumentBuilder } from './builder.js';

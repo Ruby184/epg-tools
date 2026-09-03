@@ -82,14 +82,7 @@ export interface GrabCounts {
    */
   unchanged: number;
   /**
-   * What did not come back: one for each channel-day that could not be fetched,
-   * and one for each site that could not be run at all.
-   *
-   * A site counts once rather than per channel-day because there is no grid to
-   * spread it over — a site that could not be read has no channel list, so the
-   * number of channel-days it *would* have covered is not knowable. Which makes
-   * this "things that went wrong" rather than strictly channel-days, and is why
-   * a non-zero value is the run's exit code either way.
+   * Channel-days that did not come back — one for each, and nothing else.
    *
    * A count, not a list. It used to be the errors themselves, and it was the
    * one thing a run retained that grew with the size of the guide: a site that
@@ -101,6 +94,18 @@ export interface GrabCounts {
    * of its own, and gets to decide how long it may grow.
    */
   failed: number;
+  /**
+   * Sites that answered nothing at all — one for each that could not be read,
+   * or whose channel list never arrived.
+   *
+   * Counted apart from {@link failed} because there is no grid to spread it
+   * over: a site that could not be read has no channel list, so the number of
+   * channel-days it *would* have covered is not knowable. Adding one to a
+   * count of channel-days would make a dead site look like a rounding error
+   * next to a guide of thousands — which is the whole difference `allowMissing`
+   * turns on, and why no allowance covers this.
+   */
+  sitesFailed: number;
 }
 
 /**

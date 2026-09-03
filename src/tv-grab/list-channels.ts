@@ -41,7 +41,10 @@ async function collectChannels(config: EpgConfig): Promise<XmltvChannel[]> {
  * selection in the configuration: the caller uses this to *offer* a choice.
  */
 export async function listChannelsXml(config: EpgConfig): Promise<string> {
-  const options = config.indent !== undefined ? { indent: config.indent } : undefined;
+  const options = {
+    ...(config.indent !== undefined ? { indent: config.indent } : {}),
+    ...(config.extensions !== undefined ? { extensions: config.extensions } : {}),
+  };
   const channels = await collectChannels(config);
 
   let out = serializeDocumentHeader(config.meta, options);

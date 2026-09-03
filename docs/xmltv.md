@@ -141,8 +141,16 @@ back on parse, and XML never sees a `>` to end an instruction on — the same tr
 as embedding JSON in a `<script>` tag without tripping over `</script>`.
 
 This is how a cache entry in [xmltv format](./configuration.md#cache-reference)
-records what the DTD has no attribute for: it stays a document any other reader
-accepts, and `xmllint --dtdvalid` agrees.
+records what the DTD has no attribute for, without spending validity on it: an
+instruction is well-formed XML that no DTD constrains, so a reader that has
+never heard of `epg-cache` skips it and `xmllint --dtdvalid` has nothing to say
+about it either.
+
+What *can* cost an entry its validity is the listing inside it: a cache keeps
+whatever the site produced, [provider extensions](#provider-extensions)
+included, and those are by definition what the DTD does not describe. The cache
+is not the place to drop them — the merge reads them back — so the switch for
+that is [on the way out](#leaving-extensions-out).
 
 ### Cancelling
 
@@ -234,6 +242,35 @@ lossless. You can produce them the same way: the
 `extraAttributes` argument — which is how a site's `parseDay` and `channelInfo`
 [write extensions into a grabbed guide](./site-config.md#building-programmes).
 
+#### Leaving extensions out
+
+They are also the one thing in a guide that **no DTD can describe**, so a
+document carrying them does not validate — which matters only for a consumer
+that checks. `extensions` decides which of them are written, and every entry
+point that serializes takes it:
+
+```ts
+writeXmltvStream(input);                              // all of them — the default
+writeXmltvStream(input, { extensions: false });       // none: a DTD-valid document
+writeXmltvStream(input, { extensions: ['lcn'] });     // only these names
+writeXmltvStream(input, {                             // or decide one at a time
+  extensions: ({ kind, name, on }) => on === 'programme' && name !== 'debug',
+});
+```
+
+An array matches names exactly, attributes and elements alike. A filter is told
+`kind` (`'attribute'` or `'element'`), the `name`, and the element carrying it
+as `on` (`'programme'`, `'channel'`, `'tv'`, `'category'`, `'director'`, …), so
+a deny-list is `({ name }) => name !== 'lcn'`.
+
+What is kept is kept **whole**: an extension element goes out with its own
+attributes and children as they came in. This chooses which extensions a
+document has, not what is inside one.
+
+An element left holding nothing collapses to what the DTD allows rather than
+being written empty — `<credits>` with only extensions in it is not written at
+all, and `<video>` becomes `<video/>`.
+
 ## Serializing
 
 | function | gives |
@@ -256,11 +293,13 @@ that belong to it, so nothing between them has to know about them.
 | option | type | default | what it does |
 |---|---|---|---|
 | `indent` | `string \| number` | omitted — **compact** | Pretty-print with this indentation, mirroring `JSON.stringify`: a number of spaces or a literal string like `'\t'`. Compact output has no whitespace between elements at all, which is smaller and what a machine consumer like tvheadend wants. |
+| `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — **all of them** | Which [provider extensions](#provider-extensions) are written. `false` leaves every one out, which is what makes the document valid against the DTD; an array keeps only the names it lists; a filter decides one at a time. See [leaving extensions out](#leaving-extensions-out). |
 | `highWaterMark` | `number` | Node's stream default (16 KiB before Node 22, 64 KiB since) | For `writeXmltvStream`, how many characters accumulate before a chunk is yielded — one yield per batch, not per element, since a generator has no buffer of its own. For `XmltvSerializeStream` it is simply the readable `highWaterMark`. Ignored by the per-element serializers. |
 
 ```ts
 writeXmltvStream(input, { indent: 2 });     // two-space pretty-print
 serializeProgramme(programme);              // compact (default)
+serializeProgramme(programme, { extensions: false });   // and nothing off-DTD
 ```
 
 ## Node stream Transforms

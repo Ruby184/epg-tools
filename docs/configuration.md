@@ -55,6 +55,8 @@ hardcode — a username, a password, a region. See
 | `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true }` | How several sites covering one channel are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
+| `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — all of them | Which provider extensions the guide carries — see [Provider extensions](#provider-extensions). `false` leaves every one out, which is what makes the guide valid against the DTD. |
+| `allowMissing` | `number \| string` | none — anything missing fails | How much of the guide may be missing and the run still exit **0**: a number of channel-days, or a share like `'5%'` — see [allowing some of the guide to be missing](#allowing-some-of-the-guide-to-be-missing). |
 | `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'text'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
 
 ### Root `<tv>` attributes
@@ -91,7 +93,7 @@ Non-DTD attributes go in `extraAttributes` and are emitted verbatim.
 | field | type | default | what it is |
 |---|---|---|---|
 | `dir` | `string` | `.epg-cache` in the working directory | Cache root. **Make it absolute** if the config is also used by a [grabber](./tv-grab.md), which runs from wherever it is called. |
-| `driver` | `'ndjson' \| 'xmltv' \| 'sqlite' \| 'memory' \| CacheDriverFactory` | `'ndjson'` | Where and how cached days are kept. Both names are **one file** per channel-day under `dir`, its own meta included. `ndjson` writes `<day>.ndjson`: a meta line (`grabbedAt`, `programmeCount`, and the two versions [an entry records about itself](./api.md#what-an-entry-says-about-itself)), then one JSON programme per line, with dates in XMLTV form (`20260807203000 +0200`) so the offset the source wrote them in and how precise it was both survive. `xmltv` writes `<day>.xml`, one small indented document — its root element carrying `date` as XMLTV means it, and its meta in a [processing instruction](./xmltv.md#processing-instructions), so an entry validates against the DTD like any other guide. Pick it when something other than this package reads the cache. A driver reads **its own** entries only, so switching means starting the cache again. `sqlite` keeps the whole cache in one `cache.sqlite` under `dir` instead of a file per channel-day — worth it at thousands of channels, where a directory tree is tens of thousands of inodes to walk and back up; it needs Node 24 (or 22.5 with `--experimental-sqlite`), and is [loaded only when named](./api.md#epg-toolscachesqlite). `memory` keeps entries only as long as the process, which is enough for a `build` — its grab and its merge share one cache — and nothing for two commands, since `epg grab` and then `epg merge` would find the second one empty. Or pass a function returning a [driver of your own](./api.md#epg-toolscache) — `({ dir, signal }) => driver`, or a [builder](./api.md#epg-toolscache) that takes your options and returns one — which is how a cache ends up in a database, a bucket, or nowhere at all. It may await, so opening a connection belongs there. |
+| `driver` | `'ndjson' \| 'xmltv' \| 'sqlite' \| 'memory' \| CacheDriverFactory` | `'ndjson'` | Where and how cached days are kept. Both names are **one file** per channel-day under `dir`, its own meta included. `ndjson` writes `<day>.ndjson`: a meta line (`grabbedAt`, `programmeCount`, and the two versions [an entry records about itself](./api.md#what-an-entry-says-about-itself)), then one JSON programme per line, with dates in XMLTV form (`20260807203000 +0200`) so the offset the source wrote them in and how precise it was both survive. `xmltv` writes `<day>.xml`, one small indented document — its root element carrying `date` as XMLTV means it, and its meta in a [processing instruction](./xmltv.md#processing-instructions) rather than in an attribute no DTD defines. Whether an entry then validates is down to the listing in it: a cache keeps whatever the site produced, [provider extensions](#provider-extensions) included, and the merge reads them back — so leaving them out is a decision for the guide, not for the cache. Pick it when something other than this package reads the cache. A driver reads **its own** entries only, so switching means starting the cache again. `sqlite` keeps the whole cache in one `cache.sqlite` under `dir` instead of a file per channel-day — worth it at thousands of channels, where a directory tree is tens of thousands of inodes to walk and back up; it needs Node 24 (or 22.5 with `--experimental-sqlite`), and is [loaded only when named](./api.md#epg-toolscachesqlite). `memory` keeps entries only as long as the process, which is enough for a `build` — its grab and its merge share one cache — and nothing for two commands, since `epg grab` and then `epg merge` would find the second one empty. Or pass a function returning a [driver of your own](./api.md#epg-toolscache) — `({ dir, signal }) => driver`, or a [builder](./api.md#epg-toolscache) that takes your options and returns one — which is how a cache ends up in a database, a bucket, or nowhere at all. It may await, so opening a connection belongs there. |
 | `staleness` | `Partial<StalenessPolicy>` | `{ refetchAll: false, alwaysRefetchDays: 1, maxAgeDays: 7, emptyMaxAgeDays: 1 }` | When a cached day is refetched. `refetchAll` is what `--refresh` sets: every day in the window is fetched whatever the cache holds, and it reaches days behind today, which `alwaysRefetchDays` never does. `alwaysRefetchDays: 1` means today only, `2` today and tomorrow, `0` never force-refetch. `maxAgeDays` busts anything grabbed longer ago than that, and `emptyMaxAgeDays` does the same for an entry that came back with **no programmes** — a source that was briefly broken is asked again the next day instead of leaving a hole for a week, while a channel that genuinely has nothing on costs one request a day rather than one per run. `0` refetches an empty day on any later run; a value as large as `maxAgeDays` turns the distinction off. |
 | `prune` | `boolean` | `true` | Remove cached days older than today after a successful grab. |
 | `invalidate` | `(meta, key) => boolean` | — | One more reason a cached entry is void. The stored shape is [already checked](./api.md#what-an-entry-says-about-itself), so this is for what that cannot describe: a release whose *grabbing* changed rather than its storing, a site whose channel ids were renamed, a cache to be emptied gradually. Return `true` and the entry goes, so the day reads as never grabbed. |
@@ -120,6 +122,9 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--cache-dir <dir>` | override the cache directory |
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
+| `--allow-missing <n>` | exit 0 with up to this much of the guide missing: a number of channel-days, or a share like `5%` |
+| `--extensions <names>` | `build`/`merge` only: keep only these [provider extensions](#provider-extensions), comma-separated — `--extensions lcn,uniqueID` |
+| `--no-extensions` | `build`/`merge` only: leave every one out, for a guide that validates against the DTD |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
 | `-v, --verbose` | same as `--log-level debug` — every channel-day |
@@ -132,9 +137,10 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 
 `-v` is verbosity, not the version: the version is `-V`.
 
-It exits **0** on success, **1** when the run failed or the guide is short a
-channel-day, **2** for anything you typed wrong — an unknown option, command, or
-`--before` value, each printed with the usage — and **130** when it was
+It exits **0** on success, **1** when the run failed or the guide is short more
+than [`--allow-missing`](#allowing-some-of-the-guide-to-be-missing) forgives,
+**2** for anything you typed wrong — an unknown option, command, `--before` or
+`--allow-missing` value, each printed with the usage — and **130** when it was
 [cancelled](#cancelling-a-run).
 
 ### How much it says
@@ -288,6 +294,81 @@ of gzip's size. Ask for `{ level: 11 }` if you want it.
 Check what reads the guide before compressing it: a consumer reading
 `xmltv.xml` off disk usually copes with gzip, fewer with the other two, and
 tvheadend's socket wants the document itself.
+
+### Provider extensions
+
+A site can write anything the XMLTV DTD does not define — `uniqueID` on a
+programme, `eit` codes on a category, `<lcn>`, `<crid><series>…</series></crid>`
+— and it survives the cache and the merge to reach the guide, because a consumer
+like tvheadend reads exactly that. It is also the one thing in a guide that
+**cannot** validate against the DTD, since the DTD is the list of what is
+defined.
+
+`extensions` decides which of them the guide carries:
+
+```ts
+export default defineConfig({
+  // ...
+  extensions: false,               // none: a guide that validates
+  // extensions: ['lcn', 'uniqueID'],  // or only the ones a consumer uses
+  // extensions: ({ on, name }) => on === 'programme' && name !== 'debug',
+});
+```
+
+On the command line, `--extensions lcn,uniqueID` and `--no-extensions`, both of
+which override the config field. A filter has no command-line form, since a
+command line cannot pass a function.
+
+The cache is untouched by any of this — it keeps what the site produced, and the
+choice is made on the way out. So one grab answers both consumers:
+
+```sh
+epg build                                  # the full guide, extensions and all
+epg merge --no-extensions -o plain.xml     # and a DTD-valid one, no refetching
+```
+
+An element left holding nothing collapses to what the DTD allows rather than
+being written empty: `<credits>` with only extensions in it is not written at
+all, and `<video>` becomes `<video/>`.
+
+### Allowing some of the guide to be missing
+
+A grab that lost a few channel-days out of thousands has produced a guide; one
+that lost half of them has produced a hole. Both exit **1** by default, which
+leaves a nightly build either crying wolf over one flaky channel or — if you
+stop looking — publishing a fortnight of gaps without a word.
+
+`allowMissing` draws the line, as a count of channel-days or a share of the ones
+the run accounted for:
+
+```ts
+export default defineConfig({
+  // ...
+  allowMissing: '5%',   // or allowMissing: 20
+});
+```
+
+```sh
+epg build --allow-missing 5%   # overrides the config field
+epg build --allow-missing 20
+```
+
+Exactly the allowance passes, as "up to" reads: `--allow-missing 5%` on a run
+that lost 5% exits 0. The share is of everything the run has an answer about —
+fetched, taken from the cache, and kept as unchanged — so a run that fetched
+almost nothing because the cache was fresh is not thereby judged to have lost
+most of its guide. A day that came back **empty** is not missing: a channel with
+nothing on is an answer.
+
+**A site that answered nothing is outside this, whatever it says.** A site that
+could not be read, or whose channel list never arrived, has no channel list — so
+the channel-days it would have covered are not knowable, and weighing "one site"
+against a guide of thousands would score a source that is entirely down as a
+rounding error. The summary names those apart (`1 site answered nothing`), and
+they always exit 1.
+
+A `tv_grab_*` shim reads the same field, for the same reason: it is the config's
+answer, not the command's.
 
 ### `--offset`
 

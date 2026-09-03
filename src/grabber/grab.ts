@@ -25,7 +25,14 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
   const now = options.now ?? new Date();
   const emit = emitter(options);
   const { cache, signal } = options;
-  const tally: GrabCounts = { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0 };
+  const tally: GrabCounts = {
+    fetched: 0,
+    empty: 0,
+    fromCache: 0,
+    unchanged: 0,
+    failed: 0,
+    sitesFailed: 0,
+  };
 
   /**
    * Everything that is not a request: the staleness sweep, and parsing a
@@ -97,9 +104,11 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
           // site that failed while running says so itself, where it can do it
           // before its own cleanup awaits anything.
           //
-          // One, not one per channel-day: nothing of this site was reached, so
-          // there is no grid to attribute it across.
-          tally.failed++;
+          // Its own count, not one added to the channel-days: nothing of this
+          // site was reached, so there is no grid to attribute it across —
+          // and a threshold that let a dead site pass as one lost channel-day
+          // would be measuring the wrong thing.
+          tally.sitesFailed++;
           emit({ type: 'site:failed', site: config.site, error });
         }
       }).catch(() => {}),

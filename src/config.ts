@@ -13,8 +13,10 @@ import {
   type StageDefaults,
 } from './core/answers.js';
 import type { CompressionFormat, CompressionOptions } from './core/output.js';
+import type { MissingAllowance } from './grabber/missing.js';
 import type { AnySiteConfig } from './grabber/types.js';
 import type { MergeOptions } from './merge/types.js';
+import type { SerializeOptions } from './xmltv/serialize.js';
 import type { XmltvDocumentMeta } from './xmltv/types.js';
 import type { ReporterFactory, ReporterName } from './core/reporters.js';
 
@@ -101,6 +103,33 @@ export interface EpgConfig {
    * spaces or a string like `'\t'`). Omit for compact output — the default.
    */
   indent?: string | number;
+  /**
+   * Which provider extensions the guide carries. Defaults to all of them.
+   *
+   * `false` leaves every one out, which is what makes the guide valid against
+   * the DTD — one grab, two documents from the same cache: the full one for a
+   * consumer that reads extensions, a plain one for everything else. A list
+   * keeps only the names it names, and a function decides one at a time. See
+   * [the output reference](../docs/configuration.md#provider-extensions).
+   *
+   * `--extensions` and `--no-extensions` override it, as a flag overrides a
+   * config field everywhere else here — but only the first two forms, since a
+   * command line cannot pass a function.
+   */
+  extensions?: SerializeOptions['extensions'];
+  /**
+   * How much of the guide may be missing and the run still exit **0**: a number
+   * of channel-days, or a share of the ones it accounted for (`'5%'`). Defaults
+   * to none — anything missing is a failure.
+   *
+   * For a nightly build, where one flaky channel out of two thousand is weather
+   * and a fortnight of holes is news. A site that answered *nothing* is outside
+   * this whatever it says: there is no grid to weigh it against, so it is
+   * always a run to look at.
+   *
+   * `--allow-missing` overrides it.
+   */
+  allowMissing?: MissingAllowance;
   /**
    * How a run reports what it is doing. Defaults to `'text'`.
    *

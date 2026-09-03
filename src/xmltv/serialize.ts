@@ -28,6 +28,21 @@ import type {
   XmltvWarning,
 } from './types.js';
 
+/**
+ * One extension on its way out, as {@link SerializeOptions.extensions} sees it:
+ * an `extraAttributes` key or an `extra` element, and the element carrying it.
+ */
+export interface ExtensionRef {
+  kind: 'attribute' | 'element';
+  /** The name it would be written under. */
+  name: string;
+  /** The element it hangs off — `'programme'`, `'channel'`, `'tv'`, `'icon'`, … */
+  on: string;
+}
+
+/** Whether one extension is written. See {@link SerializeOptions.extensions}. */
+export type ExtensionFilter = (extension: ExtensionRef) => boolean;
+
 /** Options shared by every serialize entry point. */
 export interface SerializeOptions {
   /**
@@ -36,6 +51,23 @@ export interface SerializeOptions {
    * between elements — which is the default, mirroring `JSON.stringify`.
    */
   indent?: string | number;
+  /**
+   * Which provider extensions — `extraAttributes` and `extra` — are written.
+   * Defaults to `true`, all of them.
+   *
+   * `false` leaves every one out, which is what makes a document valid against
+   * the DTD: one grab then writes the full guide for a consumer that reads
+   * extensions and a plain one for everything else. An array keeps only the
+   * names it lists, attributes and elements alike — `['lcn', 'uniqueID']` for
+   * the two a consumer actually uses. An {@link ExtensionFilter} decides one at
+   * a time, told the name, whether it is an attribute or an element, and which
+   * element carries it; a deny-list is `({ name }) => name !== 'lcn'`.
+   *
+   * What is kept is kept **whole**: an extension element goes out with its own
+   * attributes and children verbatim, as it came in. This chooses which
+   * extensions a document has, not what is inside one.
+   */
+  extensions?: boolean | readonly string[] | ExtensionFilter;
   /**
    * `writeXmltvStream` accumulates serialized elements until roughly this many
    * characters before yielding a chunk (one yield per batch, not per element),
@@ -78,21 +110,53 @@ export interface WriteOptions extends SerializeOptions {
 }
 
 /**
- * Resolved whitespace policy threaded through the serializers. `unit` is the
- * per-level indent (`''` when compact) and `nl` the line separator (`''` when
- * compact) — so a compact document carries no formatting whitespace at all,
- * while element text (inside `escapeXml`) is never touched either way.
+ * Resolved output policy threaded through the serializers: what the document
+ * looks like, which is whitespace and which extensions it carries.
+ *
+ * `unit` is the per-level indent (`''` when compact) and `nl` the line
+ * separator (`''` when compact) — so a compact document carries no formatting
+ * whitespace at all, while element text (inside `escapeXml`) is never touched
+ * either way. `keep` is {@link SerializeOptions.extensions} resolved: `true`
+ * for all of them, `false` for none, or the filter that decides one at a time.
  */
 interface Fmt {
   unit: string;
   nl: string;
+  keep: boolean | ExtensionFilter;
+}
+
+/**
+ * The predicate an allowlist resolves to, kept per array rather than per call.
+ *
+ * `makeFmt` runs once per element — `serializeChannel` and `serializeProgramme`
+ * each call it — so building the `Set` there would rebuild it for every
+ * programme in the guide. Weak, because the array is the caller's and the
+ * options object it sits in may not outlive one call.
+ */
+const ALLOWLISTS = new WeakMap<readonly string[], ExtensionFilter>();
+
+function keepFrom(extensions: SerializeOptions['extensions'] = true): boolean | ExtensionFilter {
+  if (typeof extensions === 'boolean' || typeof extensions === 'function') {
+    return extensions;
+  }
+
+  let filter = ALLOWLISTS.get(extensions);
+
+  if (filter === undefined) {
+    const names = new Set(extensions);
+
+    filter = ({ name }) => names.has(name);
+    ALLOWLISTS.set(extensions, filter);
+  }
+
+  return filter;
 }
 
 function makeFmt(options: SerializeOptions | undefined): Fmt {
   const indent = options?.indent;
   const unit = typeof indent === 'number' ? ' '.repeat(Math.max(0, indent)) : (indent ?? '');
 
-  return { unit, nl: unit === '' ? '' : '\n' };
+  return { unit, nl: unit === '' ? '' : '\n', keep: keepFrom(options?.extensions) };
 }
 
 type AttrValue = string | number | undefined;
@@ -123,14 +187,36 @@ function element(
   return text === undefined ? `${open}/>${f.nl}` : `${open}>${escapeXml(text)}</${name}>${f.nl}`;
 }
 
-function extraAttrPairs(
-  extraAttributes: Record<string, string> | undefined,
-): [string, AttrValue][] {
-  return extraAttributes ? Object.entries(extraAttributes) : [];
+/** Every attribute of an extension element, which is kept whole or not at all. */
+function pairsOf(attributes: Record<string, string> | undefined): [string, AttrValue][] {
+  return attributes ? Object.entries(attributes) : [];
 }
 
-function textAttrPairs(value: XmltvTextValue): [string, AttrValue][] {
-  return [['lang', value.lang], ...extraAttrPairs(value.extraAttributes)];
+/**
+ * The extension attributes of `on` that this document keeps.
+ *
+ * One of the two places extensions leave through, and so one of the two the
+ * policy is applied in — `true` hands back what it was given, and `false`
+ * allocates nothing at all.
+ */
+function extraAttrPairs(
+  f: Fmt,
+  on: string,
+  extraAttributes: Record<string, string> | undefined,
+): [string, AttrValue][] {
+  const { keep } = f;
+
+  if (keep === false || extraAttributes === undefined) {
+    return [];
+  }
+
+  const pairs = pairsOf(extraAttributes);
+
+  return keep === true ? pairs : pairs.filter(([name]) => keep({ kind: 'attribute', name, on }));
+}
+
+function textAttrPairs(f: Fmt, on: string, value: XmltvTextValue): [string, AttrValue][] {
+  return [['lang', value.lang], ...extraAttrPairs(f, on, value.extraAttributes)];
 }
 
 function langElements(
@@ -142,15 +228,21 @@ function langElements(
   let out = '';
 
   for (const value of values ?? []) {
-    out += element(f, pad, name, textAttrPairs(value), value.value);
+    out += element(f, pad, name, textAttrPairs(f, name, value), value.value);
   }
 
   return out;
 }
 
-/** Inline markup of one extension element (recursive, no added whitespace). */
+/**
+ * Inline markup of one extension element (recursive, no added whitespace).
+ *
+ * Unfiltered on purpose: an extension the policy kept is kept whole, its own
+ * attributes and children as they came in. What is inside one is the provider's
+ * business — the choice being made is which extensions the document has.
+ */
 function extraMarkup(extra: XmltvExtraElement): string {
-  const attrString = attrs(extraAttrPairs(extra.attributes));
+  const attrString = attrs(pairsOf(extra.attributes));
   const inner =
     (extra.value !== undefined ? escapeXml(extra.value) : '') +
     (extra.children ?? []).map(extraMarkup).join('');
@@ -160,11 +252,39 @@ function extraMarkup(extra: XmltvExtraElement): string {
     : `<${extra.name}${attrString}/>`;
 }
 
-function extraElements(f: Fmt, pad: string, extras: XmltvExtraElement[] | undefined): string {
+/** Whether one extension element of `on` is written. */
+function keepsElement(f: Fmt, on: string, extra: XmltvExtraElement): boolean {
+  const { keep } = f;
+
+  return keep === true || (keep !== false && keep({ kind: 'element', name: extra.name, on }));
+}
+
+/** The kept extension elements of `on`, inline — for a mixed-content parent. */
+function extraInline(f: Fmt, on: string, extras: XmltvExtraElement[] | undefined): string {
   let out = '';
 
   for (const extra of extras ?? []) {
-    out += `${pad}${extraMarkup(extra)}${f.nl}`;
+    if (keepsElement(f, on, extra)) {
+      out += extraMarkup(extra);
+    }
+  }
+
+  return out;
+}
+
+/** The other place extensions leave through: one per line, under `pad`. */
+function extraElements(
+  f: Fmt,
+  on: string,
+  pad: string,
+  extras: XmltvExtraElement[] | undefined,
+): string {
+  let out = '';
+
+  for (const extra of extras ?? []) {
+    if (keepsElement(f, on, extra)) {
+      out += `${pad}${extraMarkup(extra)}${f.nl}`;
+    }
   }
 
   return out;
@@ -178,7 +298,7 @@ function iconElements(f: Fmt, pad: string, icons: XmltvIcon[] | undefined): stri
       ['src', icon.src],
       ['width', icon.width],
       ['height', icon.height],
-      ...extraAttrPairs(icon.extraAttributes),
+      ...extraAttrPairs(f, 'icon', icon.extraAttributes),
     ]);
   }
 
@@ -196,7 +316,7 @@ function urlElements(f: Fmt, pad: string, urls: XmltvUrlValue[] | undefined): st
             f,
             pad,
             'url',
-            [['system', url.system], ...extraAttrPairs(url.extraAttributes)],
+            [['system', url.system], ...extraAttrPairs(f, 'url', url.extraAttributes)],
             url.value,
           );
   }
@@ -205,20 +325,20 @@ function urlElements(f: Fmt, pad: string, urls: XmltvUrlValue[] | undefined): st
 }
 
 /** Inline (mixed-content) `<image>`/`<url>` markup, no indentation/newlines. */
-function inlineImage(image: XmltvImage): string {
+function inlineImage(f: Fmt, image: XmltvImage): string {
   return `<image${attrs([
     ['type', image.type],
     ['size', image.size],
     ['orient', image.orient],
     ['system', image.system],
-    ...extraAttrPairs(image.extraAttributes),
+    ...extraAttrPairs(f, 'image', image.extraAttributes),
   ])}>${escapeXml(image.value)}</image>`;
 }
 
-function inlineUrl(url: XmltvUrlValue): string {
+function inlineUrl(f: Fmt, url: XmltvUrlValue): string {
   return typeof url === 'string'
     ? `<url>${escapeXml(url)}</url>`
-    : `<url${attrs([['system', url.system], ...extraAttrPairs(url.extraAttributes)])}>${escapeXml(url.value)}</url>`;
+    : `<url${attrs([['system', url.system], ...extraAttrPairs(f, 'url', url.extraAttributes)])}>${escapeXml(url.value)}</url>`;
 }
 
 const CREDIT_ORDER = [
@@ -253,7 +373,7 @@ function personElement(
   }
 
   if (typeof person !== 'string') {
-    attrPairs.push(...extraAttrPairs(person.extraAttributes));
+    attrPairs.push(...extraAttrPairs(f, role, person.extraAttributes));
   }
 
   if (typeof person === 'string') {
@@ -261,9 +381,9 @@ function personElement(
   }
 
   const children =
-    (person.image ?? []).map(inlineImage).join('') +
-    (person.url ?? []).map(inlineUrl).join('') +
-    (person.extra ?? []).map(extraMarkup).join('');
+    (person.image ?? []).map((image) => inlineImage(f, image)).join('') +
+    (person.url ?? []).map((url) => inlineUrl(f, url)).join('') +
+    extraInline(f, role, person.extra);
 
   if (!children) {
     return element(f, pad, role, attrPairs, person.value);
@@ -286,7 +406,7 @@ function creditsElement(f: Fmt, pad: string, credits: XmltvCredits | undefined):
     }
   }
 
-  inner += extraElements(f, childPad, credits.extra);
+  inner += extraElements(f, 'credits', childPad, credits.extra);
 
   return inner ? `${pad}<credits>${f.nl}${inner}${pad}</credits>${f.nl}` : '';
 }
@@ -306,9 +426,9 @@ function videoElement(f: Fmt, pad: string, video: XmltvVideo | undefined): strin
     (video.colour !== undefined ? element(f, childPad, 'colour', [], yesNo(video.colour)) : '') +
     (video.aspect !== undefined ? element(f, childPad, 'aspect', [], video.aspect) : '') +
     (video.quality !== undefined ? element(f, childPad, 'quality', [], video.quality) : '') +
-    extraElements(f, childPad, video.extra);
+    extraElements(f, 'video', childPad, video.extra);
 
-  const open = `<video${attrs(extraAttrPairs(video.extraAttributes))}`;
+  const open = `<video${attrs(extraAttrPairs(f, 'video', video.extraAttributes))}`;
   return inner ? `${pad}${open}>${f.nl}${inner}${pad}</video>${f.nl}` : `${pad}${open}/>${f.nl}`;
 }
 
@@ -321,9 +441,9 @@ function audioElement(f: Fmt, pad: string, audio: XmltvAudio | undefined): strin
   const inner =
     (audio.present !== undefined ? element(f, childPad, 'present', [], yesNo(audio.present)) : '') +
     (audio.stereo !== undefined ? element(f, childPad, 'stereo', [], audio.stereo) : '') +
-    extraElements(f, childPad, audio.extra);
+    extraElements(f, 'audio', childPad, audio.extra);
 
-  const open = `<audio${attrs(extraAttrPairs(audio.extraAttributes))}`;
+  const open = `<audio${attrs(extraAttrPairs(f, 'audio', audio.extraAttributes))}`;
   return inner ? `${pad}${open}>${f.nl}${inner}${pad}</audio>${f.nl}` : `${pad}${open}/>${f.nl}`;
 }
 
@@ -341,7 +461,7 @@ function flagElement(
     return `${pad}<${name}/>${f.nl}`;
   }
 
-  return element(f, pad, name, textAttrPairs(value), value.value);
+  return element(f, pad, name, textAttrPairs(f, name, value), value.value);
 }
 
 function ratingElements(
@@ -354,10 +474,10 @@ function ratingElements(
   let out = '';
 
   for (const rating of ratings ?? []) {
-    out += `${pad}<${name}${attrs([['system', rating.system], ...extraAttrPairs(rating.extraAttributes)])}>${f.nl}`;
+    out += `${pad}<${name}${attrs([['system', rating.system], ...extraAttrPairs(f, name, rating.extraAttributes)])}>${f.nl}`;
     out += `${childPad}<value>${escapeXml(rating.value)}</value>${f.nl}`;
     out += iconElements(f, childPad, rating.icon);
-    out += extraElements(f, childPad, rating.extra);
+    out += extraElements(f, name, childPad, rating.extra);
     out += `${pad}</${name}>${f.nl}`;
   }
 
@@ -370,11 +490,11 @@ export function serializeChannel(channel: XmltvChannel, options?: SerializeOptio
   const pad = f.unit;
   const childPad = pad + f.unit;
 
-  let out = `${pad}<channel${attrs([['id', channel.id], ...extraAttrPairs(channel.extraAttributes)])}>${f.nl}`;
+  let out = `${pad}<channel${attrs([['id', channel.id], ...extraAttrPairs(f, 'channel', channel.extraAttributes)])}>${f.nl}`;
   out += langElements(f, childPad, 'display-name', channel.displayName);
   out += iconElements(f, childPad, channel.icon);
   out += urlElements(f, childPad, channel.url);
-  out += extraElements(f, childPad, channel.extra);
+  out += extraElements(f, 'channel', childPad, channel.extra);
   return `${out}${pad}</channel>${f.nl}`;
 }
 
@@ -393,7 +513,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
     ['videoplus', programme.videoplus],
     ['channel', programme.channel],
     ['clumpidx', programme.clumpidx],
-    ...extraAttrPairs(programme.extraAttributes),
+    ...extraAttrPairs(f, 'programme', programme.extraAttributes),
   ])}>${f.nl}`;
 
   out += langElements(f, I, 'title', programme.title);
@@ -409,7 +529,13 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
   out += langElements(f, I, 'keyword', programme.keyword);
 
   if (programme.language) {
-    out += element(f, I, 'language', textAttrPairs(programme.language), programme.language.value);
+    out += element(
+      f,
+      I,
+      'language',
+      textAttrPairs(f, 'language', programme.language),
+      programme.language.value,
+    );
   }
 
   if (programme.origLanguage) {
@@ -417,7 +543,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
       f,
       I,
       'orig-language',
-      textAttrPairs(programme.origLanguage),
+      textAttrPairs(f, 'orig-language', programme.origLanguage),
       programme.origLanguage.value,
     );
   }
@@ -427,7 +553,10 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
       f,
       I,
       'length',
-      [['units', programme.length.units], ...extraAttrPairs(programme.length.extraAttributes)],
+      [
+        ['units', programme.length.units],
+        ...extraAttrPairs(f, 'length', programme.length.extraAttributes),
+      ],
       String(programme.length.value),
     );
   }
@@ -441,7 +570,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
       f,
       I,
       'episode-num',
-      [['system', episode.system], ...extraAttrPairs(episode.extraAttributes)],
+      [['system', episode.system], ...extraAttrPairs(f, 'episode-num', episode.extraAttributes)],
       episode.value,
     );
   }
@@ -458,7 +587,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
           : undefined,
       ],
       ['channel', programme.previouslyShown.channel],
-      ...extraAttrPairs(programme.previouslyShown.extraAttributes),
+      ...extraAttrPairs(f, 'previously-shown', programme.previouslyShown.extraAttributes),
     ]);
   }
 
@@ -472,7 +601,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
   for (const subtitles of programme.subtitles ?? []) {
     const subtitlesAttrs: [string, AttrValue][] = [
       ['type', subtitles.type],
-      ...extraAttrPairs(subtitles.extraAttributes),
+      ...extraAttrPairs(f, 'subtitles', subtitles.extraAttributes),
     ];
 
     const childPad = I + f.unit;
@@ -482,10 +611,10 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
             f,
             childPad,
             'language',
-            textAttrPairs(subtitles.language),
+            textAttrPairs(f, 'language', subtitles.language),
             subtitles.language.value,
           )
-        : '') + extraElements(f, childPad, subtitles.extra);
+        : '') + extraElements(f, 'subtitles', childPad, subtitles.extra);
 
     if (inner) {
       out += `${I}<subtitles${attrs(subtitlesAttrs)}>${f.nl}${inner}${I}</subtitles>${f.nl}`;
@@ -507,7 +636,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
         ['source', review.source],
         ['reviewer', review.reviewer],
         ['lang', review.lang],
-        ...extraAttrPairs(review.extraAttributes),
+        ...extraAttrPairs(f, 'review', review.extraAttributes),
       ],
       review.value,
     );
@@ -523,13 +652,13 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
         ['size', image.size],
         ['orient', image.orient],
         ['system', image.system],
-        ...extraAttrPairs(image.extraAttributes),
+        ...extraAttrPairs(f, 'image', image.extraAttributes),
       ],
       image.value,
     );
   }
 
-  out += extraElements(f, I, programme.extra);
+  out += extraElements(f, 'programme', I, programme.extra);
 
   return `${out}${pad}</programme>${f.nl}`;
 }
@@ -607,7 +736,7 @@ export function serializeDocumentHeader(
       ['source-data-url', meta?.sourceDataUrl],
       ['generator-info-name', meta?.generatorInfoName],
       ['generator-info-url', meta?.generatorInfoUrl],
-      ...extraAttrPairs(meta?.extraAttributes),
+      ...extraAttrPairs(f, 'tv', meta?.extraAttributes),
     ])}>${f.nl}` +
     instructionsAt(options?.processingInstructions, 'root', options)
   );

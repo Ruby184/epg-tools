@@ -440,7 +440,7 @@ describe('defineXmltvSite', () => {
 
       // The channel list comes out of the same document, so an unreadable one
       // fails the site rather than each of its channel-days: there are none.
-      expect(summary.failed).toBe(1);
+      expect(summary).toMatchObject({ failed: 0, sitesFailed: 1 });
       expect(report.of('site:failed')).toEqual([
         expect.objectContaining({ site: 'published.example' }),
       ]);

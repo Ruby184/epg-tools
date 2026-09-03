@@ -131,11 +131,27 @@ describe('render', () => {
       '[a.tv] 50 channel(s) × 7 day(s): 300 to fetch in 350 request(s)',
     ],
     [
-      { type: 'grab:done', fetched: 1, empty: 0, fromCache: 0, unchanged: 0, failed: 0 },
+      {
+        type: 'grab:done',
+        fetched: 1,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 0,
+        sitesFailed: 0,
+      },
       'Grab done: 1 fetched, 0 from cache, 0 failed',
     ],
     [
-      { type: 'grab:done', fetched: 1, empty: 1, fromCache: 0, unchanged: 2, failed: 3 },
+      {
+        type: 'grab:done',
+        fetched: 1,
+        empty: 1,
+        fromCache: 0,
+        unchanged: 2,
+        failed: 3,
+        sitesFailed: 0,
+      },
       'Grab done: 1 fetched (1 empty), 0 from cache, 2 unchanged, 3 failed',
     ],
     [
@@ -277,7 +293,15 @@ describe('textReporter', () => {
 
     run(textReporter({ stream: out, errorStream: err, level: 'info' }), [
       failure,
-      { type: 'grab:done', fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 1 },
+      {
+        type: 'grab:done',
+        fetched: 0,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 1,
+        sitesFailed: 0,
+      },
     ]);
 
     // The summary first, then the block under it as the detail of "1 failed".
@@ -291,7 +315,15 @@ describe('textReporter', () => {
 
     run(textReporter({ stream: new Sink(), errorStream: err, level: 'error' }), [
       failure,
-      { type: 'grab:done', fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 1 },
+      {
+        type: 'grab:done',
+        fetched: 0,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 1,
+        sitesFailed: 0,
+      },
     ]);
 
     expect(err.lines).toEqual(['  FAILED [a.tv] one 2026-09-01: the feed went away']);
@@ -325,7 +357,15 @@ describe('textReporter', () => {
         ...failure,
         day: `2026-09-0${index + 1}`,
       })),
-      { type: 'grab:done', fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 5 },
+      {
+        type: 'grab:done',
+        fetched: 0,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 5,
+        sitesFailed: 0,
+      },
     ]);
 
     expect(err.lines).toEqual([
@@ -340,7 +380,15 @@ describe('textReporter', () => {
 
     run(textReporter({ stream: new Sink(), errorStream: err, failures: 'inline' }), [
       failure,
-      { type: 'grab:done', fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 1 },
+      {
+        type: 'grab:done',
+        fetched: 0,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 1,
+        sitesFailed: 0,
+      },
     ]);
 
     // Unindented, and not repeated by the flush the summary triggers.
@@ -426,7 +474,15 @@ describe('progressReporter', () => {
 
     run(progressReporter({ stream: out }), [
       started,
-      { type: 'grab:done', fetched: 6, empty: 0, fromCache: 0, unchanged: 0, failed: 0 },
+      {
+        type: 'grab:done',
+        fetched: 6,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 0,
+        sitesFailed: 0,
+      },
     ]);
 
     expect(out.lines.at(-1)).toBe('Grab done: 6 fetched, 0 from cache, 0 failed');
@@ -451,7 +507,15 @@ describe('progressReporter', () => {
 
     run(progressReporter({ stream: out }), [
       started,
-      { type: 'grab:done', fetched: 6, empty: 0, fromCache: 0, unchanged: 0, failed: 0 },
+      {
+        type: 'grab:done',
+        fetched: 6,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 0,
+        sitesFailed: 0,
+      },
       // The merge draws a line of its own, and takes it away again.
       { type: 'merge:channel', channelId: 'one' },
       { type: 'merge:done', output: 'guide.xml' },

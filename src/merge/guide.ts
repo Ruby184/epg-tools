@@ -380,7 +380,10 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       channels,
       programmes: programmes(),
     },
-    options.indent !== undefined ? { indent: options.indent } : undefined,
+    {
+      ...(options.indent !== undefined ? { indent: options.indent } : {}),
+      ...(options.extensions !== undefined ? { extensions: options.extensions } : {}),
+    },
   );
 }
 

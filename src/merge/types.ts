@@ -1,3 +1,4 @@
+import type { SerializeOptions } from '../xmltv/serialize.js';
 import type { XmltvDocumentMeta, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheStore } from '../cache/types.js';
 import type { AnySiteConfig } from '../grabber/types.js';
@@ -207,4 +208,10 @@ export interface BuildGuideOptions {
    * string like `'\t'`). Omit for compact output — the default.
    */
   indent?: string | number;
+  /**
+   * Which provider extensions the guide carries — all of them by default,
+   * `false` for none (a DTD-valid document), a list of names, or a filter. See
+   * {@link SerializeOptions.extensions}.
+   */
+  extensions?: SerializeOptions['extensions'];
 }

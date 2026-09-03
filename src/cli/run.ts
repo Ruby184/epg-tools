@@ -14,6 +14,8 @@ import type { Writable } from 'node:stream';
 import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../config.js';
 import { build, createCacheStore, runGrab, runMerge } from '../build.js';
 import { CACHE_DRIVER_NAMES } from '../cache/main.js';
+import { fellShort, resolveAllowance } from '../grabber/main.js';
+import type { MissingAllowance } from '../grabber/main.js';
 import { GrabberError } from '../core/error.js';
 import { OptionError, parseOptions } from '../core/options.js';
 import { dayToDate, toDayString } from '../core/days.js';
@@ -41,6 +43,12 @@ Options:
       --cache-driver <name>  Override where cached days are kept: ndjson, xmltv,
                         sqlite or memory
       --refresh         Refetch every day in the window, ignoring what is cached
+      --allow-missing <n>   Exit 0 with up to this much of the guide missing:
+                        a number of channel-days, or a share like 5%
+      --extensions <names>  build/merge only: keep only these provider
+                        extensions, comma-separated (e.g. lcn,uniqueID)
+      --no-extensions   build/merge only: leave every provider extension out,
+                        for a guide that validates against the DTD
       --before <day>    prune only: remove days before YYYY-MM-DD (default: today)
       --log-level <l>   How much to report: error, warn, info (default) or debug
   -v, --verbose         Same as --log-level debug
@@ -71,6 +79,43 @@ function dayString(raw: string, flag: string): string {
   }
 
   return raw;
+}
+
+/**
+ * An `--allow-missing` value, checked before the run rather than after it.
+ *
+ * The same reading the config field gets, so `20`, `5%` and the ways of getting
+ * either wrong mean one thing wherever they are written — but reported as
+ * something typed, which is what puts the usage on screen and exits 2.
+ */
+function allowance(raw: string, flag: string): string {
+  try {
+    resolveAllowance(raw, flag);
+  } catch (error) {
+    throw new OptionError(error instanceof Error ? error.message : String(error));
+  }
+
+  return raw;
+}
+
+/**
+ * The extension names of `--extensions a,b`, and at least one of them.
+ *
+ * An empty list would be `--no-extensions` said the long way round, and far
+ * more likely a shell that expanded a variable to nothing — which would
+ * silently strip every extension from the guide.
+ */
+function extensionNames(raw: string, flag: string): string[] {
+  const names = raw
+    .split(',')
+    .map((name) => name.trim())
+    .filter((name) => name !== '');
+
+  if (names.length === 0) {
+    throw new OptionError(`Invalid ${flag} value: ${raw} (expected names, or --no-extensions)`);
+  }
+
+  return names;
 }
 
 /** Something the user typed: the usage goes with it, as the grabber does. */
@@ -163,9 +208,12 @@ function isRealDay(day: string): boolean {
  * under it — is a `grab:done` event, and the reporter's business: it used to be
  * assembled here and the failures printed a second time in a format of their
  * own, which is how the same failure came to be said twice and differently.
+ *
+ * How much missing is too much is `fellShort`'s to say, and it says the same
+ * thing for a `tv_grab_*` shim — one rule, two front doors.
  */
-function exitCode(summary: GrabSummary): number {
-  return summary.failed > 0 ? EXIT_FAILED : 0;
+function exitCode(summary: GrabSummary, allowMissing: MissingAllowance | undefined): number {
+  return fellShort(summary, allowMissing) ? EXIT_FAILED : 0;
 }
 
 /** `epg init-grabber <name>` — write the executable and say what to do with it. */
@@ -261,6 +309,11 @@ async function execute(
       // can do.
       'cache-driver': { type: 'string', choices: CACHE_DRIVER_NAMES },
       refresh: { type: 'boolean' },
+      'allow-missing': { type: 'string', transform: allowance },
+      // A list of names, or `--no-extensions` for none of them. A config can
+      // point at a filter of its own by passing a function, which is not
+      // something a command line can do.
+      extensions: { type: 'string', negatable: true, transform: extensionNames },
       before: { type: 'string', transform: dayString },
       quiet: { type: 'boolean', short: 'q' },
       verbose: { type: 'boolean', short: 'v' },
@@ -318,6 +371,16 @@ async function execute(
     config = { ...config, cache: { ...config.cache, driver: values['cache-driver'] } };
   }
 
+  // `null` is `--no-extensions` — the third state a negatable option has, and
+  // the one that means "none" rather than "the config decides".
+  if (values.extensions !== undefined) {
+    config = { ...config, extensions: values.extensions ?? false };
+  }
+
+  if (values['allow-missing'] !== undefined) {
+    config = { ...config, allowMissing: values['allow-missing'] };
+  }
+
   if (values.refresh) {
     // The reading of the cache is what this turns off, not the writing: the days
     // still land in it for the run after this one.
@@ -362,12 +425,12 @@ async function execute(
 
       emit({ type: 'merge:done', output: String(config.output) });
 
-      return exitCode(summary);
+      return exitCode(summary, config.allowMissing);
     }
     case 'grab': {
       const summary = await runGrab(config, runOptions);
 
-      return signal?.aborted ? EXIT_CANCELLED : exitCode(summary);
+      return signal?.aborted ? EXIT_CANCELLED : exitCode(summary, config.allowMissing);
     }
     case 'merge': {
       await runMerge(config, runOptions);

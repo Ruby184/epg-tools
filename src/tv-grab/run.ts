@@ -2,6 +2,7 @@ import path from 'node:path';
 import type { Writable } from 'node:stream';
 import { resolveConfigSource, type EpgConfig } from '../config.js';
 import { guideStream, runGrab } from '../build.js';
+import { fellShort } from '../grabber/main.js';
 import { OptionError } from '../core/options.js';
 import { OutputError, writeOutput } from '../core/output.js';
 import { drain, queueLine, writeFlushed, writeLines } from '../core/streams.js';
@@ -292,14 +293,18 @@ async function execute(
     ...(options.signal ? { signal: options.signal } : {}),
   };
 
-  let failed = 0;
+  let short = false;
 
   if (options.grab !== false) {
     // The summary line and the failures under it are the reporter's, which is
     // what stops this grabber saying both in a format of its own — and is why
     // it now mentions what a source said was unchanged, which its own line
     // silently dropped.
-    failed = (await runGrab(selected, runOptions)).failed;
+    //
+    // Whether what is missing is too much is the config's to say, through the
+    // same rule the `epg` CLI applies — a grabber run nightly by tv_grab has
+    // the same reason to tolerate one flaky channel out of two thousand.
+    short = fellShort(await runGrab(selected, runOptions), selected.allowMissing);
   }
 
   // A cancelled run writes nothing: the reference grabbers are read by a
@@ -317,5 +322,5 @@ async function execute(
 
   // Partial data is reported as a failure, as the reference grabbers do, and
   // outranks any advisory code a capability asked for.
-  return failed > 0 ? 1 : advisory;
+  return short ? 1 : advisory;
 }
