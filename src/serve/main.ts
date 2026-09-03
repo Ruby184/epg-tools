@@ -543,18 +543,34 @@ export async function serveGuide(
     return closing;
   };
 
-  options.signal?.addEventListener('abort', () => void close(), { once: true });
+  // Listened for before anything can close, or a server stopped during its own
+  // startup would leave this promise waiting on an event that has already been
+  // and gone.
+  const closed = new Promise<void>((resolve) => {
+    server.once('close', () => resolve());
+  });
 
   emit({ type: 'serve:started', url });
 
-  return {
-    url,
-    port: address.port,
-    close,
-    closed: new Promise<void>((resolve) => {
-      server.once('close', () => resolve());
-    }),
-  };
+  // One or the other, because a listener answers only a signal that fires
+  // *after* it is added: one already aborted never emits again, and one that
+  // fired while the port was being bound has emitted already. Asking first is
+  // what keeps a server from listening for good on a run that had been called
+  // off, and nothing can slip between the question and the answer — there is no
+  // await between them for an abort to arrive in.
+  //
+  // Not `listen({ signal })`, which Node offers and which looks like the
+  // answer. All it does on abort is `server.close()` — the smallest quarter of
+  // what stopping this means. It cuts no connection, so a consumer part way
+  // through a guide holds the port open; it releases no cache; and it says
+  // nothing. Two owners of one lifecycle, the lesser racing the greater.
+  if (options.signal?.aborted === true) {
+    await close();
+  } else {
+    options.signal?.addEventListener('abort', () => void close(), { once: true });
+  }
+
+  return { url, port: address.port, close, closed };
 }
 
 export type { EpgServeConfig } from './config.js';

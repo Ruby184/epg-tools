@@ -387,6 +387,34 @@ describe('serveGuide', () => {
     await expect(fetch(server.url)).rejects.toThrow();
   });
 
+  it('stops at once for a signal that had already fired', async () => {
+    // `addEventListener('abort')` never fires for a signal that has already
+    // aborted, so this used to bind a port and serve for good on a run that had
+    // been called off. Node's own `listen({ signal })` is not the answer: all
+    // it does is `server.close()`, which cuts no connection and releases no
+    // cache.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const controller = new AbortController();
+
+    controller.abort();
+
+    const report = collect();
+    const server = await serve(configFor(['one']), cache, {
+      signal: controller.signal,
+      reporter: report.reporter,
+    });
+
+    // Resolved already, rather than waiting on an event long since gone.
+    await expect(server.closed).resolves.toBeUndefined();
+    await expect(fetch(server.url)).rejects.toThrow();
+    // And said so in the order it happened, rather than stopping before it
+    // started.
+    expect(report.of('serve:started')).toHaveLength(1);
+    expect(report.of('serve:stopped')).toHaveLength(1);
+  });
+
   it('leaves a cache it was handed open, and closes the one it opened', async () => {
     const cache = cacheWith({});
     const server = await serve(configFor(['one']), cache);
