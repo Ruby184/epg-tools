@@ -56,6 +56,7 @@ hardcode — a username, a password, a region. See
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 | `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — all of them | Which provider extensions the guide carries — see [Provider extensions](#provider-extensions). `false` leaves every one out, which is what makes the guide valid against the DTD. |
+| `serve` | `{ port?, host?, path?, compress?, cors? }` | `8080`, `127.0.0.1`, `/guide.xml`, `gzip`, off | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). |
 | `allowMissing` | `number \| string` | none — anything missing fails | How much of the guide may be missing and the run still exit **0**: a number of channel-days, or a share like `'5%'` — see [allowing some of the guide to be missing](#allowing-some-of-the-guide-to-be-missing). |
 | `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'text'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
 
@@ -104,6 +105,9 @@ Non-DTD attributes go in `extraAttributes` and are emitted verbatim.
 epg build            # grab stale/missing days, then write the merged guide
 epg grab             # grab only
 epg merge            # write the guide from cache only
+epg serve            # hold the guide behind HTTP for a consumer that polls
+epg try example.tv one.example.tv   # one channel-day, with the working shown
+epg validate         # read the guide and report what is wrong with it
 epg prune            # drop cached days older than today
 epg init-grabber tv_grab_sk_example   # write an XMLTV grabber for this config
 epg build -d 14 -o public/epg.xml
@@ -125,6 +129,12 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--allow-missing <n>` | exit 0 with up to this much of the guide missing: a number of channel-days, or a share like `5%` |
 | `--extensions <names>` | `build`/`merge` only: keep only these [provider extensions](#provider-extensions), comma-separated — `--extensions lcn,uniqueID` |
 | `--no-extensions` | `build`/`merge` only: leave every one out, for a guide that validates against the DTD |
+| `--port <n>` | `serve` only: port to listen on, default `8080` |
+| `--host <h>` | `serve` only: address to bind, default `127.0.0.1` — see [serving the guide](#serving-the-guide) |
+| `--serve-path <p>` | `serve` only: the path that answers with the guide, default `/guide.xml` |
+| `--raw` | `try` only: print the whole payload, not the first 2000 characters |
+| `--format <how>` | `validate` only: `text` (default) or `json` — see [validating a guide](#validating-a-guide) |
+| `--strict` | `validate` only: count warnings as failures too |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
 | `-v, --verbose` | same as `--log-level debug` — every channel-day |
@@ -330,6 +340,229 @@ epg merge --no-extensions -o plain.xml     # and a DTD-valid one, no refetching
 An element left holding nothing collapses to what the DTD allows rather than
 being written empty: `<credits>` with only extensions in it is not written at
 all, and `<video>` becomes `<video/>`.
+
+### Trying one channel-day
+
+`epg try <site> <channel> [day]` puts one channel-day through the whole path and
+shows every step of it — what a site author needs while writing one, and what a
+grab cannot show:
+
+```sh
+epg try example.tv one.example.tv          # today
+epg try example.tv one.example.tv 2026-09-05
+epg try example.tv 1 --raw                 # by site id, whole payload
+```
+
+```
+example.tv → one.example.tv on 2026-09-03
+
+  GET https://example.tv/api?ch=1&d=2026-09-03
+    → 200, 143ms, 4.2 KB, application/json
+
+  payload
+    { "items": [ { "start": "06:00", "title": "Breakfast" } ] }
+
+    [log]  the source sent 2 items
+
+  2 programmes in 38ms
+    <programme start="20260903060000 +0000" channel="one.example.tv">
+      <title lang="en">Breakfast</title>
+    </programme>
+```
+
+**The url is the point.** A grab cannot print one: a site builds its own inside
+its own `request`, through the client it was given, so nothing above it ever
+sees a url. `try` instruments that client instead — hooks around the site's own,
+never instead of them — which is the only place a url exists.
+
+The channel is taken by either of its ids, `xmltvId` or `siteId`. Batching is
+honoured, so a site that asks for a week at a time is asked for a week here too
+and what it does with one day of it is the thing being tried; `ctx.log` and
+`ctx.warn` appear where the site said them.
+
+**Nothing is written** and no cache is opened, so trying a site cannot poison
+the guide a run would build, or make the next run think the day is already done.
+A site that keeps its channel list between runs is asked for it afresh.
+
+It exits **0** when programmes came out and **1** when none did — not an error,
+since a channel with nothing on is an answer, but the commonest thing you are
+here to look at, and enough for a shell loop over channels to tell.
+
+### Serving the guide
+
+`epg serve` holds the merged guide behind HTTP for a consumer that polls — the
+serving half of what [`conditionalGet`](./site-config.md) does on the fetching
+side, and for the same reason. A consumer asking hourly for a guide that changes
+nightly spends twenty-three of those asks receiving a document it already has.
+
+```sh
+epg serve                          # http://127.0.0.1:8080/guide.xml
+epg serve --port 9000 --host 0.0.0.0
+epg serve --serve-path /xmltv.xml
+```
+
+```
+GET /guide.xml → 200 in 412ms
+GET /guide.xml → 304 in 1ms
+```
+
+That second line is the point. A `304 Not Modified` costs a header instead of a
+merge, and `--reporter text -v` shows which of the two a poll got.
+
+**What decides it.** A guide is a stream, so its bytes cannot be hashed without
+buffering the document this package exists not to buffer. The cache answers
+instead: the newest `grabbedAt` across the window, with how many entries are in
+it. That reading is metadata only: the same lookups a merge *begins* with, and
+none of the payload reads, parsing or serializing that follow. It is worked out
+at most once a second (`revalidateMs`), and once for however many polls arrive
+together.
+
+The one thing it cannot see is a channel that was not in the window when the
+reading was taken: the entries are looked up by the channel list already in
+hand, so a grab that adds a channel and refreshes nothing else writes a key
+nobody asks about. The list is therefore resolved again when the fingerprint
+moves, and in any case once its `sitesMaxAgeMs` (ten minutes) is up — a ceiling
+on how long a new channel can stay invisible, without letting a poll drive the
+request that resolving a fetched channel list can mean.
+
+**`SIGHUP` skips the wait.** The ceiling is a guess at how long a new channel
+may stay unseen; `kill -HUP` is you saying you know:
+
+```sh
+epg serve &
+epg grab              # which adds a channel
+kill -HUP %1          # served from the next request on, rather than in ten minutes
+```
+
+It asks a question rather than asserting an answer. If resolving finds the same
+channels the guide is unchanged, the ETag is the one it had, and a poller still
+gets its `304` — so a stray signal costs nothing. Every other command keeps what
+`SIGHUP` has always meant: a grab whose terminal closed still stops.
+
+It does not re-read the config file. Adding a *site*, or changing `days`, still
+needs a restart.
+
+What the ceiling costs depends on how a site gives its channels, and the
+difference is worth knowing before leaving a server up for a fortnight:
+
+| `channels` | what resolving again does | how a new channel appears |
+|---|---|---|
+| an array | returns it — free | only by editing the config, which means restarting anyway |
+| a function with [`cacheChannels`](./site-config.md#a-channel-list-that-has-to-be-fetched) | reads the list the grab wrote to the cache; no request | within `sitesMaxAgeMs`, or at once on `SIGHUP` |
+| a function without it | **asks the source**, every time the ceiling is reached | the same, at the price of a round trip |
+
+The last row is the one to avoid on a long-lived server: an hourly poller turns
+into a channel-list request per site per poll, where a grab makes one a day.
+`cacheChannels` is the answer — the grab writes the list, `serve` reads it, and
+the ceiling costs a cache lookup instead. One wrinkle even then: a stored list
+older than `cacheChannels`'s own max age is refetched by whoever asks for it
+next, `serve` included, so a server left running while the grabs stop still asks
+once a day.
+
+The guide streams straight into the response, so nothing is held in memory; a
+consumer that hangs up mid-guide stops the merge feeding it, and is reported as
+a disconnect rather than a failure — a reader that has seen enough, a proxy that
+timed out or a closed tab is not something to be paged about.
+
+**Behind a reverse proxy**, idle connections are held for 65 seconds. Node's own
+default is 5, which is *below* the 60 nginx and Traefik keep, and that ordering
+is what produces the intermittent `502` nobody can reproduce: the proxy sends a
+request down a pooled socket at the moment Node is tearing it down. Holding
+longer means the proxy is always the one to decide a connection is finished.
+
+**For a browser**, set `serve.cors` — `true` for any origin, or one origin to
+allow only it. It is off by default because loopback is not the boundary it
+looks like: a page open in a browser on this machine can reach `127.0.0.1`, so
+allowing every origin would publish the channel list that binding to loopback
+declines to. Turning it on does the whole job rather than the one header —
+`OPTIONS` is answered, `If-None-Match` is allowed through, and `ETag` is exposed,
+without which a browser cannot read the validator and no conditional GET happens
+at all.
+
+`compress` (`gzip` by default) is used when the request's `Accept-Encoding` names it, and
+`concurrency` (2) bounds how many guides are generated at once — a slot is held
+for the whole response, a slow consumer included, since a merge reads the whole
+cache and a burst of polls that each started one would make a cheap poll the
+most expensive thing on the machine.
+
+**It binds to loopback.** A guide is not a secret, but which sites you grab and
+which channels you watch is not nothing, and a command that listened on every
+interface because a flag was left off would be the wrong default to have chosen
+once. `--host 0.0.0.0` is one word, and is a decision.
+
+`SIGINT` or `SIGTERM` stops it, and it exits **0**: a server that was asked to
+stop did what it was asked, so this is not the **130** a cancelled grab answers
+with. `SIGHUP` reloads rather than stops, as [above](#serving-the-guide). It
+does not grab — it serves what is in the cache, so run `epg grab` on whatever
+schedule suits and leave this listening.
+
+`serveGuide(config, options)` is the same thing as a library, returning
+`{ url, port, reload, close, closed }` — see [the API reference](./api.md).
+
+### Validating a guide
+
+`epg validate` reads a guide and says what is wrong with it — the config's own
+`output` by default, or a file named on the command line. A `.gz`, `.br` or
+`.zst` name is decompressed on the way in, since that is what the name promised.
+
+```sh
+epg validate                       # the guide this config writes
+epg validate public/epg.xml.gz     # or any other
+epg validate --format json         # one document for CI to read
+epg validate --strict              # warnings count as failures too
+```
+
+```
+guide.xml — 200 channels, 33,600 programmes
+
+  error   unknown-channel (14): a <programme> names a channel no <channel> describes
+      sport2.example
+      film4.example
+  warning extensions (67,210): a provider extension, which no DTD describes — extensions: false removes them
+      attribute uniqueID on <programme>
+      element lcn on <channel>
+
+14 errors, 67,210 warnings
+```
+
+It exits **1** when there is an error — or any warning, under `--strict`.
+
+Findings are grouped **by rule, not by occurrence**: a guide where every
+programme carries an extension is one line with a count, not a hundred thousand
+lines. The names under each are examples, deduplicated and capped, so a report
+stays the same size whatever the guide's — and so does the memory reading it: a
+41 MB guide with 336,000 programmes validates in the same 8 MiB heap a 10 MB one
+does.
+
+A guide named on the command line needs **no config**: `epg validate
+some/guide.xml` works in a directory with no project in it. Without a name it is
+the config's `output`, and the config is then exactly what says where that is.
+
+**`--format` is not `--reporter`.** They answer different questions.
+`--format` is the shape of this command's output — one document, written once,
+about a file that already exists, which is what a CI step wants: an `ok` to
+branch on and a list to print. `--reporter` is how a *run* narrates itself while
+it works, a stream of events with no end until the run has one. `validate` reads
+a file rather than running anything, so `--reporter` has nothing to say about
+it.
+
+| severity | what it means |
+|---|---|
+| `error` | the guide is wrong: a `<programme>` naming a channel nothing describes, two programmes on one channel on at the same moment, a `<channel>` with no `<display-name>`, two channels sharing an id, a programme that stops before it starts, or a document that ends mid-element |
+| `warning` | the parser found something and coped: a dropped attribute, a duplicated element, markup it skipped — and [provider extensions](#provider-extensions), which are deliberate and are what `--no-extensions` removes |
+
+Two programmes overlap when one starts strictly before the other has stopped.
+Touching is not overlapping: the DTD makes a programme a half-closed interval —
+on at its start, off just before its stop — so 11:00–12:00 and 12:00–13:00 do
+not clash "not even for a moment". It is the constraint the DTD describes and
+then says it has no way to express, which is why it lives here; a merge's
+[`clipOverlaps`](#cleaning-up-the-output) is what keeps guides *this* package
+writes clear of it.
+
+What it does **not** check is element *order*. Parsing produces a model, and a
+model has no order, so `<desc>` before `<title>` is invisible here. For that,
+`xmllint --valid` beside a copy of `xmltv.dtd` is the tool — and a guide written
+with `--no-extensions` is what makes that check pass.
 
 ### Allowing some of the guide to be missing
 

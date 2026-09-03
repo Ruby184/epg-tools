@@ -55,6 +55,10 @@
       "types": "./dist/merge/main.d.ts",
       "import": "./dist/merge/main.js"
     },
+    "./serve": {
+      "types": "./dist/serve/main.d.ts",
+      "import": "./dist/serve/main.js"
+    },
     "./tv-grab": {
       "types": "./dist/tv-grab/main.d.ts",
       "import": "./dist/tv-grab/main.js"

@@ -112,7 +112,7 @@ the call site — `EVENT_KINDS` is the whole table, and it is the whole answer t
 | group | types |
 |---|---|
 | the run | `run:cancelled`, `grab:done` |
-| a site | `site:started`, `site:done`, `site:failed`, `site:note`, `site:warning` |
+| a site | `site:started`, `site:done`, `site:failed`, `site:note`, `site:warning` (the last two carrying whatever [fields the site attached](./site-config.md#saying-something)) |
 | one channel-day | `entry:cached`, `entry:fetched`, `entry:appended`, `entry:unchanged`, `entry:failed` |
 | one request | `request:started`, `request:done` (with `ms`), `request:failed` |
 | a whole-document source | `stream:gaps`, `stream:ignored` |
@@ -232,6 +232,57 @@ filter decides one at a time. The cache keeps everything either way, so two
 documents come out of one grab — see [leaving extensions
 out](./xmltv.md#leaving-extensions-out).
 
+## Serving a guide
+
+`serveGuide(config, options)` is `guideStream` behind an HTTP server that
+answers conditionally, for a consumer that polls:
+
+```ts
+import { serveGuide } from 'epg-tools';
+
+const server = await serveGuide(config, { port: 8080 });
+
+console.log(`serving ${server.url}`);
+await server.closed;          // resolves when it stops
+```
+
+It resolves once listening, and gives back `{ url, port, reload, close, closed }`.
+`options` takes `port`, `host`, `path`, `compress`, `cors`, `concurrency`,
+`keepAliveMs`, `revalidateMs`, `sitesMaxAgeMs`, `reloadOn`, and the `signal`,
+`reporter`, `now`, `offset` and `cache` a run takes — a `cache` handed in stays
+the caller's, and one it opened is closed by `close()`.
+
+The validator is the cache's, not the document's: a guide is a generator, so
+hashing its bytes would mean buffering it. What is read per poll is the window's
+metadata — the same lookups a merge begins with, without the payload reads and
+serializing that follow — at most once per `revalidateMs`, and once for however
+many polls arrive together. Those lookups are keyed by the channel list in hand,
+which is re-resolved when the fingerprint moves and at least every
+`sitesMaxAgeMs` (ten minutes), so that a grab which only adds a channel is not
+invisible until midnight. See [serving the
+guide](./configuration.md#serving-the-guide) for what that costs and saves.
+
+`reload()` resolves the channel lists again on the next poll, whatever those
+clocks say — the ceiling is a guess, and this is the caller saying they know. It
+is lazy (it marks; the next request does the work) and it asserts nothing: if
+resolving finds the same channels, the ETag is unchanged and pollers still get
+`304`s.
+
+`reloadOn` is where that comes from as an event — the repeatable counterpart to
+`signal`, which fires once and is over:
+
+```ts
+const reloadOn = new EventTarget();
+
+await serveGuide(config, { reloadOn });
+reloadOn.dispatchEvent(new Event('reload', { cancelable: true })); // false: taken
+```
+
+The listener cancels the event, which is how a dispatcher learns somebody acted
+on it. That is what lets the `epg` bin point `SIGHUP` at one target for every
+command and still leave `SIGHUP` meaning what it always did for the commands
+that end by themselves.
+
 ## Entry points
 
 ```ts
@@ -240,6 +291,7 @@ import { parseXmltvFile, writeXmltvStream } from 'epg-tools/xmltv';
 import { CacheManager, FsNdjsonCacheDriver, isStale } from 'epg-tools/cache';
 import { grab, resolveChannels, siteHttp } from 'epg-tools/grabber';
 import { generateGuide, writeGuide, mergeProgrammes } from 'epg-tools/merge';
+import { serveGuide } from 'epg-tools/serve';
 import { runXmltvGrabber, defineCapability } from 'epg-tools/tv-grab';
 ```
 
@@ -281,6 +333,7 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 - **Builders*** — `ProgrammeBuilder`, `ChannelBuilder`, `XmltvDocumentBuilder`
 - **Dates** — `parseXmltvDate`, `formatXmltvDate`, `xmltvDate`, `getXmltvOffset`, `setXmltvOffset`, `getXmltvPrecision`, `setXmltvPrecision`, `XMLTV_OFFSET`, `XMLTV_PRECISION`, `XmltvDateError`
 - **Zones** — `zonedXmltvDate`, `xmltvZone`, `setXmltvZone`, `xmltvZoneOffset` — see [named zones](./xmltv.md#named-zones)
+- **Validate** — `validateXmltv` — see [validating a guide](./configuration.md#validating-a-guide)
 - **Other** — `escapeXml`
 
 `*` this subpath only — not re-exported from the root.
@@ -567,6 +620,13 @@ the config: `siteConcurrency`, how many sites resolve a fetched channel list at
 once, and `readAhead` (from `localConcurrency`, default 16), how many
 channel-days are read from the cache ahead of the writer. `readAhead: 1` reads
 strictly one at a time.
+
+### `epg-tools/serve`
+
+`serveGuide` and the `GuideServer` / `ServeOptions` / `EpgServeConfig` types,
+with `DEFAULT_SERVE_PORT`, `DEFAULT_SERVE_HOST`, `DEFAULT_SERVE_PATH` and
+`DEFAULT_REVALIDATE_MS`. Loaded only when named, so nothing else pulls in
+`node:http`.
 
 ### `epg-tools/tv-grab`
 

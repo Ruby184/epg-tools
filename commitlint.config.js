@@ -108,6 +108,7 @@ export default {
         'grabber',
         'cache',
         'merge',
+        'serve',
         'tv-grab',
         'cli',
         'core',

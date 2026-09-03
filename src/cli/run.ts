@@ -23,6 +23,9 @@ import { silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
 import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
 import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
+import { renderReport, REPORT_FORMATS, validateFile } from './validate.js';
+import type { ReportFormat } from './validate.js';
+import type { CompressionFormat } from '../core/output.js';
 import type { GrabSummary } from '../grabber/types.js';
 
 export const USAGE = `Usage: epg <command> [options]
@@ -31,6 +34,9 @@ Commands:
   build         Grab all sites into the cache, then generate the merged guide (default)
   grab          Grab all sites into the cache only
   merge         Generate the merged guide from the cache only
+  validate      Read a guide and report what is wrong with it
+  serve         Hold the merged guide behind HTTP for a consumer that polls
+  try           Put one site, channel and day through, showing every step
   prune         Remove cached days older than a given day
   init-grabber  Write a tv_grab_* executable for the config, next to it
 
@@ -58,6 +64,18 @@ Options:
       --failures <how>  block (default) — one capped block at the end; or inline
   -V, --version         Print this package's version
   -h, --help            Show this help
+
+try options:
+      --raw             Print the whole payload, not the first 2000 characters
+
+serve options:
+      --port <n>        Port to listen on (default: 8080)
+      --host <h>        Address to bind (default: 127.0.0.1 — loopback only)
+      --serve-path <p>  Path that answers with the guide (default: /guide.xml)
+
+validate options:
+      --format <how>    text (default) or json
+      --strict          Count warnings as failures too
 
 init-grabber options:
       --description <s> What --description prints (default: the country and name)
@@ -133,7 +151,7 @@ const EXIT_CANCELLED = 130;
 
 const CONFIG_CANDIDATES = ['epg.config.ts', 'epg.config.js', 'epg.config.mjs'];
 
-const COMMANDS = ['build', 'grab', 'merge', 'prune', 'init-grabber'];
+const COMMANDS = ['build', 'grab', 'merge', 'serve', 'try', 'validate', 'prune', 'init-grabber'];
 
 export interface CliOptions {
   /** Defaults to `process.stdout` — progress, and the help. */
@@ -146,6 +164,17 @@ export interface CliOptions {
    * test can run.
    */
   signal?: AbortSignal;
+  /**
+   * Reload on demand — the repeatable counterpart to {@link signal}, which
+   * fires once and is over. The bin points `SIGHUP` at one.
+   *
+   * A command with something to reload listens for `'reload'` and calls
+   * `preventDefault()` to say it took it; today that is `serve` and nothing
+   * else. A command that ends by itself has nothing to reload, leaves the event
+   * alone, and the bin then does what `SIGHUP` has always meant — which is why
+   * this is handed in rather than the bin deciding from what was typed.
+   */
+  reloadOn?: EventTarget;
 }
 
 /** Anything the user can be told about and can fix. Not for programming errors. */
@@ -243,6 +272,43 @@ async function writeGrabber(
 }
 
 /**
+ * What a config says its guide was written compressed with, if it says.
+ *
+ * `undefined` leaves the extension to decide, exactly as the writing side does
+ * when `compress` is absent.
+ */
+function compressionOf(config: EpgConfig): CompressionFormat | false | undefined {
+  const compress = config.compress;
+
+  if (compress === undefined || compress === false) {
+    return compress;
+  }
+
+  return typeof compress === 'object' ? compress.format : compress;
+}
+
+/** `epg validate [file]` — read a guide, write the report, say whether it passed. */
+async function validateGuide(
+  file: string,
+  values: { format?: ReportFormat; strict?: boolean },
+  stdout: Writable,
+  signal: AbortSignal | undefined,
+  compression?: CompressionFormat | false,
+): Promise<number> {
+  const report = await validateFile(file, {
+    ...(values.strict === undefined ? {} : { strict: values.strict }),
+    ...(signal ? { signal } : {}),
+    ...(compression === undefined ? {} : { compression }),
+  });
+
+  // On stdout, both formats: the report *is* this command's output, the way a
+  // guide is `merge`'s, so it goes where a shell can redirect it.
+  await writeFlushed(stdout, renderReport(report, file, values.format ?? 'text'));
+
+  return report.ok ? 0 : EXIT_FAILED;
+}
+
+/**
  * Run the `epg` command line. Resolves to the exit code; nothing here reads or
  * writes `process`, so a test drives it exactly as a shell does.
  */
@@ -251,7 +317,7 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
   const stderr = options.stderr ?? process.stderr;
 
   try {
-    return await execute(argv, stdout, stderr, options.signal);
+    return await execute(argv, stdout, stderr, options);
   } catch (error) {
     // Whatever the interruption surfaced as — a merge's own abort, a request
     // dropped mid-flight — a cancelled run is not a failure to describe.
@@ -292,8 +358,10 @@ async function execute(
   argv: string[],
   stdout: Writable,
   stderr: Writable,
-  signal: AbortSignal | undefined,
+  options: CliOptions,
 ): Promise<number> {
+  const { signal } = options;
+
   const { values, positionals } = parseOptions(
     argv,
     {
@@ -310,6 +378,12 @@ async function execute(
       'cache-driver': { type: 'string', choices: CACHE_DRIVER_NAMES },
       refresh: { type: 'boolean' },
       'allow-missing': { type: 'string', transform: allowance },
+      port: { type: 'number', min: 0, max: 65_535 },
+      host: { type: 'string' },
+      'serve-path': { type: 'string' },
+      raw: { type: 'boolean' },
+      format: { type: 'string', choices: REPORT_FORMATS },
+      strict: { type: 'boolean' },
       // A list of names, or `--no-extensions` for none of them. A config can
       // point at a filter of its own by passing a function, which is not
       // something a command line can do.
@@ -345,6 +419,14 @@ async function execute(
     throw new UsageError(`Unknown command: ${command}`);
   }
 
+  // Before the config is even looked for: a guide named on the command line is
+  // the whole of what this needs, and refusing to read one because there is no
+  // project in the working directory would be absurd. Without a name it is the
+  // config's own `output`, and the config is then exactly what says where.
+  if (command === 'validate' && positionals[1] !== undefined) {
+    return validateGuide(positionals[1], values, stdout, signal);
+  }
+
   const configFile = await findConfig(values.config);
 
   // Before the config is *loaded*: scaffolding only needs to know where it is,
@@ -377,8 +459,32 @@ async function execute(
     config = { ...config, extensions: values.extensions ?? false };
   }
 
+  if (
+    values.port !== undefined ||
+    values.host !== undefined ||
+    values['serve-path'] !== undefined
+  ) {
+    config = {
+      ...config,
+      serve: {
+        ...config.serve,
+        ...(values.port !== undefined ? { port: values.port } : {}),
+        ...(values.host !== undefined ? { host: values.host } : {}),
+        ...(values['serve-path'] !== undefined ? { path: values['serve-path'] } : {}),
+      },
+    };
+  }
+
   if (values['allow-missing'] !== undefined) {
     config = { ...config, allowMissing: values['allow-missing'] };
+  }
+
+  // Up front, whichever it came from. `fellShort` only resolves it when
+  // something has already failed, so a config with `allowMissing: '5 percent'`
+  // in it would otherwise throw after the guide was written, on the nights a
+  // day happened to be lost and not on the others.
+  if (config.allowMissing !== undefined) {
+    resolveAllowance(config.allowMissing, 'allowMissing');
   }
 
   if (values.refresh) {
@@ -438,7 +544,54 @@ async function execute(
 
       return 0;
     }
-    default: {
+    case 'validate':
+      // Only the no-file form reaches here; the other is answered above, before
+      // a config was needed. Validating what this project writes is what the
+      // command is usually for, so its `output` is the default.
+      //
+      // With the config's own `compress`, which outranks the extension the
+      // same way it does on the way out — otherwise `output: 'guide.xml'`
+      // plus `compress: 'gzip'` would be read back as XML it is not.
+      return validateGuide(String(config.output), values, stdout, signal, compressionOf(config));
+    case 'serve': {
+      const { serveGuide } = await import('../serve/main.js');
+      // `runOptions` already carries the reporter, the offset and the signal —
+      // the same three a grab or a merge is given, and for the same reasons.
+      // The reload target goes with them, and only here: it is the one command
+      // that can act on one, which is what keeps `SIGHUP` meaning what it
+      // always did everywhere else.
+      const server = await serveGuide(config, {
+        ...runOptions,
+        ...(options.reloadOn ? { reloadOn: options.reloadOn } : {}),
+      });
+
+      // The one command that outlives its own work: everything else has
+      // finished by the time it returns, and this has only started.
+      await server.closed;
+
+      // A server that was asked to stop did what it was asked. Nothing failed,
+      // and nothing was left half done — which is why this is 0 and not the
+      // 130 a cancelled grab answers with.
+      return 0;
+    }
+    case 'try': {
+      const [, siteName, channelName, when] = positionals;
+
+      if (siteName === undefined || channelName === undefined) {
+        throw new UsageError(
+          'try needs a site and a channel, e.g. epg try example.tv one.example.tv',
+        );
+      }
+
+      const { tryChannelDay } = await import('./try.js');
+
+      return tryChannelDay(config, siteName, channelName, stdout, {
+        ...(when === undefined ? {} : { day: dayString(when, 'day') }),
+        ...(values.raw === undefined ? {} : { raw: values.raw }),
+        ...(signal ? { signal } : {}),
+      });
+    }
+    case 'prune': {
       const before = values.before ?? toDayString(new Date());
 
       await using cache = await createCacheStore(config, signal);
@@ -447,6 +600,14 @@ async function execute(
       emit({ type: 'prune:done', removed, before });
 
       return 0;
+    }
+    default: {
+      // Unreachable: `COMMANDS` is checked above, so a command with no case
+      // here fails to compile rather than silently pruning the cache — which
+      // is what the old `default:` would have done with it.
+      const named: never = command as never;
+
+      throw new UsageError(`Unknown command: ${String(named)}`);
     }
   }
 }

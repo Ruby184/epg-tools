@@ -270,8 +270,13 @@ const BROTLI_QUALITY = 7;
  * One option, three scales, and no pretence otherwise: 0–9 for gzip, 0–11 for
  * brotli, 1–22 for zstd. Remapping them onto a shared range would only mean
  * nobody could ask their format for what it actually offers.
+ *
+ * Exported because a write to a file is not the only place a guide is
+ * compressed: `epg serve` negotiates one over HTTP and needs the same stream,
+ * built the same way, so a served guide and a written one cannot differ in what
+ * `{ level }` means.
  */
-function compressor(format: CompressionFormat, level: number | undefined): Transform {
+export function compressor(format: CompressionFormat, level?: number): Transform {
   switch (format) {
     case 'gzip':
       return zlib.createGzip({ level });

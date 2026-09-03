@@ -12,6 +12,12 @@ Use `defineSiteConfig` rather than a bare object literal — it infers the
 batching mode (which types `request`'s context and decides which size caps are
 accepted) and the type of a channel's `data` from what `channels` returns.
 
+While writing one, `epg try <site> <channel>` puts a single channel-day through
+the whole path and shows the request that went out, the payload that came back
+and the programmes it parsed to — see [trying one
+channel-day](./configuration.md#trying-one-channel-day). It writes nothing, so
+it cannot leave a half-built site's output in the cache.
+
 - [Reference](#reference)
 - [Channels](#channels)
   - [A channel list that has to be fetched](#a-channel-list-that-has-to-be-fetched)
@@ -412,6 +418,28 @@ The difference between them is what survives a run asked to be quiet:
 |---|---|---|
 | `log` | the run's default verbosity | progress — what is being asked for, what came back |
 | `warn` | always, down to errors only | a signal — the source has changed shape, something was skipped |
+
+Both take a second argument for the **fields** behind the sentence:
+
+```ts
+log('read the lineup', { page: 2, of: 5 });
+warn('a channel moved', { from: 'old.id', to: 'new.id' });
+```
+
+```
+[example.tv] read the lineup { page: 2, of: 5 }
+```
+
+The message is what a person reads; the fields are what a machine does.
+`--reporter json` carries them as an object on the event, so a consumer gets the
+ids and the counts as fields rather than parsing them back out of prose — which
+is the reason to attach them rather than writing them into the sentence.
+
+A text reporter renders them with Node's own `inspect`, so a `Map`, a `Set`, a
+`Date` or a cycle shows as itself. The JSON one has to produce JSON, so it uses
+`JSON.stringify` and its limits apply there — a `Set` becomes `{}`, and anything
+it cannot serialize at all is replaced by `"[unserializable]"` rather than
+ending the run.
 
 Neither is `console.log`, and that is the point: there is no `console` call
 anywhere in this package, because a `tv_grab_*` writes its guide to stdout and

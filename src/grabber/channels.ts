@@ -1,11 +1,12 @@
 import ky, { type KyInstance } from 'ky';
 import PQueue from 'p-queue';
 import type { CacheStore } from '../cache/types.js';
+import type { Emit } from '../core/events.js';
 import { ChannelBuilder } from '../xmltv/builder.js';
 import type { XmltvChannel } from '../xmltv/types.js';
 import { revalidationHooks } from './revalidate.js';
 import { channelsMaxAgeMs, SiteStateHandle } from './state.js';
-import type { AnySiteConfig, GrabberChannel } from './types.js';
+import type { AnySiteConfig, GrabberChannel, SiteSays } from './types.js';
 
 /**
  * A site's own HTTP client, built from its `ky` options.
@@ -51,7 +52,18 @@ export interface ResolveChannelsOptions {
   refresh?: boolean;
   /** "Now", for reckoning how old a cached list is. Defaults to the real one. */
   now?: Date;
+  /**
+   * Where the site's own `log` and `warn` go.
+   *
+   * Without it they are dropped, which is what a caller with nowhere to put
+   * them wants — `--list-channels` writes a document to stdout and has no room
+   * for a running commentary in the middle of it.
+   */
+  says?: SiteSays;
 }
+
+/** Said to nobody, for a caller that has nowhere to put it. */
+const SILENT: SiteSays = { log: () => {}, warn: () => {} };
 
 /**
  * A site's channels, whichever form it declares them in.
@@ -85,6 +97,7 @@ export async function resolveChannels(
     source({
       http: options.http ?? siteHttp(config, options.signal),
       ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.says ?? SILENT),
     });
 
   const maxAgeMs = channelsMaxAgeMs(config);
@@ -141,6 +154,13 @@ export async function resolveSites(
     /** Fetch every list whatever is cached — `--refresh`. */
     refresh?: boolean;
     now?: Date;
+    /**
+     * Where each site's own `log` and `warn` go, as the events they are.
+     *
+     * An emitter rather than a `says` pair, because there is one per site and
+     * only the name differs — the same two events a run's own contexts send.
+     */
+    emit?: Emit;
   } = {},
 ): Promise<AnySiteConfig[]> {
   const queue = new PQueue({ concurrency: Math.max(1, options.concurrency ?? sites.length) });
@@ -150,11 +170,32 @@ export async function resolveSites(
     sites.map((site) =>
       queue.add(async (): Promise<AnySiteConfig> => {
         const state = store === undefined ? undefined : SiteStateHandle.open(store, site.site);
+        const { emit } = options;
         const channels = await resolveChannels(site, {
           ...(options.signal ? { signal: options.signal } : {}),
           ...(state ? { state } : {}),
           ...(options.refresh === undefined ? {} : { refresh: options.refresh }),
           ...(options.now ? { now: options.now } : {}),
+          ...(emit
+            ? {
+                says: {
+                  log: (message, data) =>
+                    emit({
+                      type: 'site:note',
+                      site: site.site,
+                      message,
+                      ...(data ? { data } : {}),
+                    }),
+                  warn: (message, data) =>
+                    emit({
+                      type: 'site:warning',
+                      site: site.site,
+                      message,
+                      ...(data ? { data } : {}),
+                    }),
+                },
+              }
+            : {}),
         });
 
         // Only a list that was fetched is one to write, and the handle knows

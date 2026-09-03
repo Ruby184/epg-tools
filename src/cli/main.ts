@@ -31,4 +31,31 @@ const stop = (name: string) => (): void => {
 process.on('SIGINT', stop('SIGINT'));
 process.on('SIGTERM', stop('SIGTERM'));
 
-process.exitCode = await runCli(process.argv.slice(2), { signal: controller.signal });
+/**
+ * Where a reload goes, for whichever command can take one — `epg serve`, and so
+ * far only it.
+ *
+ * `SIGHUP` means two different things depending on what is running. To a server
+ * it is "read your configuration again", which here is the channel lists: send
+ * one after adding a channel rather than waiting out `sitesMaxAgeMs` or
+ * restarting. To anything that ends by itself it means the terminal went away,
+ * and the default is to end with it.
+ *
+ * So the event is cancelable and the fallback is the default: a command that
+ * took the reload says so by cancelling, and one that did not gets what
+ * `SIGHUP` has always given it. 129 is 128 + SIGHUP, which is what a shell
+ * reports for a process the signal killed — the same arithmetic as the 130 for
+ * `SIGINT` above.
+ */
+const reloadOn = new EventTarget();
+
+process.on('SIGHUP', () => {
+  if (reloadOn.dispatchEvent(new Event('reload', { cancelable: true }))) {
+    process.exit(129);
+  }
+});
+
+process.exitCode = await runCli(process.argv.slice(2), {
+  signal: controller.signal,
+  reloadOn,
+});

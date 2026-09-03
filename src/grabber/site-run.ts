@@ -20,11 +20,11 @@ import type { KyInstance } from 'ky';
 import PQueue from 'p-queue';
 import { isStale } from '../cache/main.js';
 import type { CacheStore } from '../cache/types.js';
-import { dayToDate } from '../core/days.js';
 import type { Emit, GrabCounts } from '../core/events.js';
 import { ProgrammeBuilder } from '../xmltv/builder.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import { resolveChannels } from './channels.js';
+import { parseContext, requestContext, streamContext, type ContextDeps } from './context.js';
 import { sitePacing } from './pacing.js';
 import { planRequests, type Pair, type Request } from './planner.js';
 import {
@@ -41,15 +41,11 @@ import type {
   AnySiteConfig,
   BaseRequestContext,
   BatchingOption,
-  BatchMode,
-  ChannelsDaysRequestContext,
   GrabberChannel,
   GrabOptions,
   ParsedProgramme,
-  RequestContextFor,
   SiteConfig,
   SiteState,
-  StreamContext,
   StreamSiteConfig,
 } from './types.js';
 
@@ -193,8 +189,10 @@ export class SiteRun {
     this.#revalidates = config.conditionalGet === true;
     this.#state = SiteStateHandle.open(run.cache, resolved.site);
     this.#says = {
-      log: (message: string) => run.emit({ type: 'site:note', site: resolved.site, message }),
-      warn: (message: string) => run.emit({ type: 'site:warning', site: resolved.site, message }),
+      log: (message, data) =>
+        run.emit({ type: 'site:note', site: resolved.site, message, ...(data ? { data } : {}) }),
+      warn: (message, data) =>
+        run.emit({ type: 'site:warning', site: resolved.site, message, ...(data ? { data } : {}) }),
     };
 
     // The queue and the client together: the signal rides on the instance, so
@@ -307,6 +305,9 @@ export class SiteRun {
     // work in it.
     this.#channels = await enqueue(this.#requests, ({ signal }) =>
       resolveChannels(this.#config, {
+        // The same pair its requests and parses get: a channel list that has to
+        // be fetched is the first place a site has anything to say.
+        says: this.#says,
         http: this.#http,
         ...(signal ? { signal } : {}),
         state: this.#state,
@@ -449,73 +450,13 @@ export class SiteRun {
     };
   }
 
-  /** What every context carries, whichever shape the rest of it takes. */
-  #contextBase(request: Request, signal?: AbortSignal): BaseRequestContext {
+  /** Everything a context is built from that this run happens to own. */
+  #deps(signal?: AbortSignal): ContextDeps {
     return {
-      channelDays: request.pairs.map(({ channel, day, cached }) => ({
-        channel,
-        day,
-        date: dayToDate(day),
-        ...(cached === undefined ? {} : { cached }),
-      })),
       http: this.#http,
       state: this.#siteState,
-      ...this.#says,
+      says: this.#says,
       ...(signal ? { signal } : {}),
-    };
-  }
-
-  /**
-   * The days a request covers, as a context that batches them says them.
-   *
-   * A Date of its own everywhere one is handed out, `from` and `to` included.
-   * They are mutable — `Object.freeze` does not help, a Date keeps its value in
-   * an internal slot rather than a property — so the hazard worth removing is not
-   * that a site can change one, it is that changing one would silently change the
-   * others: `from` and `dates[0]` as the same object is a bug nobody would find.
-   */
-  #manyDays(request: Request): Pick<ChannelsDaysRequestContext, 'days' | 'dates' | 'from' | 'to'> {
-    return {
-      days: request.days,
-      dates: request.days.map(dayToDate),
-      from: dayToDate(request.days[0]!),
-      to: dayToDate(request.days[request.days.length - 1]!),
-    };
-  }
-
-  /**
-   * The context for one request, in the shape this site's mode declares — plus
-   * the channel-days it is for, which the plan already worked out.
-   */
-  #contextFor(request: Request, signal?: AbortSignal): RequestContextFor<BatchMode> {
-    const { manyChannels, manyDays } = this.#resolved.batching;
-    const context = {
-      ...this.#contextBase(request, signal),
-      ...(manyChannels ? { channels: request.channels } : { channel: request.channels[0]! }),
-      ...(manyDays
-        ? this.#manyDays(request)
-        : { day: request.days[0]!, date: dayToDate(request.days[0]!) }),
-    };
-
-    // The mode and this shape were chosen together right here; the compiler
-    // cannot follow that through the conditional type.
-    return context as RequestContextFor<BatchMode>;
-  }
-
-  /**
-   * The context a stream is given: every channel and day it is being asked
-   * about, and somewhere to say what it noticed on the way through.
-   *
-   * Built rather than cast from {@link #contextFor}'s: a stream site always
-   * resolves to `both`, so this shape is not one of several and needs no
-   * assertion to say which — a member added to `StreamContext` fails to compile
-   * here instead of being quietly missing at runtime.
-   */
-  #streamContextFor(request: Request, signal?: AbortSignal): StreamContext {
-    return {
-      ...this.#contextBase(request, signal),
-      ...this.#manyDays(request),
-      channels: request.channels,
     };
   }
 
@@ -639,30 +580,15 @@ export class SiteRun {
     return enqueue(
       localWork,
       async ({ signal: taskSignal }) => {
-        const parsed = await config.parseDay({
-          channel,
-          date: dayToDate(day),
-          day,
-          payload,
-          http: this.#http,
-          state: this.#siteState,
-          ...this.#says,
-          ...(taskSignal ? { signal: taskSignal } : {}),
-          // A request of the parse's own goes through the site's queue, like the
-          // request being parsed did — ahead of the planned ones, so a channel-day
-          // in hand is finished rather than joined by another.
-          paced: (task) => enqueue(this.#requests, task, { priority: 1 }),
-          // Bound to the channel-day being parsed, so a parse repeats neither the
-          // id nor the language on every programme it builds.
-          programme: (start, title, options) =>
-            new ProgrammeBuilder({
-              channel: channel.xmltvId,
-              start,
-              title,
-              ...(channel.lang === undefined ? {} : { lang: channel.lang }),
-              ...options,
-            }),
-        });
+        const parsed = await config.parseDay(
+          parseContext(channel, day, payload, {
+            ...this.#deps(taskSignal),
+            // A request of the parse's own goes through the site's queue, like
+            // the request being parsed did — ahead of the planned ones, so a
+            // channel-day in hand is finished rather than joined by another.
+            paced: (task) => enqueue(this.#requests, task, { priority: 1 }),
+          }),
+        );
 
         await this.#persist(channel, day, parsed, taskSignal);
       },
@@ -817,7 +743,8 @@ export class SiteRun {
         // No ambient store for a site that never asks: the hooks are not even
         // installed, and an `AsyncLocalStorage` context per request is a real
         // cost for a `none`-batched site with one request per channel-day.
-        const fetch = (): Promise<unknown> => config.request(this.#contextFor(request, taskSignal));
+        const fetch = (): Promise<unknown> =>
+          config.request(requestContext(request, this.#resolved.batching, this.#deps(taskSignal)));
 
         return (this.#revalidates ? revalidation.run(asking, fetch) : fetch()).then((raw) => {
           this.#run.emit({
@@ -914,7 +841,9 @@ export class SiteRun {
         const began = Date.now();
 
         await revalidation.run(asking, async () => {
-          for await (const emission of config.stream(this.#streamContextFor(request, taskSignal))) {
+          for await (const emission of config.stream(
+            streamContext(request, this.#deps(taskSignal)),
+          )) {
             // Between emissions, which is as often as this has anything to say: a
             // cancelled run stops here rather than writing the rest of a document
             // nobody is waiting for.

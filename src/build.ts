@@ -325,6 +325,9 @@ export async function build(source: ConfigSource, options: RunOptions = {}): Pro
       sites: await resolveSites(config.sites, {
         ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
+        // What a site says while fetching its list, which happens here rather
+        // than inside either half — so without this it would be said nowhere.
+        emit: emitter(options),
         store: cache,
         // `--refresh` means ask the source, and a channel list is something the
         // source says.

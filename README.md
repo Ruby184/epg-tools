@@ -150,6 +150,9 @@ Then:
 epg build            # grab stale/missing days, then write the merged guide
 epg grab             # grab only
 epg merge            # write the guide from cache only
+epg serve            # hold the guide behind HTTP for a consumer that polls
+epg try <site> <ch>  # one channel-day: the request, the payload, the programmes
+epg validate         # read the guide and report what is wrong with it
 epg prune            # drop cached days older than today
 epg init-grabber tv_grab_sk_example   # write an XMLTV grabber for this config
 epg build -d 14 -o public/epg.xml

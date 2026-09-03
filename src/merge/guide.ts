@@ -125,6 +125,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   // with what it is about to read.
   const resolved = (
     await resolveSites(options.sites, {
+      emit,
       ...(options.siteConcurrency !== undefined ? { concurrency: options.siteConcurrency } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
       store: cache,

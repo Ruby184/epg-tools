@@ -17,6 +17,7 @@
  */
 
 import type { Writable } from 'node:stream';
+import { inspect } from 'node:util';
 import {
   atLevel,
   type EpgEvent,
@@ -134,7 +135,10 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       return `${at(event.site, prefix)}${counts(event)}`;
     case 'site:note':
     case 'site:warning':
-      return `${at(event.site, prefix)}${event.message}`;
+      // The fields go on the end rather than being left to the JSON reporter:
+      // a site author reaching for this instead of `console.log` is reading
+      // `--reporter text -v`, and would not otherwise see them at all.
+      return `${at(event.site, prefix)}${event.message}${said(event.data)}`;
     case 'entry:cached':
       return `${at(event.site, prefix)}${event.channelId} ${event.day}: fresh in cache, skipping`;
     case 'entry:fetched':
@@ -180,6 +184,22 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       return `merge: channel ${event.channelId} done`;
     case 'merge:done':
       return `Guide written to ${event.output}`;
+    case 'serve:started':
+      return `Serving the guide at ${event.url}`;
+    case 'serve:response':
+      // The status is the news: 304 is the poll that cost nothing, which is the
+      // whole point of answering conditionally, and a log that did not say so
+      // would leave nobody able to tell whether it was working.
+      return `${event.method} ${event.path} → ${event.status} in ${event.ms}ms`;
+    case 'serve:disconnected':
+      return `${event.path} → client gone after ${event.ms}ms`;
+    case 'serve:failed':
+      // Rendered here rather than collected as a `FailureEvent`: those are held
+      // back and flushed when the run ends, and a server's run ends when
+      // somebody stops it — possibly in a fortnight.
+      return `${event.path}: ${errorChain(event.error)}`;
+    case 'serve:stopped':
+      return 'Stopped serving';
     case 'prune:done':
       // One wording where there were two: a prune after a grab used to say
       // "Pruned N cached day(s) older than X" and `epg prune` "Pruned N cached
@@ -205,6 +225,39 @@ export function isFailure(event: EpgEvent): event is FailureEvent {
   return (
     event.type === 'entry:failed' || event.type === 'request:failed' || event.type === 'site:failed'
   );
+}
+
+/**
+ * `data` as one line, or nothing.
+ *
+ * `inspect` rather than `JSON.stringify`, because a site chooses what goes in
+ * here and this is the half that has to survive whatever that is: a cycle is
+ * `[Circular *1]` rather than a throw, and a `Map`, a `Set`, a `Date` or an
+ * `undefined` is shown as itself rather than dropped or turned into `{}`. A
+ * reporter runs synchronously in the middle of a grab, so a throw here would
+ * end a run over a log line.
+ *
+ * `breakLength: Infinity` is what keeps it one line, which is what a line-based
+ * reporter is.
+ */
+function said(data: Record<string, unknown> | undefined): string {
+  if (data === undefined) {
+    return '';
+  }
+
+  return ` ${inspect(data, { depth: 3, breakLength: Infinity, compact: true })}`;
+}
+
+/**
+ * The same for the JSON reporter, which cannot use `inspect` — its output has
+ * to parse — so it keeps `JSON.stringify` and its one failure mode.
+ */
+function asJson(value: unknown, indent?: number): string | undefined {
+  try {
+    return JSON.stringify(value, undefined, indent);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -393,7 +446,14 @@ export function jsonReporter(options: JsonReporterOptions): Reporter {
     const payload: Record<string, unknown> =
       'error' in event ? { ...event, error: errorJson(event.error) } : { ...event };
 
-    queueLine(stream, JSON.stringify(payload, undefined, pretty ? 2 : undefined));
+    const indent = pretty ? 2 : undefined;
+    // Rather than not at all: the event is still worth having, so what would
+    // not serialize is named in place of the value it stood for.
+    const line =
+      asJson(payload, indent) ??
+      JSON.stringify({ ...payload, data: '[unserializable]' }, undefined, indent);
+
+    queueLine(stream, line);
   };
 }
 
@@ -503,6 +563,9 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
       ...(counts.fromCache > 0 ? [`${counts.fromCache} cached`] : []),
       ...(counts.unchanged > 0 ? [`${counts.unchanged} unchanged`] : []),
       ...(counts.failed > 0 ? [`${counts.failed} failed`] : []),
+      // Said here too, so moving it out of `failed` does not make a site that
+      // answered nothing vanish from the line until the run is over.
+      ...(counts.sitesFailed > 0 ? [`${count(counts.sitesFailed, 'site')} answered nothing`] : []),
     ].join(' · ');
   };
 
@@ -548,10 +611,13 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
         counts.unchanged++;
         break;
       case 'entry:failed':
-      // A whole site counts once, as the summary counts it — without this the
-      // live line and `Grab done` disagreed about `failed`.
-      case 'site:failed':
         counts.failed++;
+        break;
+      // Not in `failed`: the summary counts a site that answered nothing in
+      // `sitesFailed` instead, and adding it here made the live line say
+      // `1 failed` where `Grab done` said `0 failed, 1 site answered nothing`.
+      case 'site:failed':
+        counts.sitesFailed++;
         break;
       case 'merge:channel':
         merging = true;
