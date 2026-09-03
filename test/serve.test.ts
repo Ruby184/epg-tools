@@ -4,7 +4,7 @@ import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/types.js';
 import type { EpgConfig } from '../src/config.js';
@@ -224,6 +224,139 @@ describe('serveGuide', () => {
 
     // Nothing is listening, so nothing cancels it.
     expect(reloadOn.dispatchEvent(new Event('reload', { cancelable: true }))).toBe(true);
+  });
+
+  it('calls a consumer hanging up a disconnect rather than a failure', async () => {
+    // A reader that has seen enough, a proxy that timed out, a tab that closed.
+    // Reported as a 500 it is an alarm about the ordinary — and a dashboard
+    // that pages somebody for a browser refresh gets muted, which is worse.
+    const ids = Array.from({ length: 2000 }, (_, i) => `c-${i}`);
+    const cache = cacheWith(
+      Object.fromEntries(
+        ids.map((id) => [
+          id,
+          Array.from({ length: 20 }, (_, h) => ({
+            channel: id,
+            start: new Date(new Date(`${DAY}T00:00:00.000Z`).getTime() + h * 3600000),
+            title: [{ value: `Show ${h} ${'x'.repeat(200)}` }],
+          })),
+        ]),
+      ),
+    );
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const report = collect();
+    const server = await serve(configFor(ids), cache, { reporter: report.reporter });
+    const url = new URL(server.url);
+
+    // A raw socket that never reads, cut mid-guide.
+    await new Promise<void>((resolve, reject) => {
+      const socket = connect(Number(url.port), url.hostname, () => {
+        socket.write(`GET ${url.pathname} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`);
+        setTimeout(() => {
+          socket.destroy();
+          resolve();
+        }, 150);
+      });
+
+      socket.on('error', reject);
+    });
+
+    await vi.waitFor(() => expect(report.of('serve:disconnected')).toHaveLength(1));
+
+    expect(report.of('serve:failed')).toEqual([]);
+    // And no 500 pinned on it either.
+    expect(report.of('serve:response').map((event) => event.status)).not.toContain(500);
+  });
+
+  it('says nothing to a browser unless asked to', async () => {
+    // Loopback is not the boundary it looks like: a page open in a browser on
+    // this machine can reach 127.0.0.1, so allowing every origin by default
+    // would publish the channel list the loopback default declines to.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const shut = await serve(configFor(['one']), cache);
+
+    expect((await fetch(shut.url)).headers.get('access-control-allow-origin')).toBeNull();
+    expect((await fetch(shut.url, { method: 'OPTIONS' })).status).toBe(405);
+  });
+
+  it('lets a browser read the guide, validators and all, when it is', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one']), cache, { cors: true });
+    const first = await fetch(server.url);
+
+    await first.text();
+
+    expect(first.headers.get('access-control-allow-origin')).toBe('*');
+    // Without this a browser hides the ETag from the page, and the conditional
+    // GET this server exists for cannot be made at all.
+    expect(first.headers.get('access-control-expose-headers')).toContain('ETag');
+
+    // `If-None-Match` is not a safelisted header, so a conditional GET from a
+    // page is preflighted — answered 405 before, which failed the fetch.
+    const preflight = await fetch(server.url, { method: 'OPTIONS' });
+
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-headers')).toContain('If-None-Match');
+
+    // And the 304 carries it too, or every revalidation reads as a failure.
+    const again = await fetch(server.url, {
+      headers: { 'if-none-match': first.headers.get('etag')! },
+    });
+
+    expect(again.status).toBe(304);
+    expect(again.headers.get('access-control-allow-origin')).toBe('*');
+  });
+
+  it('names one origin, and varies on it', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one']), cache, { cors: 'https://tv.example' });
+    const response = await fetch(server.url);
+
+    await response.text();
+
+    expect(response.headers.get('access-control-allow-origin')).toBe('https://tv.example');
+    // The answer now depends on who asked, so a cache between must not hand it
+    // to somebody else.
+    expect(response.headers.get('vary')).toContain('Origin');
+  });
+
+  it('holds an idle connection for as long as it was told to', async () => {
+    // The default is above the sixty seconds nginx and Traefik keep, because
+    // Node's own five is *below* them — and that ordering is what produces the
+    // intermittent 502 nobody can reproduce, when the proxy sends a request
+    // down a pooled socket at the moment Node is tearing it down. Asserted
+    // through a short one, since waiting out the real default is a minute.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one']), cache, { keepAliveMs: 250 });
+    const url = new URL(server.url);
+
+    const closedAfter = await new Promise<number>((resolve, reject) => {
+      const socket = connect(Number(url.port), url.hostname, () => {
+        socket.write(`GET ${url.pathname} HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n`);
+      });
+
+      let answered = 0;
+
+      socket.on('data', () => {
+        answered ||= Date.now();
+      });
+      // Held open after the response, then dropped by the server rather than
+      // by us — which is the setting doing its work.
+      socket.on('close', () => resolve(Date.now() - answered));
+      socket.on('error', reject);
+    });
+
+    expect(closedAfter).toBeGreaterThanOrEqual(200);
+    expect(closedAfter).toBeLessThan(5000);
   });
 
   it('brackets a literal IPv6 host in the url it advertises', async () => {

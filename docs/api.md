@@ -247,10 +247,10 @@ await server.closed;          // resolves when it stops
 ```
 
 It resolves once listening, and gives back `{ url, port, reload, close, closed }`.
-`options` takes `port`, `host`, `path`, `compress`, `concurrency`,
-`revalidateMs`, `sitesMaxAgeMs`, `reloadOn`, and the `signal`, `reporter`,
-`now`, `offset` and `cache` a run takes — a `cache` handed in stays the
-caller's, and one it opened is closed by `close()`.
+`options` takes `port`, `host`, `path`, `compress`, `cors`, `concurrency`,
+`keepAliveMs`, `revalidateMs`, `sitesMaxAgeMs`, `reloadOn`, and the `signal`,
+`reporter`, `now`, `offset` and `cache` a run takes — a `cache` handed in stays
+the caller's, and one it opened is closed by `close()`.
 
 The validator is the cache's, not the document's: a guide is a generator, so
 hashing its bytes would mean buffering it. What is read per poll is the window's

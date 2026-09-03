@@ -238,7 +238,15 @@ export type EpgEventInput =
    * time it took to reach the consumer.
    */
   | { type: 'serve:response'; method: string; path: string; status: number; ms: number }
-  /** A request that could not be answered — the merge threw, or the client went. */
+  /**
+   * A consumer that hung up part way through a guide.
+   *
+   * Its own kind rather than a failure, because it is not one: a reader that
+   * has seen enough, a proxy that timed out, a browser tab closed. Reporting it
+   * as an error is how a log fills with alarms about the normal.
+   */
+  | { type: 'serve:disconnected'; path: string; ms: number }
+  /** A request that could not be answered — the merge threw, or worse. */
   | { type: 'serve:failed'; path: string; error: unknown }
   | { type: 'serve:stopped' };
 
@@ -290,6 +298,7 @@ export const EVENT_KINDS = {
   'prune:done': { level: 'info', phase: 'prune' },
   'serve:started': { level: 'info', phase: 'serve' },
   'serve:response': { level: 'debug', phase: 'serve' },
+  'serve:disconnected': { level: 'debug', phase: 'serve' },
   'serve:failed': { level: 'error', phase: 'serve' },
   'serve:stopped': { level: 'info', phase: 'serve' },
 } as const satisfies Record<EpgEventType, EventKind>;

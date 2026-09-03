@@ -71,6 +71,24 @@ export const DEFAULT_SITES_MAX_AGE_MS = 10 * 60 * 1000;
 /** How many guides are generated at once, when nothing says. */
 const DEFAULT_CONCURRENCY = 2;
 
+/**
+ * How long an idle connection is held open, and how long a request's headers
+ * may take — both well above what a reverse proxy in front of this is likely
+ * to use.
+ *
+ * Node's own default is five seconds, which is *below* the sixty a proxy such
+ * as nginx or Traefik keeps by default. That ordering is the whole problem: the
+ * proxy believes a pooled socket is still good, sends a request down it at the
+ * moment Node is tearing it down, and the client sees an occasional `502` that
+ * reproduces for nobody. Holding longer than whatever is in front means the
+ * proxy is always the one to decide a connection is finished.
+ *
+ * The headers timeout sits a second above the keep-alive, as Node's own docs
+ * advise, so that a connection at the very end of its life is not cut off
+ * mid-request-line.
+ */
+export const DEFAULT_KEEP_ALIVE_MS = 65_000;
+
 export interface ServeOptions {
   port?: number;
   /** Defaults to `127.0.0.1` — see {@link DEFAULT_SERVE_HOST}. */
@@ -99,6 +117,24 @@ export interface ServeOptions {
    * request's `Accept-Encoding` names it.
    */
   compress?: CompressionFormat | false;
+  /** See {@link DEFAULT_KEEP_ALIVE_MS}. Raise it above whatever proxies this. */
+  keepAliveMs?: number;
+  /**
+   * Let a browser read the guide, by naming who may: `true` for any origin, or
+   * one origin to allow it alone. Off by default.
+   *
+   * Off, because loopback is not the boundary it looks like. A page in a
+   * browser on this machine can reach `127.0.0.1`, so `true` lets any site the
+   * viewer happens to open read which channels they watch — the same thing
+   * {@link DEFAULT_SERVE_HOST} declines to publish. It is a fair trade for a
+   * dashboard you wrote, and one to make on purpose.
+   *
+   * Turning it on does the whole job rather than the one header: `OPTIONS` is
+   * answered, `If-None-Match` and `If-Modified-Since` are allowed through, and
+   * `ETag` is exposed — without which a browser cannot read the validator and
+   * the conditional GET this server exists for does not happen.
+   */
+  cors?: boolean | string;
   /** Stop serving. The returned promise resolves once the server has closed. */
   signal?: AbortSignal;
   /**
@@ -217,6 +253,29 @@ async function fingerprintOf(
   return { etag: `W/"${present}-${newest}-${window}"`, lastModified };
 }
 
+/**
+ * What a browser needs to be allowed to read the guide, or nothing at all.
+ *
+ * `Vary: Origin` goes with a named origin because the answer then depends on
+ * who asked, and a cache in between must not hand one origin's response to
+ * another. `*` is the same for everybody, so it does not.
+ */
+function corsHeaders(cors: boolean | string): Record<string, string> {
+  if (cors === false) {
+    return {};
+  }
+
+  const origin = cors === true ? '*' : cors;
+
+  return {
+    'access-control-allow-origin': origin,
+    // Without this a browser hides the validator from the page, and a
+    // conditional GET — the entire point of this server — cannot be made.
+    'access-control-expose-headers': 'ETag, Last-Modified',
+    ...(origin === '*' ? {} : { vary: 'Accept-Encoding, Origin' }),
+  };
+}
+
 /** Whether the client already has this, by either validator. */
 function unchanged(request: IncomingMessage, print: Fingerprint): boolean {
   const noneMatch = request.headers['if-none-match'];
@@ -290,6 +349,7 @@ export async function serveGuide(
   const path = options.path ?? config.serve?.path ?? DEFAULT_SERVE_PATH;
   const compress = options.compress ?? config.serve?.compress ?? 'gzip';
   const revalidateMs = options.revalidateMs ?? DEFAULT_REVALIDATE_MS;
+  const cors = options.cors ?? config.serve?.cors ?? false;
   const sitesMaxAgeMs = options.sitesMaxAgeMs ?? DEFAULT_SITES_MAX_AGE_MS;
 
   const opened = options.cache === undefined;
@@ -432,10 +492,26 @@ export async function serveGuide(
     void answer(request, response);
   });
 
+  // See DEFAULT_KEEP_ALIVE_MS: above whatever is in front of this, so the proxy
+  // is always the one that decides a pooled connection is finished.
+  server.keepAliveTimeout = Math.max(0, options.keepAliveMs ?? DEFAULT_KEEP_ALIVE_MS);
+  server.headersTimeout = server.keepAliveTimeout + 1000;
+
   async function answer(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const began = Date.now();
     const url = request.url ?? '/';
     const [requestPath] = url.split('?') as [string];
+    /**
+     * What stops the guide when the consumer goes away, kept in scope so the
+     * `catch` can tell that apart from a fault.
+     *
+     * Asked of the signal rather than of the error, because the error is
+     * whichever of several won a race: the pipeline's own `AbortError` usually,
+     * but a write to a socket the client already destroyed can arrive first as
+     * an `EPIPE` or a premature close. The signal is the one thing that says it
+     * was *our* abort.
+     */
+    let gone: AbortController | undefined;
 
     const done = (status: number): void => {
       emit({
@@ -447,9 +523,29 @@ export async function serveGuide(
       });
     };
 
+    const allowed = corsHeaders(cors);
+
     try {
+      // A browser asks before it fetches, whenever the fetch carries a header
+      // that is not on the safelist — `If-None-Match` is not, so every
+      // conditional GET from a page begins here.
+      if (cors !== false && request.method === 'OPTIONS') {
+        response
+          .writeHead(204, {
+            ...allowed,
+            'access-control-allow-methods': 'GET, HEAD, OPTIONS',
+            'access-control-allow-headers': 'If-None-Match, If-Modified-Since',
+            'access-control-max-age': '86400',
+          })
+          .end();
+
+        return done(204);
+      }
+
       if (request.method !== 'GET' && request.method !== 'HEAD') {
-        response.writeHead(405, { allow: 'GET, HEAD' }).end();
+        response
+          .writeHead(405, { allow: cors === false ? 'GET, HEAD' : 'GET, HEAD, OPTIONS' })
+          .end();
 
         return done(405);
       }
@@ -471,6 +567,10 @@ export async function serveGuide(
         // and what makes the 304 below possible at all.
         'cache-control': 'no-cache',
         vary: 'Accept-Encoding',
+        // In the validators rather than beside them, so a 304 carries it too:
+        // a browser refused the headers on a revalidation would treat every
+        // conditional poll as a failure.
+        ...allowed,
       };
 
       if (unchanged(request, fingerprint)) {
@@ -502,27 +602,40 @@ export async function serveGuide(
         // The client going away is what stops the merge: a generator abandoned
         // half way is a merge that carries on reading the cache for a guide
         // nobody is left to receive.
-        const gone = new AbortController();
+        const stops = new AbortController();
+
+        gone = stops;
 
         response.on('close', () => {
           if (!response.writableEnded) {
-            gone.abort(new Error('the client closed the connection'));
+            stops.abort(new Error('the client closed the connection'));
           }
         });
 
         response.writeHead(200, headers);
 
-        const guide = generateGuide({ ...guideOptions(now, sites), signal: gone.signal });
+        const guide = generateGuide({ ...guideOptions(now, sites), signal: stops.signal });
         const chain =
           encoding === undefined
             ? ([Readable.from(guide), response] as const)
             : ([Readable.from(guide), compressor(encoding), response] as const);
 
-        await pipeline(chain, { signal: gone.signal });
+        await pipeline(chain, { signal: stops.signal });
       });
 
       done(200);
     } catch (error) {
+      if (gone?.signal.aborted === true) {
+        // Normal, and not ours to answer for: a reader that had seen enough, a
+        // proxy that timed out, a tab that closed. Calling it a failure — and
+        // returning the 500 below — is how a log fills with alarms about the
+        // ordinary, and how somebody ends up paged for a browser refresh.
+        emit({ type: 'serve:disconnected', path: requestPath, ms: Date.now() - began });
+        response.destroy();
+
+        return;
+      }
+
       emit({ type: 'serve:failed', path: requestPath, error });
 
       if (!response.headersSent) {

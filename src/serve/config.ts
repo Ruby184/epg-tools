@@ -27,4 +27,14 @@ export interface EpgServeConfig {
    * Defaults to `'gzip'`; `false` never compresses.
    */
   compress?: CompressionFormat | false;
+  /**
+   * Let a browser read the guide: `true` for any origin, or one origin to
+   * allow it alone. Off by default.
+   *
+   * Off because loopback is not the boundary it looks like — a page in a
+   * browser on this machine can reach `127.0.0.1`, so `true` lets any site the
+   * viewer opens read which channels they watch. Worth turning on for a
+   * dashboard of your own, and worth doing on purpose.
+   */
+  cors?: boolean | string;
 }

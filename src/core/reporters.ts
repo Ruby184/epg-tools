@@ -187,6 +187,8 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       // whole point of answering conditionally, and a log that did not say so
       // would leave nobody able to tell whether it was working.
       return `${event.method} ${event.path} → ${event.status} in ${event.ms}ms`;
+    case 'serve:disconnected':
+      return `${event.path} → client gone after ${event.ms}ms`;
     case 'serve:failed':
       // Rendered here rather than collected as a `FailureEvent`: those are held
       // back and flushed when the run ends, and a server's run ends when

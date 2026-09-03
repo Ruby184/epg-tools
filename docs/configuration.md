@@ -56,7 +56,7 @@ hardcode — a username, a password, a region. See
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 | `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — all of them | Which provider extensions the guide carries — see [Provider extensions](#provider-extensions). `false` leaves every one out, which is what makes the guide valid against the DTD. |
-| `serve` | `{ port?, host?, path?, compress? }` | `8080`, `127.0.0.1`, `/guide.xml`, `gzip` | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). |
+| `serve` | `{ port?, host?, path?, compress?, cors? }` | `8080`, `127.0.0.1`, `/guide.xml`, `gzip`, off | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). |
 | `allowMissing` | `number \| string` | none — anything missing fails | How much of the guide may be missing and the run still exit **0**: a number of channel-days, or a share like `'5%'` — see [allowing some of the guide to be missing](#allowing-some-of-the-guide-to-be-missing). |
 | `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'text'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
 
@@ -460,8 +460,26 @@ next, `serve` included, so a server left running while the grabs stop still asks
 once a day.
 
 The guide streams straight into the response, so nothing is held in memory; a
-consumer that hangs up mid-guide stops the merge feeding it. `compress` (`gzip`
-by default) is used when the request's `Accept-Encoding` names it, and
+consumer that hangs up mid-guide stops the merge feeding it, and is reported as
+a disconnect rather than a failure — a reader that has seen enough, a proxy that
+timed out or a closed tab is not something to be paged about.
+
+**Behind a reverse proxy**, idle connections are held for 65 seconds. Node's own
+default is 5, which is *below* the 60 nginx and Traefik keep, and that ordering
+is what produces the intermittent `502` nobody can reproduce: the proxy sends a
+request down a pooled socket at the moment Node is tearing it down. Holding
+longer means the proxy is always the one to decide a connection is finished.
+
+**For a browser**, set `serve.cors` — `true` for any origin, or one origin to
+allow only it. It is off by default because loopback is not the boundary it
+looks like: a page open in a browser on this machine can reach `127.0.0.1`, so
+allowing every origin would publish the channel list that binding to loopback
+declines to. Turning it on does the whole job rather than the one header —
+`OPTIONS` is answered, `If-None-Match` is allowed through, and `ETag` is exposed,
+without which a browser cannot read the validator and no conditional GET happens
+at all.
+
+`compress` (`gzip` by default) is used when the request's `Accept-Encoding` names it, and
 `concurrency` (2) bounds how many guides are generated at once — a slot is held
 for the whole response, a slow consumer included, since a merge reads the whole
 cache and a burst of polls that each started one would make a cheap poll the
