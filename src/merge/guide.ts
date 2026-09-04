@@ -1,6 +1,7 @@
 import { dayRange, dayToDate, toDayString } from '../core/days.js';
 import { writeOutput, type OutputOptions, type OutputTarget } from '../core/output.js';
 import { emitter } from '../core/events.js';
+import type { Says } from '../core/events.js';
 import { channelElement, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
@@ -245,7 +246,43 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       return result;
     }
 
-    return transform(result, { xmltvId, ...(next === undefined ? {} : { next }) }) ?? undefined;
+    return (
+      transform(result, { xmltvId, ...mergeSays, ...(next === undefined ? {} : { next }) }) ??
+      undefined
+    );
+  };
+
+  /**
+   * Where a site's own `transform` says things, one pair per site.
+   *
+   * Built once and kept rather than made per channel-day: `contribution` runs
+   * for every one of them, and the transform inside it for every programme.
+   */
+  const saysBySite = new Map<string, Says>();
+
+  const saysFor = (site: string): Says => {
+    let says = saysBySite.get(site);
+
+    if (says === undefined) {
+      says = {
+        log: (message, data) =>
+          emit({ type: 'site:note', site, message, ...(data ? { data } : {}) }),
+        warn: (message, data) =>
+          emit({ type: 'site:warning', site, message, ...(data ? { data } : {}) }),
+      };
+      saysBySite.set(site, says);
+    }
+
+    return says;
+  };
+
+  /**
+   * Where a `merge.transform` says things — no site on it, because the code is
+   * the config's own rather than any site's.
+   */
+  const mergeSays: Says = {
+    log: (message, data) => emit({ type: 'merge:note', message, ...(data ? { data } : {}) }),
+    warn: (message, data) => emit({ type: 'merge:warning', message, ...(data ? { data } : {}) }),
   };
 
   /** What a site contributes for one channel-day, as the site would have it. */
@@ -258,7 +295,12 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     let programmes = list;
 
     if (siteTransform) {
-      const context = { channel: source.channel, day, date: dayToDate(day) };
+      const context = {
+        channel: source.channel,
+        day,
+        date: dayToDate(day),
+        ...saysFor(source.config.site),
+      };
 
       programmes = programmes.flatMap((programme) => {
         const kept = siteTransform(programme, context);

@@ -47,6 +47,47 @@ export const PHASES = ['run', 'grab', 'merge', 'serve', 'prune'] as const;
 export type RunPhase = (typeof PHASES)[number];
 
 /**
+ * How code a config supplies says something — a site's `request` or `parseDay`,
+ * a `transform` over the merged guide.
+ *
+ * Here rather than with the sites because it is not only theirs: a merge
+ * transform is the config author's own code and has the same problem, which is
+ * that there is no `console` in this package to reach for and a `tv_grab_*`
+ * writes its guide to stdout, where one stray line is a broken document.
+ */
+export interface Says {
+  /**
+   * Say something about what is being done, wherever the run's own messages go.
+   *
+   * Progress, so it is shown at the run's default verbosity and hidden when the
+   * run is asked to be quiet. Whose it is — the site's name — is added for you.
+   */
+  log(message: string, data?: SaidFields): void;
+  /**
+   * The same, for something the reader has to see.
+   *
+   * A warning is a signal rather than progress: it survives a run asked to
+   * report errors only, because "the source moved this channel" is worth
+   * hearing even then. Throw instead when the work should also fail.
+   */
+  warn(message: string, data?: SaidFields): void;
+}
+
+/**
+ * The fields behind the sentence — `{ page: 3, of: 12 }`.
+ *
+ * The message is what a person reads; this is what a machine reads, and it is
+ * why `--reporter json` is worth pointing at a pipeline: a consumer gets the
+ * ids and counts as fields rather than parsing them out of prose. A text
+ * reporter appends them with `inspect`, so a `Map`, a `Date` or a cycle shows
+ * as itself.
+ *
+ * It should survive `JSON.stringify`, which is what the JSON reporter has to
+ * use. One that cannot is named in place of its value rather than ending a run.
+ */
+export type SaidFields = Record<string, unknown>;
+
+/**
  * What one channel-day amounts to, as three of these say it.
  *
  * Named because `entry:*` is the only group with a natural key, and a reporter
@@ -225,6 +266,13 @@ export type EpgEventInput =
   // ── merging, and tidying up ──────────────────────────────────────────────
   | { type: 'merge:channel'; channelId: string }
   | { type: 'merge:done'; output: string }
+  /**
+   * A `merge.transform` saying something, and the reason these two exist apart
+   * from `site:note`: the code is the config's own rather than any site's, so
+   * there is no site to put on it.
+   */
+  | { type: 'merge:note'; message: string; data?: SaidFields }
+  | { type: 'merge:warning'; message: string; data?: SaidFields }
   | { type: 'prune:done'; removed: number; before: string }
   /** The server is listening, and this is where. */
   | { type: 'serve:started'; url: string }
@@ -295,6 +343,8 @@ export const EVENT_KINDS = {
   'pacing:rateLimit': { level: 'debug', phase: 'grab' },
   'merge:channel': { level: 'debug', phase: 'merge' },
   'merge:done': { level: 'info', phase: 'merge' },
+  'merge:note': { level: 'info', phase: 'merge' },
+  'merge:warning': { level: 'warn', phase: 'merge' },
   'prune:done': { level: 'info', phase: 'prune' },
   'serve:started': { level: 'info', phase: 'serve' },
   'serve:response': { level: 'debug', phase: 'serve' },

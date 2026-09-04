@@ -13,6 +13,7 @@
  */
 
 import { dayToDate } from '../core/days.js';
+import type { Says } from '../core/events.js';
 import { ProgrammeBuilder } from '../xmltv/builder.js';
 import type { Request } from './planner.js';
 import type { ResolvedBatching } from './planner.js';
@@ -35,7 +36,7 @@ export interface ContextDeps {
   /** The site's own `Map`, as it will be given to the site. */
   state: SiteState;
   /** Where `ctx.log` and `ctx.warn` go. */
-  says: Pick<BaseRequestContext, 'log' | 'warn'>;
+  says: Says;
   signal?: AbortSignal;
 }
 

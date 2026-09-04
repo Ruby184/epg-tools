@@ -3,7 +3,7 @@ import type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from '../xmlt
 import type { DateInput } from '../xmltv/date.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheEntryMeta, CacheStore, StalenessPolicy } from '../cache/types.js';
-import type { GrabCounts, Reporter } from '../core/events.js';
+import type { GrabCounts, Reporter, Says } from '../core/events.js';
 
 /**
  * A channel to grab: maps an output XMLTV id to a site-specific id.
@@ -93,7 +93,7 @@ export type SiteState = Map<string, unknown>;
  * What every context carries, whichever shape the rest of it takes: the
  * channel-days it is for, the site's client, its state, and the run's signal.
  */
-export interface BaseRequestContext<TData = unknown> extends SiteSays {
+export interface BaseRequestContext<TData = unknown> extends Says {
   /**
    * Exactly the channel-days this request is being made for — every one of
    * them stale, in channel order and then day order.
@@ -122,7 +122,7 @@ export interface BaseRequestContext<TData = unknown> extends SiteSays {
  * Context for the function form of {@link SiteConfig.channels} — a channel list
  * that is fetched rather than written out.
  */
-export interface ChannelsContext extends SiteSays {
+export interface ChannelsContext extends Says {
   /**
    * The site's ky instance, the very one its requests use: same prefix,
    * headers, retry, proxy and abort signal.
@@ -133,47 +133,20 @@ export interface ChannelsContext extends SiteSays {
 }
 
 /**
- * How a site's own code says something — the pair every context carries.
+ * What a site's own {@link BaseSiteConfig.transform} is told about a programme,
+ * and where it can say something — the same `log` and `warn` its `request` and
+ * `parseDay` have, going to the same place under the same site's name.
  *
- * Named because four of them carry it and one place builds it, and because it
- * is the answer to the question a site author otherwise answers with
- * `console.log`: there is somewhere to say things, it goes wherever the run's
- * own messages go, and it is quietened by the same flags.
+ * It runs as the cache is read rather than as it is written, so this is where a
+ * site notices what only the whole of a channel-day shows.
  */
-export interface SiteSays {
-  /**
-   * Say something about what this site is doing, wherever the run's own
-   * messages go.
-   *
-   * Progress, so it is shown at the run's default verbosity and hidden when the
-   * run is asked to be quiet. The site's name is added for you — say what
-   * happened, not who it happened to.
-   */
-  log(message: string, data?: SiteSaid): void;
-  /**
-   * The same, for something the reader has to see.
-   *
-   * A warning is a signal rather than progress: it survives a run asked to
-   * report errors only, because "the source moved this channel" is worth
-   * hearing even then. Throw instead when the whole thing should also fail.
-   */
-  warn(message: string, data?: SiteSaid): void;
+export interface SiteTransformContext<TData = unknown> extends Says {
+  channel: GrabberChannel<TData>;
+  /** The day as `YYYY-MM-DD`. */
+  day: string;
+  /** The same day as UTC midnight. */
+  date: Date;
 }
-
-/**
- * The fields a site attaches to what it says — `{ page: 3, of: 12 }`.
- *
- * The message is the sentence a person reads; this is what a machine reads,
- * and it is why `--reporter json` is worth pointing at a pipeline: a consumer
- * gets the ids and the counts as fields rather than parsing them back out of
- * prose. A text reporter appends it compactly, which is what makes this a
- * replacement for the `console.log` a site author would otherwise reach for.
- *
- * It must survive `JSON.stringify`. A reporter that cannot serialize it says so
- * in place of the value rather than throwing — a run is not worth ending over a
- * log line — but a cycle in here is still a bug worth not writing.
- */
-export type SiteSaid = Record<string, unknown>;
 
 /**
  * Where a site's channels come from: a list, or a function fetching one with
@@ -348,11 +321,11 @@ export type PacedRequest = <T>(
 ) => Promise<T>;
 
 /**
- * What a parse is handed. `log` and `warn` come from {@link SiteSays}, and a
+ * What a parse is handed. `log` and `warn` come from {@link Says}, and a
  * parse is where a site most often has something to say — a field the source
  * has started leaving out, a programme it had to skip.
  */
-export interface ParseContext<TRaw, TData = unknown> extends SiteSays {
+export interface ParseContext<TRaw, TData = unknown> extends Says {
   /** The channel this call is parsing, as the site declared it. */
   channel: GrabberChannel<TData>;
   /** The day as UTC midnight, a `Date` of this call's own. */
@@ -567,7 +540,7 @@ export interface BaseSiteConfig<TData = unknown> {
    */
   transform?(
     programme: XmltvProgramme,
-    context: { channel: GrabberChannel<TData>; day: string; date: Date },
+    context: SiteTransformContext<TData>,
   ): XmltvProgramme | undefined | null;
   /**
    * Customize the `<channel>` element. Defaults to id + name + logo.

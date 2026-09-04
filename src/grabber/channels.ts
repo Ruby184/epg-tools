@@ -1,12 +1,12 @@
 import ky, { type KyInstance } from 'ky';
 import PQueue from 'p-queue';
 import type { CacheStore } from '../cache/types.js';
-import type { Emit } from '../core/events.js';
+import type { Emit, Says } from '../core/events.js';
 import { ChannelBuilder } from '../xmltv/builder.js';
 import type { XmltvChannel } from '../xmltv/types.js';
 import { revalidationHooks } from './revalidate.js';
 import { channelsMaxAgeMs, SiteStateHandle } from './state.js';
-import type { AnySiteConfig, GrabberChannel, SiteSays } from './types.js';
+import type { AnySiteConfig, GrabberChannel } from './types.js';
 
 /**
  * A site's own HTTP client, built from its `ky` options.
@@ -59,11 +59,11 @@ export interface ResolveChannelsOptions {
    * them wants — `--list-channels` writes a document to stdout and has no room
    * for a running commentary in the middle of it.
    */
-  says?: SiteSays;
+  says?: Says;
 }
 
 /** Said to nobody, for a caller that has nowhere to put it. */
-const SILENT: SiteSays = { log: () => {}, warn: () => {} };
+const SILENT: Says = { log: () => {}, warn: () => {} };
 
 /**
  * A site's channels, whichever form it declares them in.

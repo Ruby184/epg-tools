@@ -2,7 +2,7 @@ import type { SerializeOptions } from '../xmltv/serialize.js';
 import type { XmltvDocumentMeta, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheStore } from '../cache/types.js';
 import type { AnySiteConfig } from '../grabber/types.js';
-import type { Reporter } from '../core/events.js';
+import type { Reporter, Says } from '../core/events.js';
 
 /**
  * What to do when multiple sites cover the same xmltv channel id.
@@ -76,7 +76,7 @@ export interface ProgrammeMatch {
 }
 
 /** What a guide-wide {@link MergeOptions.transform} is told about a programme. */
-export interface TransformContext {
+export interface TransformContext extends Says {
   /** The output channel it belongs to. */
   xmltvId: string;
   /**

@@ -412,10 +412,30 @@ merge, and `--reporter text -v` shows which of the two a poll got.
 **What decides it.** A guide is a stream, so its bytes cannot be hashed without
 buffering the document this package exists not to buffer. The cache answers
 instead: the newest `grabbedAt` across the window, with how many entries are in
-it. That reading is metadata only: the same lookups a merge *begins* with, and
-none of the payload reads, parsing or serializing that follow. It is worked out
-at most once a second (`revalidateMs`), and once for however many polls arrive
-together.
+it. That reading is metadata only — no payloads, no parsing, no serializing —
+worked out at most once a second (`revalidateMs`), and once for however many
+polls arrive together.
+
+**How much that actually saves is a driver question**, and by more than you
+would guess. Measured over 3,500 channel-days (500 channels × 7 days), medians
+of five rounds:
+
+| | a `304` poll | the whole guide, for scale |
+|---|---|---|
+| `ndjson` (the default) | 230 ms | 840 ms |
+| `sqlite` | **32 ms** | 840 ms |
+
+On a file cache the sweep is one `open` and one read per channel-day, so it
+costs a *quarter* of generating the guide rather than nothing like it — the
+per-file syscall dominates, and the entries are small. On `sqlite` the same
+sweep is one query. **If you are serving a guide of any size, that is the
+driver to use**; the win over the network is the same either way, but the work
+on your machine is twelve times smaller.
+
+The keys are asked for in bounded batches (64 at a time, 8 in flight) rather
+than as one enormous question. That is the caller's decision to make and not the
+store's — a batch is one piece of work by the cache's own contract, precisely so
+a store cannot multiply a caller's bound into a descriptor storm.
 
 The one thing it cannot see is a channel that was not in the window when the
 reading was taken: the entries are looked up by the channel list already in
@@ -715,7 +735,7 @@ fix both because it has the programme that follows:
 | `fillStop` | `true` (cap 6 h) | A programme with no `stop` gets the next one's start — capped, so the gap where a channel goes off air for the night stays a gap instead of becoming one nine-hour programme. `{ maxMs: 1_800_000 }` for a cap of your own, `false` to leave ends missing. |
 | `clipOverlaps` | `true` | A `stop` that reaches past the next programme's start is pulled back to it. |
 | `clampToWindow` | `false` | Leave out programmes starting outside the guide's window. Off, because a source handing back a few hours past the last day is giving you something. |
-| `transform` | — | The last word on every programme: `(programme, { xmltvId, next }) => programme \| null`. |
+| `transform` | — | The last word on every programme: `(programme, { xmltvId, next, log, warn }) => programme \| null`. |
 
 A programme with no end is what a consumer can do least with — tvheadend shows
 a zero-length event, some players nothing at all — and two programmes claiming
@@ -742,6 +762,25 @@ Returning `null` or `undefined` leaves the programme out, but the rules have
 already run, so the gap stays. To drop something and have the gap close, use
 [a site's own `transform`](./site-config.md#fixing-up-one-source), which runs
 before them — or `clampToWindow` for what falls outside the window.
+
+It also carries `log` and `warn`, for the thing a mapping like the one above
+always turns out to need — saying which category it had no mapping for:
+
+```ts
+transform: (programme, { xmltvId, warn }) => {
+  const unmapped = programme.category?.filter((c) => GENRES[c.value] === undefined);
+
+  if (unmapped?.length) {
+    warn('no genre mapping', { xmltvId, categories: unmapped.map((c) => c.value) });
+  }
+
+  return programme;
+}
+```
+
+These arrive as `merge:note` and `merge:warning` rather than the `site:note` a
+site's own code sends, and carry no site — the code is the config's own, so
+there is nobody to attribute it to.
 
 ### Across the day boundary
 

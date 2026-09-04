@@ -194,6 +194,53 @@ describe('serveGuide', () => {
     expect(await (await fetch(server.url)).text()).toContain('<channel id="three">');
   });
 
+  it('asks the cache in bounded batches, not all at once', async () => {
+    // A batch is one piece of work by the store's contract, and the caller is
+    // what decides how many to have in flight — so a store cannot multiply
+    // somebody else's bound into a descriptor storm. This is the caller with
+    // thousands of keys, so it is where that decision belongs.
+    const ids = Array.from({ length: 200 }, (_, i) => `c-${i}`);
+    const cache = cacheWith(Object.fromEntries(ids.map((id) => [id, [programme(id, 6)]])));
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const asked: number[] = [];
+    let open = 0;
+    let mostOpenAtOnce = 0;
+    const counted: CacheStore = {
+      getMeta: (key) => cache.getMeta(key),
+      getMetas: async (keys) => {
+        asked.push(keys.length);
+        open++;
+        mostOpenAtOnce = Math.max(mostOpenAtOnce, open);
+
+        try {
+          return await cache.getMetas(keys);
+        } finally {
+          open--;
+        }
+      },
+      read: (key) => cache.read(key),
+      write: (key, programmes, meta) => cache.write(key, programmes, meta),
+      delete: (key) => cache.delete(key),
+      prune: (options) => cache.prune(options),
+      getState: (site, key) => cache.getState(site, key),
+      setState: (site, key, data, meta) => cache.setState(site, key, data, meta),
+      close: () => cache.close(),
+    };
+
+    const server = await serve(configFor(ids), counted, { revalidateMs: 0 });
+
+    await (await fetch(server.url)).text();
+
+    // 200 keys over one day, so several questions rather than one of 200.
+    expect(asked.length).toBeGreaterThan(1);
+    expect(Math.max(...asked)).toBeLessThanOrEqual(64);
+    // And bounded: not every batch started at once.
+    expect(mostOpenAtOnce).toBeLessThanOrEqual(8);
+    // Every key still answered for, in order — the fingerprint depends on it.
+    expect(asked.reduce((sum, n) => sum + n, 0)).toBe(ids.length);
+  });
+
   it('does not re-send a guide for a reload that changed nothing', async () => {
     // A stray signal must not cost every consumer a full guide: reloading asks
     // a question, and an unchanged answer keeps the etag it had.

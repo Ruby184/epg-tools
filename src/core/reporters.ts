@@ -182,6 +182,11 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
         : `${at(event.site, prefix)}rate limit window open again`;
     case 'merge:channel':
       return `merge: channel ${event.channelId} done`;
+    case 'merge:note':
+    case 'merge:warning':
+      // No site on either, so no prefix: a merge transform is the config's own
+      // code, and there is nobody to attribute it to.
+      return `${event.message}${said(event.data)}`;
     case 'merge:done':
       return `Guide written to ${event.output}`;
     case 'serve:started':

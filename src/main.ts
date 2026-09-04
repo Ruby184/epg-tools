@@ -23,6 +23,8 @@ export type {
   ReportedOptions,
   Reporter,
   RunPhase,
+  SaidFields,
+  Says,
 } from './core/events.js';
 export {
   DEFAULT_FAILURE_CAP,
