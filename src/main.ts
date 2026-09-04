@@ -170,6 +170,7 @@ export type * from './cache/types.js';
 export {
   grab,
   channelElement,
+  channelsFromChannelsXml,
   channelsFromM3u,
   channelsMaxAgeMs,
   defineM3uSite,
@@ -192,6 +193,9 @@ export {
   UnchangedError,
 } from './grabber/main.js';
 export type {
+  ChannelsXmlChannelData,
+  ChannelsXmlOptions,
+  ChannelsXmlSkipReason,
   M3uChannelData,
   M3uChannelsOptions,
   M3uSiteOptions,

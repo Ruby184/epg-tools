@@ -597,11 +597,12 @@ output goes through — the site's `channelInfo` if it has one,
 `defaultChannelInfo` if not.
 
 **`channelsFromM3u(source, options?)`** reads an M3U playlist as a channel list,
-taking what [`epg-tools/m3u`](./m3u.md) produces — parse events or a whole
-`M3uPlaylist` — rather than a path or a string:
+taking a path or what [`epg-tools/m3u`](./m3u.md) produces. It returns the
+`channels` function itself, so the playlist is read when the list is resolved
+rather than when the config loads:
 
 ```ts
-channels: () => channelsFromM3u(parseM3uFile('./channels.m3u')),
+channels: channelsFromM3u('./channels.m3u'),
 ```
 
 `tvg-id` becomes both `xmltvId` and `siteId`, and an entry without one is

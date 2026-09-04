@@ -450,13 +450,26 @@ module imports nothing outside itself:
 
 ```ts
 import { channelsFromM3u } from 'epg-tools/grabber';
-import { parseM3uFile } from 'epg-tools/m3u';
 
-channels: () => channelsFromM3u(parseM3uFile('./channels.m3u')),
+channels: channelsFromM3u('./channels.m3u'),
 ```
 
-It takes what the parser produces — events or an `M3uPlaylist` — rather than a
-path or a string, so there is no guessing which a string was.
+It returns the `channels` function rather than the channels, which is what lets
+a config read like that — and means the playlist is read when the list is
+*resolved* rather than when the config module loads. The function is handed the
+site's own context too, so a playlist that does not parse cleanly says so under
+the site's name without your wiring `onWarning` up.
+
+A string is a **path**, streamed with `parseM3uFile`; a playlist is megabytes
+and there is no reason to hold one. A url is refused rather than fetched —
+[`defineM3uSite`](#a-playlist-as-a-whole-source) already does that properly,
+with the site's own client, no timeout and `.m3u.gz` sniffed. Anything the
+parser produces — events or a whole `M3uPlaylist` — is taken as it is, which is
+the way in for a playlist that came from somewhere else:
+
+```ts
+channels: channelsFromM3u(parseM3uString(await response.text())),
+```
 
 The mapping is the conventional one: `tvg-id` → `xmltvId` **and** `siteId`,
 `tvg-name` (falling back to the display name) → `name`, `tvg-logo` → `logo`,
@@ -480,9 +493,9 @@ or for anything that is not a url, the value is kept exactly as written.
 **1,948 of iptv-org's 12,946 entries (15%) have none**:
 
 ```ts
-channelsFromM3u(parseM3uFile('./channels.m3u'), {
+channelsFromM3u('./channels.m3u', {
   // The usual repair, at the risk of two channels sharing a name.
-  id: (entry) => entry.attributes['tvg-id'] || entry.name,
+  id: (entry) => entry.attributes.get('tvg-id') || entry.name,
   onSkipped: (entry, reason) => console.warn(`skipped ${entry.name}: ${reason}`),
 });
 ```

@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { renderChannelReport, reportChannels, wantedFrom } from '../src/cli/channels.js';
 import { matchChannels, timeshiftOf } from '../src/channels/match.js';
+import { channelsFromChannelsXml } from '../src/grabber/channels.js';
 import { parseChannelList } from '../src/channels/parse.js';
 import { serializeChannelList } from '../src/channels/serialize.js';
 
@@ -349,5 +350,108 @@ describe('renderChannelReport', () => {
 
     expect(text).toContain('✗ Nope (no.uk)');
     expect(text).toContain('nothing produces this');
+  });
+});
+
+describe('channelsFromChannelsXml', () => {
+  const entries = parseChannelList(
+    '<channels site="example.com">' +
+      '<channel site_id="1" xmltv_id="a.uk" lang="en" logo="http://e/a.png" lcn="101" url="http://e/a">A</channel>' +
+      '<channel site_id="2" xmltv_id="">Unmapped</channel>' +
+      '<channel site="other.com" site_id="3" xmltv_id="c.uk">C</channel>' +
+      '<channel site_id="1" xmltv_id="d.uk">Repeat</channel>' +
+      '</channels>',
+  ).entries;
+
+  // The tidier of the two mappings: a playlist has one `tvg-id` doing both
+  // jobs, while this format keeps the ids a grab needs apart.
+  it('maps site_id and xmltv_id to the two ids a grab uses', async () => {
+    const [channel] = await channelsFromChannelsXml(entries)();
+
+    expect(channel).toEqual({
+      siteId: '1',
+      xmltvId: 'a.uk',
+      name: 'A',
+      lang: 'en',
+      logo: 'http://e/a.png',
+      preset: '101',
+      // The two things a `GrabberChannel` has no field for.
+      data: { site: 'example.com', url: 'http://e/a' },
+    });
+  });
+
+  it('carries only what a GrabberChannel has no field for', async () => {
+    const [plain] = await channelsFromChannelsXml(
+      parseChannelList('<channels><channel site_id="1" xmltv_id="a.uk">A</channel></channels>')
+        .entries,
+    )();
+
+    // Neither a site nor a url, so no `data` at all rather than an empty object.
+    expect(plain).not.toHaveProperty('data');
+    expect(plain).toEqual({ siteId: '1', xmltvId: 'a.uk', name: 'A' });
+  });
+
+  it('skips what cannot become a channel, and says why', async () => {
+    const skipped: string[] = [];
+    const channels = await channelsFromChannelsXml(entries, {
+      site: 'example.com',
+      onSkipped: (entry, reason) => skipped.push(`${entry.name}:${reason}`),
+    })();
+
+    expect(channels.map((c) => c.xmltvId)).toEqual(['a.uk']);
+    expect(skipped).toEqual(['Unmapped:unmapped', 'C:other-site', 'Repeat:duplicate-site-id']);
+  });
+
+  // Kept for the reason the reader keeps it: a list built from a WebGrab+Plus
+  // file and written back would otherwise reset everyone's refresh policy.
+  it('carries WebGrab+Plus`s update through', async () => {
+    const [channel] = await channelsFromChannelsXml(
+      parseChannelList(
+        '<channels><channel update="i" site="wgb.example" site_id="1" xmltv_id="a.uk">A</channel></channels>',
+      ).entries,
+    )();
+
+    expect(channel?.data).toEqual({ site: 'wgb.example', update: 'i' });
+  });
+
+  it('keeps the first of a repeated site_id', async () => {
+    const skipped: string[] = [];
+
+    await channelsFromChannelsXml(entries, {
+      onSkipped: (entry, reason) => skipped.push(`${entry.name}:${reason}`),
+    })();
+
+    expect(skipped).toContain('Repeat:duplicate-site-id');
+  });
+});
+
+describe('channelsFromChannelsXml, from a path', () => {
+  it('reads the file when the list is resolved, not when the config loads', async () => {
+    const channels = await channelsFromChannelsXml(FIXTURE)();
+
+    // The fixture's unmapped channel cannot become one; the other four can.
+    expect(channels).toHaveLength(4);
+    expect(channels[0]).toMatchObject({ siteId: '10035', xmltvId: 'AE.us@East', name: 'A&E East' });
+  });
+
+  it('reports what the file has to say through the site`s own warn', async () => {
+    const said: string[] = [];
+
+    await channelsFromChannelsXml(FIXTURE)({
+      http: undefined as never,
+      log: () => {},
+      warn: (message) => said.push(message),
+    });
+
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain('has no xmltv_id');
+  });
+
+  // A document where a path belongs would otherwise fail as a filename several
+  // kilobytes long, which says nothing about the mistake.
+  it('says so when handed a document instead of a path', async () => {
+    await expect(channelsFromChannelsXml('<channels></channels>')()).rejects.toThrow(
+      /takes a path or entries, not a document/,
+    );
   });
 });
