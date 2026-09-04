@@ -105,6 +105,39 @@ export type {
 export type * from './xmltv/types.js';
 
 export {
+  M3uParseStream,
+  M3uSerializeStream,
+  parseM3uFile,
+  parseM3uStream,
+  parseM3uString,
+  serializeM3uEntry,
+  serializeM3uHeader,
+  writeM3uStream,
+  writeM3uToFile,
+} from './m3u/main.js';
+export type {
+  M3uParseStreamOptions,
+  M3uSerializeOptions,
+  M3uSerializeStreamOptions,
+  M3uStreamInput,
+  M3uWriteOptions,
+} from './m3u/main.js';
+// Named rather than `export type *`, which the other modules use: `src/m3u` is
+// hermetic and so declares its own `AnyIterable`, and two star re-exports of the
+// same name resolve to neither — the root would quietly stop exporting a type it
+// exports today. The two declarations are identical, so xmltv's stands for both.
+export type {
+  M3uCharset,
+  M3uDirective,
+  M3uEntry,
+  M3uHeader,
+  M3uParseEvent,
+  M3uParseOptions,
+  M3uPlaylist,
+  M3uWarning,
+} from './m3u/types.js';
+
+export {
   CacheManager,
   FsCacheDriver,
   FsNdjsonCacheDriver,
@@ -119,7 +152,10 @@ export type * from './cache/types.js';
 export {
   grab,
   channelElement,
+  channelsFromM3u,
   channelsMaxAgeMs,
+  defineM3uSite,
+  guideUrlsFromM3u,
   defineSiteConfig,
   defineStreamSiteConfig,
   defineXmltvSite,
@@ -137,7 +173,14 @@ export {
   TrackedMap,
   UnchangedError,
 } from './grabber/main.js';
-export type { MissingAllowance, ResolvedAllowance } from './grabber/main.js';
+export type {
+  M3uChannelData,
+  M3uChannelsOptions,
+  M3uSiteOptions,
+  M3uSkipReason,
+  MissingAllowance,
+  ResolvedAllowance,
+} from './grabber/main.js';
 export type * from './grabber/types.js';
 
 export { serveGuide } from './serve/main.js';

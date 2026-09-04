@@ -10,6 +10,7 @@ export default defineConfig({
   entry: {
     main: 'src/main.ts',
     'xmltv/main': 'src/xmltv/main.ts',
+    'm3u/main': 'src/m3u/main.ts',
     'cache/main': 'src/cache/main.ts',
     'cache/sqlite': 'src/cache/sqlite-driver.ts',
     'grabber/main': 'src/grabber/main.ts',

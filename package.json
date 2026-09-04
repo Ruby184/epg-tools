@@ -39,6 +39,10 @@
       "types": "./dist/xmltv/main.d.ts",
       "import": "./dist/xmltv/main.js"
     },
+    "./m3u": {
+      "types": "./dist/m3u/main.d.ts",
+      "import": "./dist/m3u/main.js"
+    },
     "./cache": {
       "types": "./dist/cache/main.d.ts",
       "import": "./dist/cache/main.js"
@@ -74,6 +78,7 @@
     "test:watch": "vitest",
     "bench": "vitest bench --run",
     "bench:memory": "npm run build && node bench/memory.mjs",
+    "bench:memory:m3u": "npm run build && node bench/memory-m3u.mjs",
     "typecheck": "tsc --noEmit",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
@@ -90,12 +95,15 @@
     "@commitlint/cli": "^21.2.2",
     "@commitlint/config-conventional": "^21.2.2",
     "@conventional-commits/parser": "^0.4.1",
+    "@iptv/playlist": "^1.2.1",
     "@iptv/xmltv": "^1.0.1",
     "@types/node": "^26.2.0",
     "epg-parser": "^0.5.0",
     "fast-xml-parser": "^5.10.1",
     "husky": "^9.1.7",
+    "iptv-playlist-parser": "^0.15.2",
     "lint-staged": "^17.3.0",
+    "m3u-parser-generator": "^5.0.2",
     "oxfmt": "0.64.0",
     "oxlint": "^1.79.0",
     "tsdown": "^0.22.14",
