@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { renderChannelReport, reportChannels, wantedFrom } from '../src/cli/channels.js';
 import { matchChannels, timeshiftOf } from '../src/channels/match.js';
 import { parseChannelList } from '../src/channels/parse.js';
 import { serializeChannelList } from '../src/channels/serialize.js';
@@ -262,5 +263,91 @@ describe('matchChannels', () => {
     );
 
     expect(match?.matched).toBe('BBC One');
+  });
+});
+
+describe('wantedFrom', () => {
+  it('reads an M3U playlist, preferring tvg-name over the display name', () => {
+    expect(
+      wantedFrom(
+        '#EXTM3U\n#EXTINF:-1 tvg-id="a.uk" tvg-name="Proper Name",Display\nhttp://e/1\n',
+        'x.m3u',
+      ),
+    ).toEqual([{ id: 'a.uk', name: 'Proper Name' }]);
+  });
+
+  it('reads a channels.xml', () => {
+    expect(
+      wantedFrom('<channels><channel site_id="1" xmltv_id="a.uk">A</channel></channels>', 'x.xml'),
+    ).toEqual([{ id: 'a.uk', name: 'A' }]);
+  });
+
+  it('reads a guide`s own channel list', () => {
+    expect(
+      wantedFrom(
+        '<?xml version="1.0"?><tv><channel id="a.uk"><display-name>A</display-name></channel></tv>',
+        'guide.xml',
+      ),
+    ).toEqual([{ id: 'a.uk', name: 'A' }]);
+  });
+
+  // All three get renamed, and `.xml` alone does not say which of two it is.
+  it('sniffs the kind rather than trusting the name', () => {
+    expect(() => wantedFrom('just some text', 'mystery.dat')).toThrow(/Cannot tell what/);
+  });
+});
+
+describe('reportChannels', () => {
+  const available = [
+    { xmltvId: 'bbcone.uk', siteId: '1', name: 'BBC One' },
+    { xmltvId: 'skyone.uk', siteId: '2', name: 'Sky One' },
+  ];
+
+  it('is ok only when every channel matched by id', () => {
+    const matched = reportChannels([{ id: 'bbcone.uk', name: 'BBC One' }], available);
+
+    expect(matched.ok).toBe(true);
+    expect(matched.counts).toEqual({ wanted: 1, byId: 1, byName: 0, unmatched: 0 });
+  });
+
+  // A name match is a suggestion nobody has written down yet, so the channel
+  // still shows an empty grid tomorrow — which is what `--check` is for.
+  it('is not ok on a name match alone', () => {
+    const report = reportChannels([{ id: '', name: 'BBC One HD' }], available);
+
+    expect(report.ok).toBe(false);
+    expect(report.rows[0]).toMatchObject({ kind: 'name', matched: { xmltvId: 'bbcone.uk' } });
+  });
+
+  it('calls a timeshift what it is', () => {
+    const report = reportChannels([{ id: '', name: 'Sky One +1' }], available);
+
+    expect(report.rows[0]?.timeshiftOf).toEqual({ xmltvId: 'skyone.uk', offset: 60 });
+    expect(report.rows[0]?.matched).toBeUndefined();
+  });
+});
+
+describe('renderChannelReport', () => {
+  const available = [{ xmltvId: 'bbcone.uk', siteId: '1', name: 'BBC One' }];
+
+  it('says nothing about the channels that are fine', () => {
+    const text = renderChannelReport(reportChannels([{ id: 'bbcone.uk', name: 'x' }], available));
+
+    expect(text).toContain('Every channel has a guide behind it.');
+    expect(text).not.toContain('bbcone.uk —');
+  });
+
+  it('names the near miss and what to do about it', () => {
+    const text = renderChannelReport(reportChannels([{ id: '', name: 'BBC One HD' }], available));
+
+    expect(text).toContain('looks like bbcone.uk (BBC One) — set its id to confirm');
+    expect(text).toContain('1 wanted, 0 matched by id, 1 by name');
+  });
+
+  it('says plainly when nothing produces a channel', () => {
+    const text = renderChannelReport(reportChannels([{ id: 'no.uk', name: 'Nope' }], available));
+
+    expect(text).toContain('✗ Nope (no.uk)');
+    expect(text).toContain('nothing produces this');
   });
 });
