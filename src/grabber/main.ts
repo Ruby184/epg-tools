@@ -1,11 +1,15 @@
 export { grab } from './grab.js';
 export {
   channelElement,
+  channelsFromM3u,
   defaultChannelInfo,
   resolveChannels,
   resolveSites,
   siteHttp,
 } from './channels.js';
+export type { M3uChannelData, M3uChannelsOptions, M3uSkipReason } from './channels.js';
+export { defineM3uSite, guideUrlsFromM3u } from './m3u-source.js';
+export type { M3uSiteOptions } from './m3u-source.js';
 export { retryAfterMs, sitePacing } from './pacing.js';
 export {
   channelsMaxAgeMs,
@@ -20,5 +24,5 @@ export { isUnchanged, UnchangedError } from './revalidate.js';
 export type { Validator } from './revalidate.js';
 export { defineSiteConfig, defineStreamSiteConfig } from './types.js';
 export { defineXmltvSite } from './xmltv-source.js';
-export type { XmltvDayZone, XmltvSiteOptions } from './xmltv-source.js';
+export type { XmltvDayZone, XmltvSiteOptions, XmltvUrlSource } from './xmltv-source.js';
 export type * from './types.js';

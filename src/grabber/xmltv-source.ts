@@ -42,12 +42,25 @@ import type {
  */
 export type XmltvDayZone = 'source' | 'utc' | (string & {});
 
+/**
+ * Where the document is: a url, or a call that works it out when first asked.
+ *
+ * The second form is for a source that has to be read to find out — an M3U
+ * playlist naming its guide in `x-tvg-url`, which is what
+ * {@link defineM3uSite} is built on. It is handed the site's own HTTP client so
+ * that lookup goes out with the site's headers, proxy and retry, and it is
+ * called **once**, its answer shared by the channel pass and the grab.
+ */
+export type XmltvUrlSource =
+  | string
+  | ((ctx: { http: StreamContext['http']; signal?: AbortSignal }) => string | Promise<string>);
+
 export interface XmltvSiteOptions<TData = XmltvChannel> extends Omit<
   StreamSiteConfig<TData>,
   'stream' | 'channels'
 > {
-  /** Where the document is. */
-  url: string;
+  /** Where the document is, or how to find out. */
+  url: XmltvUrlSource;
   /**
    * The channels to take from it, mapping `siteId` (the document's `<channel
    * id>`) to the id you want in the output.
@@ -127,8 +140,8 @@ async function readableOrEnd(source: Readable): Promise<void> {
  * Enough of them to decide on, rather than one chunk of whatever length: a body
  * arrives as the socket gave it, and a dribbling origin or a proxy flushing
  * small frames hands over **one byte** first — measured, not supposed. A magic
- * number read out of that is a gzipped guide reported as "neither XML nor
- * anything recognizable", which is a whole site failed over a chunk boundary.
+ * number read out of that is a gzipped guide reported as "neither text nor a
+ * compression this can undo", which is a whole site failed over a chunk boundary.
  *
  * Whatever is there is taken and held, rather than asking for `want` bytes and
  * waiting: `read(want)` on a stream holding fewer returns nothing *and* asks to
@@ -187,7 +200,8 @@ function looksLikeText(head: Buffer): boolean {
 
   return (
     head.length === 0 ||
-    first === 0x3c || // <
+    first === 0x3c || // < — an XML document
+    first === 0x23 || // # — an M3U playlist, which opens #EXTM3U
     first === 0xef || // a UTF-8 BOM
     first === 0x20 ||
     first === 0x09 ||
@@ -233,7 +247,7 @@ function sniff(
   }
 
   throw new TypeError(
-    `The document at ${options.url} is neither XML nor anything recognizable ` +
+    `The document at ${options.url} is neither text nor a compression this can undo ` +
       `(it starts ${[...head.subarray(0, 4)]
         .map((byte) => byte.toString(16).padStart(2, '0'))
         .join(' ')}). If it is brotli, say so with compression: 'brotli'.`,
@@ -283,7 +297,7 @@ async function opened(
 }
 
 /** The document's bytes, decompressed, however it arrives. */
-async function* documentBytes(
+export async function* documentBytes(
   response: Response,
   url: string,
   compression: CompressionFormat | false | undefined,
@@ -356,16 +370,44 @@ export function defineXmltvSite<TData = XmltvChannel>(
     ...site
   } = options;
 
+  /**
+   * Where the document is, worked out at most once.
+   *
+   * Memoized because both passes ask and a lookup can be a whole request of its
+   * own — reading an M3U playlist to find its `x-tvg-url`, say. A failure is
+   * *not* kept: a lookup that fell over on a dropped connection should be tried
+   * again by the next pass rather than poisoning the site for the process.
+   */
+  let located: Promise<string> | undefined;
+
+  const locate = (http: StreamContext['http'], signal?: AbortSignal): Promise<string> => {
+    located ??= Promise.resolve(
+      typeof url === 'function' ? url({ http, ...(signal ? { signal } : {}) }) : url,
+    ).catch((error: unknown) => {
+      located = undefined;
+
+      throw error;
+    });
+
+    return located;
+  };
+
   /** One request for the document, the same way for both passes. */
   const fetchDocument = async (
     http: StreamContext['http'],
     signal?: AbortSignal,
-  ): Promise<Response> =>
-    http.get(url, {
-      // A guide is a long download; ky's ten seconds is for an API call.
-      timeout: false,
-      ...(signal ? { signal } : {}),
-    });
+  ): Promise<{ response: Response; at: string }> => {
+    const at = await locate(http, signal);
+
+    return {
+      response: await http.get(at, {
+        // A guide is a long download; ky's ten seconds is for an API call.
+        timeout: false,
+        ...(signal ? { signal } : {}),
+      }),
+      at,
+    };
+  };
 
   return {
     // Both on by default, and both about the same thing: a published guide is
@@ -385,12 +427,12 @@ export function defineXmltvSite<TData = XmltvChannel>(
         const found: GrabberChannel<XmltvChannel>[] = [];
 
         try {
-          const response = await fetchDocument(
+          const { response, at } = await fetchDocument(
             http,
             signal ? AbortSignal.any([signal, stop.signal]) : stop.signal,
           );
 
-          for await (const event of parseXmltvStream(documentBytes(response, url, compression), {
+          for await (const event of parseXmltvStream(documentBytes(response, at, compression), {
             ...parse,
             ...(signal ? { signal } : {}),
           })) {
@@ -471,9 +513,9 @@ export function defineXmltvSite<TData = XmltvChannel>(
         }
       }
 
-      const response = await fetchDocument(http, signal);
+      const { response, at } = await fetchDocument(http, signal);
 
-      for await (const event of parseXmltvStream(documentBytes(response, url, compression), {
+      for await (const event of parseXmltvStream(documentBytes(response, at, compression), {
         ...parse,
         ...(signal ? { signal } : {}),
       })) {

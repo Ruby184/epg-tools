@@ -50,8 +50,18 @@ const GROUPED = document(
 let running: Server | undefined;
 
 afterEach(async () => {
-  await new Promise<void>((resolve) => running?.close(() => resolve()));
+  const server = running;
+
   running = undefined;
+
+  // Guarded rather than `running?.close(…)` inside the promise: the optional
+  // call short-circuits for a test that never started a server, leaving that
+  // promise with nothing to resolve it and the hook to hang for its whole
+  // timeout. Every test below happens to start one, so it has never bitten —
+  // which is exactly what makes it worth closing off rather than relying on.
+  if (server !== undefined) {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 /** Serve one body, and say what was asked for. */
