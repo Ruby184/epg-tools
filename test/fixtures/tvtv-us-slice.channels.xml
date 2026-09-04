@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<channels>
+  <channel site="tvtv.us" site_id="10126" lang="en" xmltv_id="">Bally Sports Southeast Georgia</channel>
+  <channel site="tvtv.us" site_id="10035" lang="en" xmltv_id="AE.us@East">A&amp;E East</channel>
+  <channel site="tvtv.us" site_id="45250" lang="es" xmltv_id="WSOCTV92.us@HD">Telemundo (WSOC-DT2) Charlotte, NC</channel>
+  <channel site="tvtv.us" site_id="78765" lang="en" xmltv_id="DocuBox.nl@SD">DocuBox HD</channel>
+  <channel site="tvtv.us" site_id="2121" lang="en" xmltv_id="EuronewsEnglish.fr@SD">Euronews English</channel>
+</channels>

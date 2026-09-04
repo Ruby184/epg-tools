@@ -106,6 +106,7 @@ export default {
         // One per module, matching the directory under src/.
         'xmltv',
         'm3u',
+        'channels',
         'grabber',
         'cache',
         'merge',

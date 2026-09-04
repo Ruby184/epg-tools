@@ -139,6 +139,23 @@ export type {
 } from './m3u/types.js';
 
 export {
+  matchChannels,
+  parseChannelList,
+  serializeChannelList,
+  timeshiftOf,
+} from './channels/main.js';
+export type {
+  Candidate,
+  ChannelList,
+  ChannelListEntry,
+  ChannelListWarning,
+  ChannelMatch,
+  ChannelMatchKind,
+  ChannelMatchResult,
+  WriteChannelListOptions,
+} from './channels/main.js';
+
+export {
   CacheManager,
   FsCacheDriver,
   FsNdjsonCacheDriver,
