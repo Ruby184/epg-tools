@@ -3,23 +3,14 @@ import { writeOutput, type OutputOptions, type OutputTarget } from '../core/outp
 import { emitter } from '../core/events.js';
 import type { Says } from '../core/events.js';
 import { channelElement, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
-import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
+import type { GrabberChannel } from '../grabber/types.js';
 import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import { mergeChannels } from './channel.js';
+import { derivedChannelElement, resolveDerived, shiftProgrammes } from './derive.js';
 import { mergeInto, resolveMatch } from './programme.js';
+import type { ChannelSource, RegistryEntry } from './registry.js';
 import type { BuildGuideOptions } from './types.js';
-
-interface ChannelSource {
-  config: AnySiteConfig;
-  channel: GrabberChannel;
-}
-
-/** One output `<channel>` with its covering sites in priority order. */
-interface RegistryEntry {
-  xmltvId: string;
-  sources: ChannelSource[];
-}
 
 /**
  * How many channel-days are read from the cache ahead of the writer when
@@ -108,6 +99,11 @@ export { defaultChannelInfo };
  * reported be emitted once, and the entries ahead of the writer are read while
  * it works — `readAhead` of them. So what is alive at once is those two days
  * plus that window, flat in the size of the guide however large it gets.
+ *
+ * A `derived` channel holds a little longer: its programmes arrive shifted, so
+ * what a day contributes reaches up to its offset past that day's own end and
+ * waits a fold longer to be emitted. One day plus the largest offset declared,
+ * which is why an offset is held under a day.
  */
 export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator<string> {
   const now = options.now ?? new Date();
@@ -116,6 +112,16 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   const programmeStrategy = options.merge?.programmeStrategy ?? 'merge';
   const { cache } = options;
   const emit = emitter(options);
+
+  /**
+   * Where a `merge.transform` says things — no site on it, because the code is
+   * the config's own rather than any site's. Also where a `derived` declaration
+   * the guide cannot honour is reported.
+   */
+  const mergeSays: Says = {
+    log: (message, data) => emit({ type: 'merge:note', message, ...(data ? { data } : {}) }),
+    warn: (message, data) => emit({ type: 'merge:warning', message, ...(data ? { data } : {}) }),
+  };
 
   // Through the same helper the grab uses, so a site that fetches its channel
   // list is asked the same way by both — and every site at once rather than one
@@ -164,7 +170,16 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     }
   }
 
+  // What a derived channel shifts has to be a channel this guide already has,
+  // so this comes after the registry and adds to it. A declaration the guide
+  // cannot honour has already had its say — thrown for a config that cannot be
+  // right, warned about for a source that merely is not here today.
+  const derived = options.derived?.length
+    ? resolveDerived(options.derived, registry, mergeSays)
+    : [];
+
   const channels: XmltvChannel[] = [];
+  const elementById = new Map<string, XmltvChannel>();
 
   for (const entry of registry) {
     // Channel metadata from every covering site is merged (display names
@@ -178,7 +193,27 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       continue;
     }
 
-    channels.push(infos.slice(1).reduce(mergeChannels, first));
+    const element = infos.slice(1).reduce(mergeChannels, first);
+
+    channels.push(element);
+
+    if (!elementById.has(entry.xmltvId)) {
+      elementById.set(entry.xmltvId, element);
+    }
+  }
+
+  // A derived channel's element is its source's, renamed — so it is built from
+  // what that source published rather than from any one site's idea of it, and
+  // a channel three sites cover is derived from all three merged.
+  for (const entry of derived) {
+    const inherited = elementById.get(entry.derivedFrom.source.xmltvId);
+
+    if (inherited === undefined) {
+      continue;
+    }
+
+    channels.push(derivedChannelElement(inherited, entry, mergeSays));
+    registry.push(entry);
   }
 
   const listStrategy = channelStrategy === 'merge-programmes' ? programmeStrategy : 'concat';
@@ -276,15 +311,6 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     return says;
   };
 
-  /**
-   * Where a `merge.transform` says things — no site on it, because the code is
-   * the config's own rather than any site's.
-   */
-  const mergeSays: Says = {
-    log: (message, data) => emit({ type: 'merge:note', message, ...(data ? { data } : {}) }),
-    warn: (message, data) => emit({ type: 'merge:warning', message, ...(data ? { data } : {}) }),
-  };
-
   /** What a site contributes for one channel-day, as the site would have it. */
   const contribution = (
     source: ChannelSource,
@@ -308,15 +334,23 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       });
     }
 
-    if (clampToWindow) {
-      programmes = programmes.filter((programme) => {
-        const start = programme.start.getTime();
-        return start >= windowStart && start < windowEnd;
-      });
-    }
-
     return programmes;
   };
+
+  /**
+   * The window, applied to the times the guide will publish.
+   *
+   * After a derived channel's shift rather than before it, which is the only
+   * place it can be: a `+1` channel's window is about its own hours, so
+   * clamping on what its source said would cut it an hour out at both ends.
+   */
+  const clamped = (programmes: XmltvProgramme[]): XmltvProgramme[] =>
+    clampToWindow
+      ? programmes.filter((programme) => {
+          const start = programme.start.getTime();
+          return start >= windowStart && start < windowEnd;
+        })
+      : programmes;
 
   // Every channel-day the guide is made of, in the order it is written: each
   // channel's days in turn. Which is also why the last day of the window is
@@ -332,10 +366,15 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     entry: RegistryEntry;
     day: string;
   }): Promise<{ entry: RegistryEntry; day: string; lists: XmltvProgramme[][] }> => {
+    // A derived channel reads what it shifts. Its source's rows rather than its
+    // source's *output*, so the lists stay separate and the merging below does
+    // for the derived channel exactly what it does for the channel it shifts.
+    const { source: read, offsetMs } = entry.derivedFrom ?? { source: entry, offsetMs: 0 };
+
     // The covering sites' entries for this day are read in parallel.
     const cached = await Promise.all(
-      entry.sources.map((source) =>
-        cache.read({ site: source.config.site, channelId: entry.xmltvId, day }),
+      read.sources.map((source) =>
+        cache.read({ site: source.config.site, channelId: read.xmltvId, day }),
       ),
     );
 
@@ -343,10 +382,13 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
 
     // Each site's own say over its own programmes, before they meet anyone
     // else's — so what merging sees, and what the rules run on, is already
-    // what the site meant.
+    // what the site meant. A site's transform therefore sees the times it
+    // published, and the shift comes after it.
     for (const [index, list] of cached.entries()) {
       if (list !== undefined) {
-        lists.push(contribution(entry.sources[index]!, day, list));
+        const mine = contribution(read.sources[index]!, day, list);
+
+        lists.push(clamped(offsetMs === 0 ? mine : shiftProgrammes(mine, offsetMs, entry.xmltvId)));
       }
     }
 

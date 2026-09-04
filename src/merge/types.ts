@@ -1,5 +1,5 @@
 import type { SerializeOptions } from '../xmltv/serialize.js';
-import type { XmltvDocumentMeta, XmltvProgramme } from '../xmltv/types.js';
+import type { XmltvChannel, XmltvDocumentMeta, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheStore } from '../cache/types.js';
 import type { AnySiteConfig } from '../grabber/types.js';
 import type { Reporter, Says } from '../core/events.js';
@@ -157,6 +157,66 @@ export interface MergeOptions {
   transform?: ProgrammeTransform;
 }
 
+/**
+ * A channel that is another channel, shifted — a `+1`.
+ *
+ * The same schedule an hour later is not a second source to grab, it is
+ * arithmetic on one already in the cache. So a derived channel costs no
+ * requests: the guide reads its source's cached days again and moves every
+ * programme along.
+ *
+ * `epg channels` is where these usually come from. Given a playlist wanting
+ * `Sky One +1`, it declines to map it onto `skyone.uk` — an hour-wrong schedule
+ * is worse than none — and reports instead that it *looks like* a shift of it.
+ * This is how that report gets answered.
+ */
+export interface DerivedChannel {
+  /**
+   * The new channel's id, as the guide will publish it.
+   *
+   * Must be a channel nothing else produces: colliding with a real channel, or
+   * with another derivation, is a declaration that cannot be honoured and fails
+   * the run rather than emitting the id twice.
+   */
+  xmltvId: string;
+  /**
+   * The `xmltvId` this one shifts — a channel any site covers, or another
+   * derived channel. A chain is resolved to its root with the offsets summed.
+   */
+  from: string;
+  /**
+   * How far along, in minutes. `60` is a `+1` channel; a negative value shifts
+   * earlier.
+   *
+   * Minutes because that is what {@link timeshiftOf} reads out of a name, and
+   * whole minutes because a broadcast schedule has no finer idea of an offset.
+   * Under a day: a full day's shift is the same schedule again, and going that
+   * far spends the margin the merge keeps for sources whose day runs 06:00 to
+   * 06:00 — see the guide's own note on what it holds back.
+   */
+  offset: number;
+  /**
+   * What to call it. Defaults to the source's display name with the shift
+   * appended — `Sky One` becomes `Sky One +1` — which is the name a playlist
+   * uses, so the channel matches by name as well as by id.
+   *
+   * Only when the offset is a whole number of hours. Otherwise the source's name
+   * is inherited unchanged and the merge warns, since two channels with one
+   * display name is how a consumer maps the wrong one.
+   */
+  name?: string;
+  /** An icon of its own. Defaults to the source's. */
+  logo?: string;
+  /** The `lang` of {@link name}. Defaults to the source's first display name's. */
+  lang?: string;
+  /**
+   * The last word on the `<channel>` element, given the one this would have
+   * emitted — id, display name and icon already settled, and the source's
+   * channel-level extensions already dropped.
+   */
+  channelInfo?: (element: XmltvChannel) => XmltvChannel;
+}
+
 export interface BuildGuideOptions {
   /** Site configs in priority order (first = highest). */
   sites: AnySiteConfig[];
@@ -177,7 +237,8 @@ export interface BuildGuideOptions {
    * since writing is quick and reading is not, a large guide spends its time on
    * round trips taken one at a time. Reading ahead overlaps them; the window is
    * what bounds the memory, so this is also how many programme lists may be
-   * alive at once (a channel-day is one read per covering site). `1` is the old
+   * alive at once (a channel-day is one read per covering site, and a
+   * {@link DerivedChannel} reads its source's again). `1` is the old
    * strictly-serial behaviour.
    */
   readAhead?: number;
@@ -198,6 +259,11 @@ export interface BuildGuideOptions {
    */
   startDay?: string;
   merge?: MergeOptions;
+  /**
+   * Channels that are other channels shifted — see {@link DerivedChannel}. They
+   * cost no requests: each reads its source's cached days again.
+   */
+  derived?: DerivedChannel[];
   meta?: XmltvDocumentMeta;
   /**
    * Where this merge's events go — see {@link Reporter}.

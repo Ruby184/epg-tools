@@ -1234,6 +1234,239 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     });
   });
 
+  describe('derived channels', () => {
+    const site = makeSite('site-a.sk', [{ xmltvId: 'X', siteId: 'a-x', name: 'Sky One' }]);
+    const DAY2 = '2026-01-16';
+
+    /** Every `<programme>` as `channel start`, in document order. */
+    function aired(output: string): string[] {
+      return [...output.matchAll(/<programme ([^>]*?)>/g)].map(([, attrs]) => {
+        const start = /start="(\d{14})/.exec(attrs!)?.[1];
+        const channel = /channel="([^"]*)"/.exec(attrs!)?.[1];
+
+        return `${channel} ${start}`;
+      });
+    }
+
+    const withDays = (entries: Record<string, XmltvProgramme[]>): CacheStore =>
+      createFakeCache(entries);
+
+    const guide = (
+      derived: BuildGuideOptions['derived'],
+      cache: CacheStore,
+      options: Partial<BuildGuideOptions> = {},
+    ): Promise<string> =>
+      generate({
+        sites: [site],
+        cache,
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        ...(derived ? { derived } : {}),
+        ...options,
+      });
+
+    it('publishes a channel of its own, with every programme under its id', async () => {
+      const output = await guide(
+        [{ xmltvId: 'X.plus1', from: 'X', offset: 60 }],
+        withDays({ [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'A')] }),
+      );
+
+      expect(output).toContain('<channel id="X.plus1">');
+      // The name a playlist uses for it, built from the source's own.
+      expect(output).toContain('<display-name>Sky One +1</display-name>');
+      expect(aired(output)).toEqual(['X 20260115100000', 'X.plus1 20260115110000']);
+    });
+
+    // The one worth being explicit about: a shift moves programmes across the
+    // day boundary, so the day the merge holds back has to carry them — and the
+    // programme both days report has to still be recognized after the move.
+    it('carries a programme across midnight, once', async () => {
+      const midnight = prog('X', '2026-01-15T23:30:00Z', 'Midnight');
+      const output = await guide(
+        [{ xmltvId: 'X.plus1', from: 'X', offset: 60 }],
+        withDays({
+          [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T22:00:00Z', 'Late'), midnight],
+          // The same programme again, as a source whose day runs to 06:00 does.
+          [`site-a.sk|X|${DAY2}`]: [midnight, prog('X', '2026-01-16T09:00:00Z', 'Morning')],
+        }),
+        { days: 2 },
+      );
+
+      expect(aired(output)).toEqual([
+        'X 20260115220000',
+        'X 20260115233000',
+        'X 20260116090000',
+        'X.plus1 20260115230000',
+        'X.plus1 20260116003000',
+        'X.plus1 20260116100000',
+      ]);
+    });
+
+    it('keeps the offset each date was published in', async () => {
+      const { xmltvDate } = await import('../src/xmltv/main.js');
+      const output = await guide(
+        [{ xmltvId: 'X.plus1', from: 'X', offset: 60 }],
+        withDays({
+          [`site-a.sk|X|${DAY}`]: [
+            {
+              ...prog('X', '2026-01-15T08:00:00Z', 'A'),
+              start: xmltvDate(new Date('2026-01-15T08:00:00Z'), { offset: 120 }),
+            },
+          ],
+        }),
+      );
+
+      // 10:00 +0200 an hour later is 11:00 +0200 — not 09:00 UTC.
+      expect(output).toMatch(/start="20260115110000 ?\+0200"/);
+    });
+
+    it('leaves the production year and an earlier airing where they were', async () => {
+      const output = await guide(
+        [{ xmltvId: 'X.plus1', from: 'X', offset: 60 }],
+        withDays({
+          [`site-a.sk|X|${DAY}`]: [
+            prog('X', '2026-01-15T10:00:00Z', 'A', undefined, {
+              date: new Date('2020-01-01T00:00:00Z'),
+              previouslyShown: { start: new Date('2019-05-05T20:00:00Z') },
+            }),
+          ],
+        }),
+      );
+
+      expect(output).toContain('20200101000000');
+      expect(output).toContain('20190505200000');
+    });
+
+    it('sums a chain of shifts', async () => {
+      const output = await guide(
+        [
+          { xmltvId: 'X.plus1', from: 'X', offset: 60 },
+          { xmltvId: 'X.plus2', from: 'X.plus1', offset: 60 },
+        ],
+        withDays({ [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'A')] }),
+      );
+
+      expect(aired(output)).toEqual([
+        'X 20260115100000',
+        'X.plus1 20260115110000',
+        'X.plus2 20260115120000',
+      ]);
+    });
+
+    it('keeps the source name, and says so, for an offset it cannot spell', async () => {
+      const report = collectEvents();
+      const output = await guide(
+        [{ xmltvId: 'X.plus90', from: 'X', offset: 90 }],
+        withDays({ [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'A')] }),
+        { reporter: report.reporter },
+      );
+
+      expect(output).toContain('<display-name>Sky One</display-name>');
+      expect(aired(output)).toContain('X.plus90 20260115113000');
+      expect(report.of('merge:warning')[0]?.message).toMatch(/no name to say it with/);
+    });
+
+    it('goes on without a channel nothing produces, rather than failing', async () => {
+      const report = collectEvents();
+      const output = await guide(
+        [{ xmltvId: 'Y.plus1', from: 'Y', offset: 60 }],
+        withDays({ [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'A')] }),
+        { reporter: report.reporter },
+      );
+
+      expect(output).not.toContain('Y.plus1');
+      expect(report.of('merge:warning')[0]?.message).toMatch(/which no site produces/);
+    });
+
+    it.each([
+      [
+        'a cycle',
+        [
+          { xmltvId: 'A1', from: 'A2', offset: 60 },
+          { xmltvId: 'A2', from: 'A1', offset: 60 },
+        ],
+        /shifts itself/,
+      ],
+      ['itself', [{ xmltvId: 'X.plus1', from: 'X.plus1', offset: 60 }], /shifts itself/],
+      ['a channel a site produces', [{ xmltvId: 'X', from: 'X', offset: 60 }], /shifts itself/],
+      ['a day or more', [{ xmltvId: 'X.plus24', from: 'X', offset: 1440 }], /a day or more/],
+      [
+        'half a minute',
+        [{ xmltvId: 'X.half', from: 'X', offset: 0.5 }],
+        /not a whole number of minutes/,
+      ],
+      [
+        'no shift at all',
+        [{ xmltvId: 'X.same', from: 'X', offset: 0 }],
+        /not a whole number of minutes/,
+      ],
+      [
+        'the same id twice',
+        [
+          { xmltvId: 'X.plus1', from: 'X', offset: 60 },
+          { xmltvId: 'X.plus1', from: 'X', offset: 120 },
+        ],
+        /declared twice/,
+      ],
+    ])('refuses %s', async (_what, derived, expected) => {
+      await expect(guide(derived, withDays({ [`site-a.sk|X|${DAY}`]: [] }))).rejects.toThrow(
+        expected,
+      );
+    });
+
+    it('refuses an id a site already produces', async () => {
+      await expect(
+        guide([{ xmltvId: 'X', from: 'Z', offset: 60 }], withDays({ [`site-a.sk|X|${DAY}`]: [] })),
+      ).rejects.toThrow(/a channel a site already produces/);
+    });
+
+    it("refuses a source 'keep-all' produces more than once", async () => {
+      const second = makeSite('site-b.sk', [{ xmltvId: 'X', siteId: 'b-x' }]);
+
+      await expect(
+        generate({
+          sites: [site, second],
+          cache: withDays({ [`site-a.sk|X|${DAY}`]: [] }),
+          days: 1,
+          startDay: DAY,
+          now: NOW,
+          derived: [{ xmltvId: 'X.plus1', from: 'X', offset: 60 }],
+          merge: { channelStrategy: 'keep-all' },
+        }),
+      ).rejects.toThrow(/more than one site produces/);
+    });
+
+    describe('the window it can fill', () => {
+      const cache = (): CacheStore =>
+        withDays({
+          [`site-a.sk|X|${DAY}`]: [
+            prog('X', '2026-01-15T00:30:00Z', 'First'),
+            prog('X', '2026-01-15T23:30:00Z', 'Last'),
+          ],
+        });
+
+      it('overhangs the end by its offset, by default', async () => {
+        const output = await guide([{ xmltvId: 'X.plus1', from: 'X', offset: 60 }], cache());
+
+        // 23:30 + 1h is the next day, past the window — kept, like any spill.
+        expect(aired(output)).toContain('X.plus1 20260116003000');
+      });
+
+      it('has that overhang clamped off when the window is enforced', async () => {
+        const output = await guide([{ xmltvId: 'X.plus1', from: 'X', offset: 60 }], cache(), {
+          merge: { clampToWindow: true },
+        });
+
+        // Clamped on its own hours, not the source's: 01:30 is inside, 00:30
+        // of the next day is not.
+        expect(aired(output).filter((line) => line.startsWith('X.plus1'))).toEqual([
+          'X.plus1 20260115013000',
+        ]);
+      });
+    });
+  });
+
   describe('reading the cache ahead of the writer', () => {
     /** A cache that records the order reads were started in, and their overlap. */
     function tracingCache(): {
