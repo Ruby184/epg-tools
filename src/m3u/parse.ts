@@ -1,5 +1,6 @@
 import { createReadStream } from 'node:fs';
 import { Transform, type TransformCallback } from 'node:stream';
+import { M3uIptvReader } from './iptv.js';
 import { M3uScanner } from './scan.js';
 import type {
   AnyIterable,
@@ -54,7 +55,9 @@ export async function* parseM3uStream(
   options?: M3uParseStreamOptions,
 ): AsyncGenerator<M3uParseEvent> {
   const decoder = new TextDecoder(options?.charset);
-  const scanner = new M3uScanner(options);
+  // The scanner reads lines; the reader says what they mean. Composed here
+  // rather than folded together, so another dialect can supply its own reader.
+  const scanner = new M3uScanner(new M3uIptvReader(options), options);
   let buf = '';
 
   for await (const chunk of source) {
@@ -86,7 +89,7 @@ export async function* parseM3uStream(
  * `warning`).
  */
 export class M3uParseStream extends Transform {
-  readonly #scanner: M3uScanner;
+  readonly #scanner: M3uScanner<M3uParseEvent>;
   readonly #decoder: TextDecoder;
   #buf = '';
 
@@ -98,7 +101,7 @@ export class M3uParseStream extends Transform {
     // Before the scanner, so an unknown charset throws from the constructor
     // rather than from the middle of a pipeline.
     this.#decoder = new TextDecoder(options?.charset);
-    this.#scanner = new M3uScanner(options);
+    this.#scanner = new M3uScanner(new M3uIptvReader(options), options);
   }
 
   override _transform(
@@ -171,11 +174,15 @@ export async function* parseM3uFile(
 export function parseM3uString(text: string, options?: M3uParseOptions): M3uPlaylist {
   // An empty header, so a caller gets the same shape whether or not the
   // playlist carried one.
-  const playlist: M3uPlaylist = { header: { attributes: new Map() }, entries: [], warnings: [] };
+  const playlist: M3uPlaylist = {
+    header: { attributes: new Map() },
+    entries: [],
+    warnings: [],
+  };
 
   // Ordered by how often a playlist produces each: it is overwhelmingly
   // entries, and the header happens once or not at all.
-  for (const event of new M3uScanner(options).consume(text, true)) {
+  for (const event of new M3uScanner(new M3uIptvReader(options), options).consume(text, true)) {
     switch (event.type) {
       case 'entry':
         playlist.entries.push(event.value);

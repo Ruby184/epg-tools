@@ -116,6 +116,7 @@ export {
   writeM3uToFile,
 } from './m3u/main.js';
 export type {
+  M3uAttributeOptions,
   M3uParseStreamOptions,
   M3uSerializeOptions,
   M3uSerializeStreamOptions,

@@ -7,6 +7,8 @@ import { pipeline } from 'node:stream/promises';
 import { describe, expect, it } from 'vitest';
 import {
   M3uParseStream,
+  M3uScanner,
+  M3uTag,
   M3uSerializeStream,
   parseM3uFile,
   parseM3uStream,
@@ -16,7 +18,7 @@ import {
   writeM3uStream,
   writeM3uToFile,
 } from '../src/m3u/main.js';
-import type { M3uEntry, M3uParseEvent, M3uWarning } from '../src/m3u/main.js';
+import type { M3uEntry, M3uParseEvent, M3uTokens, M3uWarning } from '../src/m3u/main.js';
 
 const FIXTURE = new URL('./fixtures/iptv-org-slice.m3u', import.meta.url);
 /** `parseM3uFile` takes a path, and `URL.pathname` is not one — it keeps the
@@ -456,6 +458,212 @@ describe('a line that never ends', () => {
     const document = await readFile(FIXTURE, 'utf8');
 
     expect(parseM3uString(document).warnings).toEqual([]);
+  });
+});
+
+describe('the scanner on its own, for a dialect that is not IPTV', () => {
+  const HLS = [
+    '#EXTM3U',
+    '#EXT-X-TARGETDURATION:10',
+    '#EXT-X-KEY:METHOD=AES-128,URI="https://e/k1.bin"',
+    '#EXTINF:9.009,',
+    'http://e/first.ts',
+    '#EXT-X-KEY:METHOD=AES-128,URI="https://e/k2.bin"',
+    '#EXTINF:8.5,Third',
+    'http://e/second.ts',
+    '#EXT-X-ENDLIST',
+    '',
+  ].join('\r\n');
+
+  /** Every line, in order, as the scanner classified it. */
+  class Lines implements M3uTokens<never> {
+    readonly events: never[] = [];
+    readonly seen: string[] = [];
+    ended = false;
+
+    tag({ name, value, line }: M3uTag): void {
+      this.seen.push(`${line} tag ${name}${value === '' ? '' : `:${value}`}`);
+    }
+    uri(text: string, line: number): void {
+      this.seen.push(`${line} uri ${text}`);
+    }
+    warn(): void {}
+    end(): void {
+      this.ended = true;
+    }
+  }
+
+  it('classifies lines and knows nothing else about them', () => {
+    const lines = new Lines();
+
+    for (const _event of new M3uScanner(lines, {}).consume(HLS, true)) {
+      // this handler emits nothing
+    }
+
+    expect(lines.seen).toEqual([
+      '1 tag EXTM3U',
+      '2 tag EXT-X-TARGETDURATION:10',
+      '3 tag EXT-X-KEY:METHOD=AES-128,URI="https://e/k1.bin"',
+      '4 tag EXTINF:9.009,',
+      '5 uri http://e/first.ts',
+      '6 tag EXT-X-KEY:METHOD=AES-128,URI="https://e/k2.bin"',
+      '7 tag EXTINF:8.5,Third',
+      '8 uri http://e/second.ts',
+      '9 tag EXT-X-ENDLIST',
+    ]);
+    expect(lines.ended).toBe(true);
+  });
+
+  // The point of the seam: a handler that scopes tags the way RFC 8216 does,
+  // getting CRLF, blank lines and the line bound from the scanner for nothing.
+  it('lets a handler carry an EXT-X-KEY forward, as the RFC says to', () => {
+    class Hls implements M3uTokens<never> {
+      readonly events: never[] = [];
+      readonly segments: { uri: string; duration: number; key: string | undefined }[] = [];
+      targetDuration?: number;
+      #key: string | undefined;
+      #duration = 0;
+
+      tag(tag: M3uTag): void {
+        if (tag.name === 'EXTINF') this.#duration = Number(tag.value.split(',')[0]);
+        else if (tag.name === 'EXT-X-TARGETDURATION') this.targetDuration = Number(tag.value);
+        // Applies to every segment after it, until the next one. The grammar is
+        // the tag's own business, which is why the reader names it here.
+        else if (tag.name === 'EXT-X-KEY')
+          this.#key = tag.attributes({ separator: ',' }).get('URI');
+      }
+      uri(text: string): void {
+        this.segments.push({ uri: text, duration: this.#duration, key: this.#key });
+      }
+      warn(): void {}
+      end(): void {}
+    }
+
+    const hls = new Hls();
+
+    for (const _event of new M3uScanner(hls, {}).consume(HLS, true)) {
+      // this handler emits nothing
+    }
+
+    expect(hls.targetDuration).toBe(10);
+    expect(hls.segments).toEqual([
+      { uri: 'http://e/first.ts', duration: 9.009, key: 'https://e/k1.bin' },
+      { uri: 'http://e/second.ts', duration: 8.5, key: 'https://e/k2.bin' },
+    ]);
+  });
+
+  // RFC 8216 §4.3.1.1 requires `#EXTM3U` of every playlist type, so the scanner
+  // reports its absence and every dialect gets that without asking.
+  it('tells any handler when the playlist does not open with #EXTM3U', () => {
+    class Warnings implements M3uTokens<never> {
+      readonly events: never[] = [];
+      readonly warnings: M3uWarning[] = [];
+      tag(): void {}
+      uri(): void {}
+      warn(warning: M3uWarning): void {
+        this.warnings.push(warning);
+      }
+      end(): void {}
+    }
+
+    const missing = new Warnings();
+
+    for (const _event of new M3uScanner(missing, {}).consume('\n# a comment\nhttp://e/1\n', true)) {
+      // this handler emits nothing
+    }
+
+    expect(missing.warnings).toEqual([
+      {
+        code: 'missing-header',
+        message: 'the playlist begins with "# a comment", not #EXTM3U',
+        // The comment, not the blank line above it.
+        line: 2,
+        col: 1,
+      },
+    ]);
+
+    const present = new Warnings();
+
+    for (const _event of new M3uScanner(present, {}).consume(HLS, true)) {
+      // this handler emits nothing
+    }
+
+    expect(present.warnings).toEqual([]);
+  });
+
+  it('gives the IPTV reader those same lines as entries', () => {
+    const playlist = parseM3uString(HLS);
+
+    expect(playlist.entries.map((e) => [e.duration, e.url])).toEqual([
+      [9.009, 'http://e/first.ts'],
+      [8.5, 'http://e/second.ts'],
+    ]);
+  });
+});
+
+describe('M3uTag.attributes', () => {
+  const tag = (name: string, value: string) => new M3uTag(name, value, 1, 1);
+
+  it('reads the space-separated grammar the #EXTINF layer uses', () => {
+    expect(tag('EXTM3U', 'tvg-id="a.us" group-title="News"').attributes()).toEqual(
+      attrs({ 'tvg-id': 'a.us', 'group-title': 'News' }),
+    );
+  });
+
+  it('reads the comma-separated grammar RFC 8216 §4.2 defines', () => {
+    expect(
+      tag('EXT-X-KEY', 'METHOD=AES-128,URI="https://e/k.bin",IV=0x9c7d').attributes({
+        separator: ',',
+      }),
+    ).toEqual(attrs({ METHOD: 'AES-128', URI: 'https://e/k.bin', IV: '0x9c7d' }));
+  });
+
+  it('keeps a comma inside a quoted value under either grammar', () => {
+    expect(
+      tag('EXT-X-STREAM-INF', 'BANDWIDTH=1280000,CODECS="avc1.42e00a,mp4a.40.2"').attributes({
+        separator: ',',
+      }),
+    ).toEqual(attrs({ BANDWIDTH: '1280000', CODECS: 'avc1.42e00a,mp4a.40.2' }));
+  });
+
+  it('reads only the slice it is given', () => {
+    // What the IPTV reader asks for: past the duration, up to the comma that
+    // begins the display name.
+    const extinf = tag('EXTINF', '-1 tvg-id="a.us",One HD, the good one');
+
+    expect(extinf.attributes({ from: 2, to: 16 })).toEqual(attrs({ 'tvg-id': 'a.us' }));
+  });
+
+  it('says where a quote was opened and never closed', () => {
+    const opened: number[] = [];
+
+    expect(
+      tag('EXTM3U', 'a="one" b="never closed').attributes({
+        onUnterminated: (at) => opened.push(at),
+      }),
+    ).toEqual(attrs({ a: 'one', b: 'never closed' }));
+    // The `"` after `b=`, which is where the trouble starts.
+    expect(opened).toEqual([10]);
+  });
+
+  // Which grammar applies is a property of the tag, which is why the reading
+  // belongs to the tag — and why a value is handed over unparsed. `#EXTVLCOPT`
+  // is not an attribute list at all: one key, and a value holding spaces and
+  // commas, which neither grammar reads.
+  it('is not the tool for a directive carrying a single free-text value', () => {
+    const vlc = tag('EXTVLCOPT', 'http-user-agent=Mozilla/5.0 (KHTML, like Gecko) Chrome/1');
+
+    for (const separator of [' ', ','] as const) {
+      expect(vlc.attributes({ separator }).get('http-user-agent')).toBe('Mozilla/5.0');
+    }
+
+    // What the tag actually means, which is the caller's business.
+    const at = vlc.value.indexOf('=');
+
+    expect([vlc.value.slice(0, at), vlc.value.slice(at + 1)]).toEqual([
+      'http-user-agent',
+      'Mozilla/5.0 (KHTML, like Gecko) Chrome/1',
+    ]);
   });
 });
 

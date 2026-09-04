@@ -1,50 +1,216 @@
 /**
- * The M3U scanner: bytes of playlist in, events out, one line at a time.
+ * The M3U line scanner: bytes of playlist in, tags and urls out.
  *
- * Shaped like {@link XmltvScanner} and for the same reason — `consume` yields
+ * Deliberately knows nothing about what a playlist *means*. RFC 8216 §4.1 is
+ * the whole of its brief — "each line is a URI, is blank, or starts with the
+ * character '#'" — so this splits lines, drops the carriage return a CRLF
+ * playlist carries, skips the blank ones, and hands each remaining line to a
+ * {@link M3uTokens} handler as either a tag or a url. Which of them opens a
+ * channel, which describes the one above it, and which govern the whole
+ * document are questions for whoever implements that handler: `M3uIptvReader`
+ * answers them the way the IPTV world does, and an HLS reader would answer
+ * differently.
+ *
+ * Shaped like {@link XmltvScanner} in the way that matters — `consume` yields
  * what it finished and **returns what it could not**, so a caller feeding it
  * arbitrary chunks hands the remainder back next time and never has to know
- * where a line ended. A playlist is line-oriented, so the state this carries is
- * small: the entry being assembled, and whether a header has been seen.
- *
- * The character work is charcodes and lookup tables rather than regular
- * expressions, as the XMLTV scanner's is, because the two inner loops here run
- * over every character of every `#EXTINF` line in the playlist.
+ * where a line ended.
  */
 
-import type {
-  M3uDirective,
-  M3uEntry,
-  M3uParseEvent,
-  M3uParseOptions,
-  M3uWarning,
-} from './types.js';
-
-/** What `#EXTINF:` introduces, and the only tag that opens an entry. */
-const EXTINF = '#EXTINF:';
-
-const EXTM3U = '#EXTM3U';
+import type { M3uWarning } from './types.js';
 
 /**
- * Where `#EXTINF:` first differs from anything else beginning `#EXT`.
- *
- * One `charCodeAt` rules the tag out before a `startsWith` walks eight
- * characters, which is worth the indirection on a check every line pays.
+ * The one tag RFC 8216 requires of every playlist there is: §4.3.1.1 has it
+ * "the first line of every Media Playlist and every Master Playlist". Which
+ * makes its absence a structural fact rather than any dialect's opinion, and so
+ * the scanner's to report.
  */
-const TAG_AT = 4;
-const EXTINF_I = 'I'.charCodeAt(0);
+const EXTM3U = 'EXTM3U';
+
+const HASH = '#'.charCodeAt(0);
+const COLON = ':'.charCodeAt(0);
+const CR = '\r'.charCodeAt(0);
 
 const QUOT = '"'.charCodeAt(0);
 const COMMA = ','.charCodeAt(0);
 const EQ = '='.charCodeAt(0);
-const HASH = '#'.charCodeAt(0);
 const SPACE = ' '.charCodeAt(0);
 const TAB = '\t'.charCodeAt(0);
-const CR = '\r'.charCodeAt(0);
-const MINUS = '-'.charCodeAt(0);
-const ZERO = '0'.charCodeAt(0);
-const NINE = '9'.charCodeAt(0);
 const LF = '\n'.charCodeAt(0);
+
+/**
+ * Whitespace, indexed by charcode (ASCII 0–127; anything higher reads
+ * `undefined` → falsy, which is correct — a non-ASCII character is an ordinary
+ * name or value character).
+ */
+const WS_TABLE = new Uint8Array(128);
+WS_TABLE[SPACE] = WS_TABLE[TAB] = WS_TABLE[CR] = WS_TABLE[LF] = 1;
+
+/**
+ * Continues an attribute name. Deliberately wider than RFC 8216 §4.2, which
+ * allows only uppercase letters, digits and hyphens: the names the IPTV layer
+ * carries are lowercase and hyphenated (`tvg-id`, `group-title`), so a reader
+ * written to the letter of the specification would read none of them.
+ */
+const NAME_TABLE = new Uint8Array(128);
+
+for (let code = 0; code < 128; code++) {
+  NAME_TABLE[code] = /[A-Za-z0-9_.-]/.test(String.fromCharCode(code)) ? 1 : 0;
+}
+
+/**
+ * No separator beyond whitespace. `-1` because `charCodeAt` never returns it,
+ * so the comparison it takes part in is simply never true.
+ */
+const NO_SEPARATOR = -1;
+
+/** What {@link M3uTag.attributes} takes beyond the value it is reading. */
+export interface M3uAttributeOptions {
+  /**
+   * What separates one attribute from the next.
+   *
+   * `' '` — the default — is the grammar the IPTV layer puts on an `#EXTINF`
+   * line. `','` is the one RFC 8216 §4.2 defines, which is what every `#EXT-X-`
+   * tag carrying an attribute list uses.
+   */
+  separator?: ' ' | ',';
+  /** Read from here in the value rather than from its start. */
+  from?: number;
+  /** Stop here rather than at the end of the value. */
+  to?: number;
+  /**
+   * Told where a quote was opened and never closed, as an offset into the
+   * value. A caller with warnings to report wants to know; one that only wants
+   * the attributes it could read need not ask.
+   */
+  onUnterminated?: (at: number) => void;
+}
+
+/**
+ * One `#` line, split into the name and whatever followed the colon or space
+ * that ended it: `EXT-X-ENDLIST` and no value, `EXT-X-TARGETDURATION` and `10`,
+ * `EXTINF` and `-1 tvg-id="a",Name`.
+ *
+ * The value arrives **unparsed**, because which grammar it uses is a property
+ * of the name and only a reader of a particular dialect knows that:
+ * `EXT-X-KEY` carries a comma-separated attribute list, `EXTINF` a
+ * space-separated one behind a duration, `EXT-X-TARGETDURATION` a bare number,
+ * and `EXTVLCOPT` free text with commas in it. {@link M3uTag.attributes} reads
+ * the ones that *are* attribute lists, in whichever grammar the reader says.
+ */
+export class M3uTag {
+  constructor(
+    /** The tag name, without its `#`. */
+    readonly name: string,
+    /** Everything after the character that ended the name. */
+    readonly value: string,
+    /** 1-based line the tag was on. */
+    readonly line: number,
+    /**
+     * 1-based column where {@link value} begins, so a reader can anchor a
+     * warning at something it found inside it.
+     */
+    readonly col: number,
+  ) {}
+
+  /**
+   * The value read as an attribute list, in whichever grammar the tag uses.
+   *
+   * The only way to read one, and deliberately: which grammar applies is a
+   * property of the tag, so the reading belongs to the tag rather than to a
+   * function anyone could point at any string.
+   *
+   * Tolerant of what RFC 8216 forbids and this format does anyway: lowercase
+   * hyphenated names, and whitespace either side of the `=`. An unquoted value
+   * runs to the next space, which is in no specification but is what a playlist
+   * written by hand looks like.
+   *
+   * `separator` is the one thing the two grammars disagree about. The IPTV
+   * layer on `#EXTINF` separates attributes with spaces; RFC 8216 §4.2
+   * separates them with commas. Everything else is shared — a comma between
+   * attributes is already stepped over by the "nothing a name could begin with"
+   * branch below — so the whole difference is where an *unquoted* value stops.
+   */
+  attributes(options?: M3uAttributeOptions): Map<string, string> {
+    const into = new Map<string, string>();
+    const to = options?.to ?? this.value.length;
+    const separator = options?.separator === ',' ? COMMA : NO_SEPARATOR;
+    let at = options?.from ?? 0;
+
+    while (at < to) {
+      while (at < to && WS_TABLE[this.value.charCodeAt(at)]) {
+        at++;
+      }
+
+      const nameFrom = at;
+
+      while (at < to && NAME_TABLE[this.value.charCodeAt(at)]) {
+        at++;
+      }
+
+      if (at === nameFrom) {
+        // Nothing a name could begin with — step over it rather than stalling.
+        at++;
+        continue;
+      }
+
+      const name = this.value.slice(nameFrom, at);
+
+      while (at < to && WS_TABLE[this.value.charCodeAt(at)]) {
+        at++;
+      }
+
+      if (this.value.charCodeAt(at) !== EQ) {
+        // A bare word with no this.value. Not an attribute, and not worth a warning
+        // in a format where free text begins a few characters later.
+        continue;
+      }
+
+      at++;
+
+      while (at < to && WS_TABLE[this.value.charCodeAt(at)]) {
+        at++;
+      }
+
+      if (this.value.charCodeAt(at) === QUOT) {
+        const openedAt = at;
+
+        at++;
+
+        const valueFrom = at;
+
+        while (at < to && this.value.charCodeAt(at) !== QUOT) {
+          at++;
+        }
+
+        into.set(name, this.value.slice(valueFrom, at));
+
+        if (at >= to) {
+          // Opened and never closed: what was read is kept, and a caller with
+          // warnings to report is told where the quote that opened it was. The
+          // loop ends here too, so this happens at most once.
+          options?.onUnterminated?.(openedAt);
+        } else {
+          at++;
+        }
+      } else {
+        const valueFrom = at;
+
+        while (
+          at < to &&
+          !WS_TABLE[this.value.charCodeAt(at)] &&
+          this.value.charCodeAt(at) !== separator
+        ) {
+          at++;
+        }
+
+        into.set(name, this.value.slice(valueFrom, at));
+      }
+    }
+
+    return into;
+  }
+}
 
 /**
  * The byte-order mark a playlist saved by a Windows editor begins with.
@@ -56,34 +222,54 @@ const LF = '\n'.charCodeAt(0);
  */
 const BOM = 0xfeff;
 
-/**
- * Char-classification tables for the inner loops, indexed by charcode
- * (ASCII 0–127; anything higher reads `undefined` → falsy, which is correct —
- * a non-ASCII character is an ordinary attribute-name or value character).
- */
-const WS_TABLE = new Uint8Array(128);
-WS_TABLE[SPACE] = WS_TABLE[TAB] = WS_TABLE[CR] = WS_TABLE[LF] = 1;
-
-/**
- * Continues an attribute name. Deliberately wider than RFC 8216 §4.2, which
- * allows only uppercase letters, digits and hyphens: the names this format
- * actually carries are lowercase and hyphenated (`tvg-id`, `group-title`), so a
- * scanner written to the letter of the specification would read none of them.
- */
-const NAME_TABLE = new Uint8Array(128);
-
-for (let code = 0; code < 128; code++) {
-  NAME_TABLE[code] = /[A-Za-z0-9_.-]/.test(String.fromCharCode(code)) ? 1 : 0;
-}
-
-/** Every quote closed — what {@link M3uScanner} reports when the list is sound. */
-const CLOSED = -1;
-
-/** See {@link M3uParseOptions.maxLineLength}. */
+/** See {@link M3uScanOptions.maxLineLength}. */
 const DEFAULT_MAX_LINE_LENGTH = 1024 * 1024;
 
-export class M3uScanner {
-  readonly #keepUnknown: boolean;
+/**
+ * What a reader of some dialect of this format provides.
+ *
+ * The scanner calls one of the first three for every line that carries
+ * anything, then drains {@link M3uTokens.events} — which is what keeps a
+ * playlist streaming line by line rather than a chunk at a time, however large
+ * a chunk the caller passes.
+ */
+export interface M3uTokens<TEvent> {
+  /** A tag line, split as RFC 8216 §4.3 shapes one. See {@link M3uTag}. */
+  tag(tag: M3uTag): void;
+  /** A line that is neither blank nor a tag, so by §4.1 a URI. */
+  uri(text: string, line: number): void;
+  /** Something the *scanner* found wrong, which is only ever a line too long. */
+  warn(warning: M3uWarning): void;
+  /** The playlist is over, so anything left unfinished can be reported. */
+  end(): void;
+  /**
+   * Whatever the line just handed over produced, emptied by the scanner once it
+   * has been yielded on.
+   */
+  readonly events: TEvent[];
+}
+
+export interface M3uScanOptions {
+  /**
+   * The longest line to hold, in characters. **1 MiB** by default; `Infinity`
+   * for no bound at all.
+   *
+   * A line is held until its newline arrives, which is what lets a chunk fall
+   * anywhere — and what a body of megabytes with no newline in it would exploit,
+   * since a playlist is usually fetched from a url someone else controls. The
+   * bound is what keeps "flat in the size of the playlist" true for a response
+   * that is not a playlist.
+   *
+   * The default is chosen to be unreachable by anything real: the longest line
+   * in iptv-org's 26,803 is **1,184 characters**, so this leaves roughly 885×
+   * headroom. Over it, the line is dropped with a `line-too-long` warning and
+   * scanning resumes at the next newline.
+   */
+  maxLineLength?: number;
+}
+
+export class M3uScanner<TEvent> {
+  readonly #tokens: M3uTokens<TEvent>;
   readonly #maxLineLength: number;
 
   /**
@@ -95,57 +281,13 @@ export class M3uScanner {
    */
   #skipping = false;
 
-  /**
-   * What the line being read has produced so far, drained by {@link consume}.
-   *
-   * The same shape `XmltvScanner` uses for its own warnings: the methods that
-   * read a line are plain and record what they find here, and one small
-   * generator hands it on. They are entered once per line and say something
-   * only occasionally, so as generators each line paid for a generator object
-   * and a `yield*` delegation whether or not it had anything to report.
-   *
-   * `consume` checks this before draining rather than calling a drain generator
-   * unconditionally — that would put back the very allocation this removes, and
-   * measured 3.2× the cost. Emptied rather than replaced, so one array serves
-   * the whole playlist.
-   */
-  readonly #events: M3uParseEvent[] = [];
-
   /** 1-based, and counted across chunks — a warning is only useful with it. */
   #line = 0;
+  /** Whether any line has carried anything yet — see {@link EXTM3U}. */
   #seenAnything = false;
 
-  /**
-   * The entry being assembled: an `#EXTINF` has been read and its url has not.
-   *
-   * The whole of the parser's state, because an entry is the only thing in this
-   * format that spans lines. `null` rather than `undefined` for the reason the
-   * XMLTV scanner's own slots are — it is emptied and refilled as the document
-   * goes by, and an explicit empty reads differently from a field never set.
-   */
-  #pending: M3uEntry | null = null;
-  /** The line the pending entry's `#EXTINF` was on, for its warning. */
-  #pendingAt = 0;
-
-  /**
-   * Directives read before the `#EXTINF` they belong to, waiting for it.
-   *
-   * A playlist may put `#EXTGRP`, `#KODIPROP` or `#EXTVLCOPT` on either side of
-   * the `#EXTINF` — Kodi and tvheadend both accumulate into a pending channel
-   * and commit it on the url line, so which side is not something either of
-   * them can even notice. Kodi has an issue titled "#EXTGRP before #EXTINF
-   * breaks the parsing of playlist", which is how common the leading form is.
-   *
-   * Held here rather than dropped, so a playlist written that way keeps its
-   * groups. Anything still waiting when the playlist ends never found an entry,
-   * and *that* is what is finally reported as `orphan-directive`.
-   */
-  #leading: M3uDirective[] | null = null;
-  /** Where each of those was, so a leftover can be reported against its line. */
-  #leadingAt: number[] = [];
-
-  constructor(options: M3uParseOptions = {}) {
-    this.#keepUnknown = options.keepUnknownDirectives !== false;
+  constructor(tokens: M3uTokens<TEvent>, options: M3uScanOptions = {}) {
+    this.#tokens = tokens;
     this.#maxLineLength = options.maxLineLength ?? DEFAULT_MAX_LINE_LENGTH;
   }
 
@@ -153,10 +295,10 @@ export class M3uScanner {
    * Read what is complete in `buf` and hand back what is not.
    *
    * With `final`, the remainder is treated as a whole line even without its
-   * newline — a playlist whose last line has none is ordinary — and an entry
-   * still open at the end is reported rather than dropped.
+   * newline — a playlist whose last line has none is ordinary — and the handler
+   * is told the document is over, so it can report anything left unfinished.
    */
-  *consume(buf: string, final: boolean): Generator<M3uParseEvent, string> {
+  *consume(buf: string, final: boolean): Generator<TEvent, string> {
     let at = 0;
 
     // Still throwing away a line that ran past the bound. Nothing in it is
@@ -182,11 +324,7 @@ export class M3uScanner {
       }
 
       this.#read(buf, at, newline);
-
-      if (this.#events.length > 0) {
-        yield* this.#events;
-        this.#events.length = 0;
-      }
+      yield* this.#drain();
 
       at = newline + 1;
     }
@@ -199,17 +337,15 @@ export class M3uScanner {
       if (rest.length > this.#maxLineLength) {
         // Against the line it was about to become, which is the one after
         // everything counted so far.
-        yield {
-          type: 'warning',
-          value: {
-            code: 'line-too-long',
-            message: `line is longer than ${this.#maxLineLength} characters and was dropped`,
-            line: this.#line + 1,
-            col: 1,
-          },
-        };
-
+        this.#tokens.warn({
+          code: 'line-too-long',
+          message: `line is longer than ${this.#maxLineLength} characters and was dropped`,
+          line: this.#line + 1,
+          col: 1,
+        });
         this.#skipping = true;
+
+        yield* this.#drain();
 
         return '';
       }
@@ -219,43 +355,26 @@ export class M3uScanner {
 
     if (at < buf.length) {
       this.#read(buf, at, buf.length);
+      yield* this.#drain();
     }
 
-    this.#flush();
-
-    if (this.#events.length > 0) {
-      yield* this.#events;
-      this.#events.length = 0;
-    }
-
-    // Directives that waited for an `#EXTINF` the playlist never got to. Said
-    // here rather than where they were read, because until the document stops
-    // there is always the chance the entry is simply the next thing in it —
-    // the same reason an unfinished entry is reported at the end.
-    const waiting = this.#leading;
-
-    if (waiting !== null) {
-      this.#leading = null;
-
-      for (const [index, directive] of waiting.entries()) {
-        yield {
-          type: 'warning',
-          value: {
-            code: 'orphan-directive',
-            message: `#${directive.name} has no #EXTINF to belong to, and is dropped`,
-            line: this.#leadingAt[index] ?? this.#line,
-            col: 1,
-          },
-        };
-      }
-
-      this.#leadingAt = [];
-    }
+    this.#tokens.end();
+    yield* this.#drain();
 
     return '';
   }
 
-  /** One line of `buf`, whatever it turns out to be. */
+  /** Hand on whatever the last line produced, and start the next one empty. */
+  *#drain(): Generator<TEvent> {
+    const { events } = this.#tokens;
+
+    if (events.length > 0) {
+      yield* events;
+      events.length = 0;
+    }
+  }
+
+  /** One line of `buf`, classified and handed over. */
   #read(buf: string, start: number, end: number): void {
     this.#line++;
 
@@ -272,365 +391,73 @@ export class M3uScanner {
       from++;
     }
 
-    // Here rather than only where the buffer grows, so the bound is a property
-    // of *the line* and not of how the bytes happened to be chunked — a line
-    // that arrived whole inside one chunk was never buffered, and would
-    // otherwise be read normally while the same line split across two was
-    // dropped. Every line reaches this method, so this is the one place that is
-    // true of.
-    if (to - from > this.#maxLineLength) {
-      this.#warn(
-        'line-too-long',
-        `line is longer than ${this.#maxLineLength} characters and was dropped`,
-        0,
-      );
-
-      return;
-    }
-
     // "Blank lines are ignored" — RFC 8216 §4. Checked before slicing, so a
     // blank line costs no allocation at all.
     if (this.#blank(buf, from, to)) {
       return;
     }
 
-    const line = buf.slice(from, to);
-
-    // Only the first line that carries anything can be the header — RFC 8216
-    // has `#EXTM3U` first or not at all — so this is asked once per playlist
-    // rather than of all 26,803 lines, and a later one falls through to the
-    // ordinary `#` handling below, which is where it belongs.
-    //
-    // The tag and nothing more, too: `#EXTM3UPLUS` is a `#` line the format
-    // does not define. Reading it as a header would swallow the directive *and*
-    // fill the header slot, so a playlist with no real `#EXTM3U` would never be
-    // told it was missing one.
-    if (!this.#seenAnything && line.startsWith(EXTM3U) && this.#endsTag(line, EXTM3U.length)) {
-      this.#header(line);
+    // A property of *the line*, not of how the bytes happened to be chunked: a
+    // line that arrived whole inside one chunk was never buffered, and would
+    // otherwise be read normally while the same line split across two was
+    // dropped. Every line reaches here, so this is the one place that is true of.
+    if (to - from > this.#maxLineLength) {
+      this.#tokens.warn({
+        code: 'line-too-long',
+        message: `line is longer than ${this.#maxLineLength} characters and was dropped`,
+        line: this.#line,
+        col: 1,
+      });
 
       return;
     }
 
-    // The first line that carries anything, and it is not the header RFC 8216
-    // requires. Said here rather than at the end, so a caller reading events in
-    // order learns it before the entries it applies to — and said against the
-    // line that should have been the header rather than against line 1, which
-    // may be a comment or a blank.
-    if (!this.#seenAnything) {
-      this.#warn(
-        'missing-header',
-        `the playlist begins with ${JSON.stringify(line)}, not #EXTM3U`,
-        0,
+    if (buf.charCodeAt(from) === HASH) {
+      // The name runs to the colon that introduces a value, or to the space a
+      // dialect may put before one on `#EXTM3U`, whichever comes first.
+      let at = from + 1;
+
+      while (at < to && buf.charCodeAt(at) !== COLON && !WS_TABLE[buf.charCodeAt(at)]) {
+        at++;
+      }
+
+      const name = buf.slice(from + 1, at);
+
+      this.#opens(name === EXTM3U, buf, from, to);
+      this.#tokens.tag(
+        new M3uTag(name, at < to ? buf.slice(at + 1, to) : '', this.#line, at - from + 2),
       );
+
+      return;
+    }
+
+    this.#opens(false, buf, from, to);
+    this.#tokens.uri(buf.slice(from, to), this.#line);
+  }
+
+  /**
+   * The first line that carries anything, and whether it was the `#EXTM3U`
+   * RFC 8216 requires.
+   *
+   * Reported here rather than by a reader, so every dialect gets it — and said
+   * against the line that should have been the header rather than against line
+   * 1, which may be a comment or a blank.
+   */
+  #opens(isHeader: boolean, buf: string, from: number, to: number): void {
+    if (this.#seenAnything) {
+      return;
     }
 
     this.#seenAnything = true;
 
-    if (line.charCodeAt(TAG_AT) === EXTINF_I && line.startsWith(EXTINF)) {
-      this.#extinf(line);
-
-      return;
+    if (!isHeader) {
+      this.#tokens.warn({
+        code: 'missing-header',
+        message: `the playlist begins with ${JSON.stringify(buf.slice(from, to))}, not #EXTM3U`,
+        line: this.#line,
+        col: 1,
+      });
     }
-
-    if (line.charCodeAt(0) === HASH) {
-      this.#directive(line);
-
-      return;
-    }
-
-    this.#url(line);
-  }
-
-  /**
-   * `#EXTM3U`, with whatever it carries.
-   *
-   * Reached only for the first line of the playlist that carries anything: a
-   * later `#EXTM3U` is not a header but a `#` line the format does not define,
-   * and {@link #read} leaves it to the directive handling for that reason.
-   */
-  #header(line: string): void {
-    this.#seenAnything = true;
-
-    const attributes = new Map<string, string>();
-    const opened = this.#attributes(line, EXTM3U.length, line.length, attributes);
-
-    if (opened !== CLOSED) {
-      this.#warn('malformed-attributes', 'unterminated quote on the #EXTM3U line', opened);
-    }
-
-    this.#emit({ type: 'header', value: { attributes } });
-  }
-
-  /**
-   * `#EXTINF:<duration> <attributes>,<name>`.
-   *
-   * Where the name begins is the whole difficulty of this format, and the rule
-   * is decidable rather than a guess: a quoted value cannot contain a double
-   * quote (RFC 8216 §4.2), so the first comma **outside** quotes ends the
-   * attributes. Taking the first comma outright mangles one entry in twenty of
-   * iptv-org's playlist, where a `http-user-agent` says "(KHTML, like Gecko)";
-   * taking the last breaks any channel with a comma in its name.
-   */
-  #extinf(line: string): void {
-    // Whatever came before is finished: a new `#EXTINF` is the one thing that
-    // can neither add a url to it nor be part of it.
-    this.#flush();
-
-    this.#pendingAt = this.#line;
-
-    const comma = this.#nameStart(line, EXTINF.length);
-    const headEnd = comma === -1 ? line.length : comma;
-    const name = comma === -1 ? '' : line.slice(comma + 1);
-
-    // The duration runs to the first space or the end of the head; whatever
-    // follows it is the attribute list.
-    //
-    // Read digit by digit rather than sliced and handed to `Number`, because
-    // every live channel in every playlist says `-1` and that is a string
-    // allocation and a numeric parse per entry for a value already in hand.
-    // Anything that is not a plain integer — `212.5`, `1e3`, an empty duration —
-    // falls back to exactly what it did before, so only the common case is
-    // shortcut and the meaning is unchanged.
-    let at = EXTINF.length;
-    let simple = true;
-    let value = 0;
-    let digits = 0;
-
-    if (line.charCodeAt(at) === MINUS) {
-      at++;
-    }
-
-    while (at < headEnd && !WS_TABLE[line.charCodeAt(at)]) {
-      const code = line.charCodeAt(at);
-
-      if (code >= ZERO && code <= NINE) {
-        value = value * 10 + (code - ZERO);
-        digits++;
-      } else {
-        simple = false;
-      }
-
-      at++;
-    }
-
-    const negative = line.charCodeAt(EXTINF.length) === MINUS;
-    // `Number.MAX_SAFE_INTEGER` is 16 digits; past that the accumulator above
-    // has lost precision and `Number` is the one that gets it right.
-    const exact = simple && digits > 0 && digits < 16;
-    const duration = exact ? (negative ? -value : value) : Number(line.slice(EXTINF.length, at));
-    const known = exact || (at > EXTINF.length && Number.isFinite(duration));
-
-    if (!known) {
-      this.#warn(
-        'invalid-duration',
-        `#EXTINF duration ${JSON.stringify(line.slice(EXTINF.length, at))} is not a number`,
-        EXTINF.length,
-      );
-    }
-
-    const attributes = new Map<string, string>();
-    const opened = this.#attributes(line, at, headEnd, attributes);
-
-    if (opened !== CLOSED) {
-      this.#warn('malformed-attributes', 'unterminated quote on an #EXTINF line', opened);
-    }
-
-    if (comma === -1) {
-      this.#warn('malformed-attributes', '#EXTINF has no comma, so no name', line.length);
-    }
-
-    // Whatever was waiting for an `#EXTINF` was waiting for this one, and it
-    // goes on first — the order the playlist wrote them in.
-    const waiting = this.#leading;
-
-    this.#leading = null;
-    this.#leadingAt = [];
-
-    // A plain literal and then an assignment, rather than a conditional spread:
-    // spreading builds the object through a slower path in V8 and this runs once
-    // per entry — measured at 2.3× the cost for a shape the great majority of
-    // entries (94% of iptv-org's) never use.
-    const entry: M3uEntry = { url: '', name, duration: known ? duration : -1, attributes };
-
-    if (waiting !== null) {
-      entry.directives = waiting;
-    }
-
-    this.#pending = entry;
-  }
-
-  /**
-   * A `#` line the format does not define, kept with the entry it belongs to.
-   *
-   * Which is the entry being assembled if there is one, and otherwise the next
-   * one to arrive — see {@link #leading}. Only a directive that never finds
-   * either, because the playlist ended first, is dropped, and it is *said* to be
-   * dropped: it is legal to ignore one (RFC 8216 says such a line "SHOULD be
-   * ignored") but it is also the only thing left that stops a playlist
-   * round-tripping, and a module whose rule is losslessness should not go quiet
-   * about the one case it cannot keep.
-   */
-  #directive(line: string): void {
-    // Asked for, rather than lost: dropping these is the caller's own choice.
-    if (!this.#keepUnknown) {
-      return;
-    }
-
-    // The first colon and no further: `#EXTVLCOPT:http-user-agent=Mozilla/5.0…`
-    // has an `=`, spaces and more colons inside its value, every one of which
-    // belongs to the value.
-    const colon = line.indexOf(':');
-    const directive: M3uDirective =
-      colon === -1
-        ? { name: line.slice(1), value: '' }
-        : { name: line.slice(1, colon), value: line.slice(colon + 1) };
-
-    if (this.#pending === null) {
-      (this.#leading ??= []).push(directive);
-      this.#leadingAt.push(this.#line);
-
-      return;
-    }
-
-    (this.#pending.directives ??= []).push(directive);
-  }
-
-  /**
-   * Anything not beginning with `#`, which closes the entry it follows.
-   *
-   * One url and one only: RFC 8216 gives an `#EXTINF` exactly one URI, and no
-   * implementation surveyed — Kodi, tvheadend, `iptv-playlist-parser` — reads a
-   * second line as a backup stream for the same channel. The proposals that do
-   * exist for backups put them in one line (`url|backup`) or behind a tag of
-   * their own, so a bare second url really is what the warning says it is.
-   */
-  #url(line: string): void {
-    const entry = this.#pending;
-
-    if (entry === null) {
-      this.#warn(
-        'orphan-url',
-        `${JSON.stringify(line)} has no #EXTINF before it, and is dropped`,
-        0,
-      );
-
-      return;
-    }
-
-    this.#pending = null;
-    entry.url = line.trim();
-
-    this.#emit({ type: 'entry', value: entry });
-  }
-
-  /**
-   * Where the name begins: the first comma not inside a quoted value, or `-1`.
-   *
-   * Counting quotes is enough to know which side of one a comma falls on,
-   * because a quoted string cannot contain a double quote — there is no escape
-   * to unpick and no lookahead needed.
-   */
-  #nameStart(line: string, from: number): number {
-    let quoted = false;
-
-    for (let at = from; at < line.length; at++) {
-      const code = line.charCodeAt(at);
-
-      if (code === QUOT) {
-        quoted = !quoted;
-      } else if (code === COMMA && !quoted) {
-        return at;
-      }
-    }
-
-    return -1;
-  }
-
-  /**
-   * Every `key="value"` between `from` and `to`, as spelled and in order.
-   * Returns where a quote was opened and never closed, or {@link CLOSED}.
-   *
-   * Tolerant of what RFC 8216 forbids and this format does anyway: lowercase
-   * hyphenated names, and whitespace either side of the `=`. An unquoted value
-   * runs to the next space, which is in no specification but is what a playlist
-   * written by hand looks like.
-   */
-  #attributes(line: string, from: number, to: number, into: Map<string, string>): number {
-    let at = from;
-    let unterminated = CLOSED;
-
-    while (at < to) {
-      while (at < to && WS_TABLE[line.charCodeAt(at)]) {
-        at++;
-      }
-
-      const nameFrom = at;
-
-      while (at < to && NAME_TABLE[line.charCodeAt(at)]) {
-        at++;
-      }
-
-      if (at === nameFrom) {
-        // Nothing a name could begin with — step over it rather than stalling.
-        at++;
-        continue;
-      }
-
-      const name = line.slice(nameFrom, at);
-
-      while (at < to && WS_TABLE[line.charCodeAt(at)]) {
-        at++;
-      }
-
-      if (line.charCodeAt(at) !== EQ) {
-        // A bare word with no value. Not an attribute, and not worth a warning
-        // in a format where free text begins a few characters later.
-        continue;
-      }
-
-      at++;
-
-      while (at < to && WS_TABLE[line.charCodeAt(at)]) {
-        at++;
-      }
-
-      if (line.charCodeAt(at) === QUOT) {
-        const openedAt = at;
-
-        at++;
-
-        const valueFrom = at;
-
-        while (at < to && line.charCodeAt(at) !== QUOT) {
-          at++;
-        }
-
-        into.set(name, line.slice(valueFrom, at));
-
-        if (at >= to) {
-          // Opened and never closed: what was read is kept, and the caller told
-          // where the quote that opened it was.
-          unterminated = openedAt;
-        } else {
-          at++;
-        }
-      } else {
-        const valueFrom = at;
-
-        while (at < to && !WS_TABLE[line.charCodeAt(at)]) {
-          at++;
-        }
-
-        into.set(name, line.slice(valueFrom, at));
-      }
-    }
-
-    return unterminated;
-  }
-
-  /** Whether a tag ends at `at`: the line stops there, or whitespace does. */
-  #endsTag(line: string, at: number): boolean {
-    return at >= line.length || WS_TABLE[line.charCodeAt(at)] === 1;
   }
 
   /** Whitespace only, and without allocating the slice to find out. */
@@ -642,52 +469,5 @@ export class M3uScanner {
     }
 
     return true;
-  }
-
-  /**
-   * The entry that never got a url, emitted anyway — if one is open.
-   *
-   * Reached only from the two places an entry can be cut short: a new `#EXTINF`
-   * arriving before the last one's url, and the end of the playlist. An entry
-   * that got its url was emitted by {@link #url} and is long gone.
-   */
-  #flush(): void {
-    const entry = this.#pending;
-
-    if (entry === null) {
-      return;
-    }
-
-    this.#pending = null;
-
-    // An `#EXTINF` that never met a url. Kept rather than dropped because most
-    // readers of a playlist want the channel list rather than the streams, and
-    // a metadata line with nothing to play is still a channel. The warning is
-    // what says so, and it comes first, so a caller reading events in order
-    // knows what the entry behind it is before it arrives. It is anchored to
-    // the `#EXTINF` rather than to whatever line finally displaced it.
-    if (entry.url === '') {
-      this.#emit({
-        type: 'warning',
-        value: {
-          code: 'incomplete-entry',
-          message: `#EXTINF for ${JSON.stringify(entry.name)} has no url`,
-          line: this.#pendingAt,
-          col: 1,
-        },
-      });
-    }
-
-    this.#emit({ type: 'entry', value: entry });
-  }
-
-  /** `at` is a 0-based offset into the line; a warning carries it 1-based. */
-  #warn(code: M3uWarning['code'], message: string, at: number): void {
-    this.#events.push({ type: 'warning', value: { code, message, line: this.#line, col: at + 1 } });
-  }
-
-  /** The header or entry a line turned out to be, in the order it produced them. */
-  #emit(event: M3uParseEvent): void {
-    this.#events.push(event);
   }
 }

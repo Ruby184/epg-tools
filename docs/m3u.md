@@ -18,6 +18,7 @@ import { parseM3uFile, parseM3uString, writeM3uToFile } from 'epg-tools/m3u';
 - [Serializing](#serializing)
 - [Reading a playlist you did not write](#reading-a-playlist-you-did-not-write)
 - [Node streams](#node-streams)
+- [Reading it as something other than IPTV](#reading-it-as-something-other-than-iptv)
 - [A playlist as a site's channel list](#a-playlist-as-a-sites-channel-list)
 - [A playlist as a whole source](#a-playlist-as-a-whole-source)
 - [Benchmarks](#benchmarks)
@@ -359,6 +360,89 @@ everything else it carried:
 new M3uSerializeStream({ header: { attributes: new Map([['x-tvg-url', ours]]) } })
 ```
 
+## Reading it as something other than IPTV
+
+The module is two layers, and the seam between them is public.
+
+**`M3uScanner` is purely lexical.** RFC 8216 §4.1 is its whole brief — "each
+line is a URI, is blank, or starts with the character `#`" — so it splits lines,
+drops the carriage return of a CRLF playlist, skips blanks, enforces
+`maxLineLength`, splits a tag from its value, and hands each remaining line to a
+handler. It reports exactly the two things the RFC requires of *any* playlist:
+a line too long to hold, and a playlist that does not open with `#EXTM3U`
+(§4.3.1.1, "the first line of every Media Playlist and every Master Playlist").
+
+**`M3uIptvReader` is one handler**, and it holds every convention this document
+has described: that `#EXTINF` opens a channel, that the url below closes it,
+that a `#` line describes the channel beside it. None of that is in the RFC.
+
+So another dialect is another handler:
+
+```ts
+interface M3uTokens<TEvent> {
+  tag(tag: M3uTag): void;                 // a `#` line, split into name and value
+  uri(text: string, line: number): void;  // by §4.1, everything else
+  warn(warning: M3uWarning): void;        // a line too long, or no #EXTM3U
+  end(): void;                            // report whatever is unfinished
+  readonly events: TEvent[];              // drained by the scanner, per line
+}
+```
+
+An HLS media playlist is the case that needs one. RFC 8216 scopes its tags three
+ways — `EXT-X-TARGETDURATION` covers the document, `EXT-X-BYTERANGE` only the
+next segment, `EXT-X-KEY` and `EXT-X-MAP` every segment until the next one — and
+none of that is decidable without knowing the tags. A handler that does know
+them is short, and gets CRLF, the BOM, blank lines, the line bound, `charset`
+and the `#EXTM3U` check for nothing:
+
+```ts
+class HlsReader implements M3uTokens<never> {
+  readonly events = [];
+  tag(tag) {
+    if (tag.name === 'EXT-X-TARGETDURATION') this.playlist.targetDuration = Number(tag.value);
+    // …applies until the next one, so it is simply kept:
+    else if (tag.name === 'EXT-X-KEY') this.key = tag.attributes({ separator: ',' });
+  }
+  uri(text) { this.playlist.segments.push({ uri: text, key: this.key }); }
+  warn(warning) { /* … */ }
+  end() { /* EXT-X-TARGETDURATION is REQUIRED — report if it never came */ }
+}
+
+for (const _ of new M3uScanner(new HlsReader()).consume(text, true)) {}
+```
+
+`events` is what the scanner drains after **each line**, which is what keeps a
+playlist streaming line by line however large a chunk arrives. A handler that
+assembles a whole document rather than emitting as it goes — the one above —
+leaves it empty.
+
+### Why a tag's value arrives unparsed
+
+`M3uTag` carries the `name`, the `value`, the `line` and the `col` where the
+value starts. Reading the value as an attribute list is `tag.attributes()`, and
+it is the *only* way to read one — deliberately, because which grammar applies
+is a property of the tag and only a handler knows the tag:
+
+| | |
+|---|---|
+| `EXT-X-KEY:METHOD=AES-128,URI="k.bin"` | an attribute list, comma-separated (§4.2) |
+| `EXTINF:-1 tvg-id="a",Name` | an attribute list, space-separated, behind a duration |
+| `EXT-X-TARGETDURATION:10` | a bare number |
+| `EXTVLCOPT:http-user-agent=Mozilla/5.0 … (KHTML, like Gecko) …` | one key and free text, commas and all |
+
+That last shape is **628 of the 909 directives** in iptv-org's playlist, so a
+scanner that guessed at a grammar would be wrong most of the time it tried.
+
+```ts
+tag.attributes({ separator: ',' })          // the RFC 8216 §4.2 grammar
+tag.attributes()                            // the space-separated IPTV one
+tag.attributes({ from, to })                // only a slice of the value
+tag.attributes({ onUnterminated: (at) => … }) // told about a quote left open
+```
+
+Values come back as strings. §4.2 defines seven value types, but which one an
+attribute has is also a property of the tag.
+
 ## A playlist as a site's channel list
 
 `channelsFromM3u` lives in `epg-tools/grabber`, not in this module — the M3U
@@ -475,7 +559,7 @@ move each figure by around ±10%:
 |---|---|---|
 | `epg-tools/m3u` | — | — |
 | [`m3u-parser-generator`][generator] | ~1.4× slower | ~1.15× slower |
-| [`@iptv/playlist`][iptv-playlist] | ~2.5× slower | — |
+| [`@iptv/playlist`][iptv-playlist] | ~3× slower | — |
 | [`iptv-playlist-parser`][legacy] | ~4× slower | — |
 
 Worth saying what the nearest one is doing differently rather than leaving a
