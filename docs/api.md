@@ -294,6 +294,7 @@ that end by themselves.
 import { build, defineConfig, defineSiteConfig } from 'epg-tools';
 import { parseXmltvFile, writeXmltvStream } from 'epg-tools/xmltv';
 import { parseM3uFile, writeM3uToFile } from 'epg-tools/m3u';
+import { parseChannelsXml, matchChannels } from 'epg-tools/channels';
 import { CacheManager, FsNdjsonCacheDriver, isStale } from 'epg-tools/cache';
 import { grab, resolveChannels, siteHttp } from 'epg-tools/grabber';
 import { generateGuide, writeGuide, mergeProgrammes } from 'epg-tools/merge';
@@ -302,9 +303,10 @@ import { runXmltvGrabber, defineCapability } from 'epg-tools/tv-grab';
 ```
 
 The root re-exports most of the subpaths, so a single import usually does. Two
-reasons to reach for a subpath: `epg-tools/xmltv` and `epg-tools/m3u` pull in
-**nothing else** — no grabber, no cache, no config loading — so they are the
-ones to use if all you want is to read or write those formats; and a handful of
+reasons to reach for a subpath: `epg-tools/xmltv`, `epg-tools/m3u` and
+`epg-tools/channels` pull in **nothing else** — no grabber, no cache, no config
+loading — so they are the ones to use if all you want is to read or write those
+formats; and a handful of
 names live only on a subpath (marked below).
 
 ## Export map
@@ -323,8 +325,9 @@ names live only on a subpath (marked below).
 | Options parsing | `parseOptions`, `OptionError` |
 | XMLTV | `escapeXml`, `serializeChannel`, `serializeProgramme`, `writeXmltvStream`, `writeXmltvToFile`, `parseXmltvStream`, `parseXmltvFile`, every [date helper](./xmltv.md#dates) and the [zone helpers](./xmltv.md#named-zones) |
 | M3U | `parseM3uStream`, `parseM3uFile`, `parseM3uString`, `serializeM3uEntry`, `serializeM3uHeader`, `writeM3uStream`, `writeM3uToFile`, `M3uParseStream`, `M3uSerializeStream` |
+| Channels | `parseChannelsXml`, `serializeChannelsXml`, `serializeChannelsXmlEntry`, `matchChannels`, `timeshiftOf` |
 | Cache | `CacheManager`, `CACHE_SCHEMA`, `CacheDriverBase`, `FsCacheDriver`, `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`, `MemoryCacheDriver`, `NoCacheDriver`, `isStale`, `DEFAULT_STALENESS` |
-| Grabber | `grab`, `defineSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `guideUrlsFromM3u`, `channelElement`, `siteHttp`, `sitePacing`, `retryAfterMs` |
+| Grabber | `grab`, `defineSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`, `channelElement`, `siteHttp`, `sitePacing`, `retryAfterMs` |
 | Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
 
 Plus the types for all of the above (`EpgConfig`, `SiteConfig`,
@@ -356,6 +359,19 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 Everything here is re-exported from the root. The bridge to a site's channel
 list, `channelsFromM3u`, lives on `epg-tools/grabber` instead — this subpath
 imports nothing from the rest of the package.
+
+### `epg-tools/channels`
+
+Zero dependencies, and nothing else in the package is loaded. Full detail in
+[Channel lists and matching](./channels.md).
+
+- **Parse** — `parseChannelsXml`
+- **Serialize** — `serializeChannelsXml`, `serializeChannelsXmlEntry`
+- **Match** — `matchChannels`, `timeshiftOf`
+
+Everything here is re-exported from the root. The bridge to a site's channel
+list, `channelsFromChannelsXml`, lives on `epg-tools/grabber` — same rule as the
+M3U one above.
 
 ### `epg-tools/cache`
 
@@ -597,17 +613,31 @@ output goes through — the site's `channelInfo` if it has one,
 `defaultChannelInfo` if not.
 
 **`channelsFromM3u(source, options?)`** reads an M3U playlist as a channel list,
-taking what [`epg-tools/m3u`](./m3u.md) produces — parse events or a whole
-`M3uPlaylist` — rather than a path or a string:
+taking a path or what [`epg-tools/m3u`](./m3u.md) produces. It returns the
+`channels` function itself, so the playlist is read when the list is resolved
+rather than when the config loads:
 
 ```ts
-channels: () => channelsFromM3u(parseM3uFile('./channels.m3u')),
+channels: channelsFromM3u('./channels.m3u'),
 ```
 
 `tvg-id` becomes both `xmltvId` and `siteId`, and an entry without one is
 skipped — which is 15% of iptv-org's playlist, so pass `onSkipped` or an `id` of
 your own. See [a playlist as a site's channel
 list](./m3u.md#a-playlist-as-a-sites-channel-list).
+
+**`channelsFromChannelsXml(source, options?)`** does the same for a
+[`*.channels.xml`](./channels.md), taking a path or the entries
+`parseChannelsXml` returned, and likewise returning the `channels` function:
+
+```ts
+channels: channelsFromChannelsXml('./tvtv.us.channels.xml'),
+```
+
+`site_id` and `xmltv_id` are already the split `GrabberChannel` models. An entry
+with no `xmltv_id` is skipped — it names something the source has but nothing a
+guide could refer to. See [a channel list as a site's
+channels](./channels.md#a-channel-list-as-a-sites-channels).
 
 **`defineM3uSite(options)`** goes one further and makes the playlist a whole
 source: its entries are the channels and its `x-tvg-url` header says where their

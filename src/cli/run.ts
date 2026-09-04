@@ -35,6 +35,7 @@ Commands:
   grab          Grab all sites into the cache only
   merge         Generate the merged guide from the cache only
   validate      Read a guide and report what is wrong with it
+  channels      Report which wanted channels will get no guide, and why
   serve         Hold the merged guide behind HTTP for a consumer that polls
   try           Put one site, channel and day through, showing every step
   prune         Remove cached days older than a given day
@@ -55,6 +56,10 @@ Options:
                         extensions, comma-separated (e.g. lcn,uniqueID)
       --no-extensions   build/merge only: leave every provider extension out,
                         for a guide that validates against the DTD
+      --against <file>  channels only: what you want a guide for — an M3U
+                        playlist, a *.channels.xml, or an XMLTV guide
+      --check           channels only: exit 1 unless every wanted channel
+                        matched by id, for a CI step
       --before <day>    prune only: remove days before YYYY-MM-DD (default: today)
       --log-level <l>   How much to report: error, warn, info (default) or debug
   -v, --verbose         Same as --log-level debug
@@ -151,7 +156,17 @@ const EXIT_CANCELLED = 130;
 
 const CONFIG_CANDIDATES = ['epg.config.ts', 'epg.config.js', 'epg.config.mjs'];
 
-const COMMANDS = ['build', 'grab', 'merge', 'serve', 'try', 'validate', 'prune', 'init-grabber'];
+const COMMANDS = [
+  'build',
+  'grab',
+  'merge',
+  'serve',
+  'try',
+  'validate',
+  'channels',
+  'prune',
+  'init-grabber',
+];
 
 export interface CliOptions {
   /** Defaults to `process.stdout` — progress, and the help. */
@@ -384,6 +399,10 @@ async function execute(
       raw: { type: 'boolean' },
       format: { type: 'string', choices: REPORT_FORMATS },
       strict: { type: 'boolean' },
+      // `epg channels` only: the file naming the channels somebody wants a
+      // guide for, and whether a mismatch should fail a CI step.
+      against: { type: 'string' },
+      check: { type: 'boolean' },
       // A list of names, or `--no-extensions` for none of them. A config can
       // point at a filter of its own by passing a function, which is not
       // something a command line can do.
@@ -553,6 +572,22 @@ async function execute(
       // same way it does on the way out — otherwise `output: 'guide.xml'`
       // plus `compress: 'gzip'` would be read back as XML it is not.
       return validateGuide(String(config.output), values, stdout, signal, compressionOf(config));
+    case 'channels': {
+      // Loaded here rather than at the top: it pulls in the matcher and three
+      // readers, and no other command has any use for them.
+      const { reportChannelsCommand } = await import('./channels.js');
+
+      return reportChannelsCommand(
+        config,
+        {
+          against: values.against,
+          format: values.format,
+          check: values.check,
+          ...(signal ? { signal } : {}),
+        },
+        stdout,
+      );
+    }
     case 'serve': {
       const { serveGuide } = await import('../serve/main.js');
       // `runOptions` already carries the reporter, the offset and the signal —

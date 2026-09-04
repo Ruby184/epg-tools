@@ -43,6 +43,10 @@
       "types": "./dist/m3u/main.d.ts",
       "import": "./dist/m3u/main.js"
     },
+    "./channels": {
+      "types": "./dist/channels/main.d.ts",
+      "import": "./dist/channels/main.js"
+    },
     "./cache": {
       "types": "./dist/cache/main.d.ts",
       "import": "./dist/cache/main.js"

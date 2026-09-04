@@ -198,6 +198,7 @@ decides what to refetch are in [Configuration and CLI](./docs/configuration.md).
 | [Site configuration](./docs/site-config.md) | Writing a site: channels, `request`, `parseDay`, batching, per-site HTTP and proxies, rate limits and backoff |
 | [XMLTV parser, serializer and builders](./docs/xmltv.md) | The standalone `epg-tools/xmltv` entry point — parsing, warnings, serializing, the stream `Transform`s, builders, dates |
 | [M3U playlists](./docs/m3u.md) | The standalone `epg-tools/m3u` entry point — parsing, the model, warnings, serializing, and reading a playlist as a channel list |
+| [Channel lists and matching](./docs/channels.md) | The standalone `epg-tools/channels` entry point — reading and writing `*.channels.xml`, matching two channel lists, `epg channels` |
 | [Using it as an XMLTV grabber](./docs/tv-grab.md) | `tv_grab_*` executables, the grabber protocol, capabilities of your own, configuration stages, channel lineups |
 | [Programmatic API](./docs/api.md) | `build`/`runGrab`/`runMerge`/`guideStream` and the full export map for every entry point |
 

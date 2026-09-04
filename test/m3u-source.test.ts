@@ -1,4 +1,7 @@
+import { writeFile, rm } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -143,9 +146,46 @@ describe('guideUrlsFromM3u', () => {
   });
 });
 
+describe('channelsFromM3u, from a path', () => {
+  it('streams the file when the list is resolved, not when the config loads', async () => {
+    const file = join(tmpdir(), `epg-m3u-${process.pid}.m3u`);
+
+    await writeFile(file, '#EXTM3U\n#EXTINF:-1 tvg-id="a",A\nhttp://e/a\n');
+
+    try {
+      expect(await channelsFromM3u(file)()).toMatchObject([{ xmltvId: 'a', name: 'A' }]);
+    } finally {
+      await rm(file, { force: true });
+    }
+  });
+
+  // Either would otherwise fail as a filename — one megabytes long, the other
+  // with a scheme in it — and neither failure says what the mistake was.
+  it('says so when handed a document or a url instead of a path', async () => {
+    await expect(channelsFromM3u('#EXTM3U\n#EXTINF:-1,A\nhttp://e/a\n')()).rejects.toThrow(
+      /not a document: use parseM3uString/,
+    );
+    await expect(channelsFromM3u('https://host/list.m3u')()).rejects.toThrow(
+      /not a url: use defineM3uSite/,
+    );
+  });
+
+  it('reports what the playlist has to say through the site`s own warn', async () => {
+    const said: string[] = [];
+
+    await channelsFromM3u(parseM3uString('#EXTINF:-1 tvg-id="a",A\nhttp://e/a\n'))({
+      http: undefined as never,
+      log: () => {},
+      warn: (message) => said.push(message),
+    });
+
+    expect(said).toEqual([expect.stringContaining('#EXTM3U')]);
+  });
+});
+
 describe('channelsFromM3u', () => {
   const channels = (text: string, options?: Parameters<typeof channelsFromM3u>[1]) =>
-    channelsFromM3u(parseM3uString(text), options);
+    channelsFromM3u(parseM3uString(text), options)();
 
   // `#EXTGRP` is a *begin* directive: Kodi sets the group from one and
   // deliberately does not clear it after each entry, so one line groups every

@@ -108,6 +108,7 @@ epg merge            # write the guide from cache only
 epg serve            # hold the guide behind HTTP for a consumer that polls
 epg try example.tv one.example.tv   # one channel-day, with the working shown
 epg validate         # read the guide and report what is wrong with it
+epg channels --against playlist.m3u  # which wanted channels will get no guide
 epg prune            # drop cached days older than today
 epg init-grabber tv_grab_sk_example   # write an XMLTV grabber for this config
 epg build -d 14 -o public/epg.xml
@@ -133,8 +134,10 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--host <h>` | `serve` only: address to bind, default `127.0.0.1` — see [serving the guide](#serving-the-guide) |
 | `--serve-path <p>` | `serve` only: the path that answers with the guide, default `/guide.xml` |
 | `--raw` | `try` only: print the whole payload, not the first 2000 characters |
-| `--format <how>` | `validate` only: `text` (default) or `json` — see [validating a guide](#validating-a-guide) |
+| `--format <how>` | `validate` and `channels`: `text` (default) or `json` |
 | `--strict` | `validate` only: count warnings as failures too |
+| `--against <file>` | `channels` only: what you want a guide for — an M3U playlist, a `*.channels.xml` or an XMLTV guide |
+| `--check` | `channels` only: exit 1 unless every wanted channel matched by id |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
 | `-v, --verbose` | same as `--log-level debug` — every channel-day |
@@ -583,6 +586,45 @@ What it does **not** check is element *order*. Parsing produces a model, and a
 model has no order, so `<desc>` before `<title>` is invisible here. For that,
 `xmllint --valid` beside a copy of `xmltv.dtd` is the tool — and a guide written
 with `--no-extensions` is what makes that check pass.
+
+### Which channels will get no guide
+
+`epg channels` answers the question that has no error message: an id in your
+playlist that does not equal a `<channel id>` in the guide. Nothing fails — the
+playlist loads, the guide loads, and the row is simply empty.
+
+```sh
+epg channels --against playlist.m3u    # or a *.channels.xml, or a guide
+epg channels --against playlist.m3u --check    # for CI
+epg channels --against playlist.m3u --format json
+```
+
+```
+  ~ BBC Two HD
+      looks like bbctwo.uk (BBC Two) — set its id to confirm
+  ~ Sky One +1
+      a +1h shift of skyone.uk — a derived channel, not a mapping
+  ✗ Some Channel Nobody Has (nope.uk)
+      nothing produces this
+
+4 wanted, 1 matched by id, 1 by name, 2 with nothing
+```
+
+`--against` takes an **M3U playlist, a `*.channels.xml`, or an XMLTV guide**,
+sniffed rather than taken from the extension: all three get renamed, and `.xml`
+alone does not say which of the last two a file is. What it is compared against
+is the channels your configured sites can produce.
+
+Only what is wrong is printed — a channel matched by id says nothing, which is
+what keeps the output the size of the problem rather than the size of the
+lineup.
+
+`--check` exits **1** unless every wanted channel matched **by id**. A name
+match is deliberately not enough: it is a suggestion, nothing has been written
+anywhere, and a channel resting on one still shows an empty grid tomorrow.
+Confirm it by writing the id into your channel list. Matching, and why a `+1`
+is reported as a derived channel rather than matched, is in [channel lists and
+matching](./channels.md#matching).
 
 ### Allowing some of the guide to be missing
 

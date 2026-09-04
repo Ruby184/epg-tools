@@ -1,13 +1,21 @@
 export { grab } from './grab.js';
 export {
   channelElement,
+  channelsFromChannelsXml,
   channelsFromM3u,
   defaultChannelInfo,
   resolveChannels,
   resolveSites,
   siteHttp,
 } from './channels.js';
-export type { M3uChannelData, M3uChannelsOptions, M3uSkipReason } from './channels.js';
+export type {
+  ChannelsXmlChannelData,
+  ChannelsXmlOptions,
+  ChannelsXmlSkipReason,
+  M3uChannelData,
+  M3uChannelsOptions,
+  M3uSkipReason,
+} from './channels.js';
 export { defineM3uSite, guideUrlsFromM3u } from './m3u-source.js';
 export type { M3uSiteOptions } from './m3u-source.js';
 export { retryAfterMs, sitePacing } from './pacing.js';

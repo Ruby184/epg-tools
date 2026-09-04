@@ -176,7 +176,7 @@ export function defineM3uSite<TData = M3uChannelData>(
         skipped.set(reason, (skipped.get(reason) ?? 0) + 1);
         channelOptions?.onSkipped?.(entry, reason);
       },
-    });
+    })();
 
     for (const [reason, count] of skipped) {
       ctx.warn?.(`${count} playlist ${count === 1 ? 'entry' : 'entries'} skipped (${reason})`);
