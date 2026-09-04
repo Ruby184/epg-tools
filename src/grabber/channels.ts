@@ -2,6 +2,14 @@ import ky, { type KyInstance } from 'ky';
 import PQueue from 'p-queue';
 import type { CacheStore } from '../cache/types.js';
 import type { Emit, Says } from '../core/events.js';
+import type {
+  AnyIterable,
+  M3uDirective,
+  M3uEntry,
+  M3uParseEvent,
+  M3uPlaylist,
+  M3uWarning,
+} from '../m3u/types.js';
 import { ChannelBuilder } from '../xmltv/builder.js';
 import type { XmltvChannel } from '../xmltv/types.js';
 import { revalidationHooks } from './revalidate.js';
@@ -250,4 +258,212 @@ export function channelElement(config: AnySiteConfig, channel: GrabberChannel): 
   const info = config.channelInfo(channel, element);
 
   return info instanceof ChannelBuilder ? info.build() : info;
+}
+
+/**
+ * The id an entry carries, unless the caller says otherwise.
+ *
+ * `tvg-ID` as well as `tvg-id` because some providers spell it that way and
+ * Kodi reads both — its own source calls the second one incorrect and accepts it
+ * regardless, which is the right way round for a format with no authority.
+ */
+const defaultId = (entry: M3uEntry): string | undefined =>
+  entry.attributes.get('tvg-id') ?? entry.attributes.get('tvg-ID');
+
+/** A semi-colon separated list, which is how this format spells a list. */
+const semicolons = (value: string | undefined): string[] =>
+  value
+    ? value
+        .split(';')
+        .map((one) => one.trim())
+        .filter(Boolean)
+    : [];
+
+/**
+ * A url as written, made absolute against the playlist it came from.
+ *
+ * A playlist may name its streams relatively — tvheadend resolves them against
+ * the playlist's own url, and a channel list holding `stream/a.m3u8` is of no
+ * use to anything downstream. Left exactly as it was when there is no base to
+ * resolve against, or when it does not parse as a url at all: this is a channel
+ * list, not a validator, and a value nobody can make sense of is better handed
+ * over unchanged than replaced with a guess.
+ */
+function resolve(url: string, base: string | undefined): string {
+  if (!base || url === '') {
+    return url;
+  }
+
+  try {
+    return new URL(url, base).href;
+  } catch {
+    return url;
+  }
+}
+
+/** Why {@link channelsFromM3u} passed an entry over. */
+export type M3uSkipReason =
+  /** No `tvg-id`, and nothing to put in its place — see {@link M3uChannelsOptions.id}. */
+  | 'no-id'
+  /** An id already taken by an earlier entry; the first one is kept. */
+  | 'duplicate-id';
+
+/** What {@link channelsFromM3u} keeps from the entry a channel came from. */
+export interface M3uChannelData {
+  /** The stream url, which the guide has no use for and a caller may. */
+  url: string;
+  /**
+   * The groups this channel is in, from **both** ways a playlist can say it.
+   *
+   * `group-title` on the `#EXTINF`, split on `;` because it is a *list* — the
+   * thing most readers of this format get wrong — together with any `#EXTGRP`
+   * in force. `#EXTGRP` is a **begin directive**: Kodi sets the group from one
+   * and deliberately does not clear it after each entry, so a single line
+   * groups every entry that follows until the next one. Empty when the playlist
+   * said neither.
+   */
+  groups: string[];
+  /** Every `#EXTINF` attribute as spelled, including the ones mapped above. */
+  attributes: Record<string, string>;
+  /** `#EXTVLCOPT` and friends, in order, when the entry had any. */
+  directives?: M3uDirective[];
+}
+
+export interface M3uChannelsOptions {
+  /**
+   * The id for an entry. `tvg-id` by default; an entry this returns empty for
+   * is skipped.
+   *
+   * Worth overriding rather than an edge case: **1,948 of iptv-org's 12,946
+   * entries (15%) have no `tvg-id`**, and a playlist assembled by hand often
+   * has none at all. `(entry) => entry.attributes['tvg-id'] || entry.name` is
+   * the usual repair, and takes the risk of two channels sharing a name.
+   */
+  id?: (entry: M3uEntry) => string | undefined;
+  /**
+   * Told about every entry that did not become a channel, and why.
+   *
+   * Offered because the default skips 15% of the best-known playlist there is,
+   * and a channel list quietly a sixth shorter than its source is the kind of
+   * thing that is noticed a long way downstream.
+   */
+  onSkipped?: (entry: M3uEntry, reason: M3uSkipReason) => void;
+  /** Told about every non-fatal parse problem; see {@link M3uWarning}. */
+  onWarning?: (warning: M3uWarning) => void;
+  /**
+   * The playlist's own url, so a relative stream url becomes absolute.
+   *
+   * A playlist served at `https://host/lists/uk.m3u` may name its streams as
+   * `stream/a.m3u8`, and tvheadend resolves those against the playlist the same
+   * way. {@link defineM3uSite} passes this for you. Without it the url is kept
+   * exactly as the playlist wrote it.
+   */
+  base?: string;
+}
+
+/**
+ * Read an M3U playlist as a site's channel list.
+ *
+ * Takes what `src/m3u` produces rather than a file path or a string, so the
+ * caller picks the source and there is no guessing which a string was:
+ *
+ * ```ts
+ * channels: () => channelsFromM3u(parseM3uFile('./channels.m3u')),
+ * channels: () => channelsFromM3u(parseM3uString(await response.text())),
+ * ```
+ *
+ * The mapping is the conventional one the Kodi IPTV Simple Client documents:
+ * `tvg-id` → `xmltvId` **and** `siteId`, `tvg-name` (falling back to the
+ * display name) → `name`, `tvg-logo` → `logo`, `tvg-chno` → `preset`,
+ * `tvg-language` → `lang`. Everything else is kept in `data`.
+ *
+ * `siteId` defaults to the same id because a playlist has no second identity to
+ * offer — which is what makes the result usable as a site's `channels` directly.
+ * A site that fetches by something else should map over the result and say so.
+ *
+ * The reverse direction is deliberately not a helper: only the caller knows
+ * what url a channel has, and building entries for `writeM3uStream` is three
+ * lines once they do.
+ */
+export async function channelsFromM3u(
+  source: AnyIterable<M3uParseEvent> | M3uPlaylist,
+  options?: M3uChannelsOptions,
+): Promise<GrabberChannel<M3uChannelData>[]> {
+  const channels: GrabberChannel<M3uChannelData>[] = [];
+  const seen = new Set<string>();
+
+  const base = options?.base;
+  /**
+   * The groups the last `#EXTGRP` put in force, which stay in force.
+   *
+   * Updated before the skip checks below, because a directive applies to the
+   * entries after it whether or not the one carrying it became a channel.
+   */
+  let carriedGroups: string[] = [];
+
+  const take = (entry: M3uEntry): void => {
+    for (const directive of entry.directives ?? []) {
+      if (directive.name === 'EXTGRP') {
+        // Replaces rather than adds, as Kodi's does — it clears the list first.
+        carriedGroups = semicolons(directive.value);
+      }
+    }
+
+    const id = (options?.id ?? defaultId)(entry);
+
+    if (!id) {
+      options?.onSkipped?.(entry, 'no-id');
+
+      return;
+    }
+
+    if (seen.has(id)) {
+      options?.onSkipped?.(entry, 'duplicate-id');
+
+      return;
+    }
+
+    seen.add(id);
+
+    const { attributes } = entry;
+    const name = attributes.get('tvg-name') || entry.name;
+
+    channels.push({
+      xmltvId: id,
+      siteId: id,
+      ...(name ? { name } : {}),
+      ...(attributes.get('tvg-language') ? { lang: attributes.get('tvg-language')! } : {}),
+      ...(attributes.get('tvg-logo') ? { logo: attributes.get('tvg-logo')! } : {}),
+      ...(attributes.get('tvg-chno') ? { preset: attributes.get('tvg-chno')! } : {}),
+      data: {
+        url: resolve(entry.url, base),
+        groups: [...new Set([...semicolons(attributes.get('group-title')), ...carriedGroups])],
+        // A plain object, not the entry's `Map`: this is handed back to a site
+        // and cached, and the cache stores it with `JSON.stringify`, which
+        // turns a `Map` into `{}` without saying so.
+        attributes: Object.fromEntries(attributes),
+        ...(entry.directives ? { directives: entry.directives } : {}),
+      },
+    });
+  };
+
+  if (Symbol.iterator in source || Symbol.asyncIterator in source) {
+    for await (const event of source as AnyIterable<M3uParseEvent>) {
+      if (event.type === 'entry') {
+        take(event.value);
+      } else if (event.type === 'warning') {
+        options?.onWarning?.(event.value);
+      }
+    }
+  } else {
+    for (const warning of source.warnings) {
+      options?.onWarning?.(warning);
+    }
+
+    for (const entry of source.entries) {
+      take(entry);
+    }
+  }
+
+  return channels;
 }
