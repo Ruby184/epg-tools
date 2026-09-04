@@ -140,8 +140,8 @@ export type {
 
 export {
   matchChannels,
-  parseChannelList,
-  serializeChannelList,
+  parseChannelsXml,
+  serializeChannelsXml,
   timeshiftOf,
 } from './channels/main.js';
 export type {
@@ -152,7 +152,7 @@ export type {
   ChannelMatch,
   ChannelMatchKind,
   ChannelMatchResult,
-  WriteChannelListOptions,
+  WriteChannelsXmlOptions,
 } from './channels/main.js';
 
 export {

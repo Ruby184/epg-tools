@@ -4,17 +4,17 @@ import { describe, expect, it } from 'vitest';
 import { renderChannelReport, reportChannels, wantedFrom } from '../src/cli/channels.js';
 import { matchChannels, timeshiftOf } from '../src/channels/match.js';
 import { channelsFromChannelsXml } from '../src/grabber/channels.js';
-import { parseChannelList } from '../src/channels/parse.js';
-import { serializeChannelList } from '../src/channels/serialize.js';
+import { parseChannelsXml } from '../src/channels/parse.js';
+import { serializeChannelsXml } from '../src/channels/serialize.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/tvtv-us-slice.channels.xml', import.meta.url));
 
 /** A candidate, written the way a test wants to read one. */
 const of = (id: string, name: string) => ({ id, name, value: name });
 
-describe('parseChannelList', () => {
+describe('parseChannelsXml', () => {
   it('reads the four attributes both formats share, and the name', async () => {
-    const list = parseChannelList(await readFile(FIXTURE, 'utf8'));
+    const list = parseChannelsXml(await readFile(FIXTURE, 'utf8'));
 
     expect(list.entries[4]).toEqual({
       site: 'tvtv.us',
@@ -28,7 +28,7 @@ describe('parseChannelList', () => {
   // iptv-org and WebGrab+Plus write the same document; WGB+ adds `update`,
   // which is its business and not ours, so it round-trips rather than vanishing.
   it('keeps WebGrab+Plus`s update attribute', () => {
-    const list = parseChannelList(
+    const list = parseChannelsXml(
       '<channels><channel update="i" site="tvprograma.lt" site_id="tv3/42" xmltv_id="TV3">TV3</channel></channels>',
     );
 
@@ -42,7 +42,7 @@ describe('parseChannelList', () => {
   });
 
   it('decodes entities in a name', async () => {
-    const list = parseChannelList(await readFile(FIXTURE, 'utf8'));
+    const list = parseChannelsXml(await readFile(FIXTURE, 'utf8'));
 
     expect(list.entries[1]?.name).toBe('A&E East');
   });
@@ -50,7 +50,7 @@ describe('parseChannelList', () => {
   // The state these files are actually in: tvtv.us's own list carries 69 of its
   // 2,299 channels unmapped. Not an error — the thing the matching is for.
   it('reports an unmapped channel rather than dropping it', async () => {
-    const list = parseChannelList(await readFile(FIXTURE, 'utf8'));
+    const list = parseChannelsXml(await readFile(FIXTURE, 'utf8'));
 
     expect(list.warnings).toEqual([
       {
@@ -64,7 +64,7 @@ describe('parseChannelList', () => {
   });
 
   it('reports a channel with no site_id, and a repeated one', () => {
-    const list = parseChannelList(
+    const list = parseChannelsXml(
       '<channels>' +
         '<channel site="a" site_id="" xmltv_id="x">No Id</channel>' +
         '<channel site="a" site_id="1" xmltv_id="y">One</channel>' +
@@ -81,7 +81,7 @@ describe('parseChannelList', () => {
   // very nearly anything — WebGrab+Plus writes them like `tv3/42` — so any
   // separator is one a real id could contain.
   it('does not confuse two channels whose site and site_id merely join the same', () => {
-    const list = parseChannelList(
+    const list = parseChannelsXml(
       '<channels>' +
         '<channel site="a b" site_id="c" xmltv_id="x">One</channel>' +
         '<channel site="a" site_id="b c" xmltv_id="y">Two</channel>' +
@@ -92,7 +92,7 @@ describe('parseChannelList', () => {
   });
 
   it('sees a duplicate whether the site is inherited or named', () => {
-    const list = parseChannelList(
+    const list = parseChannelsXml(
       '<channels site="a">' +
         '<channel site_id="1" xmltv_id="x">Inherited</channel>' +
         '<channel site="a" site_id="1" xmltv_id="y">Named</channel>' +
@@ -103,7 +103,7 @@ describe('parseChannelList', () => {
   });
 
   it('says so when handed something that is not a channel list', () => {
-    expect(parseChannelList('<?xml version="1.0"?><tv><channel id="a"/></tv>').warnings).toEqual([
+    expect(parseChannelsXml('<?xml version="1.0"?><tv><channel id="a"/></tv>').warnings).toEqual([
       {
         code: 'unexpected-document',
         message: 'no <channels> element: this does not look like a channel list',
@@ -113,7 +113,7 @@ describe('parseChannelList', () => {
   });
 
   it('reads a self-closing channel, which has no name', () => {
-    const list = parseChannelList('<channels><channel site_id="1" xmltv_id="a.uk" /></channels>');
+    const list = parseChannelsXml('<channels><channel site_id="1" xmltv_id="a.uk" /></channels>');
 
     expect(list.entries[0]).toMatchObject({ siteId: '1', xmltvId: 'a.uk', name: '' });
   });
@@ -121,7 +121,7 @@ describe('parseChannelList', () => {
 // The shorthand for a file describing one source: named once on the root,
 // inherited by every channel in it.
 it('inherits a site given once on the root', () => {
-  const list = parseChannelList(
+  const list = parseChannelsXml(
     '<?xml version="1.0" ?>\n<channels site="example.com">\n' +
       '  <channel site_id="cnn-23" xmltv_id="CNN.us">CNN</channel>\n' +
       '  <channel site="other.com" site_id="x" xmltv_id="X.us">X</channel>\n' +
@@ -135,7 +135,7 @@ it('inherits a site given once on the root', () => {
 });
 
 it('reads the per-channel logo, url and lcn', () => {
-  const list = parseChannelList(
+  const list = parseChannelsXml(
     '<channels>\n<channel\n  site="example.com"\n  site_id="france-24"\n' +
       '  xmltv_id="France24.fr"\n  lang="fr"\n  logo="https://example.com/f24.png"\n' +
       '  url="https://example.com/"\n  lcn="36"\n>France 24</channel>\n</channels>',
@@ -153,12 +153,12 @@ it('reads the per-channel logo, url and lcn', () => {
   });
 });
 
-describe('serializeChannelList', () => {
+describe('serializeChannelsXml', () => {
   it('round-trips a real file byte for byte', async () => {
     const text = await readFile(FIXTURE, 'utf8');
-    const list = parseChannelList(text);
+    const list = parseChannelsXml(text);
 
-    expect(serializeChannelList(list)).toBe(text);
+    expect(serializeChannelsXml(list)).toBe(text);
   });
 
   it('puts a root site back on the root rather than on every line', () => {
@@ -167,23 +167,23 @@ describe('serializeChannelList', () => {
       '  <channel site_id="cnn-23" xmltv_id="CNN.us">CNN</channel>\n' +
       '  <channel site="other.com" site_id="x" xmltv_id="X.us">X</channel>\n' +
       '</channels>\n';
-    const list = parseChannelList(source);
+    const list = parseChannelsXml(source);
 
-    expect(serializeChannelList(list)).toBe(source);
+    expect(serializeChannelsXml(list)).toBe(source);
   });
 
   it('keeps an unmapped channel unmapped, attribute and all', () => {
-    const out = serializeChannelList([{ siteId: '1', xmltvId: '', name: 'Unmapped' }]);
+    const out = serializeChannelsXml([{ siteId: '1', xmltvId: '', name: 'Unmapped' }]);
 
     expect(out).toContain('<channel site_id="1" xmltv_id="">Unmapped</channel>');
   });
 
   it('escapes what has to be escaped', () => {
-    const out = serializeChannelList([{ siteId: 'a&b', xmltvId: 'x', name: 'A&E <East>' }]);
+    const out = serializeChannelsXml([{ siteId: 'a&b', xmltvId: 'x', name: 'A&E <East>' }]);
 
     expect(out).toContain('site_id="a&amp;b"');
     expect(out).toContain('>A&amp;E &lt;East&gt;</channel>');
-    expect(parseChannelList(out).entries[0]?.name).toBe('A&E <East>');
+    expect(parseChannelsXml(out).entries[0]?.name).toBe('A&E <East>');
   });
 });
 
@@ -354,7 +354,7 @@ describe('renderChannelReport', () => {
 });
 
 describe('channelsFromChannelsXml', () => {
-  const entries = parseChannelList(
+  const entries = parseChannelsXml(
     '<channels site="example.com">' +
       '<channel site_id="1" xmltv_id="a.uk" lang="en" logo="http://e/a.png" lcn="101" url="http://e/a">A</channel>' +
       '<channel site_id="2" xmltv_id="">Unmapped</channel>' +
@@ -382,7 +382,7 @@ describe('channelsFromChannelsXml', () => {
 
   it('carries only what a GrabberChannel has no field for', async () => {
     const [plain] = await channelsFromChannelsXml(
-      parseChannelList('<channels><channel site_id="1" xmltv_id="a.uk">A</channel></channels>')
+      parseChannelsXml('<channels><channel site_id="1" xmltv_id="a.uk">A</channel></channels>')
         .entries,
     )();
 
@@ -406,7 +406,7 @@ describe('channelsFromChannelsXml', () => {
   // file and written back would otherwise reset everyone's refresh policy.
   it('carries WebGrab+Plus`s update through', async () => {
     const [channel] = await channelsFromChannelsXml(
-      parseChannelList(
+      parseChannelsXml(
         '<channels><channel update="i" site="wgb.example" site_id="1" xmltv_id="a.uk">A</channel></channels>',
       ).entries,
     )();

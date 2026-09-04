@@ -12,7 +12,7 @@
 import { escapeXml } from '../xmltv/escape.js';
 import type { ChannelList, ChannelListEntry } from './types.js';
 
-export interface WriteChannelListOptions {
+export interface WriteChannelsXmlOptions {
   /**
    * A `site` for the `<channels>` root, naming the source once.
    *
@@ -31,9 +31,9 @@ export interface WriteChannelListOptions {
 }
 
 /** One `<channel>` element, attributes in the order the two formats use them. */
-export function serializeChannelListEntry(
+export function serializeChannelsXmlEntry(
   entry: ChannelListEntry,
-  options?: WriteChannelListOptions,
+  options?: WriteChannelsXmlOptions,
 ): string {
   let out = '  <channel';
 
@@ -75,13 +75,13 @@ export function serializeChannelListEntry(
 /**
  * A whole `<channels>` document.
  *
- * Takes what {@link parseChannelList} returned, or just its entries — so
- * `serializeChannelList(parseChannelList(text))` writes the file back as it
+ * Takes what {@link parseChannelsXml} returned, or just its entries — so
+ * `serializeChannelsXml(parseChannelsXml(text))` writes the file back as it
  * was, root `site` and all, without the caller having to move it across.
  */
-export function serializeChannelList(
+export function serializeChannelsXml(
   list: ChannelList | readonly ChannelListEntry[],
-  options?: WriteChannelListOptions,
+  options?: WriteChannelsXmlOptions,
 ): string {
   // `Array.isArray` and not `'entries' in list`: an array *has* an `entries`
   // method, so the `in` check matches both branches and reads the method as the
@@ -95,7 +95,7 @@ export function serializeChannelList(
   let out = `<?xml version="1.0" encoding="UTF-8"?>${eol}<channels${site}>${eol}`;
 
   for (const entry of entries) {
-    out += serializeChannelListEntry(entry, {
+    out += serializeChannelsXmlEntry(entry, {
       ...options,
       ...(root === undefined ? {} : { site: root }),
     });

@@ -16,7 +16,7 @@
 import { readFile } from 'node:fs/promises';
 import type { Writable } from 'node:stream';
 import { matchChannels } from '../channels/match.js';
-import { parseChannelList } from '../channels/parse.js';
+import { parseChannelsXml } from '../channels/parse.js';
 import type { EpgConfig } from '../config.js';
 import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
@@ -54,7 +54,7 @@ export function wantedFrom(text: string, from: string): WantedChannel[] {
   }
 
   if (text.includes('<channels')) {
-    return parseChannelList(text).entries.map((entry) => ({
+    return parseChannelsXml(text).entries.map((entry) => ({
       id: entry.xmltvId,
       name: entry.name,
     }));

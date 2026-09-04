@@ -1,7 +1,7 @@
 import ky, { type KyInstance } from 'ky';
 import PQueue from 'p-queue';
 import { readFile } from 'node:fs/promises';
-import { parseChannelList } from '../channels/parse.js';
+import { parseChannelsXml } from '../channels/parse.js';
 import { parseM3uFile } from '../m3u/parse.js';
 import type { ChannelListEntry, ChannelListWarning } from '../channels/types.js';
 import type { CacheStore } from '../cache/types.js';
@@ -518,11 +518,11 @@ async function readChannelList(
   // filename several kilobytes long, which says nothing about the mistake.
   if (path.trimStart().startsWith('<')) {
     throw new TypeError(
-      'channelsFromChannelsXml takes a path or entries, not a document: use parseChannelList(text).entries',
+      'channelsFromChannelsXml takes a path or entries, not a document: use parseChannelsXml(text).entries',
     );
   }
 
-  const list = parseChannelList(await readFile(path, 'utf8'));
+  const list = parseChannelsXml(await readFile(path, 'utf8'));
 
   for (const warning of list.warnings) {
     // The site's own `warn` by default, so an unmapped channel is said out loud
@@ -615,7 +615,7 @@ export interface ChannelsXmlOptions {
  * A path is read here rather than by the caller, since a site wanting its
  * channel list beside it is the whole of what this is for. Entries can be
  * passed instead for a list that came from somewhere else — an HTTP response,
- * say — parsed with {@link parseChannelList}, and the returned function then
+ * say — parsed with {@link parseChannelsXml}, and the returned function then
  * needs no context: `await channelsFromChannelsXml(entries)()`.
  *
  * An entry with no `xmltv_id` is skipped: it names something the source has but

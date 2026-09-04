@@ -44,7 +44,7 @@ function attributes(text: string): Map<string, string> {
  * back with its channels rearranged would turn a one-line change into a review
  * nobody can read.
  */
-export function parseChannelList(text: string): ChannelList {
+export function parseChannelsXml(text: string): ChannelList {
   const entries: ChannelListEntry[] = [];
   const warnings: ChannelListWarning[] = [];
   /** Which line an index falls on, counted as the scan passes newlines. */
