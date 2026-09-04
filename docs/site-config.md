@@ -629,6 +629,25 @@ export default defineConfig({
 });
 ```
 
+### From a playlist, when you do not know the guide's url
+
+An M3U playlist names its guide in the `x-tvg-url` of its `#EXTM3U` line, so a
+playlist is a source on its own — its entries are the channel list and its
+header says where their guide is:
+
+```ts
+import { defineM3uSite } from 'epg-tools/grabber';
+
+sites: [defineM3uSite({ site: 'iptv-org', url: 'https://iptv-org.github.io/iptv/index.m3u' })],
+```
+
+It reads the playlist once and hands the rest to `defineXmltvSite`, so
+everything below applies unchanged. `tvg-id` becomes both `siteId` and
+`xmltvId`, which is what makes the playlist and the guide agree. See
+[a playlist as a whole source](./m3u.md#a-playlist-as-a-whole-source).
+
+### What it does with the document
+
 That is the whole of it. The document is **streamed** through the parser and
 **split** by channel-day, so its entries merge with any other site's and the
 guide is never held whole: 43 MiB of XML — 1,000 channels over a week, 7,000
