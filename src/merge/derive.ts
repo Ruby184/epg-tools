@@ -169,9 +169,9 @@ function refuse(message: string): never {
 function rootOf(
   declaration: DerivedChannel,
   declarations: ReadonlyMap<string, DerivedChannel>,
-  byId: ReadonlyMap<string, RegistryEntry>,
-  says: Says,
-): { source: RegistryEntry; offsetMinutes: number } | undefined {
+  produced: ReadonlySet<string>,
+  says: Says | undefined,
+): { rootId: string; offsetMinutes: number } | undefined {
   const seen = new Set<string>([declaration.xmltvId]);
   let offsetMinutes = 0;
   let step = declaration;
@@ -179,9 +179,7 @@ function rootOf(
   for (;;) {
     offsetMinutes += step.offset;
 
-    const entry = byId.get(step.from);
-
-    if (entry !== undefined) {
+    if (produced.has(step.from)) {
       // A real channel, so the walk ends. The offsets of every link add up
       // because a shift of a shift is one shift — which is why a chain needs no
       // second pass over anything.
@@ -192,7 +190,7 @@ function rootOf(
         );
       }
 
-      return { source: entry, offsetMinutes };
+      return { rootId: step.from, offsetMinutes };
     }
 
     const next = declarations.get(step.from);
@@ -201,7 +199,7 @@ function rootOf(
       // Nothing produces the channel it shifts. A fetched channel list that came
       // back short does this, so the guide goes on without it rather than
       // failing — a running `epg serve` must not stop for one absent source.
-      says.warn(`${declaration.xmltvId} shifts ${declaration.from}, which no site produces`);
+      says?.warn(`${declaration.xmltvId} shifts ${declaration.from}, which no site produces`);
 
       return undefined;
     }
@@ -215,32 +213,32 @@ function rootOf(
   }
 }
 
+/** One declaration, resolved: what it shifts, and by how much in all. */
+export interface ResolvedDerived {
+  declaration: DerivedChannel;
+  /** The `xmltvId` of the real channel at the end of the chain. */
+  rootId: string;
+  offsetMinutes: number;
+}
+
 /**
- * The registry entries a config's `derived` declarations add.
+ * Every declaration a guide can honour, in declaration order — so a config
+ * decides where its `+1` channels appear.
  *
- * In declaration order, so a config decides where its `+1` channels appear in
- * the guide. Every entry returned has a root among `registry` and an offset that
- * the merge can carry.
+ * The one resolver, shared by everything that needs to know what `derived`
+ * means: the merge, which goes on to read and shift; the channels report, which
+ * only needs the ids and names; and an XMLTV grabber's channel list. They agree
+ * because they ask the same function.
+ *
+ * `produced` is what the guide already has, and `duplicated` the ids more than
+ * one entry answers to — only possible under `channelStrategy: 'keep-all'`.
  */
-export function resolveDerived(
+export function resolveDeclarations(
   declarations: readonly DerivedChannel[],
-  registry: readonly RegistryEntry[],
-  says: Says,
-): DerivedEntry[] {
-  const byId = new Map<string, RegistryEntry>();
-  const duplicated = new Set<string>();
-
-  for (const entry of registry) {
-    if (byId.has(entry.xmltvId)) {
-      // Only `channelStrategy: 'keep-all'`, which keeps one entry per site and
-      // channel rather than one per channel. Recorded rather than resolved: see
-      // below for why picking one is not an option.
-      duplicated.add(entry.xmltvId);
-    } else {
-      byId.set(entry.xmltvId, entry);
-    }
-  }
-
+  produced: ReadonlySet<string>,
+  duplicated: ReadonlySet<string>,
+  says?: Says,
+): ResolvedDerived[] {
   const declared = new Map<string, DerivedChannel>();
 
   for (const declaration of declarations) {
@@ -264,7 +262,7 @@ export function resolveDerived(
       );
     }
 
-    if (byId.has(declaration.xmltvId) || duplicated.has(declaration.xmltvId)) {
+    if (produced.has(declaration.xmltvId)) {
       refuse(`${declaration.xmltvId} is a channel a site already produces`);
     }
 
@@ -275,7 +273,7 @@ export function resolveDerived(
     declared.set(declaration.xmltvId, declaration);
   }
 
-  const derived: DerivedEntry[] = [];
+  const resolved: ResolvedDerived[] = [];
 
   for (const declaration of declarations) {
     if (duplicated.has(declaration.from)) {
@@ -288,22 +286,83 @@ export function resolveDerived(
       );
     }
 
-    const root = rootOf(declaration, declared, byId, says);
+    const root = rootOf(declaration, declared, produced, says);
 
-    if (root === undefined) {
-      continue;
+    if (root !== undefined) {
+      resolved.push({ declaration, ...root });
     }
+  }
 
-    derived.push({
+  return resolved;
+}
+
+/**
+ * What each declaration would call itself, for the callers that need the list of
+ * channels rather than their programmes — the channels report, and an XMLTV
+ * grabber's `--list-channels`.
+ *
+ * `named` is every channel the guide has, and what it calls itself. The default
+ * name is built from the *root's*, so a chain reads `Sky One +2` rather than
+ * naming what it happens to shift.
+ */
+export function derivedChannelList(
+  declarations: readonly DerivedChannel[],
+  named: ReadonlyMap<string, string | undefined>,
+): { xmltvId: string; name?: string }[] {
+  const produced = new Set(named.keys());
+
+  return resolveDeclarations(declarations, produced, new Set()).map(
+    ({ declaration, rootId, offsetMinutes }) => {
+      const name =
+        declaration.name ??
+        timeshiftName(named.get(rootId) ?? '', offsetMinutes) ??
+        named.get(rootId);
+
+      return { xmltvId: declaration.xmltvId, ...(name === undefined ? {} : { name }) };
+    },
+  );
+}
+
+/**
+ * The registry entries a config's `derived` declarations add.
+ *
+ * Every entry returned has a root among `registry` and an offset the merge can
+ * carry.
+ */
+export function resolveDerived(
+  declarations: readonly DerivedChannel[],
+  registry: readonly RegistryEntry[],
+  says: Says,
+): DerivedEntry[] {
+  const byId = new Map<string, RegistryEntry>();
+  const duplicated = new Set<string>();
+
+  for (const entry of registry) {
+    if (byId.has(entry.xmltvId)) {
+      // Only `channelStrategy: 'keep-all'`, which keeps one entry per site and
+      // channel rather than one per channel.
+      duplicated.add(entry.xmltvId);
+    } else {
+      byId.set(entry.xmltvId, entry);
+    }
+  }
+
+  const produced = new Set(byId.keys());
+
+  for (const id of duplicated) {
+    produced.add(id);
+  }
+
+  return resolveDeclarations(declarations, produced, duplicated, says).map(
+    ({ declaration, rootId, offsetMinutes }) => ({
       xmltvId: declaration.xmltvId,
       sources: [],
       derivedFrom: {
-        source: root.source,
-        offsetMs: root.offsetMinutes * MINUTE_MS,
+        // Present: `rootId` came out of `produced`, which is `byId`'s keys.
+        source: byId.get(rootId)!,
+        offsetMs: offsetMinutes * MINUTE_MS,
         declaration,
       },
-    });
-  }
-
-  return derived;
+    }),
+  );
 }
