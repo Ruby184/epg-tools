@@ -509,7 +509,7 @@ function playlistPath(source: string): string {
 }
 
 /** A path, read and parsed, with whatever it had to say passed on. */
-async function read(
+async function readChannelList(
   path: string,
   options: ChannelsXmlOptions | undefined,
   context: ChannelsContext | undefined,
@@ -627,7 +627,8 @@ export function channelsFromChannelsXml(
   options?: ChannelsXmlOptions,
 ): (context?: ChannelsContext) => Promise<GrabberChannel<ChannelsXmlChannelData>[]> {
   return async (context) => {
-    const entries = typeof source === 'string' ? await read(source, options, context) : source;
+    const entries =
+      typeof source === 'string' ? await readChannelList(source, options, context) : source;
     const channels: GrabberChannel<ChannelsXmlChannelData>[] = [];
     const seen = new Set<string>();
 
