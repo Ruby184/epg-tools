@@ -9,7 +9,7 @@
  * lines quite differently. Implement {@link M3uTokens} to read it that way.
  */
 
-import type { M3uScanOptions, M3uTag, M3uTokens } from './scan.js';
+import type { M3uScanOptions, M3uTag, M3uTokens, M3uUri } from './scan.js';
 import type {
   M3uDirective,
   M3uEntry,
@@ -103,7 +103,7 @@ export class M3uIptvReader implements M3uTokens<M3uParseEvent> {
   }
 
   /** Anything not beginning with `#`, which closes the entry it follows. */
-  uri(text: string, line: number): void {
+  uri({ text, line }: M3uUri): void {
     this.#line = line;
     this.#col = 1;
     this.#seenAnything = true;

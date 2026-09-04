@@ -18,7 +18,7 @@ import {
   writeM3uStream,
   writeM3uToFile,
 } from '../src/m3u/main.js';
-import type { M3uEntry, M3uParseEvent, M3uTokens, M3uWarning } from '../src/m3u/main.js';
+import type { M3uEntry, M3uParseEvent, M3uTokens, M3uUri, M3uWarning } from '../src/m3u/main.js';
 
 const FIXTURE = new URL('./fixtures/iptv-org-slice.m3u', import.meta.url);
 /** `parseM3uFile` takes a path, and `URL.pathname` is not one — it keeps the
@@ -484,7 +484,7 @@ describe('the scanner on its own, for a dialect that is not IPTV', () => {
     tag({ name, value, line }: M3uTag): void {
       this.seen.push(`${line} tag ${name}${value === '' ? '' : `:${value}`}`);
     }
-    uri(text: string, line: number): void {
+    uri({ text, line }: M3uUri): void {
       this.seen.push(`${line} uri ${text}`);
     }
     warn(): void {}
@@ -532,7 +532,7 @@ describe('the scanner on its own, for a dialect that is not IPTV', () => {
         else if (tag.name === 'EXT-X-KEY')
           this.#key = tag.attributes({ separator: ',' }).get('URI');
       }
-      uri(text: string): void {
+      uri({ text }: M3uUri): void {
         this.segments.push({ uri: text, duration: this.#duration, key: this.#key });
       }
       warn(): void {}

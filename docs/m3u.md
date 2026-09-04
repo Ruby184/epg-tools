@@ -28,7 +28,7 @@ import { parseM3uFile, parseM3uString, writeM3uToFile } from 'epg-tools/m3u';
 Every other M3U parser takes the whole playlist as a string. A public IPTV index
 is megabytes of it — [iptv-org's `index.m3u`][iptv-org] is 2.7 MB and 12,946
 entries — and holding the document *and* the model at once is the difference
-between **0.9 MiB** of peak heap and 55–82 MiB, [measured](#benchmarks) on a
+between **0.8 MiB** of peak heap and 55–82 MiB, [measured](#benchmarks) on a
 20 MB one.
 
 Half of this format is specified and half is convention, which is most of what
@@ -574,7 +574,7 @@ them do. Peak heap over a 20.6 MB, 100,000-entry playlist:
 
 | | peak heap |
 |---|---|
-| `parseM3uFile` (streaming) | **0.9 MiB** |
+| `parseM3uFile` (streaming) | **0.8 MiB** |
 | `m3u-parser-generator` | 55.0 MiB |
 | `parseM3uString` | 68.8 MiB |
 | `@iptv/playlist` | 62.5 MiB |

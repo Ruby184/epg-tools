@@ -226,6 +226,23 @@ const BOM = 0xfeff;
 const DEFAULT_MAX_LINE_LENGTH = 1024 * 1024;
 
 /**
+ * One line that is not a tag, which RFC 8216 §4.1 leaves only one thing it can
+ * be: a URI.
+ *
+ * Handed over exactly as written, including the `|User-Agent=…&Referer=…` some
+ * providers append and tvheadend splits out — what that means is the reading
+ * dialect's business, and no reader is obliged to think it means anything.
+ */
+export class M3uUri {
+  constructor(
+    /** The line, trimmed of nothing. */
+    readonly text: string,
+    /** 1-based line it was on. */
+    readonly line: number,
+  ) {}
+}
+
+/**
  * What a reader of some dialect of this format provides.
  *
  * The scanner calls one of the first three for every line that carries
@@ -236,8 +253,8 @@ const DEFAULT_MAX_LINE_LENGTH = 1024 * 1024;
 export interface M3uTokens<TEvent> {
   /** A tag line, split as RFC 8216 §4.3 shapes one. See {@link M3uTag}. */
   tag(tag: M3uTag): void;
-  /** A line that is neither blank nor a tag, so by §4.1 a URI. */
-  uri(text: string, line: number): void;
+  /** A line that is neither blank nor a tag. See {@link M3uUri}. */
+  uri(uri: M3uUri): void;
   /** Something the *scanner* found wrong, which is only ever a line too long. */
   warn(warning: M3uWarning): void;
   /** The playlist is over, so anything left unfinished can be reported. */
@@ -432,7 +449,7 @@ export class M3uScanner<TEvent> {
     }
 
     this.#opens(false, buf, from, to);
-    this.#tokens.uri(buf.slice(from, to), this.#line);
+    this.#tokens.uri(new M3uUri(buf.slice(from, to), this.#line));
   }
 
   /**

@@ -14,7 +14,7 @@ export type {
   M3uWriteOptions,
 } from './serialize.js';
 export { M3uIptvReader } from './iptv.js';
-export { M3uScanner, M3uTag } from './scan.js';
+export { M3uScanner, M3uTag, M3uUri } from './scan.js';
 export type { M3uScanOptions, M3uTokens } from './scan.js';
 export type { M3uAttributeOptions } from './scan.js';
 export type * from './types.js';
