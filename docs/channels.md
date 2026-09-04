@@ -8,8 +8,11 @@ channel on a source is which channel in a guide.**
 import { parseChannelsXml, serializeChannelsXml, matchChannels } from 'epg-tools/channels';
 ```
 
-Zero dependencies, and nothing else in the package is loaded — the same rule
-[`epg-tools/xmltv`](./xmltv.md) and [`epg-tools/m3u`](./m3u.md) follow.
+Zero dependencies, and no grabber, cache or config loading behind it — the same
+rule [`epg-tools/xmltv`](./xmltv.md) and [`epg-tools/m3u`](./m3u.md) follow. The
+one thing it does load from the rest of the package is `escape.ts`, the XMLTV
+module's entity rules, which imports nothing itself: a `*.channels.xml` escapes
+exactly as a guide does, and a second copy of those rules is how the two drift.
 
 ## Why this exists
 
@@ -172,6 +175,20 @@ declares an offset and the base name *is* available, the match carries
 `timeshiftOf: { channel, offset }` instead of `matched`. The answer is "this is
 `Sky One` an hour later", which is a channel you can **derive**, not one you can
 map.
+
+`timeshiftName` is the inverse, and the two read each other back:
+
+```ts
+timeshiftName('Sky One', 60); // 'Sky One +1'
+```
+
+A derived channel declared in a config lands on the name a viewer is looking
+for, so `matchChannels` places it by name even before an id is set — see
+[derived channels](./configuration.md#derived-channels) for the declaration
+itself, which is what turns this hint into a channel. It returns
+`undefined` rather than inventing a spelling when the offset is not a whole
+number of hours — `+90 minutes` has no form the recognizer would read back, and
+one that reads back as something else is worse than declining.
 
 ## `epg channels`
 
