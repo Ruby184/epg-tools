@@ -103,8 +103,6 @@ export type ChannelMatchKind =
   | 'id'
   /** The names agree once normalized. */
   | 'name'
-  /** The names agree only after dropping something that may be significant. */
-  | 'weak'
   /** Nothing lined up. */
   | 'none';
 

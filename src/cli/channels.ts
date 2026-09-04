@@ -17,6 +17,7 @@ import { readFile } from 'node:fs/promises';
 import type { Writable } from 'node:stream';
 import { matchChannels } from '../channels/match.js';
 import { parseChannelsXml } from '../channels/parse.js';
+import type { ChannelMatchKind } from '../channels/types.js';
 import type { EpgConfig } from '../config.js';
 import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
@@ -75,7 +76,7 @@ export function wantedFrom(text: string, from: string): WantedChannel[] {
 /** What the report says about one wanted channel. */
 export interface ChannelReportRow {
   wanted: WantedChannel;
-  kind: 'id' | 'name' | 'weak' | 'none';
+  kind: ChannelMatchKind;
   /** The channel it lines up with, when it does. */
   matched?: { xmltvId: string; name?: string };
   /** Rivals, when more than one matched equally well. */
