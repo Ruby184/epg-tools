@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { renderChannelReport, reportChannels, wantedFrom } from '../src/cli/channels.js';
-import { matchChannels, timeshiftOf } from '../src/channels/match.js';
+import { matchChannels, timeshiftName, timeshiftOf } from '../src/channels/match.js';
 import { channelsFromChannelsXml } from '../src/grabber/channels.js';
 import { parseChannelsXml } from '../src/channels/parse.js';
 import { serializeChannelsXml } from '../src/channels/serialize.js';
@@ -241,6 +241,33 @@ describe('matchChannels', () => {
   it('leaves a name with no offset alone', () => {
     expect(timeshiftOf('Channel 4')).toBeUndefined();
     expect(timeshiftOf('BBC One')).toBeUndefined();
+  });
+
+  it.each([
+    [60, 'Sky One +1'],
+    [-60, 'Sky One -1'],
+    [1380, 'Sky One +23'],
+  ])('writes %i minutes as the name a playlist uses', (offset, expected) => {
+    expect(timeshiftName('Sky One', offset)).toBe(expected);
+  });
+
+  // The two are each other's opposite, and this is what says so: whatever a
+  // derived channel is named, the recognizer reads the same offset back out —
+  // which is why declaring one makes it match by name.
+  it.each([60, -60, 120, 1380])('round-trips %i minutes through timeshiftOf', (offset) => {
+    const name = timeshiftName('Sky One', offset);
+
+    expect(name).toBeDefined();
+    expect(timeshiftOf(name!)).toEqual({ offset, base: 'Sky One' });
+  });
+
+  it('declines an offset it cannot spell, rather than inventing one', () => {
+    // 90 minutes has no form `TIMESHIFT` would read back, and `Sky One +1.5`
+    // would read back as `+1` — an hour out, said confidently.
+    expect(timeshiftName('Sky One', 90)).toBeUndefined();
+    expect(timeshiftName('Sky One', 0)).toBeUndefined();
+    expect(timeshiftName('Sky One', 30.5)).toBeUndefined();
+    expect(timeshiftName('  ', 60)).toBeUndefined();
   });
 
   it('reports rivals rather than picking one', () => {

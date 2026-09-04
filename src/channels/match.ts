@@ -80,6 +80,33 @@ export function timeshiftOf(name: string): { offset: number; base: string } | un
   };
 }
 
+/**
+ * What to call a channel that is another one shifted — the inverse of
+ * {@link timeshiftOf}.
+ *
+ * `('Sky One', 60)` is `Sky One +1`, which is what a playlist calls it, so a
+ * derived channel declared in a config lands on the name a viewer is looking
+ * for and `matchChannels` places it by name even before an id is set. The two
+ * functions are each other's opposite on purpose: whatever this writes,
+ * `timeshiftOf` reads back.
+ *
+ * `undefined` when there is no name to build on, or when the offset is not a
+ * whole number of hours — `+90 minutes` has no spelling the recognizer would
+ * accept, and inventing one that reads back as something else is worse than
+ * declining. A caller that gets `undefined` should keep the name it had.
+ */
+export function timeshiftName(base: string, offsetMinutes: number): string | undefined {
+  const trimmed = base.trim();
+
+  if (trimmed === '' || !Number.isInteger(offsetMinutes) || offsetMinutes % 60 !== 0) {
+    return undefined;
+  }
+
+  const hours = offsetMinutes / 60;
+
+  return hours === 0 ? undefined : `${trimmed} ${hours > 0 ? '+' : '-'}${Math.abs(hours)}`;
+}
+
 /** What {@link matchChannels} hands back for a channel it could place. */
 export interface ChannelMatchResult<TWanted, TAvailable> extends ChannelMatch<TWanted, TAvailable> {
   /**

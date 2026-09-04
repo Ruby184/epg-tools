@@ -142,6 +142,7 @@ export {
   matchChannels,
   parseChannelsXml,
   serializeChannelsXml,
+  timeshiftName,
   timeshiftOf,
 } from './channels/main.js';
 export type {
