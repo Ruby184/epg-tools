@@ -212,7 +212,14 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       continue;
     }
 
-    channels.push(derivedChannelElement(inherited, entry, mergeSays));
+    channels.push(
+      derivedChannelElement(
+        inherited,
+        entry.derivedFrom.declaration,
+        entry.derivedFrom.offsetMs / 60_000,
+        mergeSays,
+      ),
+    );
     registry.push(entry);
   }
 

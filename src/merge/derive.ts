@@ -114,6 +114,22 @@ export function shiftProgrammes(
 }
 
 /**
+ * What a derived channel calls itself: what the config said, else the source's
+ * name with the shift appended, else nothing — for an offset with no spelling,
+ * meaning keep the source's name as it is.
+ *
+ * One rule, so the guide and the channel lists cannot disagree about the name of
+ * a channel that appears in both.
+ */
+function derivedDisplayName(
+  rootName: string | undefined,
+  declaration: DerivedChannel,
+  offsetMinutes: number,
+): string | undefined {
+  return declaration.name ?? timeshiftName(rootName ?? '', offsetMinutes);
+}
+
+/**
  * The `<channel>` element a derived channel publishes.
  *
  * The source's, with a new id and usually a new name — and without its
@@ -123,21 +139,20 @@ export function shiftProgrammes(
  */
 export function derivedChannelElement(
   inherited: XmltvChannel,
-  entry: DerivedEntry,
-  says: Says,
+  declaration: DerivedChannel,
+  offsetMinutes: number,
+  says?: Says,
 ): XmltvChannel {
-  const { declaration, offsetMs } = entry.derivedFrom;
   const { extra: _extra, extraAttributes: _extraAttributes, ...rest } = inherited;
   const first = inherited.displayName[0];
-  const offsetMinutes = offsetMs / MINUTE_MS;
-  const shifted = declaration.name ?? timeshiftName(first?.value ?? '', offsetMinutes);
+  const shifted = derivedDisplayName(first?.value, declaration, offsetMinutes);
   const lang = declaration.lang ?? first?.lang;
 
   if (shifted === undefined) {
     // Nothing to append the shift to, or an offset with no spelling the
     // recognizer would read back. Worth saying: a guide with two channels under
     // one name is one a consumer can map the wrong way round.
-    says.warn(
+    says?.warn(
       `${declaration.xmltvId} keeps the display name of ${declaration.from}: ` +
         `${offsetMinutes} minutes has no name to say it with`,
     );
@@ -313,10 +328,8 @@ export function derivedChannelList(
 
   return resolveDeclarations(declarations, produced, new Set()).map(
     ({ declaration, rootId, offsetMinutes }) => {
-      const name =
-        declaration.name ??
-        timeshiftName(named.get(rootId) ?? '', offsetMinutes) ??
-        named.get(rootId);
+      const root = named.get(rootId);
+      const name = derivedDisplayName(root, declaration, offsetMinutes) ?? root;
 
       return { xmltvId: declaration.xmltvId, ...(name === undefined ? {} : { name }) };
     },

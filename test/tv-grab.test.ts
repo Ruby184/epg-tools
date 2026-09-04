@@ -201,6 +201,72 @@ describe('applyChannelSelection', () => {
     expect(calls).toBe(1);
   });
 
+  // A derived channel is not grabbed, its source is — so a selection has to
+  // pull the source in behind it, and must not leave a derivation behind whose
+  // channel nobody asked for.
+  describe('with derived channels', () => {
+    const epg = (): EpgConfig => ({
+      sites: [site('one.example.tv'), site('two.example.tv')],
+      output: 'x',
+      derived: [
+        { xmltvId: 'one.plus1.example.tv', from: 'one.example.tv', offset: 60 },
+        { xmltvId: 'two.plus1.example.tv', from: 'two.example.tv', offset: 60 },
+      ],
+    });
+
+    it('keeps the source of a selected derivation, unasked for', () => {
+      const selected = applyChannelSelection(epg(), new Set(['one.plus1.example.tv']));
+
+      expect(selected.derived).toEqual([
+        { xmltvId: 'one.plus1.example.tv', from: 'one.example.tv', offset: 60 },
+      ]);
+      // Its source came along: there is no shifting a channel nobody grabbed.
+      expect(selected.sites).toHaveLength(1);
+      expect(selected.sites[0]?.channels).toEqual([
+        { xmltvId: 'one.example.tv', siteId: '1', name: 'Channel one.example.tv' },
+      ]);
+    });
+
+    it('drops a derivation nobody selected', () => {
+      const selected = applyChannelSelection(epg(), new Set(['one.example.tv']));
+
+      expect(selected.derived).toEqual([]);
+      expect(selected.sites).toHaveLength(1);
+    });
+
+    it('flattens a chain whose middle was not selected', () => {
+      const config: EpgConfig = {
+        sites: [site('one.example.tv')],
+        output: 'x',
+        derived: [
+          { xmltvId: 'plus1', from: 'one.example.tv', offset: 60 },
+          { xmltvId: 'plus2', from: 'plus1', offset: 60 },
+        ],
+      };
+
+      const selected = applyChannelSelection(config, new Set(['plus2']));
+
+      // A shift of a shift is one shift, so the dropped middle becomes arithmetic.
+      expect(selected.derived).toEqual([{ xmltvId: 'plus2', from: 'one.example.tv', offset: 120 }]);
+    });
+
+    it('lists them among the ids a config can deliver', async () => {
+      expect(await resolveChannelIds(epg())).toEqual([
+        'one.example.tv',
+        'two.example.tv',
+        'one.plus1.example.tv',
+        'two.plus1.example.tv',
+      ]);
+    });
+
+    it('offers them in --list-channels, named as a playlist names them', async () => {
+      const xml = await listChannelsXml(epg());
+
+      expect(xml).toContain('<channel id="one.plus1.example.tv">');
+      expect(xml).toContain('<display-name>Channel one.example.tv +1</display-name>');
+    });
+  });
+
   it('resolveChannelIds deduplicates across sites, keeping priority order', async () => {
     const epg: EpgConfig = {
       sites: [site('one.example.tv'), site('two.example.tv'), site('one.example.tv')],
