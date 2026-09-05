@@ -53,12 +53,13 @@ hardcode — a username, a password, a region. See
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
 | `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source. |
 | `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true }` | How several sites covering one channel are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
+| `derived` | `DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. See [Derived channels](#derived-channels). |
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 | `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — all of them | Which provider extensions the guide carries — see [Provider extensions](#provider-extensions). `false` leaves every one out, which is what makes the guide valid against the DTD. |
 | `serve` | `{ port?, host?, path?, compress?, cors? }` | `8080`, `127.0.0.1`, `/guide.xml`, `gzip`, off | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). |
 | `allowMissing` | `number \| string` | none — anything missing fails | How much of the guide may be missing and the run still exit **0**: a number of channel-days, or a share like `'5%'` — see [allowing some of the guide to be missing](#allowing-some-of-the-guide-to-be-missing). |
-| `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'text'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
+| `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'progress'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
 
 ### Root `<tv>` attributes
 
@@ -571,7 +572,7 @@ it.
 
 | severity | what it means |
 |---|---|
-| `error` | the guide is wrong: a `<programme>` naming a channel nothing describes, two programmes on one channel on at the same moment, a `<channel>` with no `<display-name>`, two channels sharing an id, a programme that stops before it starts, or a document that ends mid-element |
+| `error` | the guide is wrong: a `<programme>` naming a channel nothing describes, two programmes on one channel on at the same moment, a `<channel>` with no `<display-name>`, a `<programme>` with no `<title>`, two channels sharing an id, a programme that stops before it starts, or a document that ends mid-element |
 | `warning` | the parser found something and coped: a dropped attribute, a duplicated element, markup it skipped — and [provider extensions](#provider-extensions), which are deliberate and are what `--no-extensions` removes |
 
 Two programmes overlap when one starts strictly before the other has stopped.
@@ -844,6 +845,72 @@ up the order, and the window is what bounds the memory, so what is alive at once
 is those two days plus the entries already read. On a warm page cache it is
 worth around 1.3× on 1,400 channel-days, and more wherever a read costs more
 than a local SSD's — an SD card, a network share, a Raspberry Pi.
+
+## Derived channels
+
+A `+1` channel carries the same schedule as its base an hour later. That is
+arithmetic on days already in the cache, not a second source to grab — so
+declare it and it costs nothing:
+
+```ts
+export default defineConfig({
+  sites: [/* … */],
+  derived: [
+    { xmltvId: 'skyone.plus1.uk', from: 'skyone.uk', offset: 60 },
+    { xmltvId: 'markiza.plus1.sk', from: 'markiza.sk', offset: 60, name: 'Markíza +1' },
+  ],
+});
+```
+
+| field | type | default | what it is |
+|---|---|---|---|
+| `xmltvId` | `string` | **required** | The new channel's id. Nothing else may produce it. |
+| `from` | `string` | **required** | The `xmltvId` it shifts — any site's channel, or another derived channel. |
+| `offset` | `number` | **required** | Minutes, and under a day. `60` is a `+1`; a negative value shifts earlier. |
+| `name` | `string` | the source's name with the shift appended | Its display name. |
+| `logo` | `string` | the source's | An icon of its own. |
+| `lang` | `string` | the source's | The language of `name`. |
+| `channelInfo` | `(element) => XmltvChannel` | — | The last word on the `<channel>` element, given the one this would have emitted. |
+
+[`epg channels`](#which-channels-will-get-no-guide) is what usually sends you here. Shown a
+playlist wanting `Sky One +1`, it refuses to map it onto `skyone.uk` — an
+hour-wrong schedule is worse than none — and reports that it *looks like* a
+shift of it instead. Declaring one is how that gets answered, and the report
+stops asking: the default name is the one a playlist uses, so the channel then
+matches by name even before its `tvg-id` is set.
+
+`from` may name another derived channel. A chain is resolved to its root with
+the offsets summed, since a shift of a shift is one shift, and it takes its name
+from that root — so a `+2` reads as one.
+
+**What moves:** the start, the stop, and the PDC/VPS starts. Not `<date>`, which
+is the year the programme was made, and not `previously-shown`, which describes
+a real earlier airing on a real other channel. Each time keeps the UTC offset it
+was published in, so a guide written in `+0200` stays in `+0200`.
+
+**What it costs:** no requests, but a second read. A derived channel reads its
+source's cached days again, so a channel with three derivations is read four
+times, and each site's `transform` runs over the same rows four times. Write
+transforms that do not care how often they run.
+
+**The hole at one end.** A `+1` channel's first hour would have to come from the
+day *before* the window, which was never grabbed — so the guide's first hour of
+a `+1` channel is empty, and its last hour spills past the end (kept by default,
+like any spill; `clampToWindow` removes it). A negative offset mirrors both.
+Grab a day more than you publish — `days: 8` with `clampToWindow: true` — for a
+derived channel with no hole in it.
+
+**Limits.** An offset must be under a day: the merge holds a day back and emits
+what no later day can reach, and a bigger shift would spend the margin that
+leaves for sources whose own day runs 06:00 to 06:00. A day's shift is the same
+schedule again anyway. A declaration that cannot be right fails the run — a
+cycle, an id a site already produces, an offset of a day or more. One whose
+`from` no site produces only warns and is skipped, since a fetched channel list
+that came back short does that, and `epg serve` must not stop for it.
+
+A derived channel is listed and selectable in a generated `tv_grab_*` too, so
+tvheadend can map it. Selecting it pulls its source in behind it, since there is
+no shifting a channel nobody grabbed.
 
 ---
 

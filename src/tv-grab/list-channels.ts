@@ -1,6 +1,7 @@
 import type { EpgConfig } from '../config.js';
 import { channelElement, resolveChannels } from '../grabber/channels.js';
 import type { GrabberChannel } from '../grabber/types.js';
+import { derivedChannelElement, resolveDeclarations } from '../merge/derive.js';
 import { mergeChannels } from '../merge/main.js';
 import {
   serializeChannel,
@@ -27,6 +28,23 @@ async function collectChannels(config: EpgConfig): Promise<XmltvChannel[]> {
       // The same merge the guide does, so a channel covered by several sites
       // is described identically in both.
       byId.set(channel.xmltvId, existing === undefined ? info : mergeChannels(existing, info));
+    }
+  }
+
+  // A derived channel is one this grabber can deliver, so it belongs in the
+  // list a caller chooses from — without it, tvheadend can never map the `+1`.
+  // Built from the source's merged element, exactly as the guide builds it.
+  if (config.derived?.length) {
+    for (const { declaration, rootId, offsetMinutes } of resolveDeclarations(
+      config.derived,
+      new Set(byId.keys()),
+      new Set(),
+    )) {
+      const inherited = byId.get(rootId);
+
+      if (inherited !== undefined) {
+        byId.set(declaration.xmltvId, derivedChannelElement(inherited, declaration, offsetMinutes));
+      }
     }
   }
 

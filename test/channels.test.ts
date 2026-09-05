@@ -2,9 +2,10 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { renderChannelReport, reportChannels, wantedFrom } from '../src/cli/channels.js';
-import { matchChannels, timeshiftOf } from '../src/channels/match.js';
+import { matchChannels, timeshiftName, timeshiftOf } from '../src/channels/match.js';
 import { channelsFromChannelsXml } from '../src/grabber/channels.js';
 import { parseChannelsXml } from '../src/channels/parse.js';
+import { derivedChannelList } from '../src/merge/derive.js';
 import { serializeChannelsXml } from '../src/channels/serialize.js';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/tvtv-us-slice.channels.xml', import.meta.url));
@@ -243,6 +244,33 @@ describe('matchChannels', () => {
     expect(timeshiftOf('BBC One')).toBeUndefined();
   });
 
+  it.each([
+    [60, 'Sky One +1'],
+    [-60, 'Sky One -1'],
+    [1380, 'Sky One +23'],
+  ])('writes %i minutes as the name a playlist uses', (offset, expected) => {
+    expect(timeshiftName('Sky One', offset)).toBe(expected);
+  });
+
+  // The two are each other's opposite, and this is what says so: whatever a
+  // derived channel is named, the recognizer reads the same offset back out —
+  // which is why declaring one makes it match by name.
+  it.each([60, -60, 120, 1380])('round-trips %i minutes through timeshiftOf', (offset) => {
+    const name = timeshiftName('Sky One', offset);
+
+    expect(name).toBeDefined();
+    expect(timeshiftOf(name!)).toEqual({ offset, base: 'Sky One' });
+  });
+
+  it('declines an offset it cannot spell, rather than inventing one', () => {
+    // 90 minutes has no form `TIMESHIFT` would read back, and `Sky One +1.5`
+    // would read back as `+1` — an hour out, said confidently.
+    expect(timeshiftName('Sky One', 90)).toBeUndefined();
+    expect(timeshiftName('Sky One', 0)).toBeUndefined();
+    expect(timeshiftName('Sky One', 30.5)).toBeUndefined();
+    expect(timeshiftName('  ', 60)).toBeUndefined();
+  });
+
   it('reports rivals rather than picking one', () => {
     const rivals = [of('a', 'Movies'), of('b', 'MOVIES!')];
     const [match] = matchChannels([{ name: 'movies', value: 'want' }], rivals);
@@ -325,6 +353,64 @@ describe('reportChannels', () => {
 
     expect(report.rows[0]?.timeshiftOf).toEqual({ xmltvId: 'skyone.uk', offset: 60 });
     expect(report.rows[0]?.matched).toBeUndefined();
+  });
+});
+
+describe('derivedChannelList', () => {
+  const named = new Map<string, string | undefined>([
+    ['skyone.uk', 'Sky One'],
+    ['bbcone.uk', 'BBC One'],
+  ]);
+
+  it('names a shift the way a playlist does', () => {
+    expect(
+      derivedChannelList([{ xmltvId: 'skyone.plus1.uk', from: 'skyone.uk', offset: 60 }], named),
+    ).toEqual([{ xmltvId: 'skyone.plus1.uk', name: 'Sky One +1' }]);
+  });
+
+  it('names a chain from its root, not from what it happens to shift', () => {
+    const list = derivedChannelList(
+      [
+        { xmltvId: 'skyone.plus1.uk', from: 'skyone.uk', offset: 60 },
+        { xmltvId: 'skyone.plus2.uk', from: 'skyone.plus1.uk', offset: 60 },
+      ],
+      named,
+    );
+
+    expect(list).toEqual([
+      { xmltvId: 'skyone.plus1.uk', name: 'Sky One +1' },
+      { xmltvId: 'skyone.plus2.uk', name: 'Sky One +2' },
+    ]);
+  });
+
+  it('leaves out one whose source nothing produces', () => {
+    expect(derivedChannelList([{ xmltvId: 'a.plus1', from: 'nope', offset: 60 }], named)).toEqual(
+      [],
+    );
+  });
+
+  // The whole reason the report has to know about these: the report is what
+  // sends you to declare one, so it must stop asking once you have.
+  it('is what turns a timeshift hint into a match', () => {
+    const available = [{ xmltvId: 'skyone.uk', siteId: '2', name: 'Sky One' }];
+    const wanted = [{ id: '', name: 'Sky One +1' }];
+
+    expect(reportChannels(wanted, available).rows[0]?.timeshiftOf).toEqual({
+      xmltvId: 'skyone.uk',
+      offset: 60,
+    });
+
+    const derived = derivedChannelList(
+      [{ xmltvId: 'skyone.plus1.uk', from: 'skyone.uk', offset: 60 }],
+      new Map([['skyone.uk', 'Sky One']]),
+    ).map((channel) => ({ ...channel, siteId: '' }));
+    const after = reportChannels(wanted, [...available, ...derived]);
+
+    expect(after.rows[0]).toMatchObject({
+      kind: 'name',
+      matched: { xmltvId: 'skyone.plus1.uk' },
+    });
+    expect(after.rows[0]?.timeshiftOf).toBeUndefined();
   });
 });
 

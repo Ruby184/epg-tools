@@ -105,9 +105,9 @@ await build(config, {
 
 Every event carries a `type`, the fields that type is about, a `level`
 (`error`, `warn`, `info`, `debug`) and a `phase` (`run`, `grab`, `merge`,
-`prune`). The level and phase follow from the type rather than being chosen at
-the call site — `EVENT_KINDS` is the whole table, and it is the whole answer to
-"what does the default verbosity show?".
+`serve`, `prune` — `PHASES`). The level and phase follow from the type rather
+than being chosen at the call site — `EVENT_KINDS` is the whole table, and it is
+the whole answer to "what does the default verbosity show?".
 
 | group | types |
 |---|---|
@@ -118,6 +118,7 @@ the call site — `EVENT_KINDS` is the whole table, and it is the whole answer t
 | a whole-document source | `stream:gaps`, `stream:ignored` |
 | pacing | `pacing:held`, `pacing:slowed`, `pacing:recovered`, `pacing:rateLimit` |
 | merging, tidying | `merge:channel`, `merge:done`, `merge:note`, `merge:warning`, `prune:done` |
+| [serving](./configuration.md#serving-the-guide) | `serve:started` (with the `url`), `serve:response` (`method`, `path`, `status`, `ms`), `serve:disconnected`, `serve:failed`, `serve:stopped` |
 
 Two things about the shape are deliberate, and both are the difference between a
 structured sink and a string one. **A failed request is one event, not one per
@@ -167,8 +168,8 @@ a command line cannot pass a function.
 `failureCap` (20, `0` for all), when the run finishes — which keeps a site that
 is down from burying the progress it interleaved with. `failures: 'inline'`
 writes each where it happens and holds nothing, for a log where interleaving is
-the point. The collecting and the flushing happen whatever the `level` is: asking
-for errors only must still end with the errors.
+the point (`FAILURE_MODES` is the pair). The collecting and the flushing happen
+whatever the `level` is: asking for errors only must still end with the errors.
 
 `progressReporter` is what `site:started` exists for: by the time it fires the
 planner has resolved the channel list and swept the cache, so `entries` — the
@@ -192,6 +193,11 @@ builds them, and `errorMessage` reads `.message` alone, so "this channel-day is
 unchanged, but nothing is cached for it" used to arrive without the `304` that
 said so. `errorChain(error)` is the same walk, exported for a caller doing its
 own rendering.
+
+`emitter(options)` is the other end: it turns the `reporter` a caller passed
+into the `Emit` the internals take, and answers a silent one when nobody is
+listening. Only needed to drive `grab` or `generateGuide` directly and have
+their events reach the same reporter `build` would have given them.
 
 ## Streaming a guide
 
@@ -304,9 +310,9 @@ import { runXmltvGrabber, defineCapability } from 'epg-tools/tv-grab';
 
 The root re-exports most of the subpaths, so a single import usually does. Two
 reasons to reach for a subpath: `epg-tools/xmltv`, `epg-tools/m3u` and
-`epg-tools/channels` pull in **nothing else** — no grabber, no cache, no config
-loading — so they are the ones to use if all you want is to read or write those
-formats; and a handful of
+`epg-tools/channels` pull in **no dependencies and none of the machinery** — no
+grabber, no cache, no config loading — so they are the ones to use if all you
+want is to read or write those formats; and a handful of
 names live only on a subpath (marked below).
 
 ## Export map
@@ -325,7 +331,7 @@ names live only on a subpath (marked below).
 | Options parsing | `parseOptions`, `OptionError` |
 | XMLTV | `escapeXml`, `serializeChannel`, `serializeProgramme`, `writeXmltvStream`, `writeXmltvToFile`, `parseXmltvStream`, `parseXmltvFile`, every [date helper](./xmltv.md#dates) and the [zone helpers](./xmltv.md#named-zones) |
 | M3U | `parseM3uStream`, `parseM3uFile`, `parseM3uString`, `serializeM3uEntry`, `serializeM3uHeader`, `writeM3uStream`, `writeM3uToFile`, `M3uParseStream`, `M3uSerializeStream` |
-| Channels | `parseChannelsXml`, `serializeChannelsXml`, `serializeChannelsXmlEntry`, `matchChannels`, `timeshiftOf` |
+| Channels | `parseChannelsXml`, `serializeChannelsXml`, `serializeChannelsXmlEntry`, `matchChannels`, `timeshiftOf`, `timeshiftName` |
 | Cache | `CacheManager`, `CACHE_SCHEMA`, `CacheDriverBase`, `FsCacheDriver`, `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`, `MemoryCacheDriver`, `NoCacheDriver`, `isStale`, `DEFAULT_STALENESS` |
 | Grabber | `grab`, `defineSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`, `channelElement`, `siteHttp`, `sitePacing`, `retryAfterMs` |
 | Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
@@ -355,19 +361,22 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 
 - **Parse** — `parseM3uFile`, `parseM3uStream`, `parseM3uString`, `M3uParseStream`
 - **Serialize** — `writeM3uStream`, `writeM3uToFile`, `serializeM3uEntry`, `serializeM3uHeader`, `M3uSerializeStream`
+- **Scanner*** — `M3uScanner`, `M3uIptvReader`, `M3uTag`, `M3uUri` — the lexical layer under the parser, for [a dialect that is not IPTV](./m3u.md#reading-it-as-something-other-than-iptv)
 
-Everything here is re-exported from the root. The bridge to a site's channel
-list, `channelsFromM3u`, lives on `epg-tools/grabber` instead — this subpath
-imports nothing from the rest of the package.
+`*` this subpath only — not re-exported from the root. The bridge to a site's
+channel list, `channelsFromM3u`, lives on `epg-tools/grabber` instead — this
+subpath imports nothing from the rest of the package.
 
 ### `epg-tools/channels`
 
-Zero dependencies, and nothing else in the package is loaded. Full detail in
+Zero dependencies. It loads one file from the rest of the package — `escape.ts`,
+which the XMLTV module owns and which imports nothing itself — rather than
+keeping a second copy of the entity rules. Full detail in
 [Channel lists and matching](./channels.md).
 
 - **Parse** — `parseChannelsXml`
 - **Serialize** — `serializeChannelsXml`, `serializeChannelsXmlEntry`
-- **Match** — `matchChannels`, `timeshiftOf`
+- **Match** — `matchChannels`, `timeshiftOf`, `timeshiftName`
 
 Everything here is re-exported from the root. The bridge to a site's channel
 list, `channelsFromChannelsXml`, lives on `epg-tools/grabber` — same rule as the
@@ -378,7 +387,7 @@ M3U one above.
 `CacheManager`, the drivers `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`,
 `MemoryCacheDriver` and `NoCacheDriver` with the abstract `FsCacheDriver` and
 `CacheDriverBase` they build on, `CACHE_SCHEMA`, `STATE_SCHEMA`, `isStale`,
-`DEFAULT_STALENESS`, and the `CacheStore` / `CacheDriver` /
+`DEFAULT_STALENESS`, `CACHE_DRIVER_NAMES`, and the `CacheStore` / `CacheDriver` /
 `ChannelDayKey` / `CacheEntryMeta` / `StoredEntryMeta` / `StoredProgramme` /
 `StateEntry` / `StoredStateMeta` / `FoundState` /
 `StalenessPolicy` / `CacheDriverName` types.
@@ -589,10 +598,11 @@ grabbed again.
 
 `grab`, `defineSiteConfig`, `defineStreamSiteConfig`, `defineXmltvSite`,
 `defineM3uSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`,
-`guideUrlsFromM3u`, `siteHttp`, `sitePacing`, `retryAfterMs`,
-`channelElement`, `defaultChannelInfo`, `SiteStateHandle`, `StateKey`,
-`TrackedMap`, `channelsMaxAgeMs`, `DEFAULT_CHANNELS_MAX_AGE_DAYS`,
-`UnchangedError`, `isUnchanged`.
+`channelsFromChannelsXml`, `guideUrlsFromM3u`, `siteHttp`, `sitePacing`,
+`retryAfterMs`, `channelElement`, `defaultChannelInfo`, `SiteStateHandle`,
+`StateKey`, `TrackedMap`, `channelsMaxAgeMs`,
+`DEFAULT_CHANNELS_MAX_AGE_DAYS`, `UnchangedError`, `isUnchanged`,
+`fellShort`, `resolveAllowance`.
 
 A site comes in two shapes and `grab` takes either: `defineSiteConfig` for one
 that fetches a request at a time and parses each channel-day out of it, and
@@ -600,11 +610,14 @@ that fetches a request at a time and parses each channel-day out of it, and
 pass](./site-config.md#sites-that-answer-in-one-pass). `AnySiteConfig` is the
 union, which is what a list of sites holds.
 
-`resolveChannels(site, { http?, signal?, state?, refresh?, now? })` returns a
-site's channels whichever form they came in — a list or a fetched one — and
-`resolveSites(sites, { signal?, concurrency?, store?, refresh?, now? })` does it
-for several, which is what `build` uses to fix the list across the grab and the
-merge. Given a `store`, both honour a site's
+`resolveChannels(site, { http?, signal?, state?, refresh?, now?, says? })`
+returns a site's channels whichever form they came in — a list or a fetched one
+— and `resolveSites(sites, { signal?, concurrency?, store?, refresh?, now?,
+emit? })` does it for several, which is what `build` uses to fix the list across
+the grab and the merge. A site's own `log` and `warn` go to `says` (or, for
+several sites, to `emit` as the events they are) and are **dropped without
+one** — which is what a caller writing a channel list to stdout wants, and a
+surprise to anyone else. Given a `store`, both honour a site's
 [`cacheChannels`](./site-config.md#keeping-a-fetched-list): a list still inside
 its max age comes back without the source being asked. `siteHttp(config,
 signal?)` builds the site's ky instance, and `sitePacing(config, { signal?, emit?
@@ -697,11 +710,16 @@ once, and `readAhead` (from `localConcurrency`, default 16), how many
 channel-days are read from the cache ahead of the writer. `readAhead: 1` reads
 strictly one at a time.
 
+`derived` adds channels that are other channels shifted — a `+1` — by reading
+the source's cached days again rather than grabbing anything, so it belongs to
+the guide rather than to `merge`. See [derived
+channels](./configuration.md#derived-channels).
+
 ### `epg-tools/serve`
 
 `serveGuide` and the `GuideServer` / `ServeOptions` / `EpgServeConfig` types,
-with `DEFAULT_SERVE_PORT`, `DEFAULT_SERVE_HOST`, `DEFAULT_SERVE_PATH` and
-`DEFAULT_REVALIDATE_MS`. Loaded only when named, so nothing else pulls in
+with `DEFAULT_SERVE_PORT`, `DEFAULT_SERVE_HOST`, `DEFAULT_SERVE_PATH`,
+`DEFAULT_REVALIDATE_MS`, `DEFAULT_KEEP_ALIVE_MS` and `DEFAULT_SITES_MAX_AGE_MS`. Loaded only when named, so nothing else pulls in
 `node:http`.
 
 ### `epg-tools/tv-grab`

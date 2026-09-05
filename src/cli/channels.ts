@@ -22,6 +22,7 @@ import type { EpgConfig } from '../config.js';
 import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { parseM3uString } from '../m3u/parse.js';
+import { derivedChannelList } from '../merge/derive.js';
 import { parseXmltvString } from '../xmltv/parse.js';
 
 /** How the report is written — the same two shapes `epg validate` offers. */
@@ -219,7 +220,30 @@ export async function reportChannelsCommand(
     ...(options.signal ? { signal: options.signal } : {}),
   });
   const available = resolved.flatMap((site) => site.channels as GrabberChannel[]);
-  const report = reportChannels(wanted, available);
+
+  // A derived channel is a channel this guide produces, so the report has to
+  // count it. Without it a declared `+1` still reads as "nothing produces
+  // this" — the report contradicting the config that answered it.
+  //
+  // The name is taken from the first site to offer the channel, which is the
+  // one the merge would build the element from.
+  const named = new Map<string, string | undefined>();
+
+  for (const channel of available) {
+    if (!named.has(channel.xmltvId)) {
+      named.set(channel.xmltvId, channel.name);
+    }
+  }
+
+  const derived = config.derived?.length
+    ? derivedChannelList(config.derived, named).map((channel) => ({
+        ...channel,
+        // No site produces it, so there is no id any site would know it by.
+        siteId: '',
+      }))
+    : [];
+
+  const report = reportChannels(wanted, [...available, ...derived]);
 
   stdout.write(
     format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderChannelReport(report),

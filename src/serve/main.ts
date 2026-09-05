@@ -536,6 +536,7 @@ export async function serveGuide(
       ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
       ...(config.localConcurrency !== undefined ? { readAhead: config.localConcurrency } : {}),
       ...(config.merge ? { merge: config.merge } : {}),
+      ...(config.derived ? { derived: config.derived } : {}),
       ...(config.meta ? { meta: config.meta } : {}),
       ...(config.indent !== undefined ? { indent: config.indent } : {}),
       ...(config.extensions !== undefined ? { extensions: config.extensions } : {}),
