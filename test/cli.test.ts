@@ -2,7 +2,7 @@ import { mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
-import { gzipSync } from 'node:zlib';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import { describe, expect, it, vi } from 'vitest';
 import { runCli } from '../src/cli/run.js';
 import { defaultDescription } from '../src/cli/scaffold.js';
@@ -579,6 +579,128 @@ describe('epg', () => {
 
       expect(code).toBe(2);
       expect(stderr).toContain('named no channels');
+    });
+  });
+
+  describe('filter', () => {
+    const GUIDE =
+      `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE tv SYSTEM "xmltv.dtd">` +
+      `<?epg-note keep-me?>` +
+      `<tv generator-info-name="somebody-else">` +
+      `<channel id="one.uk"><display-name>One</display-name><lcn>101</lcn></channel>` +
+      `<channel id="two.uk"><display-name>Two</display-name></channel>` +
+      `<programme start="20260905060000 +0000" channel="one.uk"><title>Keep</title></programme>` +
+      `<programme start="20260905060000 +0000" channel="two.uk"><title>Drop</title></programme>` +
+      `</tv>`;
+
+    async function guide(dir: string, xml = GUIDE, name = 'big.xml'): Promise<string> {
+      const file = join(dir, name);
+
+      await writeFile(file, xml, 'utf8');
+
+      return file;
+    }
+
+    // The whole point: what is kept comes back as it went in, and what is not is
+    // gone — programmes with it, since a programme on a dropped channel is a
+    // schedule for something the guide no longer describes.
+    it('keeps what was asked for, and drops the rest with its programmes', async () => {
+      const dir = await tempDir();
+      const file = await guide(dir);
+      const out = join(dir, 'small.xml');
+
+      const { code } = await run(['filter', file, '--channels', 'one.uk', '-o', out]);
+
+      expect(code).toBe(0);
+
+      const written = await readFile(out, 'utf8');
+
+      expect(written).toContain('<channel id="one.uk">');
+      expect(written).not.toContain('two.uk');
+      expect(written).toContain('<title>Keep</title>');
+      expect(written).not.toContain('<title>Drop</title>');
+      // A provider extension on a kept channel is still its own.
+      expect(written).toContain('<lcn>101</lcn>');
+      // And the document around it survived: the root's attributes and an
+      // instruction that was in the prolog.
+      expect(written).toContain('generator-info-name="somebody-else"');
+      expect(written).toContain('<?epg-note keep-me?>');
+    });
+
+    it('writes to stdout when no output is named', async () => {
+      const dir = await tempDir();
+      const file = await guide(dir);
+
+      const { code, stdout, stderr } = await run(['filter', file, '--channels', 'one.uk']);
+
+      expect(code).toBe(0);
+      expect(stdout).toContain('<channel id="one.uk">');
+      expect(stdout).not.toContain('two.uk');
+      // The summary goes to stderr, never into the document on stdout.
+      expect(stdout).not.toContain('channel,');
+      expect(stderr).toContain('1 channel, 1 programme');
+    });
+
+    it('says which channels the guide does not have', async () => {
+      const dir = await tempDir();
+      const file = await guide(dir);
+
+      const { code, stderr } = await run([
+        'filter',
+        file,
+        '--channels',
+        'one.uk,nope.uk',
+        '-o',
+        join(dir, 'small.xml'),
+      ]);
+
+      // Not an error: a guide that never carried a channel is a fact about the
+      // guide, and the subset asked for is still what came back.
+      expect(code).toBe(0);
+      expect(stderr).toContain('1 of 2 channels are not in');
+      expect(stderr).toContain('nope.uk');
+    });
+
+    it('reads and writes compressed guides', async () => {
+      const dir = await tempDir();
+      const file = join(dir, 'big.xml.gz');
+
+      await writeFile(file, gzipSync(GUIDE));
+
+      const out = join(dir, 'small.xml.gz');
+      const { code } = await run(['filter', file, '--channels', 'one.uk', '-o', out]);
+
+      expect(code).toBe(0);
+      expect(gunzipSync(await readFile(out)).toString()).toContain('<channel id="one.uk">');
+    });
+
+    it('needs a guide and a selection', async () => {
+      const dir = await tempDir();
+      const file = await guide(dir);
+
+      const missing = await run(['filter']);
+      expect(missing.code).toBe(2);
+      expect(missing.stderr).toContain('needs a guide');
+
+      const unselected = await run(['filter', file]);
+      expect(unselected.code).toBe(2);
+      expect(unselected.stderr).toContain('needs --channels');
+    });
+
+    // A guide named on the command line is the whole of what this needs.
+    it('needs no config', async () => {
+      const dir = await tempDir();
+      const file = await guide(dir);
+      const cwd = vi.spyOn(process, 'cwd').mockReturnValue(dir);
+
+      try {
+        const { code, stderr } = await run(['filter', file, '--channels', 'one.uk']);
+
+        expect(code).toBe(0);
+        expect(stderr).not.toContain('config');
+      } finally {
+        cwd.mockRestore();
+      }
     });
   });
 
