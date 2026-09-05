@@ -461,6 +461,106 @@ export function mergeInto(
 }
 
 /**
+ * How long a programme with no `stop` is taken to run when working out what a
+ * source already covers.
+ *
+ * The same six hours `fillStop` uses, and for the same reason: the two have to
+ * agree about where a hole is, or `backfill` drops a programme into a span
+ * `fillStop` is about to claim.
+ */
+export const DEFAULT_FILL_STOP_MS = 6 * 60 * 60 * 1000;
+
+/** What `backfillInto` needs beyond the two lists. */
+export interface BackfillOptions {
+  match: ResolvedMatch;
+  /**
+   * The cap a stop-less programme is taken to run for. `undefined` — which is
+   * `fillStop: false` — means no assumption at all, so such a programme covers
+   * only the instant it starts.
+   */
+  fillStopMs?: number | undefined;
+}
+
+/**
+ * The half-open span each programme of a list occupies, in order.
+ *
+ * A source that gives no `stop` still covers something, and this is the same
+ * answer `fillStop` will reach later: up to the next programme of its own list,
+ * capped. Widened to a millisecond where it would be empty, so a bare instant
+ * still collides with another at the same instant rather than slipping past it.
+ */
+function spans(
+  list: readonly XmltvProgramme[],
+  fillStopMs: number | undefined,
+): [number, number][] {
+  return list.map((programme, index) => {
+    const start = programme.start.getTime();
+
+    if (programme.stop !== undefined) {
+      return [start, Math.max(programme.stop.getTime(), start + 1)] as [number, number];
+    }
+
+    const next = list[index + 1]?.start.getTime() ?? Number.POSITIVE_INFINITY;
+    const capped = fillStopMs === undefined ? start : Math.min(next, start + fillStopMs);
+
+    return [start, Math.max(capped, start + 1)] as [number, number];
+  });
+}
+
+/**
+ * Fold one lower-priority source's list into `target`, adding only what falls
+ * where `target` has nothing.
+ *
+ * The difference from {@link mergeInto} is the whole of `backfill`: a candidate
+ * that matches something already there is **dropped**, not merged. The higher
+ * priority side keeps its broadcast whole rather than taking fields from a
+ * source it outranks.
+ *
+ * A candidate that only *partly* fits a hole is dropped too. Inserting it and
+ * leaving `clipOverlaps` to sort it out would pull back the `stop` of the
+ * programme that outranks it — the lower-priority source rewriting the higher
+ * one — and moving its start forward would be a lie about when a broadcast
+ * began. So two sources on different grids may contribute nothing at the seam,
+ * which is the price of not corrupting either.
+ */
+export function backfillInto(
+  target: XmltvProgramme[],
+  incoming: readonly XmltvProgramme[],
+  options: BackfillOptions,
+): XmltvProgramme[] {
+  const { match, fillStopMs } = options;
+  const pooled = pool(incoming);
+  const occupied = spans(target, fillStopMs);
+  const candidates = spans(pooled, fillStopMs);
+  const inserts: XmltvProgramme[] = [];
+  const taken = new Set<number>();
+
+  // Every candidate decided against `target` as it stands, as `mergeInto` is
+  // careful to do: otherwise a source's second programme is tested against its
+  // own first one the moment that lands, and a run of them filling one hole
+  // would turn each other away.
+  for (const [index, programme] of pooled.entries()) {
+    if (findMatch(target, programme, match, taken) !== -1) {
+      continue;
+    }
+
+    const [start, end] = candidates[index]!;
+
+    if (occupied.some(([from, to]) => start < to && from < end)) {
+      continue;
+    }
+
+    inserts.push(programme);
+  }
+
+  for (const programme of inserts) {
+    target.splice(lowerBound(target, programme.start.getTime() + 1), 0, programme);
+  }
+
+  return target;
+}
+
+/**
  * Combine per-site programme lists (in priority order, index 0 = highest)
  * into one list sorted by start time.
  *
@@ -474,6 +574,7 @@ export function mergeProgrammeLists(
   lists: XmltvProgramme[][],
   strategy: ProgrammeStrategy,
   match?: ProgrammeMatch | ProgrammeMatcher,
+  fillStopMs: number | undefined = DEFAULT_FILL_STOP_MS,
 ): XmltvProgramme[] {
   if (strategy === 'concat') {
     return lists.flat().sort((a, b) => a.start.getTime() - b.start.getTime());
@@ -481,6 +582,17 @@ export function mergeProgrammeLists(
 
   const resolved = resolveMatch(match);
   const merged: XmltvProgramme[] = [];
+
+  // A branch of its own rather than falling through to the merge: they take the
+  // lists in the same order and differ entirely in what they do with the second
+  // one, and a strategy that silently merged would be the worst of both.
+  if (strategy === 'backfill') {
+    for (const list of lists) {
+      backfillInto(merged, list, { match: resolved, fillStopMs });
+    }
+
+    return merged;
+  }
 
   for (const list of lists) {
     mergeInto(merged, list, resolved);

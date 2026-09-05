@@ -8,7 +8,7 @@ import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import { mergeChannels } from './channel.js';
 import { derivedChannelElement, resolveDerived, shiftProgrammes } from './derive.js';
-import { mergeInto, resolveMatch } from './programme.js';
+import { backfillInto, DEFAULT_FILL_STOP_MS, mergeInto, resolveMatch } from './programme.js';
 import type { ChannelSource, RegistryEntry } from './registry.js';
 import { channelSelection, unmatched, unmatchedMessage } from './select.js';
 import type { BuildGuideOptions } from './types.js';
@@ -23,13 +23,6 @@ import type { BuildGuideOptions } from './types.js';
 const DEFAULT_READ_AHEAD = 16;
 
 const DAY_MS = 86_400_000;
-
-/**
- * How long `fillStop` may make a programme run: long enough for any film, short
- * enough that the gap where a channel stops broadcasting for the night stays a
- * gap rather than becoming one nine-hour programme.
- */
-const DEFAULT_FILL_STOP_MS = 6 * 60 * 60 * 1000;
 
 /**
  * Yield `items` in order, with `depth` of them being read at once.
@@ -446,6 +439,22 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
         for (const list of lists) {
           mergeInto(pending, list, match);
         }
+      } else if (listStrategy === 'backfill') {
+        // Across the sites of *this day* first, into an array of its own, and
+        // only then across the day boundary. Folding straight into `pending`
+        // would test today's programmes against yesterday's tail, whose last
+        // entry has no stop and is therefore taken to run six hours — so a
+        // site's own morning would read as already covered by its own evening.
+        const today: XmltvProgramme[] = [];
+
+        for (const list of lists) {
+          backfillInto(today, list, { match, fillStopMs });
+        }
+
+        // The boundary stays a merge: two days of one source describing the
+        // same broadcast are one broadcast, which is a different question from
+        // which of two *sources* wins.
+        mergeInto(pending, today, match);
       } else {
         // Nothing is deduplicated under `concat`, but the hold still buys the
         // ordering: a programme a later day reported for an earlier one lands

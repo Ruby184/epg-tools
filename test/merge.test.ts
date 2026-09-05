@@ -609,6 +609,117 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     return collect(generateGuide(options));
   }
 
+  describe("programmeStrategy: 'backfill'", () => {
+    /** A partial primary and a broad fallback — the case the strategy is for. */
+    function twoSources(): CacheStore {
+      return createFakeCache({
+        // The good source covers the evening only.
+        [`site-a.sk|X|${DAY}`]: [
+          prog('X', '2026-01-15T18:00:00Z', 'Správy', 'sk', {
+            stop: new Date('2026-01-15T19:00:00Z'),
+          }),
+        ],
+        // The broad one covers the whole day, including the same broadcast.
+        [`site-b.com|X|${DAY}`]: [
+          prog('X', '2026-01-15T08:00:00Z', 'Morning', 'en', {
+            stop: new Date('2026-01-15T09:00:00Z'),
+          }),
+          prog('X', '2026-01-15T18:00:00Z', 'The News', 'en', {
+            stop: new Date('2026-01-15T19:00:00Z'),
+          }),
+          prog('X', '2026-01-15T20:00:00Z', 'Late', 'en', {
+            stop: new Date('2026-01-15T21:00:00Z'),
+          }),
+        ],
+      });
+    }
+
+    const titles = (output: string): string[] =>
+      [...output.matchAll(/<title[^>]*>([^<]*)<\/title>/g)].map((found) => found[1]!);
+
+    it('takes the hole from the fallback and leaves the primary whole', async () => {
+      const output = await generate({
+        sites: [siteA, siteB],
+        cache: twoSources(),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        merge: { programmeStrategy: 'backfill' },
+      });
+
+      // The primary's own broadcast, not merged with the fallback's title for
+      // the same hour — that is the difference from `merge`.
+      expect(titles(output)).toEqual(['Morning', 'Správy', 'Late']);
+      expect(output).not.toContain('The News');
+    });
+
+    it('merges the same hour under the default strategy, for contrast', async () => {
+      const output = await generate({
+        sites: [siteA, siteB],
+        cache: twoSources(),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+      });
+
+      // Both titles on one programme: what `backfill` exists not to do.
+      expect(output).toContain('Správy');
+      expect(output).toContain('The News');
+    });
+
+    it('skips a fallback programme that only partly fits the hole', async () => {
+      const output = await generate({
+        sites: [siteA, siteB],
+        cache: createFakeCache({
+          [`site-a.sk|X|${DAY}`]: [
+            prog('X', '2026-01-15T18:00:00Z', 'Správy', 'sk', {
+              stop: new Date('2026-01-15T19:00:00Z'),
+            }),
+          ],
+          [`site-b.com|X|${DAY}`]: [
+            // Overlaps the primary's 18:00–19:00 by half an hour.
+            prog('X', '2026-01-15T17:30:00Z', 'Overlapping', 'en', {
+              stop: new Date('2026-01-15T18:30:00Z'),
+            }),
+          ],
+        }),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        merge: { programmeStrategy: 'backfill' },
+      });
+
+      // Dropped rather than clipped: clipping would pull back the stop of the
+      // programme that outranks it.
+      expect(titles(output)).toEqual(['Správy']);
+    });
+
+    it('works on bare starts, taking a stop-less programme to run its cap', async () => {
+      const output = await generate({
+        sites: [siteA, siteB],
+        cache: createFakeCache({
+          // No stops anywhere: coverage has to come from the next start.
+          [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T18:00:00Z', 'Správy', 'sk')],
+          [`site-b.com|X|${DAY}`]: [
+            prog('X', '2026-01-15T19:00:00Z', 'Swallowed', 'en'),
+            prog('X', '2026-01-16T02:00:00Z', 'Kept', 'en'),
+          ],
+        }),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        merge: { programmeStrategy: 'backfill' },
+      });
+
+      // 19:00 falls inside the six hours the primary's 18:00 is taken to run, so
+      // it is already covered; 02:00 is past that cap, so it is a real hole and
+      // is filled. Without the cap the first would come through too and this
+      // would be `concat` by another name.
+      expect(titles(output)).toEqual(['Správy', 'Kept']);
+      expect(output).not.toContain('Swallowed');
+    });
+  });
+
   it('describes a channel with the builder its channelInfo was handed', async () => {
     const site: SiteConfig<unknown> = {
       ...makeSite('site-a.sk', [

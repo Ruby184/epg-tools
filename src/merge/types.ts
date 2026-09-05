@@ -26,8 +26,12 @@ export type ChannelStrategy = 'merge-programmes' | 'first-wins' | 'keep-all';
  *   `(lang, value)`, scalar fields come from the highest-priority site.
  * - `concat`: all programmes are emitted, sorted by start time, without
  *   deduplication.
+ * - `backfill`: the highest-priority site contributes everything it has, and a
+ *   lower-priority one only what falls in a hole it left. Nothing is combined —
+ *   where two sites both have a broadcast, the higher one's is the one kept,
+ *   whole. For a good-but-partial primary and a broad-but-worse fallback.
  */
-export type ProgrammeStrategy = 'merge' | 'concat';
+export type ProgrammeStrategy = 'merge' | 'concat' | 'backfill';
 
 /**
  * Whether two programmes describe the same broadcast — the whole of what
