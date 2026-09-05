@@ -609,6 +609,146 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     return collect(generateGuide(options));
   }
 
+  describe('fillGaps', () => {
+    const site = makeSite('site-a.sk', [{ xmltvId: 'X', siteId: 'a-x' }]);
+
+    const fill = (
+      merge: NonNullable<BuildGuideOptions['merge']>,
+      entries: Record<string, XmltvProgramme[]>,
+    ) =>
+      generate({
+        sites: [site],
+        cache: createFakeCache(entries),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        merge,
+      });
+
+    /** Every programme as (start, stop, title). */
+    const laid = (output: string): string[] =>
+      [
+        ...output.matchAll(
+          /<programme start="(\d{14})[^"]*" stop="(\d{14})[^"]*"[^>]*>\s*<title[^>]*>([^<]*)/g,
+        ),
+      ].map((found) => `${found[1]!.slice(8, 12)}-${found[2]!.slice(8, 12)} ${found[3]!}`);
+
+    /** Two programmes with a three-hour hole between them. */
+    const withHole = {
+      [`site-a.sk|X|${DAY}`]: [
+        prog('X', '2026-01-15T10:00:00Z', 'Before', undefined, {
+          stop: new Date('2026-01-15T11:00:00Z'),
+        }),
+        prog('X', '2026-01-15T14:00:00Z', 'After', undefined, {
+          stop: new Date('2026-01-15T15:00:00Z'),
+        }),
+      ],
+    };
+
+    it('is off by default, and changes nothing when it is', async () => {
+      expect(laid(await fill({}, withHole))).toEqual(['1000-1100 Before', '1400-1500 After']);
+    });
+
+    it('lays blocks end to end across a hole', async () => {
+      const found = laid(await fill({ fillGaps: { edges: false } }, withHole));
+
+      expect(found).toEqual([
+        '1000-1100 Before',
+        '1100-1130 No information',
+        '1130-1200 No information',
+        '1200-1230 No information',
+        '1230-1300 No information',
+        '1300-1330 No information',
+        '1330-1400 No information',
+        '1400-1500 After',
+      ]);
+    });
+
+    it('truncates the last block to the gap rather than overrunning it', async () => {
+      const found = laid(
+        await fill({ fillGaps: { edges: false, blockMs: 45 * 60_000 } }, withHole),
+      );
+
+      // 3 hours in 45-minute blocks is 45/45/45/45 exactly; make it uneven.
+      expect(found.at(-2)).toBe('1315-1400 No information');
+      expect(found.at(-1)).toBe('1400-1500 After');
+    });
+
+    it('leaves a gap shorter than minMs alone', async () => {
+      const found = laid(
+        await fill(
+          { fillGaps: { edges: false } },
+          {
+            [`site-a.sk|X|${DAY}`]: [
+              prog('X', '2026-01-15T10:00:00Z', 'Before', undefined, {
+                stop: new Date('2026-01-15T10:59:30Z'),
+              }),
+              prog('X', '2026-01-15T11:00:00Z', 'After', undefined, {
+                stop: new Date('2026-01-15T12:00:00Z'),
+              }),
+            ],
+          },
+        ),
+      );
+
+      expect(found).toEqual(['1000-1059 Before', '1100-1200 After']);
+    });
+
+    it('leaves a gap longer than maxMs alone, as genuinely off air', async () => {
+      const found = laid(await fill({ fillGaps: { edges: false, maxMs: 60 * 60_000 } }, withHole));
+
+      expect(found).toEqual(['1000-1100 Before', '1400-1500 After']);
+    });
+
+    it('covers the window edges, and the whole window for a channel with nothing', async () => {
+      const edges = laid(await fill({ fillGaps: true }, withHole));
+
+      expect(edges[0]).toBe('0000-0030 No information');
+      // The tail is not filled: the last programme has a stop here, so it is.
+      expect(edges.at(-1)).toBe('2330-0000 No information');
+
+      // A channel cached empty: edges are all there is.
+      const nothing = laid(await fill({ fillGaps: true }, { [`site-a.sk|X|${DAY}`]: [] }));
+
+      expect(nothing).toHaveLength(48);
+      expect(nothing[0]).toBe('0000-0030 No information');
+      expect(nothing.at(-1)).toBe('2330-0000 No information');
+    });
+
+    it('fills for a channel with no cache entry at all, not only an empty one', async () => {
+      // `undefined` from the cache and `[]` are different code paths.
+      expect(laid(await fill({ fillGaps: true }, {}))).toHaveLength(48);
+    });
+
+    it('refuses a blockMs that would never finish a gap', async () => {
+      await expect(fill({ fillGaps: { blockMs: 0 } }, withHole)).rejects.toThrow(
+        /blockMs must be a positive number/,
+      );
+      await expect(fill({ fillGaps: { blockMs: Number.NaN } }, withHole)).rejects.toThrow(
+        /blockMs must be a positive number/,
+      );
+    });
+
+    it('takes a title and a programme hook', async () => {
+      const found = laid(
+        await fill(
+          {
+            fillGaps: {
+              edges: false,
+              blockMs: 90 * 60_000,
+              title: ({ index }) => `Nothing on (${index})`,
+              programme: (block, { index }) => (index === 0 ? block : undefined),
+            },
+          },
+          withHole,
+        ),
+      );
+
+      // The hook dropped every block but the first.
+      expect(found).toEqual(['1000-1100 Before', '1100-1230 Nothing on (0)', '1400-1500 After']);
+    });
+  });
+
   describe("programmeStrategy: 'backfill'", () => {
     /** A partial primary and a broad fallback — the case the strategy is for. */
     function twoSources(): CacheStore {

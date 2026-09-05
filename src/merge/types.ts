@@ -115,6 +115,68 @@ export interface FillStopOptions {
   maxMs?: number;
 }
 
+/**
+ * What to put where a channel's schedule says nothing.
+ *
+ * The one rule here that **invents**: everything else takes what a source gave
+ * and reshapes it, while this adds programmes no source reported. That is why
+ * it is off by default, and why a guide it has touched is not a record of what
+ * any source said.
+ */
+export interface FillGapsOptions {
+  /** How long one block runs. Default 30 minutes. */
+  blockMs?: number;
+  /**
+   * Leave a gap shorter than this alone. Default one minute.
+   *
+   * Not dressing: sources that publish a nominal duration against real starts
+   * leave gaps of seconds all day, and without a floor a channel picks up
+   * hundreds of forty-second placeholders that no consumer ever wanted.
+   */
+  minMs?: number;
+  /**
+   * Leave a gap longer than this alone, as genuinely off air. Unset by default,
+   * which fills everything — the same judgement `fillStop`'s six-hour cap makes,
+   * offered here rather than assumed.
+   */
+  maxMs?: number;
+  /**
+   * Fill from the window's start to the first programme, and from the last to
+   * the window's end. On by default when filling at all: a source that begins
+   * at 06:00 leaves the same hole every morning, and a channel with nothing at
+   * all is edges and nothing else.
+   */
+  edges?: boolean;
+  /**
+   * What a block says. `'No information'` by default, with no `lang` — the
+   * guide cannot know the channel's language, and the wrong one is worse than
+   * none.
+   */
+  title?: string | ((context: FillGapsContext) => string);
+  /**
+   * The last word on a block: return it, a different one, or nothing to leave
+   * the block out. Where a `category`, a `desc` or an icon would go.
+   *
+   * A block does not pass through `merge.transform` — that runs before the gaps
+   * are known, and a transform written for real programmes should not have to
+   * recognize a placeholder.
+   */
+  programme?: (
+    block: XmltvProgramme,
+    context: FillGapsContext,
+  ) => XmltvProgramme | undefined | null;
+}
+
+/** Where one block sits, for {@link FillGapsOptions.title} and `programme`. */
+export interface FillGapsContext {
+  xmltvId: string;
+  /** The whole gap this block is one of. */
+  gapStart: Date;
+  gapEnd: Date;
+  /** Which block this is within that gap, from 0. */
+  index: number;
+}
+
 export interface MergeOptions {
   channelStrategy?: ChannelStrategy;
   programmeStrategy?: ProgrammeStrategy;
@@ -149,6 +211,15 @@ export interface MergeOptions {
    * you something, not making a mistake.
    */
   clampToWindow?: boolean;
+  /**
+   * Put a placeholder where the schedule says nothing. Off by default.
+   *
+   * Off because it is the only rule here that invents: `fillStop` and
+   * `clipOverlaps` reshape what a source gave, and this adds programmes none of
+   * them reported. Turning it on is a statement about your consumer rather than
+   * about your sources — see {@link FillGapsOptions}.
+   */
+  fillGaps?: boolean | FillGapsOptions;
   /**
    * The last word on every programme, after the rules above have had theirs —
    * a category map, a title cleanup, dropping what a source pads its schedule
