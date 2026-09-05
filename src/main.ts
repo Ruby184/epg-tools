@@ -212,6 +212,8 @@ export type { EpgServeConfig, GuideServer, ServeOptions } from './serve/main.js'
 
 export {
   DEFAULT_MATCH,
+  channelSelection,
+  unmatched,
   mergeInto,
   mergeProgrammes,
   mergeProgrammeLists,
@@ -222,5 +224,5 @@ export {
   writeGuide,
   defaultChannelInfo,
 } from './merge/main.js';
-export type { ResolvedMatch } from './merge/main.js';
+export type { ChannelSelection, ResolvedMatch, Selectable } from './merge/main.js';
 export type * from './merge/types.js';

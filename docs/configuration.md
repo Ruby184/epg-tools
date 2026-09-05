@@ -54,6 +54,7 @@ hardcode — a username, a password, a region. See
 | `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source. |
 | `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true }` | How several sites covering one channel are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
 | `derived` | `DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. See [Derived channels](#derived-channels). |
+| `channels` | `readonly string[]` | all of them | Keep only these channels, by `xmltvId` — see [keeping only some channels](#keeping-only-some-channels). `--channels` overrides it. |
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 | `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — all of them | Which provider extensions the guide carries — see [Provider extensions](#provider-extensions). `false` leaves every one out, which is what makes the guide valid against the DTD. |
@@ -110,6 +111,7 @@ epg serve            # hold the guide behind HTTP for a consumer that polls
 epg try example.tv one.example.tv   # one channel-day, with the working shown
 epg validate         # read the guide and report what is wrong with it
 epg channels --against playlist.m3u  # which wanted channels will get no guide
+epg filter guide.xml --channels my-60.m3u -o small.xml  # subset a guide you have
 epg prune            # drop cached days older than today
 epg init-grabber tv_grab_sk_example   # write an XMLTV grabber for this config
 epg build -d 14 -o public/epg.xml
@@ -137,6 +139,8 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--raw` | `try` only: print the whole payload, not the first 2000 characters |
 | `--format <how>` | `validate` and `channels`: `text` (default) or `json` |
 | `--strict` | `validate` only: count warnings as failures too |
+| `--channels <what>` | `build`/`grab`/`merge`/`serve`, and required by `filter`: keep only these channels and fetch nothing for the rest — ids, or a file naming them. Repeatable — see [subsetting a guide](#keeping-only-some-channels) |
+| `--indent <n\|str>` | `build`/`merge`/`filter`: pretty-print with this indentation, mirroring `JSON.stringify` |
 | `--against <file>` | `channels` only: what you want a guide for — an M3U playlist, a `*.channels.xml` or an XMLTV guide |
 | `--check` | `channels` only: exit 1 unless every wanted channel matched by id |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
@@ -587,6 +591,82 @@ What it does **not** check is element *order*. Parsing produces a model, and a
 model has no order, so `<desc>` before `<title>` is invisible here. For that,
 `xmllint --valid` beside a copy of `xmltv.dtd` is the tool — and a guide written
 with `--no-extensions` is what makes that check pass.
+
+### Keeping only some channels
+
+A source that offers 900 channels and a household that watches 60 is the normal
+case, not the awkward one — and the cost of the other 840 is paid three times
+over: in requests, in cache, and at the consumer. Jellyfin loads every programme
+of every channel in one request, which is about ten seconds at 870 channels.
+
+```sh
+epg build --channels my-60.m3u          # a playlist you already keep
+epg build --channels wanted.txt         # a plain list of ids, one per line
+epg build --channels bbc1.uk,bbc2.uk    # or just say them
+```
+
+`--channels` **selects** rather than filters: a channel left out is never
+fetched and never cached, so 60 channels cost 60 channels' worth of requests.
+`channels` in the config means the same thing, and the flag overrides it.
+
+It takes ids, or a file naming them — an **M3U playlist**, a
+**`*.channels.xml`**, an **XMLTV guide**, or a **plain list** with `#` comments
+— told apart by content rather than by extension, as everywhere else here. A
+guide is streamed rather than read whole, since subsetting somebody else's 900
+channels is exactly what this is for and theirs may be 90 MiB. It is repeatable,
+and the union of what each names, so a list kept in git plus one id you are
+trying out works.
+
+**Matched by id and nothing else.** A name that merely looks right is a
+suggestion, and [`epg channels --against`](#which-channels-will-get-no-guide) is
+what turns one into an id you can put in a config — guessing on your behalf is
+how a guide ends up confidently describing the wrong channel. Anything selected
+that no site produces is named once:
+
+```
+1 of 60 selected channels are produced by no site — bbcfour.uk.
+`epg channels --against <file>` says what they look like.
+```
+
+A [derived channel](#derived-channels) may be selected without its source: what
+it shifts is kept for it, since a shift with nothing to shift is nothing at all.
+Select the source alone and the `+1` goes, rather than being left behind with
+nothing to publish.
+
+One thing it does not narrow: a site whose `channels` is a **function** still
+resolves its whole list, because the selection is applied to the answer. It is
+the channel-*days* that are never fetched, and those are the requests that scale
+with the window.
+
+### Subsetting a guide you already have
+
+`epg filter` is the same question asked of a file rather than a run — for a
+guide somebody else wrote, where there is nothing to grab:
+
+```sh
+epg filter guide.xml --channels my-60.m3u -o small.xml
+epg filter big.xml.gz --channels bbc1.uk,bbc2.uk     # to stdout
+```
+
+It needs **no config at all** — a guide named on the command line is the whole
+of what it wants — and streams, so the memory it uses does not depend on the
+size of the guide: measured over a generated document, the live heap is 8.5 MiB
+at 17 MB and 8.4 MiB at 66 MB. (`tv_grep`, the Perl equivalent, holds the whole
+document.)
+
+What survives is what a subset should: the root `<tv>` attributes, processing
+instructions wherever they were, and provider extensions on the channels kept.
+`--no-extensions` strips those, which is the way to take somebody's guide and
+make it validate against the DTD; `--indent` gives it back a shape.
+
+Two things do **not** survive, being things the parser does not model: XML
+comments, and a `DOCTYPE` other than the standard one, which is rewritten as
+`<!DOCTYPE tv SYSTEM "xmltv.dtd">`.
+
+The summary and any parse warnings go to **stderr**, so stdout is only ever the
+guide. A channel asked for that the source does not carry is named, and is not
+an error — it is a fact about their guide, and the subset you asked for is still
+what came back.
 
 ### Which channels will get no guide
 
