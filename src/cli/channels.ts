@@ -23,7 +23,7 @@ import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { parseM3uString } from '../m3u/parse.js';
 import { derivedChannelList } from '../merge/derive.js';
-import { writeFlushed } from '../core/streams.js';
+import { writeLines } from '../core/streams.js';
 import { parseXmltvString } from '../xmltv/parse.js';
 
 /** How the report is written — the same two shapes `epg validate` offers. */
@@ -227,8 +227,8 @@ export function renderChannelReport(report: ChannelReport): string {
     (counts.unmatched > 0 ? `, ${counts.unmatched} with nothing` : '');
 
   return lines.length === 0
-    ? `${summary}\nEvery channel has a guide behind it.\n`
-    : `${lines.join('\n')}\n\n${summary}\n`;
+    ? `${summary}\nEvery channel has a guide behind it.`
+    : `${lines.join('\n')}\n\n${summary}`;
 }
 
 export interface ChannelsCommandOptions {
@@ -291,9 +291,9 @@ export async function reportChannelsCommand(
 
   const report = reportChannels(wanted, [...available, ...derived]);
 
-  await writeFlushed(
+  await writeLines(
     stdout,
-    format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderChannelReport(report),
+    format === 'json' ? JSON.stringify(report, null, 2) : renderChannelReport(report),
   );
 
   return options.check === true && !report.ok ? 1 : 0;

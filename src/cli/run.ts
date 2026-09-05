@@ -340,7 +340,7 @@ async function validateGuide(
 
   // On stdout, both formats: the report *is* this command's output, the way a
   // guide is `merge`'s, so it goes where a shell can redirect it.
-  await writeFlushed(stdout, renderReport(report, file, values.format ?? 'text'));
+  await writeLines(stdout, renderReport(report, file, values.format ?? 'text'));
 
   return report.ok ? 0 : EXIT_FAILED;
 }
