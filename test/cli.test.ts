@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
@@ -458,6 +458,128 @@ describe('epg', () => {
     // Nothing failed and nothing was left half done, so 0 rather than the 130
     // a cancelled grab answers with.
     expect(await serving.code).toBe(0);
+  });
+
+  describe('--channels', () => {
+    /** Two channels, one site, and a cache we can look inside afterwards. */
+    async function twoChannels(dir: string): Promise<string> {
+      return configFile(
+        dir,
+        `export default {
+        sites: [{
+          site: 'example.tv',
+          channels: [
+            { xmltvId: 'one.example.tv', siteId: '1', name: 'One' },
+            { xmltvId: 'two.example.tv', siteId: '2', name: 'Two' },
+          ],
+          async request({ day }) { return { day }; },
+          parseDay: ({ channel, day }) => [{
+            channel: channel.xmltvId,
+            start: new Date(day + 'T06:00:00.000Z'),
+            title: [{ value: 'Show' }],
+          }],
+        }],
+        days: 1,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+    }
+
+    // The point of select semantics: the channel left out is not merely absent
+    // from the guide, it was never asked for. Asserted on the cache, which is
+    // the only place that can tell the difference.
+    it('narrows the grab, not just the guide', async () => {
+      const dir = await tempDir();
+      const config = await twoChannels(dir);
+
+      const { code, stderr } = await run(['build', '-c', config, '--channels', 'one.example.tv']);
+
+      expect(stderr).toBe('');
+      expect(code).toBe(0);
+
+      const guide = await readFile(join(dir, 'guide.xml'), 'utf8');
+
+      expect(guide).toContain('one.example.tv');
+      expect(guide).not.toContain('two.example.tv');
+
+      const cached = await readdir(join(dir, 'cache'), { recursive: true });
+
+      expect(cached.some((entry) => String(entry).includes('one.example.tv'))).toBe(true);
+      expect(cached.some((entry) => String(entry).includes('two.example.tv'))).toBe(false);
+    });
+
+    it('takes a file naming them, and unions repeats', async () => {
+      const dir = await tempDir();
+      const config = await twoChannels(dir);
+      const list = join(dir, 'wanted.txt');
+
+      await writeFile(list, '# what we watch\none.example.tv\n');
+
+      const { code } = await run([
+        'merge',
+        '-c',
+        config,
+        '--channels',
+        list,
+        '--channels',
+        'two.example.tv',
+      ]);
+
+      expect(code).toBe(0);
+
+      const guide = await readFile(join(dir, 'guide.xml'), 'utf8');
+
+      expect(guide).toContain('one.example.tv');
+      expect(guide).toContain('two.example.tv');
+    });
+
+    it('says which selected channels nothing produces', async () => {
+      const dir = await tempDir();
+      const config = await twoChannels(dir);
+
+      const { stdout, stderr } = await run([
+        'merge',
+        '-c',
+        config,
+        '--channels',
+        'one.example.tv,nope.example.tv',
+        '--reporter',
+        'text',
+      ]);
+      const said = stdout + stderr;
+
+      expect(said).toContain('nope.example.tv');
+      expect(said).toContain('produced by no site');
+      // Once, not once per thing that assembles a guide.
+      expect(said.match(/produced by no site/g)).toHaveLength(1);
+    });
+
+    it('is refused where narrowing a run means nothing', async () => {
+      const dir = await tempDir();
+      const config = await plainConfig(dir);
+
+      const { code, stderr } = await run([
+        'validate',
+        '-c',
+        config,
+        '--channels',
+        'one.example.tv',
+      ]);
+
+      expect(code).toBe(2);
+      expect(stderr).toContain('--channels is for build, grab, merge, serve');
+    });
+
+    it('refuses a selection that names nothing', async () => {
+      const dir = await tempDir();
+      const config = await plainConfig(dir);
+
+      const { code, stderr } = await run(['merge', '-c', config, '--channels', ',']);
+
+      expect(code).toBe(2);
+      expect(stderr).toContain('named no channels');
+    });
   });
 
   describe('validate', () => {

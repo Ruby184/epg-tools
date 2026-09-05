@@ -56,6 +56,10 @@ Options:
                         extensions, comma-separated (e.g. lcn,uniqueID)
       --no-extensions   build/merge only: leave every provider extension out,
                         for a guide that validates against the DTD
+      --channels <what> build/grab/merge/serve: keep only these channels, and
+                        fetch nothing for the rest. Ids, or a file naming them —
+                        a playlist, a *.channels.xml, a guide, or a plain list.
+                        Repeatable
       --against <file>  channels only: what you want a guide for — an M3U
                         playlist, a *.channels.xml, or an XMLTV guide
       --check           channels only: exit 1 unless every wanted channel
@@ -155,6 +159,9 @@ const EXIT_FAILED = 1;
 const EXIT_CANCELLED = 130;
 
 const CONFIG_CANDIDATES = ['epg.config.ts', 'epg.config.js', 'epg.config.mjs'];
+
+/** The commands `--channels` narrows. The rest are told so rather than ignoring it. */
+const SELECTABLE = ['build', 'grab', 'merge', 'serve'];
 
 const COMMANDS = [
   'build',
@@ -403,6 +410,10 @@ async function execute(
       // guide for, and whether a mismatch should fail a CI step.
       against: { type: 'string' },
       check: { type: 'boolean' },
+      // Repeatable, and the union of what each names: a list kept in git plus
+      // the one id being tried out is a normal thing to want, and overwriting
+      // would make the order of two flags matter.
+      channels: { type: 'string', multiple: true },
       // A list of names, or `--no-extensions` for none of them. A config can
       // point at a filter of its own by passing a function, which is not
       // something a command line can do.
@@ -504,6 +515,32 @@ async function execute(
   // day happened to be lost and not on the others.
   if (config.allowMissing !== undefined) {
     resolveAllowance(config.allowMissing, 'allowMissing');
+  }
+
+  if (values.channels !== undefined) {
+    // Only where narrowing a run means something. `epg channels --against x
+    // --channels y` would make the availability report *lie* — every excluded
+    // channel reading as "nothing produces this", which is the exact failure
+    // that command exists to find — and `try` would call its own channel
+    // unknown.
+    if (!SELECTABLE.includes(command)) {
+      throw new UsageError(`--channels is for ${SELECTABLE.join(', ')}, not ${command}`);
+    }
+
+    const { wantedIds } = await import('./wanted.js');
+    const selected = new Set<string>();
+
+    for (const value of values.channels) {
+      for (const id of await wantedIds(value)) {
+        selected.add(id);
+      }
+    }
+
+    if (selected.size === 0) {
+      throw new UsageError(`--channels named no channels: ${values.channels.join(' ')}`);
+    }
+
+    config = { ...config, channels: [...selected] };
   }
 
   if (values.refresh) {

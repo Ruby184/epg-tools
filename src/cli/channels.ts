@@ -69,9 +69,54 @@ export function wantedFrom(text: string, from: string): WantedChannel[] {
     }));
   }
 
+  const ids = idList(text);
+
+  if (ids !== undefined) {
+    return ids.map((id) => ({ id, name: '' }));
+  }
+
   throw new Error(
-    `Cannot tell what ${from} is: expected an M3U playlist, a *.channels.xml, or an XMLTV guide`,
+    `Cannot tell what ${from} is: expected an M3U playlist, a *.channels.xml, an XMLTV guide, or a list of ids`,
   );
+}
+
+/**
+ * A plain list of ids — one per line or comma-separated, `#` a comment.
+ *
+ * Last, because everything is plain text: the three formats above have said no
+ * before this is asked. `undefined` for anything that does not look like a list
+ * of ids, so a file of something else entirely still gets the error above
+ * rather than being read as a channel called `<!DOCTYPE`.
+ *
+ * The test is deliberately narrow — no markup, no whitespace inside an entry —
+ * since an xmltv id is a token and this is the last chance to notice it is not.
+ */
+function idList(text: string): string[] | undefined {
+  const ids: string[] = [];
+
+  for (const line of text.split('\n')) {
+    const content = line.slice(0, line.indexOf('#') === -1 ? undefined : line.indexOf('#')).trim();
+
+    if (content === '') {
+      continue;
+    }
+
+    for (const id of content.split(',')) {
+      const trimmed = id.trim();
+
+      if (trimmed === '') {
+        continue;
+      }
+
+      if (/[<>\s"']/.test(trimmed)) {
+        return undefined;
+      }
+
+      ids.push(trimmed);
+    }
+  }
+
+  return ids.length > 0 ? ids : undefined;
 }
 
 /** What the report says about one wanted channel. */
