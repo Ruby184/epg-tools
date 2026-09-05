@@ -395,13 +395,15 @@ async function filterCommand(
 
   // On stderr, always: stdout may be the guide itself, and a summary in the
   // middle of a document would be the one thing worse than no summary.
-  if (report.missing.length > 0) {
-    stderr.write(
-      `${report.missing.length} of ${channels.size} channels are not in ${file}: ${report.missing.join(', ')}\n`,
-    );
-  }
-
-  stderr.write(`${plural(report.kept, 'channel')}, ${plural(report.programmes, 'programme')}\n`);
+  await writeLines(
+    stderr,
+    ...(report.missing.length > 0
+      ? [
+          `${report.missing.length} of ${channels.size} channels are not in ${file}: ${report.missing.join(', ')}`,
+        ]
+      : []),
+    `${plural(report.kept, 'channel')}, ${plural(report.programmes, 'programme')}`,
+  );
 
   return 0;
 }
