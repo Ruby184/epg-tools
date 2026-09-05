@@ -107,6 +107,26 @@ export interface EpgConfig {
    * a shift of it instead.
    */
   derived?: DerivedChannel[];
+  /**
+   * Keep only these channels, by `xmltvId`. Every one of them, by default.
+   *
+   * Narrows the whole run rather than only the guide: a channel left out is
+   * never fetched and never cached. Which is the point — subsetting a source
+   * that offers 900 channels when a household watches 60 should cost 60
+   * channels' worth of requests.
+   *
+   * Matched by id and nothing else. A name that merely looks right is a
+   * suggestion, and `epg channels --against <file>` is what turns one into an
+   * id you can put here; guessing on your behalf is how a guide ends up
+   * confidently describing the wrong channel.
+   *
+   * A `derived` channel may be named here without its source: what it shifts is
+   * kept for it, since a shift with nothing to shift is nothing at all.
+   *
+   * `--channels` overrides it, and takes a file — a playlist, a
+   * `*.channels.xml`, a guide, or a plain list of ids — as well as ids.
+   */
+  channels?: readonly string[];
   /** Attributes for the root `<tv>` element. */
   meta?: XmltvDocumentMeta;
   /**

@@ -7,8 +7,9 @@ import {
 } from './cache/main.js';
 import type { CacheDriver, CacheStore } from './cache/main.js';
 import { grab, resolveSites } from './grabber/main.js';
-import type { GrabSummary } from './grabber/types.js';
+import type { GrabberChannel, GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
+import { channelSelection, unmatched, unmatchedMessage } from './merge/select.js';
 import type { BuildGuideOptions } from './merge/types.js';
 import { addDays, toDayString } from './core/days.js';
 import { GrabberError } from './core/error.js';
@@ -199,6 +200,7 @@ function guideOptions(
     ...(config.localConcurrency !== undefined ? { readAhead: config.localConcurrency } : {}),
     ...(config.merge ? { merge: config.merge } : {}),
     ...(config.derived ? { derived: config.derived } : {}),
+    ...(config.channels ? { channels: config.channels } : {}),
     ...(config.meta ? { meta: config.meta } : {}),
     ...(config.indent !== undefined ? { indent: config.indent } : {}),
     ...(config.extensions !== undefined ? { extensions: config.extensions } : {}),
@@ -321,6 +323,8 @@ export async function build(source: ConfigSource, options: RunOptions = {}): Pro
     // site that fetches its channels would otherwise be asked twice, and a list
     // that changed in between would leave the guide describing channels the grab
     // never went for.
+    const emit = emitter(options);
+    const selection = channelSelection(config);
     const resolved: EpgConfig = {
       ...config,
       sites: await resolveSites(config.sites, {
@@ -328,19 +332,47 @@ export async function build(source: ConfigSource, options: RunOptions = {}): Pro
         ...(options.signal ? { signal: options.signal } : {}),
         // What a site says while fetching its list, which happens here rather
         // than inside either half — so without this it would be said nowhere.
-        emit: emitter(options),
+        emit,
         store: cache,
         // `--refresh` means ask the source, and a channel list is something the
         // source says.
         ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
+        ...(selection ? { select: selection.select } : {}),
         now,
       }),
     };
 
+    // Here rather than only in the merge below, because here is before the
+    // grab: a mistyped id should cost a sentence, not every request of a run
+    // that was always going to come up short.
+    const missing = unmatched(
+      selection,
+      resolved.sites.flatMap((site) =>
+        (site.channels as GrabberChannel[]).map((channel) => channel.xmltvId),
+      ),
+    );
+
+    if (missing.length > 0) {
+      emit({
+        type: 'merge:warning',
+        message: unmatchedMessage(missing, selection?.select.size ?? 0),
+      });
+    }
+
     const summary = await runGrab(resolved, { ...options, now, cache });
 
     if (options.signal?.aborted !== true) {
-      await runMerge(resolved, { ...options, now, cache });
+      // Without the selection, and with the `derived` it settled on. The sites
+      // above are already narrowed — they resolved to arrays under it — so
+      // asking the merge to select again would change nothing except to say the
+      // same thing about the same missing channels a second time.
+      const { channels: _asked, ...merging } = resolved;
+
+      await runMerge(selection ? { ...merging, derived: selection.derived } : resolved, {
+        ...options,
+        now,
+        cache,
+      });
     }
 
     return summary;
