@@ -15,6 +15,7 @@ import {
   grab,
   resolveAllowance,
   resolveChannels,
+  SiteStateHandle,
   UnchangedError,
 } from '../src/grabber/main.js';
 import type { EpgEvent } from '../src/core/events.js';
@@ -639,6 +640,59 @@ describe('grab', () => {
       expect(cache.stateWrites.filter((key) => key.endsWith('|channels'))).toEqual([
         'example.com|channels',
       ]);
+    });
+
+    // The two ways a selection can go wrong once a list is cached. Both were
+    // real: the selection used to be applied by wrapping the site's own
+    // `channels` function, which is called on neither of these paths.
+    describe('and a selection over it', () => {
+      const select = new Set(['two']);
+
+      const both = (asked: string[]) =>
+        makeConfig({
+          cacheChannels: true,
+          channels: () => {
+            asked.push('fetched');
+            return [channel('one'), channel('two')];
+          },
+        });
+
+      it('still applies when the list came from the cache', async () => {
+        const cache = new MemoryCache();
+        const asked: string[] = [];
+        const config = both(asked);
+        const state = SiteStateHandle.open(cache, config.site);
+
+        // Warm it, then ask again with a selection. The second call is served
+        // from the cache — the site is asked once — and must still narrow.
+        await resolveChannels(config, { state, now: NOW });
+
+        expect(await resolveChannels(config, { state, select, now: NOW })).toEqual([
+          { xmltvId: 'two', siteId: 'site-two' },
+        ]);
+        expect(asked).toEqual(['fetched']);
+      });
+
+      it('does not narrow what the cache keeps', async () => {
+        const cache = new MemoryCache();
+        const asked: string[] = [];
+        const config = both(asked);
+        const state = SiteStateHandle.open(cache, config.site);
+
+        expect(await resolveChannels(config, { state, select, now: NOW })).toEqual([
+          { xmltvId: 'two', siteId: 'site-two' },
+        ]);
+        await state.save();
+
+        // What was stored is the site's whole list, so the next run — selecting
+        // something else, or nothing — is not quietly short of a channel.
+        expect(cache.state.get('example.com|channels')?.data).toEqual([
+          { xmltvId: 'one', siteId: 'site-one' },
+          { xmltvId: 'two', siteId: 'site-two' },
+        ]);
+        expect(await resolveChannels(config, { state, now: NOW })).toHaveLength(2);
+        expect(asked).toEqual(['fetched']);
+      });
     });
 
     it('is fetched again once it is older than the site allows', async () => {

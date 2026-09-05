@@ -23,6 +23,7 @@ import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { parseM3uString } from '../m3u/parse.js';
 import { derivedChannelList } from '../merge/derive.js';
+import { writeLines } from '../core/streams.js';
 import { parseXmltvString } from '../xmltv/parse.js';
 
 /** How the report is written — the same two shapes `epg validate` offers. */
@@ -69,9 +70,54 @@ export function wantedFrom(text: string, from: string): WantedChannel[] {
     }));
   }
 
+  const ids = idList(text);
+
+  if (ids !== undefined) {
+    return ids.map((id) => ({ id, name: '' }));
+  }
+
   throw new Error(
-    `Cannot tell what ${from} is: expected an M3U playlist, a *.channels.xml, or an XMLTV guide`,
+    `Cannot tell what ${from} is: expected an M3U playlist, a *.channels.xml, an XMLTV guide, or a list of ids`,
   );
+}
+
+/**
+ * A plain list of ids — one per line or comma-separated, `#` a comment.
+ *
+ * Last, because everything is plain text: the three formats above have said no
+ * before this is asked. `undefined` for anything that does not look like a list
+ * of ids, so a file of something else entirely still gets the error above
+ * rather than being read as a channel called `<!DOCTYPE`.
+ *
+ * The test is deliberately narrow — no markup, no whitespace inside an entry —
+ * since an xmltv id is a token and this is the last chance to notice it is not.
+ */
+function idList(text: string): string[] | undefined {
+  const ids: string[] = [];
+
+  for (const line of text.split('\n')) {
+    const content = line.slice(0, line.indexOf('#') === -1 ? undefined : line.indexOf('#')).trim();
+
+    if (content === '') {
+      continue;
+    }
+
+    for (const id of content.split(',')) {
+      const trimmed = id.trim();
+
+      if (trimmed === '') {
+        continue;
+      }
+
+      if (/[<>\s"']/.test(trimmed)) {
+        return undefined;
+      }
+
+      ids.push(trimmed);
+    }
+  }
+
+  return ids.length > 0 ? ids : undefined;
 }
 
 /** What the report says about one wanted channel. */
@@ -181,8 +227,8 @@ export function renderChannelReport(report: ChannelReport): string {
     (counts.unmatched > 0 ? `, ${counts.unmatched} with nothing` : '');
 
   return lines.length === 0
-    ? `${summary}\nEvery channel has a guide behind it.\n`
-    : `${lines.join('\n')}\n\n${summary}\n`;
+    ? `${summary}\nEvery channel has a guide behind it.`
+    : `${lines.join('\n')}\n\n${summary}`;
 }
 
 export interface ChannelsCommandOptions {
@@ -245,8 +291,9 @@ export async function reportChannelsCommand(
 
   const report = reportChannels(wanted, [...available, ...derived]);
 
-  stdout.write(
-    format === 'json' ? `${JSON.stringify(report, null, 2)}\n` : renderChannelReport(report),
+  await writeLines(
+    stdout,
+    format === 'json' ? JSON.stringify(report, null, 2) : renderChannelReport(report),
   );
 
   return options.check === true && !report.ok ? 1 : 0;

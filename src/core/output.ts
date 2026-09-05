@@ -18,10 +18,11 @@
  */
 
 import { once } from 'node:events';
+import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
 import path from 'node:path';
-import { Writable, type Transform } from 'node:stream';
+import { PassThrough, Writable, type Readable, type Transform } from 'node:stream';
 import { finished, pipeline } from 'node:stream/promises';
 import * as zlib from 'node:zlib';
 import { atomicFile } from './atomic.js';
@@ -85,6 +86,42 @@ export function decompressor(format: CompressionFormat): Transform {
 
       return zlib.createZstdDecompress();
   }
+}
+
+/**
+ * The bytes of a guide on disk, decompressed by what its name promises.
+ *
+ * One helper rather than three copies: `epg validate`, `epg filter` and
+ * `--channels` all want exactly this, and a fourth format would otherwise have
+ * to be remembered in three places.
+ *
+ * `compression` overrides the name — `false` for "plain, whatever it is called",
+ * which is what a config's own `compress: false` means about its output.
+ *
+ * `pipeline` rather than `.pipe`, so a truncated member or a missing file
+ * reaches the reader as an error instead of an early end: a guide that stops
+ * short otherwise looks exactly like a small one.
+ */
+export function guideBytes(file: string, compression?: CompressionFormat | false): Readable {
+  const format =
+    compression === undefined
+      ? compressionFromName(file)
+      : compression === false
+        ? undefined
+        : compression;
+  const bytes = createReadStream(file);
+
+  if (format === undefined) {
+    return bytes;
+  }
+
+  const out = new PassThrough();
+
+  pipeline(bytes, decompressor(format), out).catch((error: unknown) => {
+    out.destroy(error as Error);
+  });
+
+  return out;
 }
 
 export interface OutputSink {

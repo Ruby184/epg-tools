@@ -35,6 +35,7 @@ Commands:
   grab          Grab all sites into the cache only
   merge         Generate the merged guide from the cache only
   validate      Read a guide and report what is wrong with it
+  filter        Write a guide with only the channels you asked for
   channels      Report which wanted channels will get no guide, and why
   serve         Hold the merged guide behind HTTP for a consumer that polls
   try           Put one site, channel and day through, showing every step
@@ -56,6 +57,11 @@ Options:
                         extensions, comma-separated (e.g. lcn,uniqueID)
       --no-extensions   build/merge only: leave every provider extension out,
                         for a guide that validates against the DTD
+      --indent <n|str>  build/merge/filter: pretty-print with this indentation
+      --channels <what> keep only these channels, and fetch nothing for the
+                        rest. Ids, or a file naming them — a playlist, a
+                        *.channels.xml, a guide, or a plain list. Repeatable.
+                        build/grab/merge/serve, and required by filter
       --against <file>  channels only: what you want a guide for — an M3U
                         playlist, a *.channels.xml, or an XMLTV guide
       --check           channels only: exit 1 unless every wanted channel
@@ -156,6 +162,21 @@ const EXIT_CANCELLED = 130;
 
 const CONFIG_CANDIDATES = ['epg.config.ts', 'epg.config.js', 'epg.config.mjs'];
 
+/** The commands `--channels` narrows. The rest are told so rather than ignoring it. */
+const SELECTABLE = ['build', 'grab', 'merge', 'serve'];
+
+/** `2 channels`, `1 channel` — a count is read, so it should read. */
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+/** `--indent`: spaces if it is a number, the string itself otherwise. */
+function indentation(raw: string): string | number {
+  const spaces = Number(raw);
+
+  return Number.isInteger(spaces) && spaces >= 0 ? spaces : raw;
+}
+
 const COMMANDS = [
   'build',
   'grab',
@@ -164,6 +185,7 @@ const COMMANDS = [
   'try',
   'validate',
   'channels',
+  'filter',
   'prune',
   'init-grabber',
 ];
@@ -318,9 +340,72 @@ async function validateGuide(
 
   // On stdout, both formats: the report *is* this command's output, the way a
   // guide is `merge`'s, so it goes where a shell can redirect it.
-  await writeFlushed(stdout, renderReport(report, file, values.format ?? 'text'));
+  await writeLines(stdout, renderReport(report, file, values.format ?? 'text'));
 
   return report.ok ? 0 : EXIT_FAILED;
+}
+
+/** `epg filter <file>` — write the guide again with only some of its channels. */
+async function filterCommand(
+  file: string | undefined,
+  values: {
+    channels?: string[];
+    output?: string;
+    extensions?: string[] | null;
+    indent?: string | number;
+  },
+  stdout: Writable,
+  stderr: Writable,
+  signal: AbortSignal | undefined,
+): Promise<number> {
+  if (file === undefined) {
+    throw new UsageError('epg filter needs a guide: epg filter <guide.xml> --channels <what>');
+  }
+
+  if (values.channels === undefined) {
+    // Without one this is `cp`, and silently copying is a worse answer than
+    // saying what was left out.
+    throw new UsageError('epg filter needs --channels: without it there is nothing to filter');
+  }
+
+  const { wantedIds } = await import('./wanted.js');
+  const { filterGuide } = await import('./filter.js');
+  const channels = new Set<string>();
+
+  for (const value of values.channels) {
+    for (const id of await wantedIds(value)) {
+      channels.add(id);
+    }
+  }
+
+  if (channels.size === 0) {
+    throw new UsageError(`--channels named no channels: ${values.channels.join(' ')}`);
+  }
+
+  const report = await filterGuide(file, {
+    channels,
+    // The caller's stdout when nothing was named, so it pipes — and so a test
+    // reads it rather than the process's.
+    output: values.output ?? stdout,
+    ...(values.extensions !== undefined ? { extensions: values.extensions ?? false } : {}),
+    ...(values.indent !== undefined ? { indent: values.indent } : {}),
+    stderr,
+    ...(signal ? { signal } : {}),
+  });
+
+  // On stderr, always: stdout may be the guide itself, and a summary in the
+  // middle of a document would be the one thing worse than no summary.
+  await writeLines(
+    stderr,
+    ...(report.missing.length > 0
+      ? [
+          `${report.missing.length} of ${channels.size} channels are not in ${file}: ${report.missing.join(', ')}`,
+        ]
+      : []),
+    `${plural(report.kept, 'channel')}, ${plural(report.programmes, 'programme')}`,
+  );
+
+  return 0;
 }
 
 /**
@@ -403,6 +488,13 @@ async function execute(
       // guide for, and whether a mismatch should fail a CI step.
       against: { type: 'string' },
       check: { type: 'boolean' },
+      // Repeatable, and the union of what each names: a list kept in git plus
+      // the one id being tried out is a normal thing to want, and overwriting
+      // would make the order of two flags matter.
+      channels: { type: 'string', multiple: true },
+      // A number of spaces or a literal string, mirroring `JSON.stringify` — so
+      // `--indent 2` and `--indent '\t'` both mean what they look like.
+      indent: { type: 'string', transform: indentation },
       // A list of names, or `--no-extensions` for none of them. A config can
       // point at a filter of its own by passing a function, which is not
       // something a command line can do.
@@ -444,6 +536,12 @@ async function execute(
   // config's own `output`, and the config is then exactly what says where.
   if (command === 'validate' && positionals[1] !== undefined) {
     return validateGuide(positionals[1], values, stdout, signal);
+  }
+
+  // For the same reason, and always: a guide to subset is named on the command
+  // line or there is nothing to do, so this never wants a config at all.
+  if (command === 'filter') {
+    return filterCommand(positionals[1], values, stdout, stderr, signal);
   }
 
   const configFile = await findConfig(values.config);
@@ -504,6 +602,36 @@ async function execute(
   // day happened to be lost and not on the others.
   if (config.allowMissing !== undefined) {
     resolveAllowance(config.allowMissing, 'allowMissing');
+  }
+
+  if (values.channels !== undefined) {
+    // Only where narrowing a run means something. `epg channels --against x
+    // --channels y` would make the availability report *lie* — every excluded
+    // channel reading as "nothing produces this", which is the exact failure
+    // that command exists to find — and `try` would call its own channel
+    // unknown.
+    if (!SELECTABLE.includes(command)) {
+      throw new UsageError(`--channels is for ${SELECTABLE.join(', ')}, not ${command}`);
+    }
+
+    const { wantedIds } = await import('./wanted.js');
+    const selected = new Set<string>();
+
+    for (const value of values.channels) {
+      for (const id of await wantedIds(value)) {
+        selected.add(id);
+      }
+    }
+
+    if (selected.size === 0) {
+      throw new UsageError(`--channels named no channels: ${values.channels.join(' ')}`);
+    }
+
+    config = { ...config, channels: [...selected] };
+  }
+
+  if (values.indent !== undefined) {
+    config = { ...config, indent: values.indent };
   }
 
   if (values.refresh) {

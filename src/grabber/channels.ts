@@ -72,6 +72,22 @@ export interface ResolveChannelsOptions {
    * for a running commentary in the middle of it.
    */
   says?: Says;
+  /**
+   * Keep only these channels — `EpgConfig.channels`, and `--channels`.
+   *
+   * Applied **here**, and after the cache, which is the whole reason it is an
+   * option rather than something a caller does to the result. A selection that
+   * wrapped the site's own `channels` function instead would sit on the wrong
+   * side of `cacheChannels` twice over: a fresh cached list returns below
+   * without that function being called at all, so the selection would silently
+   * do nothing; and on a miss the *narrowed* list would be what gets stored, so
+   * a later run with no selection would read it back and quietly publish a
+   * guide missing everything this one left out.
+   *
+   * So the cache keeps the site's true list either way, and this is the last
+   * thing that happens to it.
+   */
+  select?: ReadonlySet<string>;
 }
 
 /** Said to nobody, for a caller that has nowhere to put it. */
@@ -98,11 +114,14 @@ export async function resolveChannels(
   config: AnySiteConfig,
   options: ResolveChannelsOptions = {},
 ): Promise<GrabberChannel[]> {
+  const { select } = options;
+  const kept = (channels: GrabberChannel[]): GrabberChannel[] =>
+    select === undefined ? channels : channels.filter((channel) => select.has(channel.xmltvId));
   // In a local, so the narrowing survives into the closure below.
   const source = config.channels;
 
   if (typeof source !== 'function') {
-    return source;
+    return kept(source);
   }
 
   const fromSource = async (): Promise<GrabberChannel[]> =>
@@ -118,7 +137,7 @@ export async function resolveChannels(
   // Nothing to read and nothing to keep: the site did not ask for its list to be
   // cached, or this caller has nowhere to put it.
   if (maxAgeMs === undefined || state === undefined) {
-    return fromSource();
+    return kept(await fromSource());
   }
 
   const now = options.now ?? new Date();
@@ -128,15 +147,18 @@ export async function resolveChannels(
     const held = group.fresh(maxAgeMs, now);
 
     if (held !== undefined) {
-      return held;
+      return kept(held);
     }
   }
 
   const channels = await fromSource();
 
+  // Stored before the selection, never after: what the cache holds is what the
+  // site offers, so the next run — selecting something else, or nothing — reads
+  // back a list that is still true.
   group.set(channels, now);
 
-  return channels;
+  return kept(channels);
 }
 
 /**
@@ -173,6 +195,8 @@ export async function resolveSites(
      * only the name differs — the same two events a run's own contexts send.
      */
     emit?: Emit;
+    /** Keep only these channels — see {@link ResolveChannelsOptions.select}. */
+    select?: ReadonlySet<string>;
   } = {},
 ): Promise<AnySiteConfig[]> {
   const queue = new PQueue({ concurrency: Math.max(1, options.concurrency ?? sites.length) });
@@ -188,6 +212,7 @@ export async function resolveSites(
           ...(state ? { state } : {}),
           ...(options.refresh === undefined ? {} : { refresh: options.refresh }),
           ...(options.now ? { now: options.now } : {}),
+          ...(options.select ? { select: options.select } : {}),
           ...(emit
             ? {
                 says: {

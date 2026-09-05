@@ -264,6 +264,14 @@ export interface BuildGuideOptions {
    * cost no requests: each reads its source's cached days again.
    */
   derived?: DerivedChannel[];
+  /**
+   * Keep only these channels, by `xmltvId` — see `EpgConfig.channels`.
+   *
+   * Applied where the channel lists are resolved, so a site is never asked for
+   * a day of a channel this leaves out. Anything named here that no site
+   * produces is reported once, as a `merge:warning`.
+   */
+  channels?: readonly string[];
   meta?: XmltvDocumentMeta;
   /**
    * Where this merge's events go — see {@link Reporter}.

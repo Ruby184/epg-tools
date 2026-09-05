@@ -282,7 +282,10 @@ async function execute(
 
   const selected = applyChannelSelection(config, selection);
 
-  if (selected.sites.length === 0) {
+  // The selection itself, not the sites: a selection no longer filters them
+  // lexically — `resolveChannels` applies it, after the cache — so an empty one
+  // is what "nothing is configured" looks like now.
+  if (selection.size === 0) {
     throw new GrabberError(`No channels selected in ${configFile}; run --configure`);
   }
 

@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { defineConfig, type EpgConfig } from '../src/config.js';
 import { envReader, type ConfigContext } from '../src/core/answers.js';
 import { resolveChannels } from '../src/grabber/channels.js';
+import { channelSelection, unmatched } from '../src/merge/select.js';
 import type { SiteConfig } from '../src/grabber/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 import {
@@ -159,7 +160,7 @@ describe('config file format', () => {
 });
 
 describe('applyChannelSelection', () => {
-  it('filters an eager channel list and drops emptied sites', () => {
+  it('records the selection rather than filtering the sites', () => {
     const epg: EpgConfig = {
       sites: [site('one.example.tv'), site('two.example.tv')],
       output: 'x',
@@ -167,13 +168,28 @@ describe('applyChannelSelection', () => {
 
     const selected = applyChannelSelection(epg, new Set(['one.example.tv']));
 
-    expect(selected.sites).toHaveLength(1);
-    expect(selected.sites[0]?.channels).toEqual([
-      { xmltvId: 'one.example.tv', siteId: '1', name: 'Channel one.example.tv' },
-    ]);
+    // The sites are left alone on purpose. Filtering them here would mean
+    // wrapping a lazy `channels`, which lands on the wrong side of
+    // `cacheChannels` — see the resolveChannels tests.
+    expect(selected.sites).toHaveLength(2);
+    expect(selected.channels).toEqual(['one.example.tv']);
   });
 
-  it('filters a lazy channel list without resolving it eagerly', async () => {
+  it('applies to an eager list where the list is resolved', async () => {
+    const epg: EpgConfig = {
+      sites: [site('one.example.tv'), site('two.example.tv')],
+      output: 'x',
+    };
+
+    const { select } = channelSelection(applyChannelSelection(epg, new Set(['one.example.tv'])))!;
+
+    expect(await resolveChannels(epg.sites[0]!, { select })).toEqual([
+      { xmltvId: 'one.example.tv', siteId: '1', name: 'Channel one.example.tv' },
+    ]);
+    expect(await resolveChannels(epg.sites[1]!, { select })).toEqual([]);
+  });
+
+  it('applies to a lazy list without resolving it to decide', async () => {
     let calls = 0;
     const epg: EpgConfig = {
       sites: [
@@ -192,12 +208,13 @@ describe('applyChannelSelection', () => {
     };
 
     const selected = applyChannelSelection(epg, new Set(['two.example.tv']));
+    const { select } = channelSelection(selected)!;
 
     expect(calls).toBe(0);
 
-    const resolved = await resolveChannels(selected.sites[0]!);
-
-    expect(resolved).toEqual([{ xmltvId: 'two.example.tv', siteId: '2' }]);
+    expect(await resolveChannels(selected.sites[0]!, { select })).toEqual([
+      { xmltvId: 'two.example.tv', siteId: '2' },
+    ]);
     expect(calls).toBe(1);
   });
 
@@ -214,24 +231,24 @@ describe('applyChannelSelection', () => {
       ],
     });
 
-    it('keeps the source of a selected derivation, unasked for', () => {
-      const selected = applyChannelSelection(epg(), new Set(['one.plus1.example.tv']));
+    const selecting = (config: EpgConfig, ids: string[]) =>
+      channelSelection(applyChannelSelection(config, new Set(ids)))!;
 
-      expect(selected.derived).toEqual([
+    it('keeps the source of a selected derivation, unasked for', () => {
+      const selection = selecting(epg(), ['one.plus1.example.tv']);
+
+      expect(selection.derived).toEqual([
         { xmltvId: 'one.plus1.example.tv', from: 'one.example.tv', offset: 60 },
       ]);
       // Its source came along: there is no shifting a channel nobody grabbed.
-      expect(selected.sites).toHaveLength(1);
-      expect(selected.sites[0]?.channels).toEqual([
-        { xmltvId: 'one.example.tv', siteId: '1', name: 'Channel one.example.tv' },
-      ]);
+      expect([...selection.select]).toEqual(['one.plus1.example.tv', 'one.example.tv']);
     });
 
     it('drops a derivation nobody selected', () => {
-      const selected = applyChannelSelection(epg(), new Set(['one.example.tv']));
+      const selection = selecting(epg(), ['one.example.tv']);
 
-      expect(selected.derived).toEqual([]);
-      expect(selected.sites).toHaveLength(1);
+      expect(selection.derived).toEqual([]);
+      expect([...selection.select]).toEqual(['one.example.tv']);
     });
 
     it('flattens a chain whose middle was not selected', () => {
@@ -244,10 +261,36 @@ describe('applyChannelSelection', () => {
         ],
       };
 
-      const selected = applyChannelSelection(config, new Set(['plus2']));
+      const selection = selecting(config, ['plus2']);
 
       // A shift of a shift is one shift, so the dropped middle becomes arithmetic.
-      expect(selected.derived).toEqual([{ xmltvId: 'plus2', from: 'one.example.tv', offset: 120 }]);
+      expect(selection.derived).toEqual([
+        { xmltvId: 'plus2', from: 'one.example.tv', offset: 120 },
+      ]);
+      expect(selection.select.has('one.example.tv')).toBe(true);
+    });
+
+    // `resolveDeclarations` already says a derivation whose source is missing
+    // shifts something no site produces. Saying it again from the selection
+    // would be the same news twice, in different words.
+    it('is not reported as unproduced, being produced by the guide', () => {
+      const selection = selecting(epg(), ['one.plus1.example.tv']);
+
+      // The guide produced the source but not the shift — nothing does, which
+      // is what deriving one means.
+      expect(unmatched(selection, ['one.example.tv'])).toEqual([]);
+
+      // The source going missing is still reported, since that is a real gap.
+      expect(unmatched(selection, [])).toEqual(['one.example.tv']);
+    });
+
+    // Every caller asks rather than passing the answer along, so asking twice
+    // has to give the same answer.
+    it('is idempotent', () => {
+      const once = applyChannelSelection(epg(), new Set(['one.plus1.example.tv']));
+      const twice = { ...once, channels: [...channelSelection(once)!.select] };
+
+      expect(channelSelection(twice)).toEqual(channelSelection(once));
     });
 
     it('lists them among the ids a config can deliver', async () => {

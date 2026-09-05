@@ -103,7 +103,7 @@ function asText(report: ValidationReport, file: string): string {
   const head = `${file} — ${plural(report.channels, 'channel')}, ${plural(report.programmes, 'programme')}`;
 
   if (report.findings.length === 0) {
-    return `${head}: nothing to report\n`;
+    return `${head}: nothing to report`;
   }
 
   const blocks = report.findings.map((finding) => {
@@ -118,12 +118,12 @@ function asText(report: ValidationReport, file: string): string {
 
   const totals = [plural(report.errors, 'error'), plural(report.warnings, 'warning')].join(', ');
 
-  return `${head}\n\n${blocks.join('\n')}\n\n${totals}\n`;
+  return `${head}\n\n${blocks.join('\n')}\n\n${totals}`;
 }
 
 /** The report as one JSON document — an `ok` to branch on, and the findings. */
 function asJson(report: ValidationReport, file: string): string {
-  return `${JSON.stringify({ file, ...report }, undefined, 2)}\n`;
+  return JSON.stringify({ file, ...report }, undefined, 2);
 }
 
 export function renderReport(report: ValidationReport, file: string, format: ReportFormat): string {
