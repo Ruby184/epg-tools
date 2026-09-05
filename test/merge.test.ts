@@ -609,6 +609,349 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     return collect(generateGuide(options));
   }
 
+  describe('dropContainers', () => {
+    const site = makeSite('site-a.sk', [{ xmltvId: 'X', siteId: 'a-x' }]);
+
+    const guide = (
+      programmes: XmltvProgramme[],
+      merge: NonNullable<BuildGuideOptions['merge']> = {},
+    ) =>
+      generate({
+        sites: [site],
+        cache: createFakeCache({ [`site-a.sk|X|${DAY}`]: programmes }),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        merge: { programmeStrategy: 'concat', ...merge },
+      });
+
+    const titles = (output: string): string[] =>
+      [...output.matchAll(/<title[^>]*>([^<]*)<\/title>/g)].map((found) => found[1]!);
+
+    const span = (start: string, stop: string, title: string) =>
+      prog('X', `2026-01-15T${start}:00Z`, title, undefined, {
+        stop: new Date(`2026-01-15T${stop}:00Z`),
+      });
+
+    /** A magazine block published beside the two programmes inside it. */
+    const magazine = [
+      span('06:00', '09:00', 'Breakfast'),
+      span('06:00', '07:30', 'News'),
+      span('07:30', '09:00', 'Weather'),
+    ];
+
+    it('drops the container and keeps its parts', async () => {
+      expect(titles(await guide(magazine))).toEqual(['News', 'Weather']);
+    });
+
+    // The reason this rule exists rather than being left to `clipOverlaps`:
+    // without it the guide is not merely untidy, it is invalid.
+    it('is what makes such a guide validate', async () => {
+      const { validateXmltv } = await import('../src/xmltv/validate.js');
+
+      expect((await validateXmltv([await guide(magazine)])).ok).toBe(true);
+      expect((await validateXmltv([await guide(magazine, { dropContainers: false })])).ok).toBe(
+        false,
+      );
+    });
+
+    it('leaves a programme containing only one alone', async () => {
+      // One contained programme is as likely a source's rounding, which
+      // `clipOverlaps` is the rule for. Two is a container.
+      const found = await guide(
+        [span('06:00', '09:00', 'Long'), span('06:00', '07:30', 'Inside')],
+        {
+          clipOverlaps: false,
+        },
+      );
+
+      expect(titles(found)).toEqual(['Long', 'Inside']);
+    });
+
+    it('leaves neighbours that merely touch alone', async () => {
+      const found = await guide([
+        span('06:00', '07:00', 'First'),
+        span('07:00', '08:00', 'Second'),
+        span('08:00', '09:00', 'Third'),
+      ]);
+
+      expect(titles(found)).toEqual(['First', 'Second', 'Third']);
+    });
+
+    it('needs a stop to contain anything', async () => {
+      const found = await guide(
+        [
+          prog('X', '2026-01-15T06:00:00Z', 'Open ended'),
+          span('06:30', '07:00', 'One'),
+          span('07:00', '07:30', 'Two'),
+        ],
+        { fillStop: false },
+      );
+
+      // Nothing is dropped: without an end there is no span to contain them.
+      expect(titles(found)).toEqual(['Open ended', 'One', 'Two']);
+    });
+
+    it('can be turned off', async () => {
+      expect(titles(await guide(magazine, { dropContainers: false }))).toEqual([
+        'Breakfast',
+        'News',
+        'Weather',
+      ]);
+    });
+  });
+
+  describe('fillGaps', () => {
+    const site = makeSite('site-a.sk', [{ xmltvId: 'X', siteId: 'a-x' }]);
+
+    const fill = (
+      merge: NonNullable<BuildGuideOptions['merge']>,
+      entries: Record<string, XmltvProgramme[]>,
+    ) =>
+      generate({
+        sites: [site],
+        cache: createFakeCache(entries),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        merge,
+      });
+
+    /** Every programme as (start, stop, title). */
+    const laid = (output: string): string[] =>
+      [
+        ...output.matchAll(
+          /<programme start="(\d{14})[^"]*" stop="(\d{14})[^"]*"[^>]*>\s*<title[^>]*>([^<]*)/g,
+        ),
+      ].map((found) => `${found[1]!.slice(8, 12)}-${found[2]!.slice(8, 12)} ${found[3]!}`);
+
+    /** Two programmes with a three-hour hole between them. */
+    const withHole = {
+      [`site-a.sk|X|${DAY}`]: [
+        prog('X', '2026-01-15T10:00:00Z', 'Before', undefined, {
+          stop: new Date('2026-01-15T11:00:00Z'),
+        }),
+        prog('X', '2026-01-15T14:00:00Z', 'After', undefined, {
+          stop: new Date('2026-01-15T15:00:00Z'),
+        }),
+      ],
+    };
+
+    it('is off by default, and changes nothing when it is', async () => {
+      expect(laid(await fill({}, withHole))).toEqual(['1000-1100 Before', '1400-1500 After']);
+    });
+
+    it('lays blocks end to end across a hole', async () => {
+      const found = laid(await fill({ fillGaps: { edges: false } }, withHole));
+
+      expect(found).toEqual([
+        '1000-1100 Before',
+        '1100-1130 No information',
+        '1130-1200 No information',
+        '1200-1230 No information',
+        '1230-1300 No information',
+        '1300-1330 No information',
+        '1330-1400 No information',
+        '1400-1500 After',
+      ]);
+    });
+
+    it('truncates the last block to the gap rather than overrunning it', async () => {
+      const found = laid(
+        await fill({ fillGaps: { edges: false, blockMs: 45 * 60_000 } }, withHole),
+      );
+
+      // 3 hours in 45-minute blocks is 45/45/45/45 exactly; make it uneven.
+      expect(found.at(-2)).toBe('1315-1400 No information');
+      expect(found.at(-1)).toBe('1400-1500 After');
+    });
+
+    it('leaves a gap shorter than minMs alone', async () => {
+      const found = laid(
+        await fill(
+          { fillGaps: { edges: false } },
+          {
+            [`site-a.sk|X|${DAY}`]: [
+              prog('X', '2026-01-15T10:00:00Z', 'Before', undefined, {
+                stop: new Date('2026-01-15T10:59:30Z'),
+              }),
+              prog('X', '2026-01-15T11:00:00Z', 'After', undefined, {
+                stop: new Date('2026-01-15T12:00:00Z'),
+              }),
+            ],
+          },
+        ),
+      );
+
+      expect(found).toEqual(['1000-1059 Before', '1100-1200 After']);
+    });
+
+    it('leaves a gap longer than maxMs alone, as genuinely off air', async () => {
+      const found = laid(await fill({ fillGaps: { edges: false, maxMs: 60 * 60_000 } }, withHole));
+
+      expect(found).toEqual(['1000-1100 Before', '1400-1500 After']);
+    });
+
+    it('covers the window edges, and the whole window for a channel with nothing', async () => {
+      const edges = laid(await fill({ fillGaps: true }, withHole));
+
+      expect(edges[0]).toBe('0000-0030 No information');
+      // The tail is not filled: the last programme has a stop here, so it is.
+      expect(edges.at(-1)).toBe('2330-0000 No information');
+
+      // A channel cached empty: edges are all there is.
+      const nothing = laid(await fill({ fillGaps: true }, { [`site-a.sk|X|${DAY}`]: [] }));
+
+      expect(nothing).toHaveLength(48);
+      expect(nothing[0]).toBe('0000-0030 No information');
+      expect(nothing.at(-1)).toBe('2330-0000 No information');
+    });
+
+    it('fills for a channel with no cache entry at all, not only an empty one', async () => {
+      // `undefined` from the cache and `[]` are different code paths.
+      expect(laid(await fill({ fillGaps: true }, {}))).toHaveLength(48);
+    });
+
+    it('refuses a blockMs that would never finish a gap', async () => {
+      await expect(fill({ fillGaps: { blockMs: 0 } }, withHole)).rejects.toThrow(
+        /blockMs must be a positive number/,
+      );
+      await expect(fill({ fillGaps: { blockMs: Number.NaN } }, withHole)).rejects.toThrow(
+        /blockMs must be a positive number/,
+      );
+    });
+
+    it('takes a title and a programme hook', async () => {
+      const found = laid(
+        await fill(
+          {
+            fillGaps: {
+              edges: false,
+              blockMs: 90 * 60_000,
+              title: ({ index }) => `Nothing on (${index})`,
+              programme: (block, { index }) => (index === 0 ? block : undefined),
+            },
+          },
+          withHole,
+        ),
+      );
+
+      // The hook dropped every block but the first.
+      expect(found).toEqual(['1000-1100 Before', '1100-1230 Nothing on (0)', '1400-1500 After']);
+    });
+  });
+
+  describe("programmeStrategy: 'backfill'", () => {
+    /** A partial primary and a broad fallback — the case the strategy is for. */
+    function twoSources(): CacheStore {
+      return createFakeCache({
+        // The good source covers the evening only.
+        [`site-a.sk|X|${DAY}`]: [
+          prog('X', '2026-01-15T18:00:00Z', 'Správy', 'sk', {
+            stop: new Date('2026-01-15T19:00:00Z'),
+          }),
+        ],
+        // The broad one covers the whole day, including the same broadcast.
+        [`site-b.com|X|${DAY}`]: [
+          prog('X', '2026-01-15T08:00:00Z', 'Morning', 'en', {
+            stop: new Date('2026-01-15T09:00:00Z'),
+          }),
+          prog('X', '2026-01-15T18:00:00Z', 'The News', 'en', {
+            stop: new Date('2026-01-15T19:00:00Z'),
+          }),
+          prog('X', '2026-01-15T20:00:00Z', 'Late', 'en', {
+            stop: new Date('2026-01-15T21:00:00Z'),
+          }),
+        ],
+      });
+    }
+
+    const titles = (output: string): string[] =>
+      [...output.matchAll(/<title[^>]*>([^<]*)<\/title>/g)].map((found) => found[1]!);
+
+    it('takes the hole from the fallback and leaves the primary whole', async () => {
+      const output = await generate({
+        sites: [siteA, siteB],
+        cache: twoSources(),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        merge: { programmeStrategy: 'backfill' },
+      });
+
+      // The primary's own broadcast, not merged with the fallback's title for
+      // the same hour — that is the difference from `merge`.
+      expect(titles(output)).toEqual(['Morning', 'Správy', 'Late']);
+      expect(output).not.toContain('The News');
+    });
+
+    it('merges the same hour under the default strategy, for contrast', async () => {
+      const output = await generate({
+        sites: [siteA, siteB],
+        cache: twoSources(),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+      });
+
+      // Both titles on one programme: what `backfill` exists not to do.
+      expect(output).toContain('Správy');
+      expect(output).toContain('The News');
+    });
+
+    it('skips a fallback programme that only partly fits the hole', async () => {
+      const output = await generate({
+        sites: [siteA, siteB],
+        cache: createFakeCache({
+          [`site-a.sk|X|${DAY}`]: [
+            prog('X', '2026-01-15T18:00:00Z', 'Správy', 'sk', {
+              stop: new Date('2026-01-15T19:00:00Z'),
+            }),
+          ],
+          [`site-b.com|X|${DAY}`]: [
+            // Overlaps the primary's 18:00–19:00 by half an hour.
+            prog('X', '2026-01-15T17:30:00Z', 'Overlapping', 'en', {
+              stop: new Date('2026-01-15T18:30:00Z'),
+            }),
+          ],
+        }),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        merge: { programmeStrategy: 'backfill' },
+      });
+
+      // Dropped rather than clipped: clipping would pull back the stop of the
+      // programme that outranks it.
+      expect(titles(output)).toEqual(['Správy']);
+    });
+
+    it('works on bare starts, taking a stop-less programme to run its cap', async () => {
+      const output = await generate({
+        sites: [siteA, siteB],
+        cache: createFakeCache({
+          // No stops anywhere: coverage has to come from the next start.
+          [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T18:00:00Z', 'Správy', 'sk')],
+          [`site-b.com|X|${DAY}`]: [
+            prog('X', '2026-01-15T19:00:00Z', 'Swallowed', 'en'),
+            prog('X', '2026-01-16T02:00:00Z', 'Kept', 'en'),
+          ],
+        }),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        merge: { programmeStrategy: 'backfill' },
+      });
+
+      // 19:00 falls inside the six hours the primary's 18:00 is taken to run, so
+      // it is already covered; 02:00 is past that cap, so it is a real hole and
+      // is filled. Without the cap the first would come through too and this
+      // would be `concat` by another name.
+      expect(titles(output)).toEqual(['Správy', 'Kept']);
+      expect(output).not.toContain('Swallowed');
+    });
+  });
+
   it('describes a channel with the builder its channelInfo was handed', async () => {
     const site: SiteConfig<unknown> = {
       ...makeSite('site-a.sk', [
