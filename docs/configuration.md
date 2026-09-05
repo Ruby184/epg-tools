@@ -818,6 +818,7 @@ When several sites cover the same `xmltvId` (site order in `sites` = priority):
 - `programmeStrategy` (for `merge-programmes`)
   - `merge` (default) — programmes describing the same broadcast become one element; language-tagged fields (`title`, `desc`, `category`, …) are unioned by `(lang, value)` — grab the same channel from a Slovak and an English source and get both languages in one programme
   - `concat` — keep all programmes sorted by start
+  - `backfill` — the first covering site contributes everything it has, and a lower-priority one only what falls in a hole it left; nothing is combined — see [filling the gaps](#filling-the-gaps)
 
 ### What counts as the same broadcast
 
@@ -858,6 +859,7 @@ fix both because it has the programme that follows:
 | `fillStop` | `true` (cap 6 h) | A programme with no `stop` gets the next one's start — capped, so the gap where a channel goes off air for the night stays a gap instead of becoming one nine-hour programme. `{ maxMs: 1_800_000 }` for a cap of your own, `false` to leave ends missing. |
 | `clipOverlaps` | `true` | A `stop` that reaches past the next programme's start is pulled back to it. |
 | `clampToWindow` | `false` | Leave out programmes starting outside the guide's window. Off, because a source handing back a few hours past the last day is giving you something. |
+| `fillGaps` | `false` | Put a placeholder where the schedule says nothing — see [filling the gaps](#filling-the-gaps). The one rule here that **invents**, which is why it is off. |
 | `transform` | — | The last word on every programme: `(programme, { xmltvId, next, log, warn }) => programme \| null`. |
 
 A programme with no end is what a consumer can do least with — tvheadend shows
@@ -867,7 +869,8 @@ in the Perl suite; here they are the default.
 
 The last programme of a channel keeps no `stop`: there is nothing after it to
 take one from. Neither rule invents anything — the end comes from the next
-programme's start or not at all.
+programme's start or not at all. `fillGaps` is the one that does invent, and is
+off for that reason.
 
 `transform` runs **after** those two, so it sees the `stop` they settled and the
 programme that follows (`next`):
@@ -882,9 +885,13 @@ merge: {
 ```
 
 Returning `null` or `undefined` leaves the programme out, but the rules have
-already run, so the gap stays. To drop something and have the gap close, use
+already run, so the gap stays — unless `fillGaps` is on, which covers it with
+placeholder blocks. To drop something and have the gap **close**, use
 [a site's own `transform`](./site-config.md#fixing-up-one-source), which runs
-before them — or `clampToWindow` for what falls outside the window.
+before them — or `clampToWindow` for what falls outside the window. Dropping a
+source's own padding is the case to watch: through the guide's `transform` with
+`fillGaps` on, you replace it with padding of a different shape rather than
+closing up.
 
 It also carries `log` and `warn`, for the thing a mapping like the one above
 always turns out to need — saying which category it had no mapping for:
@@ -904,6 +911,80 @@ transform: (programme, { xmltvId, warn }) => {
 These arrive as `merge:note` and `merge:warning` rather than the `site:note` a
 site's own code sends, and carry no site — the code is the config's own, so
 there is nobody to attribute it to.
+
+### Filling the gaps
+
+A channel's day is rarely fully covered. A source stops publishing at midnight,
+drops an afternoon, or has nothing at all for a channel it lists. Two things can
+close that, and they are meant to be used in that order.
+
+**Real data first.** `programmeStrategy: 'backfill'` lets a lower-priority
+source contribute only what the higher-priority one is missing:
+
+```ts
+merge: { programmeStrategy: 'backfill' }
+```
+
+Where both describe a broadcast the higher one's is kept **whole** — nothing is
+combined, which is the whole difference from `merge`. That is what you want from
+a good-but-partial primary and a broad-but-worse fallback: the good source's
+titles and descriptions, and the other one's coverage of the hours it does not
+reach.
+
+Two things it does deliberately. A programme with no `stop` is taken to run to
+the next start of its own list, capped at six hours — the same reading `fillStop`
+will make later, so the two agree about where a hole is; without it a list of
+bare starts would look entirely empty and backfill would be `concat`. And a
+candidate that only **partly** fits a hole is dropped rather than clipped:
+clipping would pull back the `stop` of the programme that outranks it, and
+moving a start would be a lie about when a broadcast began. Two sources on
+different grids may therefore contribute nothing at the seam.
+
+**Then a placeholder for what is left.** `fillGaps` puts synthetic programmes in
+the holes:
+
+```ts
+merge: {
+  fillGaps: {
+    blockMs: 30 * 60_000,   // one block, the default
+    minMs: 60_000,          // ignore anything shorter, the default
+    maxMs: 6 * 60 * 60_000, // leave a longer gap alone as genuinely off air
+    edges: true,            // the window's start and end too, the default
+    title: 'No information',
+  },
+}
+```
+
+| field | default | what it does |
+|---|---|---|
+| `blockMs` | 30 minutes | How long one block runs. A three-hour hole becomes six blocks, not one three-hour programme, because a single long bar reads as a real broadcast |
+| `minMs` | 1 minute | Leave a shorter gap alone. Sources publishing a nominal duration against real starts leave gaps of seconds all day; without a floor a channel collects hundreds of forty-second placeholders |
+| `maxMs` | unset | Leave a longer gap alone. The judgement `fillStop`'s six-hour cap already makes, offered rather than assumed |
+| `edges` | `true` | Fill from the window's start to the first programme and from the last to the window's end. A channel with nothing at all is edges and nothing else |
+| `title` | `'No information'` | What a block says, or `({ xmltvId, gapStart, gapEnd, index }) => string` |
+| `programme` | — | The last word on a block: return it, a different one, or nothing to leave it out. Where a `category` or a `desc` would go |
+
+Blocks are laid **end to end and half-open**, and the last of a gap is truncated
+to it rather than overrunning — so a filled guide still passes
+[`epg validate`](#validating-a-guide) with no overlaps. The title carries no
+`lang`: the guide cannot know the channel's language, and the wrong one is worse
+than none.
+
+**Be clear about what this is.** Everything else in this section reshapes what a
+source gave you. This adds programmes no source reported, so a guide it has
+touched is no longer a record of what anyone said — which is why it is off by
+default. The reason to turn it on is a consumer that handles a partly-covered
+day badly; measure yours before assuming it is the problem.
+
+Two limits. A programme with no `stop` leaves the gap after it unmeasurable, so
+it is skipped rather than guessed at — with `fillStop: false` that is nearly
+every programme, and `fillGaps` will do little but the leading edge. And it does
+nothing under `channelStrategy: 'keep-all'`, where a channel has more than one
+entry and each would fill the other's silence; it says so once rather than
+doing it.
+
+`epg filter` does not fill: it subsets a guide somebody else wrote, and never
+runs a merge.
 
 ### Across the day boundary
 
