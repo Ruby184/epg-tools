@@ -609,6 +609,98 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     return collect(generateGuide(options));
   }
 
+  describe('dropContainers', () => {
+    const site = makeSite('site-a.sk', [{ xmltvId: 'X', siteId: 'a-x' }]);
+
+    const guide = (
+      programmes: XmltvProgramme[],
+      merge: NonNullable<BuildGuideOptions['merge']> = {},
+    ) =>
+      generate({
+        sites: [site],
+        cache: createFakeCache({ [`site-a.sk|X|${DAY}`]: programmes }),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        merge: { programmeStrategy: 'concat', ...merge },
+      });
+
+    const titles = (output: string): string[] =>
+      [...output.matchAll(/<title[^>]*>([^<]*)<\/title>/g)].map((found) => found[1]!);
+
+    const span = (start: string, stop: string, title: string) =>
+      prog('X', `2026-01-15T${start}:00Z`, title, undefined, {
+        stop: new Date(`2026-01-15T${stop}:00Z`),
+      });
+
+    /** A magazine block published beside the two programmes inside it. */
+    const magazine = [
+      span('06:00', '09:00', 'Breakfast'),
+      span('06:00', '07:30', 'News'),
+      span('07:30', '09:00', 'Weather'),
+    ];
+
+    it('drops the container and keeps its parts', async () => {
+      expect(titles(await guide(magazine))).toEqual(['News', 'Weather']);
+    });
+
+    // The reason this rule exists rather than being left to `clipOverlaps`:
+    // without it the guide is not merely untidy, it is invalid.
+    it('is what makes such a guide validate', async () => {
+      const { validateXmltv } = await import('../src/xmltv/validate.js');
+
+      expect((await validateXmltv([await guide(magazine)])).ok).toBe(true);
+      expect((await validateXmltv([await guide(magazine, { dropContainers: false })])).ok).toBe(
+        false,
+      );
+    });
+
+    it('leaves a programme containing only one alone', async () => {
+      // One contained programme is as likely a source's rounding, which
+      // `clipOverlaps` is the rule for. Two is a container.
+      const found = await guide(
+        [span('06:00', '09:00', 'Long'), span('06:00', '07:30', 'Inside')],
+        {
+          clipOverlaps: false,
+        },
+      );
+
+      expect(titles(found)).toEqual(['Long', 'Inside']);
+    });
+
+    it('leaves neighbours that merely touch alone', async () => {
+      const found = await guide([
+        span('06:00', '07:00', 'First'),
+        span('07:00', '08:00', 'Second'),
+        span('08:00', '09:00', 'Third'),
+      ]);
+
+      expect(titles(found)).toEqual(['First', 'Second', 'Third']);
+    });
+
+    it('needs a stop to contain anything', async () => {
+      const found = await guide(
+        [
+          prog('X', '2026-01-15T06:00:00Z', 'Open ended'),
+          span('06:30', '07:00', 'One'),
+          span('07:00', '07:30', 'Two'),
+        ],
+        { fillStop: false },
+      );
+
+      // Nothing is dropped: without an end there is no span to contain them.
+      expect(titles(found)).toEqual(['Open ended', 'One', 'Two']);
+    });
+
+    it('can be turned off', async () => {
+      expect(titles(await guide(magazine, { dropContainers: false }))).toEqual([
+        'Breakfast',
+        'News',
+        'Weather',
+      ]);
+    });
+  });
+
   describe('fillGaps', () => {
     const site = makeSite('site-a.sk', [{ xmltvId: 'X', siteId: 'a-x' }]);
 

@@ -84,6 +84,46 @@ async function* readAhead<TItem, TResult>(
 // Where it lives now, re-exported for the entry points that published it.
 export { defaultChannelInfo };
 
+/**
+ * How many of the programmes after `outer` sit wholly inside it.
+ *
+ * Counts across the batch and into what is still held, since a container that
+ * runs to the end of a day holds programmes the next day's read supplies. Both
+ * lists are sorted by start, so the walk stops at the first start the container
+ * does not reach — nothing later can be inside it.
+ */
+function containedCount(
+  outer: XmltvProgramme,
+  after: readonly XmltvProgramme[],
+  from: number,
+  held: readonly XmltvProgramme[],
+): number {
+  const stop = outer.stop?.getTime();
+
+  if (stop === undefined) {
+    return 0;
+  }
+
+  const start = outer.start.getTime();
+  let count = 0;
+
+  for (const programme of [...after.slice(from), ...held]) {
+    const at = programme.start.getTime();
+
+    if (at >= stop) {
+      break;
+    }
+
+    const ends = programme.stop?.getTime();
+
+    if (at >= start && ends !== undefined && ends <= stop) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
 /** `fillGaps`, with its defaults filled in and its numbers checked. */
 interface ResolvedFillGaps {
   blockMs: number;
@@ -344,6 +384,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     clipOverlaps = true,
     clampToWindow = false,
     fillGaps = false,
+    dropContainers = true,
     transform,
   } = options.merge ?? {};
   const fillStopMs =
@@ -633,6 +674,15 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       }
 
       for (const [index, programme] of ready.entries()) {
+        // A magazine block published beside the programmes inside it. Dropped
+        // before anything else looks at it: it is not overrunning the next
+        // programme — which is what `clipOverlaps` fixes — it is describing the
+        // same hours at a coarser grain, and keeping both leaves the guide
+        // genuinely overlapping.
+        if (dropContainers && containedCount(programme, ready, index + 1, pending) >= 2) {
+          continue;
+        }
+
         // What follows it on this channel: the next one out, or — for the last
         // of this batch — the first one still being held. Which is what the day
         // held back is for, over and above the merging it was added for.

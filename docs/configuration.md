@@ -52,7 +52,7 @@ hardcode — a username, a password, a region. See
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
 | `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source. |
-| `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true }` | How several sites covering one channel are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
+| `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true, dropContainers: true }` | How several sites covering one channel are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
 | `derived` | `DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. See [Derived channels](#derived-channels). |
 | `channels` | `readonly string[]` | all of them | Keep only these channels, by `xmltvId` — see [keeping only some channels](#keeping-only-some-channels). `--channels` overrides it. |
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
@@ -858,6 +858,7 @@ fix both because it has the programme that follows:
 |---|---|---|
 | `fillStop` | `true` (cap 6 h) | A programme with no `stop` gets the next one's start — capped, so the gap where a channel goes off air for the night stays a gap instead of becoming one nine-hour programme. `{ maxMs: 1_800_000 }` for a cap of your own, `false` to leave ends missing. |
 | `clipOverlaps` | `true` | A `stop` that reaches past the next programme's start is pulled back to it. |
+| `dropContainers` | `true` | Drop a programme that wholly contains two or more others — a magazine block published beside its own parts. `clipOverlaps` cannot reach it, and without this the guide genuinely overlaps. |
 | `clampToWindow` | `false` | Leave out programmes starting outside the guide's window. Off, because a source handing back a few hours past the last day is giving you something. |
 | `fillGaps` | `false` | Put a placeholder where the schedule says nothing — see [filling the gaps](#filling-the-gaps). The one rule here that **invents**, which is why it is off. |
 | `transform` | — | The last word on every programme: `(programme, { xmltvId, next, log, warn }) => programme \| null`. |
@@ -866,6 +867,18 @@ A programme with no end is what a consumer can do least with — tvheadend shows
 a zero-length event, some players nothing at all — and two programmes claiming
 the same minute means it has to guess which is on. Both are why `tv_sort` exists
 in the Perl suite; here they are the default.
+
+**A magazine block is the third.** Some sources publish `Breakfast` 06:00–09:00
+*and* the `News` and `Weather` inside it. That is not a programme overrunning
+the next one, so `clipOverlaps` leaves it alone — correctly, since a container
+shares its start with the first thing it contains and pulling its `stop` back
+would leave a programme of no length. What comes out is a guide with real
+overlaps in it, which [`epg validate`](#validating-a-guide) reports as an error.
+`dropContainers` keeps the parts and drops the block, because the parts are the
+finer answer to what is on at 06:30. It takes **two** contained programmes: one
+is as likely a source's rounding, which is `clipOverlaps`'s job, and dropping on
+it would throw a programme away over a minute. `tv_remove_some_overlapping` is
+the same rule in the Perl suite.
 
 The last programme of a channel keeps no `stop`: there is nothing after it to
 take one from. Neither rule invents anything — the end comes from the next

@@ -212,6 +212,28 @@ export interface MergeOptions {
    */
   clampToWindow?: boolean;
   /**
+   * Drop a programme that wholly contains two or more others on its channel. On
+   * by default.
+   *
+   * Some sources publish a magazine block *and* its parts — `Breakfast`
+   * 06:00–09:00 beside the `News` and the `Weather` inside it. `clipOverlaps`
+   * cannot reach the case, and deliberately: it pulls back a `stop` that
+   * overruns the next start, and a container shares its start with the first
+   * thing it contains, so there is nothing to pull back that would not leave a
+   * programme of no length. The result is a guide with genuine overlaps in it,
+   * which `epg validate` calls an error and a consumer has to guess its way
+   * through.
+   *
+   * Two, not one: a single contained programme is as likely to be a real
+   * overlap for `clipOverlaps` to pull back, and dropping on it would throw away
+   * a programme over a source's rounding. Two is a container.
+   *
+   * The parts are kept and the container goes, because the parts are the finer
+   * answer to "what is on at 06:30". `tv_remove_some_overlapping` is the same
+   * rule in the Perl suite.
+   */
+  dropContainers?: boolean;
+  /**
    * Put a placeholder where the schedule says nothing. Off by default.
    *
    * Off because it is the only rule here that invents: `fillStop` and
