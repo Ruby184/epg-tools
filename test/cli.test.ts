@@ -94,7 +94,7 @@ function start(
 async function eventually<T>(what: string, read: () => T | undefined): Promise<T> {
   const until = Date.now() + 5000;
 
-  for (;;) {
+  while (true) {
     const value = read();
 
     if (value !== undefined) {

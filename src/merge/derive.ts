@@ -191,7 +191,7 @@ function rootOf(
   let offsetMinutes = 0;
   let step = declaration;
 
-  for (;;) {
+  while (true) {
     offsetMinutes += step.offset;
 
     if (produced.has(step.from)) {
