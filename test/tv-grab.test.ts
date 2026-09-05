@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { defineConfig, type EpgConfig } from '../src/config.js';
 import { envReader, type ConfigContext } from '../src/core/answers.js';
 import { resolveChannels } from '../src/grabber/channels.js';
-import { channelSelection } from '../src/merge/select.js';
+import { channelSelection, unmatched } from '../src/merge/select.js';
 import type { SiteConfig } from '../src/grabber/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 import {
@@ -268,6 +268,20 @@ describe('applyChannelSelection', () => {
         { xmltvId: 'plus2', from: 'one.example.tv', offset: 120 },
       ]);
       expect(selection.select.has('one.example.tv')).toBe(true);
+    });
+
+    // `resolveDeclarations` already says a derivation whose source is missing
+    // shifts something no site produces. Saying it again from the selection
+    // would be the same news twice, in different words.
+    it('is not reported as unproduced, being produced by the guide', () => {
+      const selection = selecting(epg(), ['one.plus1.example.tv']);
+
+      // The guide produced the source but not the shift — nothing does, which
+      // is what deriving one means.
+      expect(unmatched(selection, ['one.example.tv'])).toEqual([]);
+
+      // The source going missing is still reported, since that is a real gap.
+      expect(unmatched(selection, [])).toEqual(['one.example.tv']);
     });
 
     // Every caller asks rather than passing the answer along, so asking twice

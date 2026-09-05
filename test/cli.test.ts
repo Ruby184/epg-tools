@@ -555,6 +555,61 @@ describe('epg', () => {
       expect(said.match(/produced by no site/g)).toHaveLength(1);
     });
 
+    // A derived channel is never grabbed — its source is — so selecting the
+    // `+1` alone has to pull the source in behind it, and publish both.
+    it('keeps the source of a selected derived channel, and grabs it', async () => {
+      const dir = await tempDir();
+      const config = await configFile(
+        dir,
+        `export default {
+        sites: [{
+          site: 'example.tv',
+          channels: [
+            { xmltvId: 'one.example.tv', siteId: '1', name: 'One' },
+            { xmltvId: 'two.example.tv', siteId: '2', name: 'Two' },
+          ],
+          async request({ day }) { return { day }; },
+          parseDay: ({ channel, day }) => [{
+            channel: channel.xmltvId,
+            start: new Date(day + 'T06:00:00.000Z'),
+            title: [{ value: 'Show' }],
+          }],
+        }],
+        derived: [{ xmltvId: 'one.plus1.example.tv', from: 'one.example.tv', offset: 60 }],
+        days: 1,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+
+      const { code, stderr } = await run([
+        'build',
+        '-c',
+        config,
+        '--channels',
+        'one.plus1.example.tv',
+      ]);
+
+      expect(code).toBe(0);
+
+      const guide = await readFile(join(dir, 'guide.xml'), 'utf8');
+
+      // Both: the shift, and the channel it is a shift of.
+      expect(guide).toContain('<channel id="one.plus1.example.tv">');
+      expect(guide).toContain('<channel id="one.example.tv">');
+      expect(guide).not.toContain('two.example.tv');
+
+      // The source was actually fetched — a shift with nothing to shift is
+      // nothing at all.
+      const cached = await readdir(join(dir, 'cache'), { recursive: true });
+
+      expect(cached.some((entry) => String(entry).includes('one.example.tv'))).toBe(true);
+
+      // And the derived id is not reported as something no site produces: no
+      // site does produce it, which is the point of it.
+      expect(stderr).not.toContain('produced by no site');
+    });
+
     it('is refused where narrowing a run means nothing', async () => {
       const dir = await tempDir();
       const config = await plainConfig(dir);
