@@ -333,7 +333,7 @@ names live only on a subpath (marked below).
 | M3U | `parseM3uStream`, `parseM3uFile`, `parseM3uString`, `serializeM3uEntry`, `serializeM3uHeader`, `writeM3uStream`, `writeM3uToFile`, `M3uParseStream`, `M3uSerializeStream` |
 | Channels | `parseChannelsXml`, `serializeChannelsXml`, `serializeChannelsXmlEntry`, `matchChannels`, `timeshiftOf`, `timeshiftName` |
 | Cache | `CacheManager`, `CACHE_SCHEMA`, `CacheDriverBase`, `FsCacheDriver`, `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`, `MemoryCacheDriver`, `NoCacheDriver`, `isStale`, `DEFAULT_STALENESS` |
-| Grabber | `grab`, `defineSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`, `channelElement`, `siteHttp`, `sitePacing`, `retryAfterMs` |
+| Grabber | `grab`, `defineSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `defineXtreamSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`, `xtreamChannelExtras`, `xtreamProgrammeExtras`, `channelElement`, `siteHttp`, `sitePacing`, `retryAfterMs` |
 | Selection | `channelSelection`, `unmatched` — what `channels` means once `derived` is taken into account, and what it asked for that nothing produced |
 | Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `backfillInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
 
@@ -598,8 +598,9 @@ grabbed again.
 ### `epg-tools/grabber`
 
 `grab`, `defineSiteConfig`, `defineStreamSiteConfig`, `defineXmltvSite`,
-`defineM3uSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`,
-`channelsFromChannelsXml`, `guideUrlsFromM3u`, `siteHttp`, `sitePacing`,
+`defineM3uSite`, `defineXtreamSite`, `resolveChannels`, `resolveSites`,
+`channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`,
+`xtreamChannelExtras`, `xtreamProgrammeExtras`, `siteHttp`, `sitePacing`,
 `retryAfterMs`, `channelElement`, `defaultChannelInfo`, `SiteStateHandle`,
 `StateKey`, `TrackedMap`, `channelsMaxAgeMs`,
 `DEFAULT_CHANNELS_MAX_AGE_DAYS`, `UnchangedError`, `isUnchanged`,

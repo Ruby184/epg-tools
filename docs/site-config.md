@@ -646,6 +646,67 @@ everything below applies unchanged. `tvg-id` becomes both `siteId` and
 `xmltvId`, which is what makes the playlist and the guide agree. See
 [a playlist as a whole source](./m3u.md#a-playlist-as-a-whole-source).
 
+### From an Xtream Codes panel
+
+The panel software most commercial IPTV resellers run. Its company was raided in
+2019 and the API outlived it — every successor implements `player_api.php`, and
+it is what a player means by "Xtream login": a host, a username and a password
+rather than a url with the credentials baked in.
+
+```ts
+import { defineXtreamSite } from 'epg-tools/grabber';
+
+sites: [
+  defineXtreamSite({
+    site: 'panel.example',
+    url: 'http://host:8080',
+    username: process.env.PANEL_USER!,
+    password: process.env.PANEL_PASS!,
+  }),
+],
+```
+
+**Most panels also publish `xmltv.php`**, a whole-guide dump that
+[`defineXmltvSite`](#a-published-guide-as-a-source) already reads — and one request for
+everything beats nine hundred when everything is what you want. This is for when
+it is not: a site is handed only the channel-days that are *stale*, so a run here
+costs one request per channel that needs one, where the dump is all-or-nothing.
+Note that `staleness.alwaysRefetchDays` is `1` by default, so today counts as
+stale and every channel is asked once a day regardless; set it to `0` if you
+would rather trust the cache.
+
+**Everything the panel says is kept.** What the DTD has a place for goes there —
+the name, the icon, the channel number as `preset`, and the listing's own
+`lang` on both `<title>` and `<desc>`, which is what lets two sources of one
+channel merge instead of duplicating. What it has no place for becomes a
+[provider extension](./xmltv.md): the panel's own ids, its catchup flags, and the
+category by name. `--no-extensions` strips those for a guide that must validate.
+
+```ts
+// Replace what is kept, or turn it off with `false`.
+programmeExtras: (element, programme) => {
+  xtreamProgrammeExtras(element, programme);   // keep the defaults
+  element.extraAttribute('mine', programme.epgId ?? '');
+},
+```
+
+The hooks are handed the **normalized** channel and programme — decoded, typed,
+in the shape the ecosystem's own client settles on — which is the thing a site
+`transform` cannot see, since by then the panel's fields are gone and only the
+element is left. A `channelInfo` of your own is composed with rather than
+replaced.
+
+Two things are dropped: `now_playing`, true only at the instant of asking and a
+lie by the time the guide is read, and `direct_source`, which embeds the
+credentials in a stream url.
+
+**On the credentials.** They are query parameters because that is the only place
+this API takes them, which would otherwise put the password into every failed
+request's error message — and from there into the reporter and your CI log. That
+is stripped before it leaves. The exception is [`epg try`](./configuration.md),
+which prints the request url on purpose; it is a debugging command run by the
+account's owner, but it is worth knowing before pasting its output anywhere.
+
 ### What it does with the document
 
 That is the whole of it. The document is **streamed** through the parser and
