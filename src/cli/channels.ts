@@ -21,13 +21,9 @@ import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { derivedChannelList } from '../merge/derive.js';
 import { writeLines } from '../core/streams.js';
+import type { ReportFormat } from './format.js';
 import { readChannelList } from './lists.js';
 import type { ChannelListFile, WantedChannel } from './lists.js';
-
-/** How the report is written — the same two shapes `epg validate` offers. */
-export const CHANNEL_REPORT_FORMATS = ['text', 'json'] as const;
-
-export type ChannelReportFormat = (typeof CHANNEL_REPORT_FORMATS)[number];
 
 /** What the report says about one wanted channel. */
 export interface ChannelReportRow {
@@ -143,7 +139,7 @@ export function renderChannelReport(report: ChannelReport): string {
 export interface ChannelsCommandOptions {
   /** The file naming what is wanted. Without one there is nothing to compare. */
   against?: string | undefined;
-  format?: string | undefined;
+  format?: ReportFormat | undefined;
   /** Exit non-zero unless every wanted channel matched by id. */
   check?: boolean | undefined;
   /**
@@ -184,11 +180,9 @@ export async function reportChannelsCommand(
     throw new Error('epg channels takes -o only with --write, which is what writes a file');
   }
 
+  // Not re-checked here: `--format` is one flag with one set of choices, and
+  // `parseOptions` refuses anything else before a command is reached.
   const format = options.format ?? 'text';
-
-  if (!CHANNEL_REPORT_FORMATS.includes(format as ChannelReportFormat)) {
-    throw new Error(`Unknown --format: ${format}`);
-  }
 
   // Which of the four this is, how much of it has to be held, and how an answer
   // goes back into it are all its own business — see `readChannelList`.

@@ -23,8 +23,8 @@ import { silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
 import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
 import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
-import { renderReport, REPORT_FORMATS, validateFile } from './validate.js';
-import type { ReportFormat } from './validate.js';
+import { REPORT_FORMATS, type ReportFormat } from './format.js';
+import { renderReport, validateFile } from './validate.js';
 import type { CompressionFormat } from '../core/output.js';
 import type { GrabSummary } from '../grabber/types.js';
 

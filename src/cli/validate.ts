@@ -21,11 +21,7 @@ import { pipeline } from 'node:stream/promises';
 import { compressionFromName, decompressor } from '../core/output.js';
 import type { CompressionFormat } from '../core/output.js';
 import { validateXmltv, type ValidationReport } from '../xmltv/validate.js';
-
-/** How the report is written. */
-export const REPORT_FORMATS = ['text', 'json'] as const;
-
-export type ReportFormat = (typeof REPORT_FORMATS)[number];
+import type { ReportFormat } from './format.js';
 
 export interface ValidateFileOptions {
   strict?: boolean;
