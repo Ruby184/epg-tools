@@ -1,14 +1,22 @@
 {
   "name": "epg-tools",
   "version": "0.3.0",
-  "description": "Memory-efficient EPG toolkit: parallel grabbing with day-level caching and streaming XMLTV parsing, merging and serialization",
+  "description": "Memory-efficient EPG toolkit for Node: grab from XMLTV, M3U and Xtream Codes sources with day-level caching, then merge, validate and serve XMLTV guides",
   "keywords": [
+    "cli",
+    "electronic-program-guide",
     "epg",
     "grabber",
     "guide",
     "iptv",
+    "m3u",
+    "playlist",
     "streaming",
-    "xmltv"
+    "tv-grab",
+    "tv-guide",
+    "xmltv",
+    "xtream",
+    "xtream-codes"
   ],
   "homepage": "https://github.com/Ruby184/epg-tools#readme",
   "bugs": {
