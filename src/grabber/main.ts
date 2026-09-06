@@ -32,5 +32,7 @@ export { isUnchanged, UnchangedError } from './revalidate.js';
 export type { Validator } from './revalidate.js';
 export { defineSiteConfig, defineStreamSiteConfig } from './types.js';
 export { defineXmltvSite } from './xmltv-source.js';
+export { defineXtreamSite, xtreamChannelExtras, xtreamProgrammeExtras } from './xtream-source.js';
+export type { XtreamChannel, XtreamProgramme, XtreamSiteOptions } from './xtream-source.js';
 export type { XmltvDayZone, XmltvSiteOptions, XmltvUrlSource } from './xmltv-source.js';
 export type * from './types.js';
