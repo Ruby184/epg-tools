@@ -68,7 +68,8 @@ Options:
                         matched by id, for a CI step
       --write           channels only: write the ids the report suggested back
                         into --against, in place — a *.channels.xml, a playlist
-                        or a guide
+                        or a guide. With -o, writes there and leaves the
+                        original alone
       --before <day>    prune only: remove days before YYYY-MM-DD (default: today)
       --log-level <l>   How much to report: error, warn, info (default) or debug
   -v, --verbose         Same as --log-level debug
@@ -718,6 +719,7 @@ async function execute(
           format: values.format,
           check: values.check,
           write: values.write,
+          output: values.output,
           ...(signal ? { signal } : {}),
         },
         stdout,

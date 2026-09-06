@@ -732,6 +732,78 @@ describe('epg', () => {
       expect(written).toContain('<?keep me?>');
     });
 
+    it('writes elsewhere with -o, leaving the original untouched', async () => {
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'g.channels.xml');
+      const before =
+        `<?xml version="1.0" encoding="UTF-8"?>\n<channels site="example.tv">\n` +
+        `  <channel site_id="1" xmltv_id="">BBC One</channel>\n</channels>\n`;
+
+      await writeFile(file, before);
+
+      const out = join(dir, 'fixed.channels.xml');
+      const { code, stdout } = await run([
+        'channels',
+        '-c',
+        config,
+        '--against',
+        file,
+        '--write',
+        '-o',
+        out,
+      ]);
+
+      expect(code).toBe(0);
+      // The answer went to the new file, and the summary names that one.
+      expect(stdout).toContain(`Wrote 1 id into ${out}`);
+      expect(await readFile(out, 'utf8')).toContain('xmltv_id="bbcone.uk"');
+      expect(await readFile(file, 'utf8')).toBe(before);
+    });
+
+    it('diverts a guide rewrite too, reading the original while writing', async () => {
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'h.xml');
+      const before =
+        `<?xml version="1.0" encoding="UTF-8"?><tv>` +
+        `<channel id="THEIR-1"><display-name>BBC One</display-name></channel>` +
+        `<programme start="20260906060000 +0000" stop="20260906070000 +0000" channel="THEIR-1">` +
+        `<title>Breakfast</title></programme></tv>`;
+
+      await writeFile(file, before);
+
+      const out = join(dir, 'renamed.xml');
+
+      expect(
+        (await run(['channels', '-c', config, '--against', file, '--write', '-o', out])).code,
+      ).toBe(0);
+
+      expect(await readFile(out, 'utf8')).toContain('channel="bbcone.uk"');
+      expect(await readFile(file, 'utf8')).toBe(before);
+    });
+
+    it('refuses -o without --write, which would write nothing anywhere', async () => {
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'i.channels.xml');
+
+      await writeFile(file, '<channels><channel site_id="1" xmltv_id="">A</channel></channels>');
+
+      const { code, stderr } = await run([
+        'channels',
+        '-c',
+        config,
+        '--against',
+        file,
+        '-o',
+        join(dir, 'nope.xml'),
+      ]);
+
+      expect(code).toBe(1);
+      expect(stderr).toContain('takes -o only with --write');
+    });
+
     it('leaves the file alone when there is nothing to write', async () => {
       const dir = await tempDir();
       const config = await siteConfig(dir);

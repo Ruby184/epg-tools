@@ -51,8 +51,13 @@ export interface ChannelListFile {
   map: (channel: WantedChannel, xmltvId: string) => boolean;
   /** What to call one of them in a summary. */
   label: (channel: WantedChannel) => string;
-  /** Put what was mapped back into the file, in place. Nothing if none was. */
-  write: () => Promise<void>;
+  /**
+   * Put what was mapped back — into the file it came from, or into `to`.
+   *
+   * Nothing if nothing was mapped: a file rewritten byte for byte is still a
+   * file whose timestamp moved for no reason.
+   */
+  write: (to?: string) => Promise<void>;
 }
 
 /** What one entry of a file can do, kept beside the channel it produced. */
@@ -93,11 +98,9 @@ export async function readChannelList(file: string): Promise<ChannelListFile> {
 
       return true;
     },
-    // Nothing mapped, nothing written: a file rewritten byte for byte is still
-    // a file whose timestamp moved for no reason.
-    write: async () => {
+    write: async (to) => {
       if (mapped > 0) {
-        await built.write();
+        await built.write(to ?? file);
       }
     },
   };
@@ -106,7 +109,8 @@ export async function readChannelList(file: string): Promise<ChannelListFile> {
 /** What a format's reader produces: its channels, paired with what they can do. */
 interface Built {
   entries: [WantedChannel, Entry][];
-  write: () => Promise<void>;
+  /** Where it goes is the caller's: `--write` alone means back where it came from. */
+  write: (to: string) => Promise<void>;
 }
 
 /**
@@ -136,9 +140,9 @@ function textList(file: string, text: string, format: ListFormat | undefined): B
           },
         ];
       }),
-      write: () =>
+      write: (to) =>
         writeFile(
-          file,
+          to,
           serializeM3uHeader(playlist.header) +
             playlist.entries.map((entry) => serializeM3uEntry(entry)).join(''),
           'utf8',
@@ -160,7 +164,7 @@ function textList(file: string, text: string, format: ListFormat | undefined): B
           },
         },
       ]),
-      write: () => writeFile(file, serializeChannelsXml(list), 'utf8'),
+      write: (to) => writeFile(to, serializeChannelsXml(list), 'utf8'),
     };
   }
 
@@ -208,7 +212,7 @@ function guideList(file: string, found: readonly WantedChannel[]): Built {
         set: (xmltvId: string) => renames.set(channel.id, xmltvId),
       },
     ]),
-    write: async () => {
+    write: async (to) => {
       const serializer = new XmltvSerializeStream();
 
       serializer.setEncoding('utf8');
@@ -229,12 +233,13 @@ function guideList(file: string, found: readonly WantedChannel[]): Built {
         }
       }
 
-      // Reading the file while writing it, which is safe because `writeOutput`
-      // writes beside the path and renames into place only once the document is
-      // finished — so the read above has the old file throughout.
+      // Reading the source while writing over it, which is safe because
+      // `writeOutput` writes beside the path and renames into place only once
+      // the document is finished — so the read above has the old file
+      // throughout, whether or not `to` is that same path.
       const pumped = pipeline(Readable.from(renamed(), { objectMode: true }), serializer);
 
-      await Promise.all([writeOutput(file, serializer), pumped]);
+      await Promise.all([writeOutput(to, serializer), pumped]);
     },
   };
 }

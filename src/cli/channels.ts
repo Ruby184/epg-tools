@@ -156,6 +156,16 @@ export interface ChannelsCommandOptions {
    * unmapped.
    */
   write?: boolean | undefined;
+  /**
+   * Where `--write` puts it, rather than back over `--against`.
+   *
+   * In place is the default because that is what writing an answer into your
+   * own channel list means, and those files live in version control — `git
+   * diff` is then exactly the ids added, since every reader here round-trips
+   * byte for byte. `-o` is for the times that is not true: somebody else's
+   * guide, a playlist you did not author, or simply wanting to look first.
+   */
+  output?: string | undefined;
   signal?: AbortSignal | undefined;
 }
 
@@ -166,6 +176,12 @@ export async function reportChannelsCommand(
 ): Promise<number> {
   if (options.against === undefined) {
     throw new Error('epg channels needs --against <playlist.m3u | channels.xml | guide.xml>');
+  }
+
+  // Said rather than ignored: `-o` is a global flag, and one given to a command
+  // that is only reporting has been typed for a reason.
+  if (options.output !== undefined && options.write !== true) {
+    throw new Error('epg channels takes -o only with --write, which is what writes a file');
   }
 
   const format = options.format ?? 'text';
@@ -208,13 +224,13 @@ export async function reportChannelsCommand(
   const report = reportChannels(wanted, [...available, ...derived]);
   const written = options.write === true ? fillIds(report, list) : [];
 
-  await list.write();
+  await list.write(options.output);
 
   await writeLines(
     stdout,
     format === 'json'
       ? JSON.stringify({ ...report, ...(options.write === true ? { written } : {}) }, null, 2)
-      : renderChannelReport(report) + renderWritten(written, options.against),
+      : renderChannelReport(report) + renderWritten(written, options.output ?? options.against),
   );
 
   // What was just written counts as matched: the ids are in the file now, so a

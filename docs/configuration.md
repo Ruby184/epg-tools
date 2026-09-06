@@ -142,7 +142,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--channels <what>` | `build`/`grab`/`merge`/`serve`, and required by `filter`: keep only these channels and fetch nothing for the rest — ids, or a file naming them. Repeatable — see [subsetting a guide](#keeping-only-some-channels) |
 | `--indent <n\|str>` | `build`/`merge`/`filter`: pretty-print with this indentation, mirroring `JSON.stringify` |
 | `--against <file>` | `channels` only: what you want a guide for — an M3U playlist, a `*.channels.xml` or an XMLTV guide |
-| `--write` | `channels` only: write the ids the report suggested back into `--against`, in place |
+| `--write` | `channels` only: write the ids the report suggested back into `--against`, in place — or to `-o` |
 | `--check` | `channels` only: exit 1 unless every wanted channel matched by id |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
@@ -712,6 +712,17 @@ It writes into whichever of the three the file is — a `*.channels.xml`'s
 `xmltv_id`, a playlist's `tvg-id`, or, for a guide, it **renames** the
 `<channel id>` and every `<programme channel=…>` with it. All three round-trip,
 so the diff is only the ids; the guide is rewritten by streaming, never held.
+
+**In place, unless you say otherwise.** That is what writing an answer into your
+own channel list means, and these files live in version control — `git diff` is
+then exactly the ids added, since every reader here round-trips byte for byte.
+For the times that is not true — somebody else's guide, a playlist you did not
+author, or simply wanting to look first — `-o` writes elsewhere and leaves the
+original alone:
+
+```sh
+epg channels --against theirs.xml --write -o ours.xml
+```
 
 Only where there is no id already. One that is there is somebody's decision —
 possibly one made against this very suggestion — and replacing it silently is
