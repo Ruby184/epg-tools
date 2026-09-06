@@ -66,6 +66,9 @@ Options:
                         playlist, a *.channels.xml, or an XMLTV guide
       --check           channels only: exit 1 unless every wanted channel
                         matched by id, for a CI step
+      --write           channels only: write the ids the report suggested back
+                        into --against, in place — a *.channels.xml, a playlist
+                        or a guide
       --before <day>    prune only: remove days before YYYY-MM-DD (default: today)
       --log-level <l>   How much to report: error, warn, info (default) or debug
   -v, --verbose         Same as --log-level debug
@@ -488,6 +491,9 @@ async function execute(
       // guide for, and whether a mismatch should fail a CI step.
       against: { type: 'string' },
       check: { type: 'boolean' },
+      // `epg channels` only: put the ids the report suggested back into the
+      // file it read them from.
+      write: { type: 'boolean' },
       // Repeatable, and the union of what each names: a list kept in git plus
       // the one id being tried out is a normal thing to want, and overwriting
       // would make the order of two flags matter.
@@ -711,6 +717,7 @@ async function execute(
           against: values.against,
           format: values.format,
           check: values.check,
+          write: values.write,
           ...(signal ? { signal } : {}),
         },
         stdout,

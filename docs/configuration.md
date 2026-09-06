@@ -142,6 +142,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--channels <what>` | `build`/`grab`/`merge`/`serve`, and required by `filter`: keep only these channels and fetch nothing for the rest — ids, or a file naming them. Repeatable — see [subsetting a guide](#keeping-only-some-channels) |
 | `--indent <n\|str>` | `build`/`merge`/`filter`: pretty-print with this indentation, mirroring `JSON.stringify` |
 | `--against <file>` | `channels` only: what you want a guide for — an M3U playlist, a `*.channels.xml` or an XMLTV guide |
+| `--write` | `channels` only: write the ids the report suggested back into `--against`, in place |
 | `--check` | `channels` only: exit 1 unless every wanted channel matched by id |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
@@ -699,6 +700,24 @@ is the channels your configured sites can produce.
 Only what is wrong is printed — a channel matched by id says nothing, which is
 what keeps the output the size of the problem rather than the size of the
 lineup.
+
+**`--write` puts the answer back.** The report has always ended by telling you to
+set an id by hand; this is that confirmation, given once for the whole file:
+
+```sh
+epg channels --against tvtv.us.channels.xml --write
+```
+
+It writes into whichever of the three the file is — a `*.channels.xml`'s
+`xmltv_id`, a playlist's `tvg-id`, or, for a guide, it **renames** the
+`<channel id>` and every `<programme channel=…>` with it. All three round-trip,
+so the diff is only the ids; the guide is rewritten by streaming, never held.
+
+Only where there is no id already. One that is there is somebody's decision —
+possibly one made against this very suggestion — and replacing it silently is
+worse than leaving a channel unmapped. An ambiguous match is still refused and a
+timeshift is still a [derived channel](#derived-channels) rather than a mapping,
+so neither is written.
 
 `--check` exits **1** unless every wanted channel matched **by id**. A name
 match is deliberately not enough: it is a suggestion, nothing has been written

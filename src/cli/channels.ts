@@ -13,18 +13,26 @@
  * the near misses were.
  */
 
-import { readFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import type { Writable } from 'node:stream';
 import { matchChannels } from '../channels/match.js';
 import { parseChannelsXml } from '../channels/parse.js';
+import { serializeChannelsXml } from '../channels/serialize.js';
 import type { ChannelMatchKind } from '../channels/types.js';
 import type { EpgConfig } from '../config.js';
 import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { parseM3uString } from '../m3u/parse.js';
+import { serializeM3uEntry, serializeM3uHeader } from '../m3u/serialize.js';
 import { derivedChannelList } from '../merge/derive.js';
 import { writeLines } from '../core/streams.js';
-import { parseXmltvString } from '../xmltv/parse.js';
+import { parseXmltvStream, parseXmltvString } from '../xmltv/parse.js';
+import { isGuide, sniff } from './sniff.js';
+import { XmltvSerializeStream } from '../xmltv/serialize.js';
+import type { XmltvParseEvent } from '../xmltv/types.js';
+import { guideBytes, writeOutput } from '../core/output.js';
 
 /** How the report is written — the same two shapes `epg validate` offers. */
 export const CHANNEL_REPORT_FORMATS = ['text', 'json'] as const;
@@ -237,7 +245,162 @@ export interface ChannelsCommandOptions {
   format?: string | undefined;
   /** Exit non-zero unless every wanted channel matched by id. */
   check?: boolean | undefined;
+  /**
+   * Write the ids the report suggested back into `--against`, in place.
+   *
+   * The two formats that carry a mapping of their own: a `*.channels.xml`'s
+   * `xmltv_id`, and a playlist's `tvg-id`. Only entries that have **none** — an
+   * id already there is somebody's decision, possibly one made against this
+   * very suggestion, and replacing it silently is worse than leaving a channel
+   * unmapped.
+   */
+  write?: boolean | undefined;
   signal?: AbortSignal | undefined;
+}
+
+/** One entry of a file that can be written back, however it spells its id. */
+interface Mappable {
+  /** What the report matches on. */
+  wanted: WantedChannel;
+  /** Whether it already names an id, in which case nothing is written. */
+  mapped: boolean;
+  /** What to call it in the summary. */
+  label: string;
+  set: (xmltvId: string) => void;
+}
+
+/** A file the report can write its answer back into. */
+interface Mapping {
+  entries: Mappable[];
+  /** Put the answer back where it came from, in place. */
+  write: () => Promise<void>;
+}
+
+/**
+ * The file as something writable, or a refusal naming why it is not.
+ *
+ * Two of the formats the report reads carry a mapping: a `*.channels.xml` says
+ * `xmltv_id` and a playlist says `tvg-id`, and both are that file's own
+ * statement about which guide channel it means. Both round-trip byte for byte,
+ * so what is written back differs only by the ids added.
+ *
+ * A guide does not: its `<channel id>` is that document's own name for a
+ * channel rather than a mapping onto one, and changing it would mean rewriting
+ * every `<programme channel=…>` with it — a rewrite of somebody else's document.
+ * A plain list of ids has no names to match on in the first place.
+ */
+function mappingFor(text: string, from: string, found?: WantedChannel[]): Mapping {
+  if (text.startsWith('#EXTM3U') || text.includes('#EXTINF:')) {
+    const playlist = parseM3uString(text);
+
+    return {
+      entries: playlist.entries.map((entry) => {
+        const id = entry.attributes.get('tvg-id') ?? entry.attributes.get('tvg-ID') ?? '';
+        const name = entry.attributes.get('tvg-name') || entry.name;
+
+        return {
+          wanted: { id, name },
+          mapped: id !== '',
+          label: name || entry.url,
+          // Replaces an empty `tvg-id` where the entry had one, keeping its
+          // place among the attributes; appends where it had none at all.
+          set: (xmltvId: string) => entry.attributes.set('tvg-id', xmltvId),
+        };
+      }),
+      write: async () => {
+        await writeFile(
+          from,
+          serializeM3uHeader(playlist.header) +
+            playlist.entries.map((entry) => serializeM3uEntry(entry)).join(''),
+          'utf8',
+        );
+      },
+    };
+  }
+
+  if (text.includes('<channels')) {
+    const list = parseChannelsXml(text);
+
+    return {
+      entries: list.entries.map((entry) => ({
+        wanted: { id: entry.xmltvId, name: entry.name },
+        mapped: entry.xmltvId !== '',
+        label: entry.name || entry.siteId,
+        set: (xmltvId: string) => {
+          entry.xmltvId = xmltvId;
+        },
+      })),
+      write: async () => {
+        await writeFile(from, serializeChannelsXml(list), 'utf8');
+      },
+    };
+  }
+
+  if (found !== undefined) {
+    // A guide names its channels rather than mapping them, so writing here is a
+    // *rename*: the `<channel id>`, and every `<programme channel=…>` with it.
+    // Streamed rather than rebuilt — the same parse-map-serialize `epg filter`
+    // runs, and for the same reason. A guide is the one of these formats that is
+    // routinely 90 MiB, and it was never read whole to get here either.
+    const renames = new Map<string, string>();
+
+    return {
+      entries: found.map((channel) => ({
+        wanted: channel,
+        // A guide's channel always has an id — that is what a `<channel>` is —
+        // so what makes one writable is not a missing id but one that lined up
+        // with nothing.
+        mapped: false,
+        label: channel.name || channel.id,
+        set: (xmltvId: string) => renames.set(channel.id, xmltvId),
+      })),
+      write: async () => {
+        const serializer = new XmltvSerializeStream();
+
+        serializer.setEncoding('utf8');
+
+        async function* renamed(): AsyncGenerator<XmltvParseEvent> {
+          for await (const event of parseXmltvStream(guideBytes(from))) {
+            if (event.type === 'channel') {
+              const to = renames.get(event.value.id);
+
+              yield to === undefined ? event : { ...event, value: { ...event.value, id: to } };
+            } else if (event.type === 'programme') {
+              const to = renames.get(event.value.channel);
+
+              yield to === undefined ? event : { ...event, value: { ...event.value, channel: to } };
+            } else {
+              yield event;
+            }
+          }
+        }
+
+        // Read from the file while writing it: safe because `writeOutput` writes
+        // beside the path and renames into place only once the document is
+        // finished, so the stream above is reading the old file throughout.
+        const pumped = pipeline(Readable.from(renamed(), { objectMode: true }), serializer);
+
+        await Promise.all([writeOutput(from, serializer), pumped]);
+      },
+    };
+  }
+
+  throw new Error(
+    `--write needs --against to be a *.channels.xml, a playlist or a guide, which ${from} is not`,
+  );
+}
+
+/** Every `<channel>` a guide describes, without ever holding the document. */
+async function guideChannels(bytes: AsyncGenerator<Uint8Array>): Promise<WantedChannel[]> {
+  const found: WantedChannel[] = [];
+
+  for await (const event of parseXmltvStream(bytes)) {
+    if (event.type === 'channel') {
+      found.push({ id: event.value.id, name: event.value.displayName[0]?.value ?? '' });
+    }
+  }
+
+  return found;
 }
 
 /**
@@ -261,7 +424,30 @@ export async function reportChannelsCommand(
     throw new Error(`Unknown --format: ${format}`);
   }
 
-  const wanted = wantedFrom(await readFile(options.against, 'utf8'), options.against);
+  // Sniffed rather than read whole. A guide is the one of these formats that is
+  // routinely 90 MiB, and both what this reports on and what `--write` puts back
+  // stream through it — loading it to find out what it was would give that away
+  // before either had started.
+  const source = await sniff(options.against);
+  const found = isGuide(source.head) ? await guideChannels(source.whole()) : undefined;
+  const text = found === undefined ? await source.text() : '';
+
+  // `--write` needs the entries themselves, not the ids and names `wantedFrom`
+  // reduces them to, so an answer can be put back where it came from.
+  const mapping = options.write === true ? mappingFor(text, options.against, found) : undefined;
+  // Joined back by object identity rather than by position. `matchChannels`
+  // does preserve order, but a row finding its entry by index would be one
+  // refactor away from writing an id onto the wrong channel.
+  const mappableOf = new Map<WantedChannel, Mappable>();
+
+  for (const entry of mapping?.entries ?? []) {
+    mappableOf.set(entry.wanted, entry);
+  }
+
+  const wanted =
+    mapping !== undefined
+      ? mapping.entries.map((entry) => entry.wanted)
+      : (found ?? wantedFrom(text, options.against));
   const resolved = await resolveSites(config.sites as AnySiteConfig[], {
     ...(options.signal ? { signal: options.signal } : {}),
   });
@@ -290,11 +476,68 @@ export async function reportChannelsCommand(
     : [];
 
   const report = reportChannels(wanted, [...available, ...derived]);
+  const written = fillIds(report, mappableOf);
+
+  if (mapping !== undefined && written.length > 0) {
+    await mapping.write();
+  }
 
   await writeLines(
     stdout,
-    format === 'json' ? JSON.stringify(report, null, 2) : renderChannelReport(report),
+    format === 'json'
+      ? JSON.stringify({ ...report, ...(mapping === undefined ? {} : { written }) }, null, 2)
+      : renderChannelReport(report) + renderWritten(written, options.against),
   );
 
-  return options.check === true && !report.ok ? 1 : 0;
+  // What was just written counts as matched: the ids are in the file now, so a
+  // second run would match them by id, and failing the run that fixed them
+  // would be a strange thing for a `--check` to do.
+  const short = report.counts.wanted - report.counts.byId - written.length;
+
+  return options.check === true && short > 0 ? 1 : 0;
+}
+
+/** One id written into one entry. */
+interface WrittenId {
+  label: string;
+  xmltvId: string;
+}
+
+/**
+ * Fill in the ids the report found a name for.
+ *
+ * The asymmetry the matcher is built on holds right up to here: an id match
+ * needs nothing done, an ambiguous one is refused, and a timeshift is a
+ * *derived* channel rather than a mapping. What is left is the name match —
+ * which the report has been telling people to confirm by hand, and the flag is
+ * that confirmation, given once for the whole file.
+ */
+function fillIds(report: ChannelReport, mappableOf: Map<WantedChannel, Mappable>): WrittenId[] {
+  const written: WrittenId[] = [];
+
+  for (const row of report.rows) {
+    const entry = mappableOf.get(row.wanted);
+
+    if (entry === undefined || entry.mapped || row.kind !== 'name' || !row.matched) {
+      continue;
+    }
+
+    entry.set(row.matched.xmltvId);
+    written.push({ label: entry.label, xmltvId: row.matched.xmltvId });
+  }
+
+  return written;
+}
+
+/** What was written, under the report that suggested it. */
+function renderWritten(written: readonly WrittenId[], file: string): string {
+  if (written.length === 0) {
+    return '';
+  }
+
+  return [
+    '',
+    `Wrote ${written.length} ${written.length === 1 ? 'id' : 'ids'} into ${file}:`,
+    ...written.map((one) => `  ${one.label} → ${one.xmltvId}`),
+  ].join('\n');
 }

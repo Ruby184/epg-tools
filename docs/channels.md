@@ -147,7 +147,9 @@ the *wrong* guide shows a confident, plausible, incorrect schedule.
 | nothing | `none` | `0` | nothing produces this channel |
 
 A name match is never applied on its own. Confirm one by writing the id into
-your channel list, which is what `epg channels` tells you to do.
+your channel list — which is what `epg channels` tells you to do, and what
+`epg channels --against <file> --write` does for you once you have read the
+report and agree with it.
 
 ### What a name can differ by
 
