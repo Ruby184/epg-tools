@@ -1,7 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { renderChannelReport, reportChannels, wantedFrom } from '../src/cli/channels.js';
+import { renderChannelReport, reportChannels } from '../src/cli/channels.js';
+import { wantedFrom } from '../src/cli/lists.js';
 import { matchChannels, timeshiftName, timeshiftOf } from '../src/channels/match.js';
 import { channelsFromChannelsXml } from '../src/grabber/channels.js';
 import { parseChannelsXml } from '../src/channels/parse.js';

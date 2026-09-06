@@ -371,7 +371,7 @@ async function filterCommand(
     throw new UsageError('epg filter needs --channels: without it there is nothing to filter');
   }
 
-  const { wantedIds } = await import('./wanted.js');
+  const { wantedIds } = await import('./lists.js');
   const { filterGuide } = await import('./filter.js');
   const channels = new Set<string>();
 
@@ -620,7 +620,7 @@ async function execute(
       throw new UsageError(`--channels is for ${SELECTABLE.join(', ')}, not ${command}`);
     }
 
-    const { wantedIds } = await import('./wanted.js');
+    const { wantedIds } = await import('./lists.js');
     const selected = new Set<string>();
 
     for (const value of values.channels) {

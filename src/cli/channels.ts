@@ -13,120 +13,21 @@
  * the near misses were.
  */
 
-import { writeFile } from 'node:fs/promises';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 import type { Writable } from 'node:stream';
 import { matchChannels } from '../channels/match.js';
-import { parseChannelsXml } from '../channels/parse.js';
-import { serializeChannelsXml } from '../channels/serialize.js';
 import type { ChannelMatchKind } from '../channels/types.js';
 import type { EpgConfig } from '../config.js';
 import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
-import { parseM3uString } from '../m3u/parse.js';
-import { serializeM3uEntry, serializeM3uHeader } from '../m3u/serialize.js';
 import { derivedChannelList } from '../merge/derive.js';
 import { writeLines } from '../core/streams.js';
-import { parseXmltvStream, parseXmltvString } from '../xmltv/parse.js';
-import { isGuide, sniff } from './sniff.js';
-import { XmltvSerializeStream } from '../xmltv/serialize.js';
-import type { XmltvParseEvent } from '../xmltv/types.js';
-import { guideBytes, writeOutput } from '../core/output.js';
+import { guideChannels, isGuide, mappingFor, sniff, wantedFrom } from './lists.js';
+import type { Mappable, WantedChannel } from './lists.js';
 
 /** How the report is written — the same two shapes `epg validate` offers. */
 export const CHANNEL_REPORT_FORMATS = ['text', 'json'] as const;
 
 export type ChannelReportFormat = (typeof CHANNEL_REPORT_FORMATS)[number];
-
-/** One channel somebody wants a guide for, however they said so. */
-export interface WantedChannel {
-  id: string;
-  name: string;
-}
-
-/**
- * The channels a file asks for, whichever of the three kinds it is.
- *
- * Sniffed rather than taken from the extension: all three get renamed, and
- * `.xml` alone does not say whether it is a channel list or a guide. What each
- * one *is* is unmistakable a few bytes in.
- *
- * Each is read whole, which is what this command is: one file the caller named,
- * once. The streaming forms exist for a guide being *built*, where the document
- * is the whole point and may be 90 MiB; here the answer is a list of names.
- */
-export function wantedFrom(text: string, from: string): WantedChannel[] {
-  if (text.startsWith('#EXTM3U') || text.includes('#EXTINF:')) {
-    return parseM3uString(text).entries.map((entry) => ({
-      id: entry.attributes.get('tvg-id') ?? entry.attributes.get('tvg-ID') ?? '',
-      name: entry.attributes.get('tvg-name') || entry.name,
-    }));
-  }
-
-  if (text.includes('<channels')) {
-    return parseChannelsXml(text).entries.map((entry) => ({
-      id: entry.xmltvId,
-      name: entry.name,
-    }));
-  }
-
-  if (text.includes('<tv')) {
-    return parseXmltvString(text).channels.map((channel) => ({
-      id: channel.id,
-      name: channel.displayName[0]?.value ?? '',
-    }));
-  }
-
-  const ids = idList(text);
-
-  if (ids !== undefined) {
-    return ids.map((id) => ({ id, name: '' }));
-  }
-
-  throw new Error(
-    `Cannot tell what ${from} is: expected an M3U playlist, a *.channels.xml, an XMLTV guide, or a list of ids`,
-  );
-}
-
-/**
- * A plain list of ids — one per line or comma-separated, `#` a comment.
- *
- * Last, because everything is plain text: the three formats above have said no
- * before this is asked. `undefined` for anything that does not look like a list
- * of ids, so a file of something else entirely still gets the error above
- * rather than being read as a channel called `<!DOCTYPE`.
- *
- * The test is deliberately narrow — no markup, no whitespace inside an entry —
- * since an xmltv id is a token and this is the last chance to notice it is not.
- */
-function idList(text: string): string[] | undefined {
-  const ids: string[] = [];
-
-  for (const line of text.split('\n')) {
-    const content = line.slice(0, line.indexOf('#') === -1 ? undefined : line.indexOf('#')).trim();
-
-    if (content === '') {
-      continue;
-    }
-
-    for (const id of content.split(',')) {
-      const trimmed = id.trim();
-
-      if (trimmed === '') {
-        continue;
-      }
-
-      if (/[<>\s"']/.test(trimmed)) {
-        return undefined;
-      }
-
-      ids.push(trimmed);
-    }
-  }
-
-  return ids.length > 0 ? ids : undefined;
-}
 
 /** What the report says about one wanted channel. */
 export interface ChannelReportRow {
@@ -258,157 +159,6 @@ export interface ChannelsCommandOptions {
   signal?: AbortSignal | undefined;
 }
 
-/** One entry of a file that can be written back, however it spells its id. */
-interface Mappable {
-  /** What the report matches on. */
-  wanted: WantedChannel;
-  /** Whether it already names an id, in which case nothing is written. */
-  mapped: boolean;
-  /** What to call it in the summary. */
-  label: string;
-  set: (xmltvId: string) => void;
-}
-
-/** A file the report can write its answer back into. */
-interface Mapping {
-  entries: Mappable[];
-  /** Put the answer back where it came from, in place. */
-  write: () => Promise<void>;
-}
-
-/**
- * The file as something writable, or a refusal naming why it is not.
- *
- * Two of the formats the report reads carry a mapping: a `*.channels.xml` says
- * `xmltv_id` and a playlist says `tvg-id`, and both are that file's own
- * statement about which guide channel it means. Both round-trip byte for byte,
- * so what is written back differs only by the ids added.
- *
- * A guide does not: its `<channel id>` is that document's own name for a
- * channel rather than a mapping onto one, and changing it would mean rewriting
- * every `<programme channel=…>` with it — a rewrite of somebody else's document.
- * A plain list of ids has no names to match on in the first place.
- */
-function mappingFor(text: string, from: string, found?: WantedChannel[]): Mapping {
-  if (text.startsWith('#EXTM3U') || text.includes('#EXTINF:')) {
-    const playlist = parseM3uString(text);
-
-    return {
-      entries: playlist.entries.map((entry) => {
-        const id = entry.attributes.get('tvg-id') ?? entry.attributes.get('tvg-ID') ?? '';
-        const name = entry.attributes.get('tvg-name') || entry.name;
-
-        return {
-          wanted: { id, name },
-          mapped: id !== '',
-          label: name || entry.url,
-          // Replaces an empty `tvg-id` where the entry had one, keeping its
-          // place among the attributes; appends where it had none at all.
-          set: (xmltvId: string) => entry.attributes.set('tvg-id', xmltvId),
-        };
-      }),
-      write: async () => {
-        await writeFile(
-          from,
-          serializeM3uHeader(playlist.header) +
-            playlist.entries.map((entry) => serializeM3uEntry(entry)).join(''),
-          'utf8',
-        );
-      },
-    };
-  }
-
-  if (text.includes('<channels')) {
-    const list = parseChannelsXml(text);
-
-    return {
-      entries: list.entries.map((entry) => ({
-        wanted: { id: entry.xmltvId, name: entry.name },
-        mapped: entry.xmltvId !== '',
-        label: entry.name || entry.siteId,
-        set: (xmltvId: string) => {
-          entry.xmltvId = xmltvId;
-        },
-      })),
-      write: async () => {
-        await writeFile(from, serializeChannelsXml(list), 'utf8');
-      },
-    };
-  }
-
-  if (found !== undefined) {
-    // A guide names its channels rather than mapping them, so writing here is a
-    // *rename*: the `<channel id>`, and every `<programme channel=…>` with it.
-    // Streamed rather than rebuilt — the same parse-map-serialize `epg filter`
-    // runs, and for the same reason. A guide is the one of these formats that is
-    // routinely 90 MiB, and it was never read whole to get here either.
-    const renames = new Map<string, string>();
-
-    return {
-      entries: found.map((channel) => ({
-        wanted: channel,
-        // A guide's channel always has an id — that is what a `<channel>` is —
-        // so what makes one writable is not a missing id but one that lined up
-        // with nothing.
-        mapped: false,
-        label: channel.name || channel.id,
-        set: (xmltvId: string) => renames.set(channel.id, xmltvId),
-      })),
-      write: async () => {
-        const serializer = new XmltvSerializeStream();
-
-        serializer.setEncoding('utf8');
-
-        async function* renamed(): AsyncGenerator<XmltvParseEvent> {
-          for await (const event of parseXmltvStream(guideBytes(from))) {
-            if (event.type === 'channel') {
-              const to = renames.get(event.value.id);
-
-              yield to === undefined ? event : { ...event, value: { ...event.value, id: to } };
-            } else if (event.type === 'programme') {
-              const to = renames.get(event.value.channel);
-
-              yield to === undefined ? event : { ...event, value: { ...event.value, channel: to } };
-            } else {
-              yield event;
-            }
-          }
-        }
-
-        // Read from the file while writing it: safe because `writeOutput` writes
-        // beside the path and renames into place only once the document is
-        // finished, so the stream above is reading the old file throughout.
-        const pumped = pipeline(Readable.from(renamed(), { objectMode: true }), serializer);
-
-        await Promise.all([writeOutput(from, serializer), pumped]);
-      },
-    };
-  }
-
-  throw new Error(
-    `--write needs --against to be a *.channels.xml, a playlist or a guide, which ${from} is not`,
-  );
-}
-
-/** Every `<channel>` a guide describes, without ever holding the document. */
-async function guideChannels(bytes: AsyncGenerator<Uint8Array>): Promise<WantedChannel[]> {
-  const found: WantedChannel[] = [];
-
-  for await (const event of parseXmltvStream(bytes)) {
-    if (event.type === 'channel') {
-      found.push({ id: event.value.id, name: event.value.displayName[0]?.value ?? '' });
-    }
-  }
-
-  return found;
-}
-
-/**
- * Read what is wanted, resolve what is available, and report the difference.
- *
- * Returns the exit code, so the caller does nothing but hand it on: `0` unless
- * `--check` was asked for and something does not line up.
- */
 export async function reportChannelsCommand(
   config: EpgConfig,
   options: ChannelsCommandOptions,
