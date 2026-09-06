@@ -64,6 +64,7 @@ async function panel(
     categories?: unknown;
     listings?: (streamId: string) => unknown;
     status?: number;
+    profile?: unknown;
   } = {},
 ): Promise<Panel> {
   const asked: IncomingMessage[] = [];
@@ -83,6 +84,21 @@ async function panel(
     }
 
     response.writeHead(200, { 'content-type': 'application/json' });
+
+    // No action at all: the panel's word on the account and on itself. Note it
+    // echoes the password straight back, which is why none of it is kept.
+    if (action === null) {
+      response.end(
+        JSON.stringify(
+          answers.profile ?? {
+            user_info: { auth: 1, status: 'Active', exp_date: null, password: 'hunter2' },
+            server_info: { timezone: 'Europe/Bratislava' },
+          },
+        ),
+      );
+
+      return;
+    }
 
     if (action === 'get_live_categories') {
       response.end(
@@ -344,6 +360,98 @@ describe('defineXtreamSite', () => {
 
     expect(seen.length).toBeGreaterThan(0);
     expect(said).not.toContain('hunter2');
+  });
+
+  /** Every `site:failed` message a run produced. */
+  async function failures(url: string): Promise<string[]> {
+    const said: string[] = [];
+
+    await grab([site(url)], {
+      cache: store(),
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'site:failed') {
+          said.push(String((event.error as Error).message));
+        }
+      },
+    });
+
+    return said;
+  }
+
+  // The panel says outright what an empty channel list only implies.
+  it('fails the site when the panel refuses the account, and asks nothing else', async () => {
+    const refused = await panel({
+      profile: { user_info: { auth: 0, message: 'Bad credentials' } },
+    });
+
+    expect(await failures(refused.url)).toEqual([expect.stringContaining('Bad credentials')]);
+    // There is no sense asking a panel for channels it has already refused you.
+    expect(refused.asked).toHaveLength(1);
+  });
+
+  it('tells an expired subscription from a working one', async () => {
+    const expired = await panel({ profile: { user_info: { auth: 1, status: 'Expired' } } });
+
+    expect(await failures(expired.url)).toEqual([expect.stringContaining('Expired')]);
+  });
+
+  // The failure that otherwise looks like the guide mysteriously emptying.
+  it('warns before the subscription runs out', async () => {
+    const soon = Math.floor(Date.now() / 1000) + 2 * 86_400;
+    const source = await panel({
+      profile: { user_info: { auth: 1, status: 'Active', exp_date: String(soon) } },
+    });
+    const said: string[] = [];
+
+    await grab([site(source.url)], {
+      cache: store(),
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'site:warning') {
+          said.push(event.message);
+        }
+      },
+    });
+
+    expect(said).toContain('the account expires in 2 days');
+  });
+
+  // The derived offset is per listing and right across a DST boundary; the
+  // panel's own zone is what is left when a listing gives nothing to derive
+  // from — and it travels with the channel list, so a cached list keeps it.
+  it('falls back to the panel`s timezone when a listing has no wall clock', async () => {
+    const source = await panel({
+      listings: () => ({
+        epg_listings: [
+          { ...listing(`${DAY}T20:00:00`, `${DAY}T21:00:00`, 'No wall clock'), start: undefined },
+        ],
+      }),
+    });
+
+    // Europe/Bratislava is +0200 in September, which is what the panel said it
+    // was in — reached without the listing saying so itself.
+    expect(await guide(source)).toContain('start="20260906200000 +0200"');
+  });
+
+  it('carries the panel`s timezone on the channel list, so a cached one keeps it', async () => {
+    const source = await panel();
+
+    const channels = await resolveChannels(site(source.url));
+
+    expect(channels[0]?.data).toMatchObject({ timezone: 'Europe/Bratislava' });
+  });
+
+  it('ignores a timezone the panel made up', async () => {
+    const source = await panel({
+      profile: { user_info: { auth: 1 }, server_info: { timezone: 'Nowhere/Fictional' } },
+    });
+
+    const channels = await resolveChannels(site(source.url));
+
+    // An unknown zone throws where it is used rather than where it was read,
+    // which would be a channel failing for a reason nothing names.
+    expect(channels[0]?.data).not.toHaveProperty('timezone');
   });
 
   it('takes a hook for the extensions, on either element', async () => {

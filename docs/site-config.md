@@ -675,6 +675,23 @@ Note that `staleness.alwaysRefetchDays` is `1` by default, so today counts as
 stale and every channel is asked once a day regardless; set it to `0` if you
 would rather trust the cache.
 
+**It asks the panel about itself first.** `player_api.php` with no action at all
+answers with the account's standing and the server's own settings, and that call
+goes before the others — there is no sense asking a panel for channels it has
+already refused you. What it buys:
+
+- a wrong password **fails the site** with what the panel said, rather than
+  looking like a panel with no channels on it;
+- `Expired` and `Banned` are told apart from each other and from empty;
+- a subscription running out **warns a week ahead**, which is the failure that
+  otherwise looks like the guide mysteriously emptying one morning;
+- the panel's own **timezone** becomes the fallback for deciding which day a
+  programme belongs to, where a listing gives nothing to work it out from.
+
+That timezone rides on the channel list — cached with it under `cacheChannels`,
+and asked for again exactly when the list is. The rest of that answer is *not*
+kept anywhere: it echoes your password straight back at you.
+
 **Everything the panel says is kept.** What the DTD has a place for goes there —
 the name, the icon, the channel number as `preset`, and the listing's own
 `lang` on both `<title>` and `<desc>`, which is what lets two sources of one

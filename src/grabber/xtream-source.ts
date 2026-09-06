@@ -34,6 +34,7 @@
 
 import { GrabberError } from '../core/error.js';
 import { xmltvDate } from '../xmltv/date.js';
+import { xmltvZoneOffset } from '../xmltv/zone.js';
 import type { XmltvDate } from '../xmltv/date.js';
 import type { ChannelBuilder, ProgrammeBuilder } from '../xmltv/builder.js';
 import { dayOf, type XmltvDayZone } from './xmltv-source.js';
@@ -66,6 +67,16 @@ export interface XtreamChannel {
   categoryIds: string[];
   /** The first category's name, where the panel's category list gave one. */
   category?: string;
+  /**
+   * The zone the *panel* writes its listings in — not anything about this
+   * channel.
+   *
+   * It rides here because this is what travels with the channel list: learnt
+   * once when the list is asked for, cached with it under `cacheChannels`, and
+   * asked for again exactly when the list is. `ChannelsContext` has no `state`
+   * to leave it in, and a closure would not survive a cached list.
+   */
+  timezone?: string;
 }
 
 /** One programme of a panel, normalized: decoded, dated, and without the noise. */
@@ -120,6 +131,30 @@ export interface XtreamSiteOptions extends Omit<
   programmeExtras?: false | ((element: ProgrammeBuilder, programme: XtreamProgramme) => void);
   /** The same for a channel — {@link xtreamChannelExtras} by default. */
   channelExtras?: false | ((element: ChannelBuilder, channel: XtreamChannel) => void);
+}
+
+/**
+ * What the panel says about the account and itself.
+ *
+ * `player_api.php` with no `action` at all. Two things here are worth the extra
+ * call: whether the credentials were accepted, which it says outright where
+ * everything else only implies it, and the panel's own timezone, which is the
+ * fallback when a listing carries no wall clock to derive an offset from.
+ *
+ * **Never persisted.** `user_info` echoes the password straight back, so this
+ * must not reach `SiteState`, which is written to disk.
+ */
+interface WireProfile {
+  user_info?: {
+    auth?: number;
+    status?: string;
+    /** Epoch seconds, as a string. `null` where the account does not expire. */
+    exp_date?: string | null;
+    message?: string;
+  };
+  server_info?: {
+    timezone?: string;
+  };
 }
 
 /** One stream of `get_live_streams`, as it arrives. */
@@ -233,8 +268,14 @@ function offsetOf(listing: WireListing, at: number): number | undefined {
   return Math.abs(offset) <= MAX_OFFSET_MINUTES ? offset : undefined;
 }
 
-/** A wire listing as a programme, or nothing if it cannot be one. */
-function normalize(listing: WireListing): XtreamProgramme | undefined {
+/**
+ * A wire listing as a programme, or nothing if it cannot be one.
+ *
+ * `zone` is the panel's own, used only where the listing gave no wall clock to
+ * work its offset out from — the derived one is per listing and right across a
+ * DST boundary, which a zone name is only where it names the same place.
+ */
+function normalize(listing: WireListing, zone: string | undefined): XtreamProgramme | undefined {
   const at = seconds(listing.start_timestamp);
   const title = decode(listing.title);
 
@@ -244,7 +285,8 @@ function normalize(listing: WireListing): XtreamProgramme | undefined {
     return undefined;
   }
 
-  const offset = offsetOf(listing, at);
+  const offset =
+    offsetOf(listing, at) ?? (zone ? xmltvZoneOffset(zone, new Date(at * 1000)) : undefined);
   const stopAt = seconds(listing.stop_timestamp);
   const description = decode(listing.description);
   const language = listing.lang?.trim();
@@ -292,6 +334,32 @@ export function xtreamChannelExtras(element: ChannelBuilder, channel: XtreamChan
     element.extra({ name: 'category', value: channel.category });
   }
 }
+
+/**
+ * The panel's timezone, if it named one a `Intl` has heard of.
+ *
+ * A panel is as likely to answer `""`, `"UTC"` or something misspelt, and an
+ * unknown zone throws where it is used rather than where it was read — which
+ * would be a channel failing for a reason nothing names.
+ */
+function zoneOf(named: string | undefined): string | undefined {
+  const zone = named?.trim();
+
+  if (!zone) {
+    return undefined;
+  }
+
+  try {
+    xmltvZoneOffset(zone, new Date());
+
+    return zone;
+  } catch {
+    return undefined;
+  }
+}
+
+/** How near an expiry has to be before a run says anything about it. */
+const EXPIRY_WARNING_DAYS = 7;
 
 /** Strip a query string, so a url in an error message carries no credentials. */
 function withoutQuery(text: string): string {
@@ -366,6 +434,38 @@ export function defineXtreamSite(
     batching: 'days',
 
     async channels({ http, warn }) {
+      // First, and on its own: there is no sense asking a panel for channels it
+      // has already refused you, and a panel that rate-limits or bans has one
+      // fewer reason to.
+      const about = await http.get('player_api.php').json<WireProfile>();
+      const account = about.user_info;
+
+      // What the panel says outright, rather than what an empty list implies.
+      // `auth: 0` is a refusal; a status that is not active tells apart an
+      // expired subscription from a banned one from a panel with nothing on it.
+      if (account?.auth === 0 || (account?.status && account.status.toLowerCase() !== 'active')) {
+        throw new GrabberError(
+          `${site.site}: the panel refused the account — ${account.status ?? `auth ${String(account.auth)}`}${account.message ? `: ${account.message}` : ''}`,
+        );
+      }
+
+      const expires = seconds(account?.exp_date);
+
+      // The failure that otherwise looks like the guide mysteriously emptying.
+      if (expires !== undefined) {
+        const left = expires * 1000 - Date.now();
+        // Rounded up, so an account with a few hours short of two days left is
+        // said to have two rather than one: the point is to be believed, and a
+        // number that undercounts by a day is the one nobody acts on.
+        const days = Math.ceil(Math.abs(left) / 86_400_000);
+
+        if (left < 0) {
+          warn(`the account expired ${String(days)} ${days === 1 ? 'day' : 'days'} ago`);
+        } else if (days <= EXPIRY_WARNING_DAYS) {
+          warn(`the account expires in ${String(days)} ${days === 1 ? 'day' : 'days'}`);
+        }
+      }
+
       const [streams, named] = await Promise.all([
         http.get('player_api.php', { searchParams: { action: 'get_live_streams' } }).json(),
         categories
@@ -381,6 +481,7 @@ export function defineXtreamSite(
         ]),
       );
 
+      const zone = zoneOf(about.server_info?.timezone);
       const channels: GrabberChannel<XtreamChannel>[] = [];
       const seen = new Set<string>();
       let duplicates = 0;
@@ -434,6 +535,7 @@ export function defineXtreamSite(
             ...(addedAt === undefined ? {} : { addedAt }),
             categoryIds: ids.filter((id) => id !== ''),
             ...(category ? { category } : {}),
+            ...(zone ? { timezone: zone } : {}),
           },
         });
       }
@@ -470,7 +572,7 @@ export function defineXtreamSite(
         .json<{ epg_listings?: unknown }>();
 
       return asList<WireListing>(payload?.epg_listings)
-        .map((listing) => normalize(listing))
+        .map((listing) => normalize(listing, channel.data?.timezone))
         .filter((listing): listing is XtreamProgramme => listing !== undefined);
     },
 
