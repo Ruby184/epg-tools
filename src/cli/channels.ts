@@ -21,8 +21,8 @@ import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { derivedChannelList } from '../merge/derive.js';
 import { writeLines } from '../core/streams.js';
-import { guideChannels, isGuide, mappingFor, sniff, wantedFrom } from './lists.js';
-import type { Mappable, WantedChannel } from './lists.js';
+import { readChannelList } from './lists.js';
+import type { ChannelListFile, WantedChannel } from './lists.js';
 
 /** How the report is written — the same two shapes `epg validate` offers. */
 export const CHANNEL_REPORT_FORMATS = ['text', 'json'] as const;
@@ -174,30 +174,10 @@ export async function reportChannelsCommand(
     throw new Error(`Unknown --format: ${format}`);
   }
 
-  // Sniffed rather than read whole. A guide is the one of these formats that is
-  // routinely 90 MiB, and both what this reports on and what `--write` puts back
-  // stream through it — loading it to find out what it was would give that away
-  // before either had started.
-  const source = await sniff(options.against);
-  const found = isGuide(source.head) ? await guideChannels(source.whole()) : undefined;
-  const text = found === undefined ? await source.text() : '';
-
-  // `--write` needs the entries themselves, not the ids and names `wantedFrom`
-  // reduces them to, so an answer can be put back where it came from.
-  const mapping = options.write === true ? mappingFor(text, options.against, found) : undefined;
-  // Joined back by object identity rather than by position. `matchChannels`
-  // does preserve order, but a row finding its entry by index would be one
-  // refactor away from writing an id onto the wrong channel.
-  const mappableOf = new Map<WantedChannel, Mappable>();
-
-  for (const entry of mapping?.entries ?? []) {
-    mappableOf.set(entry.wanted, entry);
-  }
-
-  const wanted =
-    mapping !== undefined
-      ? mapping.entries.map((entry) => entry.wanted)
-      : (found ?? wantedFrom(text, options.against));
+  // Which of the four this is, how much of it has to be held, and how an answer
+  // goes back into it are all its own business — see `readChannelList`.
+  const list = await readChannelList(options.against);
+  const wanted = list.channels;
   const resolved = await resolveSites(config.sites as AnySiteConfig[], {
     ...(options.signal ? { signal: options.signal } : {}),
   });
@@ -226,16 +206,14 @@ export async function reportChannelsCommand(
     : [];
 
   const report = reportChannels(wanted, [...available, ...derived]);
-  const written = fillIds(report, mappableOf);
+  const written = options.write === true ? fillIds(report, list) : [];
 
-  if (mapping !== undefined && written.length > 0) {
-    await mapping.write();
-  }
+  await list.write();
 
   await writeLines(
     stdout,
     format === 'json'
-      ? JSON.stringify({ ...report, ...(mapping === undefined ? {} : { written }) }, null, 2)
+      ? JSON.stringify({ ...report, ...(options.write === true ? { written } : {}) }, null, 2)
       : renderChannelReport(report) + renderWritten(written, options.against),
   );
 
@@ -262,18 +240,19 @@ interface WrittenId {
  * which the report has been telling people to confirm by hand, and the flag is
  * that confirmation, given once for the whole file.
  */
-function fillIds(report: ChannelReport, mappableOf: Map<WantedChannel, Mappable>): WrittenId[] {
+function fillIds(report: ChannelReport, list: ChannelListFile): WrittenId[] {
   const written: WrittenId[] = [];
 
   for (const row of report.rows) {
-    const entry = mappableOf.get(row.wanted);
-
-    if (entry === undefined || entry.mapped || row.kind !== 'name' || !row.matched) {
+    if (row.kind !== 'name' || !row.matched) {
       continue;
     }
 
-    entry.set(row.matched.xmltvId);
-    written.push({ label: entry.label, xmltvId: row.matched.xmltvId });
+    // The file says whether that took: it knows what already had an id, and
+    // whether it has anywhere to put one at all.
+    if (list.map(row.wanted, row.matched.xmltvId)) {
+      written.push({ label: list.label(row.wanted), xmltvId: row.matched.xmltvId });
+    }
   }
 
   return written;

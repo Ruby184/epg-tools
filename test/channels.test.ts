@@ -1,8 +1,11 @@
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { renderChannelReport, reportChannels } from '../src/cli/channels.js';
-import { wantedFrom } from '../src/cli/lists.js';
+import { guideChannels, readChannelList } from '../src/cli/lists.js';
 import { matchChannels, timeshiftName, timeshiftOf } from '../src/channels/match.js';
 import { channelsFromChannelsXml } from '../src/grabber/channels.js';
 import { parseChannelsXml } from '../src/channels/parse.js';
@@ -296,34 +299,81 @@ describe('matchChannels', () => {
   });
 });
 
-describe('wantedFrom', () => {
-  it('reads an M3U playlist, preferring tvg-name over the display name', () => {
-    expect(
-      wantedFrom(
-        '#EXTM3U\n#EXTINF:-1 tvg-id="a.uk" tvg-name="Proper Name",Display\nhttp://e/1\n',
+describe('readChannelList', () => {
+  /** The file on disk that the reader needs, since it streams rather than takes text. */
+  async function file(name: string, body: string | Uint8Array): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'epg-lists-'));
+    const path = join(dir, name);
+
+    await writeFile(path, body);
+
+    return path;
+  }
+
+  const GUIDE =
+    '<?xml version="1.0"?><tv><channel id="a.uk"><display-name>A</display-name></channel>' +
+    '<programme start="20260101000000 +0000" channel="a.uk"><title>T</title></programme></tv>';
+
+  it('reads an M3U playlist, preferring tvg-name over the display name', async () => {
+    const list = await readChannelList(
+      await file(
         'x.m3u',
+        '#EXTM3U\n#EXTINF:-1 tvg-id="a.uk" tvg-name="Proper Name",Display\nhttp://e/1\n',
       ),
-    ).toEqual([{ id: 'a.uk', name: 'Proper Name' }]);
+    );
+
+    expect(list.channels).toEqual([{ id: 'a.uk', name: 'Proper Name' }]);
   });
 
-  it('reads a channels.xml', () => {
-    expect(
-      wantedFrom('<channels><channel site_id="1" xmltv_id="a.uk">A</channel></channels>', 'x.xml'),
-    ).toEqual([{ id: 'a.uk', name: 'A' }]);
+  it('reads a channels.xml', async () => {
+    const list = await readChannelList(
+      await file('x.xml', '<channels><channel site_id="1" xmltv_id="a.uk">A</channel></channels>'),
+    );
+
+    expect(list.channels).toEqual([{ id: 'a.uk', name: 'A' }]);
   });
 
-  it('reads a guide`s own channel list', () => {
-    expect(
-      wantedFrom(
-        '<?xml version="1.0"?><tv><channel id="a.uk"><display-name>A</display-name></channel></tv>',
-        'guide.xml',
+  it('reads a plain list of ids, which no marker announces', async () => {
+    const list = await readChannelList(await file('ids.txt', '# mine\na.uk\nb.uk, c.uk\n'));
+
+    expect(list.channels.map((channel) => channel.id)).toEqual(['a.uk', 'b.uk', 'c.uk']);
+    // Nowhere to put an answer, so nothing is ever written into one.
+    expect(list.map(list.channels[0]!, 'other.uk')).toBe(false);
+  });
+
+  // The format that is routinely 90 MiB: its channels come out of a stream, and
+  // its programmes are never built.
+  it('reads a guide by streaming it', async () => {
+    expect((await readChannelList(await file('guide.xml', GUIDE))).channels).toEqual([
+      { id: 'a.uk', name: 'A' },
+    ]);
+
+    // The same thing over text in hand, which is all `guideChannels` is.
+    expect(await guideChannels([GUIDE])).toEqual([{ id: 'a.uk', name: 'A' }]);
+  });
+
+  it('decompresses on the way in', async () => {
+    const list = await readChannelList(await file('guide.xml.gz', gzipSync(GUIDE)));
+
+    expect(list.channels).toEqual([{ id: 'a.uk', name: 'A' }]);
+  });
+
+  // All four get renamed, and `.xml` alone does not say which of two it is.
+  it('sniffs the kind rather than trusting the name', async () => {
+    await expect(readChannelList(await file('mystery.dat', 'just some <text'))).rejects.toThrow(
+      /Cannot tell what/,
+    );
+  });
+
+  it('refuses to overwrite an id that is already there', async () => {
+    const list = await readChannelList(
+      await file(
+        'x.xml',
+        '<channels><channel site_id="1" xmltv_id="mine.uk">A</channel></channels>',
       ),
-    ).toEqual([{ id: 'a.uk', name: 'A' }]);
-  });
+    );
 
-  // All three get renamed, and `.xml` alone does not say which of two it is.
-  it('sniffs the kind rather than trusting the name', () => {
-    expect(() => wantedFrom('just some text', 'mystery.dat')).toThrow(/Cannot tell what/);
+    expect(list.map(list.channels[0]!, 'other.uk')).toBe(false);
   });
 });
 
