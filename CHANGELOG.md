@@ -11,6 +11,115 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.4.0](https://github.com/Ruby184/epg-tools/compare/v0.3.0...v0.4.0) (2026-09-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* **merge:** a programme wholly containing two or more others on its channel is now dropped. Set merge.dropContainers to false to keep it.
+* **channels:** parseChannelsXml, for the name everyone calls the format
+* **m3u:** give a url line the same shape a tag line has
+* **grabber:** `GrabSummary.failed` no longer counts a site that could not be read or whose channel list never arrived; those are `GrabSummary.sitesFailed` now. Code reading `summary.failed > 0` to decide an exit code should read `fellShort(summary)`, or add `|| summary.sitesFailed > 0`.
+* **grabber:** `logger` is replaced by `reporter` on `RunOptions`, `GrabOptions` and `BuildGuideOptions`, and `sitePacing`'s `log` by `emit`. The nearest equivalent is `reporter: textReporter({ stream: process.stdout })`, or `reporter: (event) => console.log(render(event))` for the lines alone. `GrabSummary.failed` is a `number`, not `GrabTaskError[]`, so `summary.failed.length` becomes `summary.failed` and the errors themselves come from a reporter; `GrabTaskError` is removed, its shape being `Extract<EpgEvent, { type: 'entry:failed' }>`. On the `epg` command line `-v` is `--verbose` and the version is `-V`, and `--quiet` means errors only instead of no progress. `StreamContext` is an alias for the `both` request context, whose `log` it already had.
+* **cache:** a cache driver of your own gains readState, writeState and deleteState, and a CacheStore of your own gains getState and setState. They are required rather than optional because a store that silently cannot remember anything would leave every caller asking whether it can, forever, and a driver author never learning the question exists. Remembering nothing is three one-line bodies — NoCacheDriver is exactly that. An existing cache needs no attention, since the SQLite table version bumps to 2 and that one file is made again.
+
+### Features
+
+* a channel derived from another, shifted ([93da123](https://github.com/Ruby184/epg-tools/commit/93da1238c323428a78b0579600154cd185f4ae92))
+* **cache:** let a site remember something between runs ([adc2fbe](https://github.com/Ruby184/epg-tools/commit/adc2fbe908dbd4f767de9c0eb4247ce746b104b7))
+* **channels:** epg-tools/channels — read, write and match the community channel lists ([28d32ae](https://github.com/Ruby184/epg-tools/commit/28d32aee80b07aa5727d1df513830ba8169eedcf))
+* **channels:** the community channel lists, and the matching that is the point ([c1929ad](https://github.com/Ruby184/epg-tools/commit/c1929ad48a8b6f2dc1cbf775c55cbf24d5d42a56))
+* **channels:** timeshiftName, the inverse of the shift a name declares ([0c6653d](https://github.com/Ruby184/epg-tools/commit/0c6653de8edfb6ed78deed233babde62a2493c73))
+* **cli:** --allow-missing, so a few lost channel-days are not a failed run ([23a540c](https://github.com/Ruby184/epg-tools/commit/23a540c4d8c1ee906d39c6b027827ae3857a1615))
+* **cli:** --channels, to grab and publish only the channels you want ([274b51b](https://github.com/Ruby184/epg-tools/commit/274b51bc54a86727ade60cfac7f6c950599048e5))
+* **cli:** -o, so --write need not overwrite what it read ([6397e6e](https://github.com/Ruby184/epg-tools/commit/6397e6ef821418c8d6eafc45f91196f7dc4d3c71))
+* **cli:** a live progress line on a terminal ([ee8cfbb](https://github.com/Ruby184/epg-tools/commit/ee8cfbbd45eb7d3be9b3add89b970ff40e9bfb5f))
+* **cli:** declare a derived channel, and let the channels report see it ([5e829e7](https://github.com/Ruby184/epg-tools/commit/5e829e7516213a91bc262ae387acf646c143de0c))
+* **cli:** epg channels --write, and one way in to a channel-list file ([a38441e](https://github.com/Ruby184/epg-tools/commit/a38441e00bd4b20131380ad99c9a549ea337cddf))
+* **cli:** epg channels --write, to act on what the report suggested ([2946830](https://github.com/Ruby184/epg-tools/commit/294683095924f3dd42b318077053e9fe898928f6))
+* **cli:** epg channels, which says what will get no guide and why ([a5ca76c](https://github.com/Ruby184/epg-tools/commit/a5ca76c26d8de4f66b03ee2f1b2cbcb0f586c4b0))
+* **cli:** epg filter, to subset a guide somebody else wrote ([cf3e5a6](https://github.com/Ruby184/epg-tools/commit/cf3e5a64143ec16a46a0382d076dd2dffcc635f8))
+* **cli:** epg serve, the guide behind HTTP for a consumer that polls ([8bf4e92](https://github.com/Ruby184/epg-tools/commit/8bf4e9269a9c56e8687a58b19b5107d0bf6b7d3c))
+* **cli:** epg try, one channel-day with the working shown ([3ef54d3](https://github.com/Ruby184/epg-tools/commit/3ef54d3dda9a5e559742d99524a6ed75cbd01ff0))
+* **cli:** epg validate, and validateXmltv behind it ([533574a](https://github.com/Ruby184/epg-tools/commit/533574a0b92103d3f1e1639cb199e2a2f62b3fbd))
+* **cli:** one grab, two guides — extensions on the way out ([30e2c1f](https://github.com/Ruby184/epg-tools/commit/30e2c1f89f375f4c9db12c1a3b7196b5aebc2a0f))
+* **core:** report what a run is doing as events ([82d8b9b](https://github.com/Ruby184/epg-tools/commit/82d8b9b131d9432b092d5c6588b96eb62af05b96))
+* **core:** say what a request cost, and what caused a failure ([6e4cb80](https://github.com/Ruby184/epg-tools/commit/6e4cb8064a13070b7b534a9f2ec187dde08ee4d9))
+* **grabber:** a channel list from a *.channels.xml, and both bridges as factories ([cf2dd1c](https://github.com/Ruby184/epg-tools/commit/cf2dd1c39ba68694401eec8c884646457ac05cd5))
+* **grabber:** a playlist as a channel list, and as a whole source ([17574ed](https://github.com/Ruby184/epg-tools/commit/17574edd45f5adb685b3f39d4596fd8916958100))
+* **grabber:** a published XMLTV guide as a source ([f7d2e0e](https://github.com/Ruby184/epg-tools/commit/f7d2e0ea62d00dcd501e40068db31844c784c806))
+* **grabber:** a site that answers its whole window in one pass ([5bd115b](https://github.com/Ruby184/epg-tools/commit/5bd115b9b87c6808175784aa9e0cb444287e76a1))
+* **grabber:** ask the panel about itself, and act on what it says ([334f1a5](https://github.com/Ruby184/epg-tools/commit/334f1a5dd727d96a9b63234d8a4d8a9d7706d841))
+* **grabber:** ask the source whether anything has changed ([0e34ed8](https://github.com/Ruby184/epg-tools/commit/0e34ed821c4f13d9e2101f95d8bf200e48362ae1))
+* **grabber:** count a site that answered nothing apart from a lost day ([542dfc1](https://github.com/Ruby184/epg-tools/commit/542dfc10a16ff1a7f02244242ab82ec00eb31af4))
+* **grabber:** defineXtreamSite, an Xtream Codes panel as a source ([dab9d3e](https://github.com/Ruby184/epg-tools/commit/dab9d3ecdb67bdc362ce50290e6751ed29c49337))
+* **grabber:** defineXtreamSite, an Xtream Codes panel as a source ([b397864](https://github.com/Ruby184/epg-tools/commit/b39786469a5251a8909b7fc847f1bcf5f475a986))
+* **grabber:** keep a fetched channel list, and let a site keep its own notes ([ca184d4](https://github.com/Ruby184/epg-tools/commit/ca184d41f2708c2cc1cf75c6a4aba8d76632a129))
+* **grabber:** let a channel list speak, and let a site attach fields ([eb758e3](https://github.com/Ruby184/epg-tools/commit/eb758e3bc362b609595a2f94573ff0ab4fbb77b3))
+* **grabber:** one reporter instead of a logger and a failure array ([86f53aa](https://github.com/Ruby184/epg-tools/commit/86f53aa4421eafddb5b3fd06a15449871503cb16))
+* **m3u:** M3U playlists — a streaming parser, a writer, and a playlist as a source ([270c0bf](https://github.com/Ruby184/epg-tools/commit/270c0bfcd96866dc976588b933db3f4295ff7f8d))
+* **m3u:** read and write M3U playlists, streaming and losslessly ([2db3bed](https://github.com/Ruby184/epg-tools/commit/2db3bedb7862105e4b3adf3729536dd9bcf674ad))
+* **merge:** a channel derived from another, shifted ([ed84af3](https://github.com/Ruby184/epg-tools/commit/ed84af30a03a51f1249636d55cd3069813420f69))
+* **merge:** fill the gaps — backfill from a second source, placeholders for the rest ([74d790e](https://github.com/Ruby184/epg-tools/commit/74d790e47fbca03e41d99c4cc95a387d45837f5b))
+* **merge:** fillGaps, a placeholder where the schedule says nothing ([37f7f87](https://github.com/Ruby184/epg-tools/commit/37f7f87897e3cf3d543148803c23130e99520273))
+* **merge:** let both transforms say something, and name the pair for both ([bafce6d](https://github.com/Ruby184/epg-tools/commit/bafce6d1a69131b7b58078affa88053370ac287d))
+* **merge:** programmeStrategy 'backfill', for a partial primary ([c1b7d6e](https://github.com/Ruby184/epg-tools/commit/c1b7d6e5fe4868b2b0a6536656a53c5cda91790a))
+* **serve:** a disconnect is not a failure, and two things a proxy needs ([d949595](https://github.com/Ruby184/epg-tools/commit/d9495950e551c33c04ce7139f769b0fbcd814dc8))
+* **serve:** reload the channel lists on SIGHUP ([ee9f6a4](https://github.com/Ruby184/epg-tools/commit/ee9f6a4a3c90d6187b17b79657bd23cacf4cc855))
+* subset a guide — --channels on a run, and epg filter over a file ([ecf7321](https://github.com/Ruby184/epg-tools/commit/ecf73211ef9f87de864c559a8ff8f978f3675fc1))
+* **tv-grab:** list and select a derived channel ([c3f83fb](https://github.com/Ruby184/epg-tools/commit/c3f83fbab716c4fcfea19bbd63f41639e21b1605))
+* **xmltv:** choose which provider extensions a document carries ([84dac53](https://github.com/Ruby184/epg-tools/commit/84dac530ed639d8bd09e53c5219361a39b95f5cf))
+
+
+### Bug Fixes
+
+* **cli:** measure progress in channel-days, not requests ([3d36b02](https://github.com/Ruby184/epg-tools/commit/3d36b020410fb3c7197127feeb276be22cbf2615))
+* eight things a review found across serve, validate and the counts ([e034602](https://github.com/Ruby184/epg-tools/commit/e034602b274995ad1a792bedde092079d0335f8e))
+* **grabber:** apply a channel selection after the cache, not around it ([1f1a2c6](https://github.com/Ruby184/epg-tools/commit/1f1a2c68b599b5502cf0896fb183378c04c49d52))
+* **grabber:** five things a review found, each with a test that catches it ([bc19bca](https://github.com/Ruby184/epg-tools/commit/bc19bca5d1c20eea63892bb4f2acac60d1919cac))
+* **grabber:** read enough of a document's start to know what it is ([4f2f967](https://github.com/Ruby184/epg-tools/commit/4f2f967b888d013ded0d2cd05df17e8455410a9b))
+* **merge:** drop a magazine block published beside its own parts ([37fa4fa](https://github.com/Ruby184/epg-tools/commit/37fa4faff443adbe753957583ea0a2b524889934))
+* **serve:** stop for a signal that had already fired ([41420c0](https://github.com/Ruby184/epg-tools/commit/41420c0b13dd1505ed96487a5a47305c5cd4f8e9))
+* **xmltv:** find every extension, count a bulk finding, and catch overlaps ([a2033d1](https://github.com/Ruby184/epg-tools/commit/a2033d162663672756e61cde865d6aa4ac9e0de8))
+
+
+### Performance
+
+* **grabber:** keep the xmltv split's inner loop linear ([90b6334](https://github.com/Ruby184/epg-tools/commit/90b6334f87edf78c2934df50968997bc29463176))
+* **serve:** ask the cache in bounded batches, and say what a poll costs ([66dab5e](https://github.com/Ruby184/epg-tools/commit/66dab5e3dd59591ee2ce9cdd13d99738adf22ff6))
+
+
+### Refactoring
+
+* **channels:** parseChannelsXml, for the name everyone calls the format ([b8419f3](https://github.com/Ruby184/epg-tools/commit/b8419f3fef34aafaf45e991f11cba53b982dae6e))
+* **cli:** --format rather than --report, one letter from --reporter ([1e5157a](https://github.com/Ruby184/epg-tools/commit/1e5157ae1ab82d3c95e0673a2c7f9d3b74f04826))
+* **cli:** let the writer end the line, not the renderer ([743cd26](https://github.com/Ruby184/epg-tools/commit/743cd2653a1f233903803b5f8ee6bb71803de8df))
+* **cli:** one --format, not one per command ([5bd119b](https://github.com/Ruby184/epg-tools/commit/5bd119bf5b25ca4f190af77fd085cf5ddf5c1416))
+* **cli:** one module for the channel-list files, not three ([91f547b](https://github.com/Ruby184/epg-tools/commit/91f547b3bfccb0aebc6cbdae8219a22011893e28))
+* **cli:** one way in to a channel-list file, whatever format it is ([484aea1](https://github.com/Ruby184/epg-tools/commit/484aea1550cccaf8a8bce0fdcb1cfa1035c452ae))
+* **cli:** writeLines and writeFlushed rather than a bare write ([8ba8c25](https://github.com/Ruby184/epg-tools/commit/8ba8c25e112668b9a800dd40b7a653dd51511678))
+* **grabber:** keep the site union narrowed instead of asserting it back ([eacbcad](https://github.com/Ruby184/epg-tools/commit/eacbcadce21c751355b1b874790fb49ccd3a58fb))
+* **grabber:** lift the site contexts out of the run that owns them ([262b385](https://github.com/Ruby184/epg-tools/commit/262b3853e5c032626b15c839eded153690902492))
+* **grabber:** peek at a document without rebuilding its stream ([d9c71bb](https://github.com/Ruby184/epg-tools/commit/d9c71bba8e6765ce4c2994e18add838c854c1435))
+* **grabber:** readChannelList, since read says nothing at module scope ([93e1c41](https://github.com/Ruby184/epg-tools/commit/93e1c419ed2bbce077b4beb9bacd83914c0627df))
+* **grabber:** split the run into a planner, a site config, and a site's turn ([eb4d955](https://github.com/Ruby184/epg-tools/commit/eb4d955f9373fd4602db28b4a960898c8a83d470))
+* **grabber:** take out what a review found redundant ([6eedc57](https://github.com/Ruby184/epg-tools/commit/6eedc578c5df3a4b25ecdc53f897c59b40e4bab3))
+* **m3u:** give a url line the same shape a tag line has ([a5203cf](https://github.com/Ruby184/epg-tools/commit/a5203cf2e35dbb7cd3c3399840699f1b7eb91fa8))
+* **m3u:** split the lexical scanner from the IPTV reading of it ([2987a47](https://github.com/Ruby184/epg-tools/commit/2987a474ca0cd1af401fe4bdf1cbd8f3caf5d019))
+* while (true) rather than for (;;) ([78a5433](https://github.com/Ruby184/epg-tools/commit/78a543353cd9882b78f697e7dbca4296da354268))
+
+
+### Documentation
+
+* an Xtream Codes panel as a source ([7771537](https://github.com/Ruby184/epg-tools/commit/77715375d747877210d06048af6e3691fd4f115e))
+* **channels:** the channel-list module, and epg channels in the CLI reference ([1128c22](https://github.com/Ruby184/epg-tools/commit/1128c2297507d37148d3549c02665760096db63f))
+* derived channels, and the hole an offset leaves ([aab4d29](https://github.com/Ruby184/epg-tools/commit/aab4d2984a6f9f639edb1e872c465efae80f6a9f))
+* filling the gaps, and the two claims it makes untrue ([1c8f6c2](https://github.com/Ruby184/epg-tools/commit/1c8f6c2f45e47a2073e9b45a2e62bf1d60319a33))
+* **grabber:** say when a conditional request cannot help ([e758ecd](https://github.com/Ruby184/epg-tools/commit/e758ecd5b11ff9e67a537361e3d815d574cac515))
+* keeping only some channels, and subsetting a guide you already have ([f6d26d7](https://github.com/Ruby184/epg-tools/commit/f6d26d775ad6be356194bf0e5f68d8085a9dbc0a))
+* **m3u:** the format, where the parsers differ, and a playlist as a source ([0fa15d0](https://github.com/Ruby184/epg-tools/commit/0fa15d0e496043d44b4a06777edc60e1f48f8d2f))
+* **xmltv:** say the real reason an empty &lt;credits&gt; is not written ([168891a](https://github.com/Ruby184/epg-tools/commit/168891a593e442ec520a7f2dd858fd12a65c163f))
+
 ## [0.3.0](https://github.com/Ruby184/epg-tools/compare/v0.2.0...v0.3.0) (2026-08-25)
 
 
