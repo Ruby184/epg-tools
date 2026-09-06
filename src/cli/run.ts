@@ -23,8 +23,8 @@ import { silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
 import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
 import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
-import { renderReport, REPORT_FORMATS, validateFile } from './validate.js';
-import type { ReportFormat } from './validate.js';
+import { REPORT_FORMATS, type ReportFormat } from './format.js';
+import { renderReport, validateFile } from './validate.js';
 import type { CompressionFormat } from '../core/output.js';
 import type { GrabSummary } from '../grabber/types.js';
 
@@ -66,6 +66,10 @@ Options:
                         playlist, a *.channels.xml, or an XMLTV guide
       --check           channels only: exit 1 unless every wanted channel
                         matched by id, for a CI step
+      --write           channels only: write the ids the report suggested back
+                        into --against, in place — a *.channels.xml, a playlist
+                        or a guide. With -o, writes there and leaves the
+                        original alone
       --before <day>    prune only: remove days before YYYY-MM-DD (default: today)
       --log-level <l>   How much to report: error, warn, info (default) or debug
   -v, --verbose         Same as --log-level debug
@@ -368,7 +372,7 @@ async function filterCommand(
     throw new UsageError('epg filter needs --channels: without it there is nothing to filter');
   }
 
-  const { wantedIds } = await import('./wanted.js');
+  const { wantedIds } = await import('./lists.js');
   const { filterGuide } = await import('./filter.js');
   const channels = new Set<string>();
 
@@ -488,6 +492,9 @@ async function execute(
       // guide for, and whether a mismatch should fail a CI step.
       against: { type: 'string' },
       check: { type: 'boolean' },
+      // `epg channels` only: put the ids the report suggested back into the
+      // file it read them from.
+      write: { type: 'boolean' },
       // Repeatable, and the union of what each names: a list kept in git plus
       // the one id being tried out is a normal thing to want, and overwriting
       // would make the order of two flags matter.
@@ -614,7 +621,7 @@ async function execute(
       throw new UsageError(`--channels is for ${SELECTABLE.join(', ')}, not ${command}`);
     }
 
-    const { wantedIds } = await import('./wanted.js');
+    const { wantedIds } = await import('./lists.js');
     const selected = new Set<string>();
 
     for (const value of values.channels) {
@@ -711,6 +718,8 @@ async function execute(
           against: values.against,
           format: values.format,
           check: values.check,
+          write: values.write,
+          output: values.output,
           ...(signal ? { signal } : {}),
         },
         stdout,

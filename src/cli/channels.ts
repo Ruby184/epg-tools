@@ -13,112 +13,17 @@
  * the near misses were.
  */
 
-import { readFile } from 'node:fs/promises';
 import type { Writable } from 'node:stream';
 import { matchChannels } from '../channels/match.js';
-import { parseChannelsXml } from '../channels/parse.js';
 import type { ChannelMatchKind } from '../channels/types.js';
 import type { EpgConfig } from '../config.js';
 import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
-import { parseM3uString } from '../m3u/parse.js';
 import { derivedChannelList } from '../merge/derive.js';
 import { writeLines } from '../core/streams.js';
-import { parseXmltvString } from '../xmltv/parse.js';
-
-/** How the report is written — the same two shapes `epg validate` offers. */
-export const CHANNEL_REPORT_FORMATS = ['text', 'json'] as const;
-
-export type ChannelReportFormat = (typeof CHANNEL_REPORT_FORMATS)[number];
-
-/** One channel somebody wants a guide for, however they said so. */
-export interface WantedChannel {
-  id: string;
-  name: string;
-}
-
-/**
- * The channels a file asks for, whichever of the three kinds it is.
- *
- * Sniffed rather than taken from the extension: all three get renamed, and
- * `.xml` alone does not say whether it is a channel list or a guide. What each
- * one *is* is unmistakable a few bytes in.
- *
- * Each is read whole, which is what this command is: one file the caller named,
- * once. The streaming forms exist for a guide being *built*, where the document
- * is the whole point and may be 90 MiB; here the answer is a list of names.
- */
-export function wantedFrom(text: string, from: string): WantedChannel[] {
-  if (text.startsWith('#EXTM3U') || text.includes('#EXTINF:')) {
-    return parseM3uString(text).entries.map((entry) => ({
-      id: entry.attributes.get('tvg-id') ?? entry.attributes.get('tvg-ID') ?? '',
-      name: entry.attributes.get('tvg-name') || entry.name,
-    }));
-  }
-
-  if (text.includes('<channels')) {
-    return parseChannelsXml(text).entries.map((entry) => ({
-      id: entry.xmltvId,
-      name: entry.name,
-    }));
-  }
-
-  if (text.includes('<tv')) {
-    return parseXmltvString(text).channels.map((channel) => ({
-      id: channel.id,
-      name: channel.displayName[0]?.value ?? '',
-    }));
-  }
-
-  const ids = idList(text);
-
-  if (ids !== undefined) {
-    return ids.map((id) => ({ id, name: '' }));
-  }
-
-  throw new Error(
-    `Cannot tell what ${from} is: expected an M3U playlist, a *.channels.xml, an XMLTV guide, or a list of ids`,
-  );
-}
-
-/**
- * A plain list of ids — one per line or comma-separated, `#` a comment.
- *
- * Last, because everything is plain text: the three formats above have said no
- * before this is asked. `undefined` for anything that does not look like a list
- * of ids, so a file of something else entirely still gets the error above
- * rather than being read as a channel called `<!DOCTYPE`.
- *
- * The test is deliberately narrow — no markup, no whitespace inside an entry —
- * since an xmltv id is a token and this is the last chance to notice it is not.
- */
-function idList(text: string): string[] | undefined {
-  const ids: string[] = [];
-
-  for (const line of text.split('\n')) {
-    const content = line.slice(0, line.indexOf('#') === -1 ? undefined : line.indexOf('#')).trim();
-
-    if (content === '') {
-      continue;
-    }
-
-    for (const id of content.split(',')) {
-      const trimmed = id.trim();
-
-      if (trimmed === '') {
-        continue;
-      }
-
-      if (/[<>\s"']/.test(trimmed)) {
-        return undefined;
-      }
-
-      ids.push(trimmed);
-    }
-  }
-
-  return ids.length > 0 ? ids : undefined;
-}
+import type { ReportFormat } from './format.js';
+import { readChannelList } from './lists.js';
+import type { ChannelListFile, WantedChannel } from './lists.js';
 
 /** What the report says about one wanted channel. */
 export interface ChannelReportRow {
@@ -234,18 +139,32 @@ export function renderChannelReport(report: ChannelReport): string {
 export interface ChannelsCommandOptions {
   /** The file naming what is wanted. Without one there is nothing to compare. */
   against?: string | undefined;
-  format?: string | undefined;
+  format?: ReportFormat | undefined;
   /** Exit non-zero unless every wanted channel matched by id. */
   check?: boolean | undefined;
+  /**
+   * Write the ids the report suggested back into `--against`, in place.
+   *
+   * The two formats that carry a mapping of their own: a `*.channels.xml`'s
+   * `xmltv_id`, and a playlist's `tvg-id`. Only entries that have **none** — an
+   * id already there is somebody's decision, possibly one made against this
+   * very suggestion, and replacing it silently is worse than leaving a channel
+   * unmapped.
+   */
+  write?: boolean | undefined;
+  /**
+   * Where `--write` puts it, rather than back over `--against`.
+   *
+   * In place is the default because that is what writing an answer into your
+   * own channel list means, and those files live in version control — `git
+   * diff` is then exactly the ids added, since every reader here round-trips
+   * byte for byte. `-o` is for the times that is not true: somebody else's
+   * guide, a playlist you did not author, or simply wanting to look first.
+   */
+  output?: string | undefined;
   signal?: AbortSignal | undefined;
 }
 
-/**
- * Read what is wanted, resolve what is available, and report the difference.
- *
- * Returns the exit code, so the caller does nothing but hand it on: `0` unless
- * `--check` was asked for and something does not line up.
- */
 export async function reportChannelsCommand(
   config: EpgConfig,
   options: ChannelsCommandOptions,
@@ -255,13 +174,20 @@ export async function reportChannelsCommand(
     throw new Error('epg channels needs --against <playlist.m3u | channels.xml | guide.xml>');
   }
 
-  const format = options.format ?? 'text';
-
-  if (!CHANNEL_REPORT_FORMATS.includes(format as ChannelReportFormat)) {
-    throw new Error(`Unknown --format: ${format}`);
+  // Said rather than ignored: `-o` is a global flag, and one given to a command
+  // that is only reporting has been typed for a reason.
+  if (options.output !== undefined && options.write !== true) {
+    throw new Error('epg channels takes -o only with --write, which is what writes a file');
   }
 
-  const wanted = wantedFrom(await readFile(options.against, 'utf8'), options.against);
+  // Not re-checked here: `--format` is one flag with one set of choices, and
+  // `parseOptions` refuses anything else before a command is reached.
+  const format = options.format ?? 'text';
+
+  // Which of the four this is, how much of it has to be held, and how an answer
+  // goes back into it are all its own business — see `readChannelList`.
+  const list = await readChannelList(options.against);
+  const wanted = list.channels;
   const resolved = await resolveSites(config.sites as AnySiteConfig[], {
     ...(options.signal ? { signal: options.signal } : {}),
   });
@@ -290,11 +216,67 @@ export async function reportChannelsCommand(
     : [];
 
   const report = reportChannels(wanted, [...available, ...derived]);
+  const written = options.write === true ? fillIds(report, list) : [];
+
+  await list.write(options.output);
 
   await writeLines(
     stdout,
-    format === 'json' ? JSON.stringify(report, null, 2) : renderChannelReport(report),
+    format === 'json'
+      ? JSON.stringify({ ...report, ...(options.write === true ? { written } : {}) }, null, 2)
+      : renderChannelReport(report) + renderWritten(written, options.output ?? options.against),
   );
 
-  return options.check === true && !report.ok ? 1 : 0;
+  // What was just written counts as matched: the ids are in the file now, so a
+  // second run would match them by id, and failing the run that fixed them
+  // would be a strange thing for a `--check` to do.
+  const short = report.counts.wanted - report.counts.byId - written.length;
+
+  return options.check === true && short > 0 ? 1 : 0;
+}
+
+/** One id written into one entry. */
+interface WrittenId {
+  label: string;
+  xmltvId: string;
+}
+
+/**
+ * Fill in the ids the report found a name for.
+ *
+ * The asymmetry the matcher is built on holds right up to here: an id match
+ * needs nothing done, an ambiguous one is refused, and a timeshift is a
+ * *derived* channel rather than a mapping. What is left is the name match —
+ * which the report has been telling people to confirm by hand, and the flag is
+ * that confirmation, given once for the whole file.
+ */
+function fillIds(report: ChannelReport, list: ChannelListFile): WrittenId[] {
+  const written: WrittenId[] = [];
+
+  for (const row of report.rows) {
+    if (row.kind !== 'name' || !row.matched) {
+      continue;
+    }
+
+    // The file says whether that took: it knows what already had an id, and
+    // whether it has anywhere to put one at all.
+    if (list.map(row.wanted, row.matched.xmltvId)) {
+      written.push({ label: list.label(row.wanted), xmltvId: row.matched.xmltvId });
+    }
+  }
+
+  return written;
+}
+
+/** What was written, under the report that suggested it. */
+function renderWritten(written: readonly WrittenId[], file: string): string {
+  if (written.length === 0) {
+    return '';
+  }
+
+  return [
+    '',
+    `Wrote ${written.length} ${written.length === 1 ? 'id' : 'ids'} into ${file}:`,
+    ...written.map((one) => `  ${one.label} → ${one.xmltvId}`),
+  ].join('\n');
 }

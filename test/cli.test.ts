@@ -637,6 +637,221 @@ describe('epg', () => {
     });
   });
 
+  describe('channels --write', () => {
+    /** A config offering two channels the files below name differently. */
+    async function siteConfig(dir: string): Promise<string> {
+      return configFile(
+        dir,
+        `export default {
+        sites: [{
+          site: 'example.tv',
+          channels: [
+            { xmltvId: 'bbcone.uk', siteId: '1', name: 'BBC One' },
+            { xmltvId: 'bbctwo.uk', siteId: '2', name: 'BBC Two' },
+          ],
+          async request() { return {}; },
+          parseDay: () => [],
+        }],
+        days: 1,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+    }
+
+    it('fills an empty xmltv_id and leaves a set one alone', async () => {
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'a.channels.xml');
+
+      await writeFile(
+        file,
+        `<?xml version="1.0" encoding="UTF-8"?>\n<channels site="example.tv">\n` +
+          `  <channel site_id="1" xmltv_id="">BBC One HD</channel>\n` +
+          `  <channel site_id="2" xmltv_id="already.set">BBC Two HD</channel>\n` +
+          `</channels>\n`,
+      );
+
+      const { code, stdout } = await run(['channels', '-c', config, '--against', file, '--write']);
+
+      expect(code).toBe(0);
+      expect(stdout).toContain('Wrote 1 id into');
+
+      const written = await readFile(file, 'utf8');
+
+      expect(written).toContain('site_id="1" xmltv_id="bbcone.uk"');
+      // Matched by name too, but an id already there is somebody's decision.
+      expect(written).toContain('xmltv_id="already.set"');
+    });
+
+    it('fills a playlist`s tvg-id in place', async () => {
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'b.m3u');
+
+      await writeFile(
+        file,
+        '#EXTM3U\n#EXTINF:-1 tvg-id="" tvg-name="BBC One HD",BBC One HD\nhttp://e/1\n',
+      );
+
+      const { code } = await run(['channels', '-c', config, '--against', file, '--write']);
+
+      expect(code).toBe(0);
+      // In the attribute's own place, not appended after the name.
+      expect(await readFile(file, 'utf8')).toContain(
+        '#EXTINF:-1 tvg-id="bbcone.uk" tvg-name="BBC One HD",BBC One HD',
+      );
+    });
+
+    // A guide names its channels rather than mapping them, so writing is a
+    // rename — and it has to reach every programme, or the guide is broken.
+    it('renames a guide`s channels and every programme on them', async () => {
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'c.xml');
+
+      await writeFile(
+        file,
+        `<?xml version="1.0" encoding="UTF-8"?><?keep me?><tv generator-info-name="theirs">` +
+          `<channel id="THEIR-1"><display-name>BBC One</display-name></channel>` +
+          `<programme start="20260906060000 +0000" stop="20260906070000 +0000" channel="THEIR-1">` +
+          `<title>Breakfast</title></programme></tv>`,
+      );
+
+      const { code } = await run(['channels', '-c', config, '--against', file, '--write']);
+
+      expect(code).toBe(0);
+
+      const written = await readFile(file, 'utf8');
+
+      expect(written).toContain('<channel id="bbcone.uk">');
+      expect(written).toContain('channel="bbcone.uk"');
+      expect(written).not.toContain('THEIR-1');
+      // The document around it survived the rewrite.
+      expect(written).toContain('generator-info-name="theirs"');
+      expect(written).toContain('<?keep me?>');
+    });
+
+    it('writes elsewhere with -o, leaving the original untouched', async () => {
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'g.channels.xml');
+      const before =
+        `<?xml version="1.0" encoding="UTF-8"?>\n<channels site="example.tv">\n` +
+        `  <channel site_id="1" xmltv_id="">BBC One</channel>\n</channels>\n`;
+
+      await writeFile(file, before);
+
+      const out = join(dir, 'fixed.channels.xml');
+      const { code, stdout } = await run([
+        'channels',
+        '-c',
+        config,
+        '--against',
+        file,
+        '--write',
+        '-o',
+        out,
+      ]);
+
+      expect(code).toBe(0);
+      // The answer went to the new file, and the summary names that one.
+      expect(stdout).toContain(`Wrote 1 id into ${out}`);
+      expect(await readFile(out, 'utf8')).toContain('xmltv_id="bbcone.uk"');
+      expect(await readFile(file, 'utf8')).toBe(before);
+    });
+
+    it('diverts a guide rewrite too, reading the original while writing', async () => {
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'h.xml');
+      const before =
+        `<?xml version="1.0" encoding="UTF-8"?><tv>` +
+        `<channel id="THEIR-1"><display-name>BBC One</display-name></channel>` +
+        `<programme start="20260906060000 +0000" stop="20260906070000 +0000" channel="THEIR-1">` +
+        `<title>Breakfast</title></programme></tv>`;
+
+      await writeFile(file, before);
+
+      const out = join(dir, 'renamed.xml');
+
+      expect(
+        (await run(['channels', '-c', config, '--against', file, '--write', '-o', out])).code,
+      ).toBe(0);
+
+      expect(await readFile(out, 'utf8')).toContain('channel="bbcone.uk"');
+      expect(await readFile(file, 'utf8')).toBe(before);
+    });
+
+    it('refuses -o without --write, which would write nothing anywhere', async () => {
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'i.channels.xml');
+
+      await writeFile(file, '<channels><channel site_id="1" xmltv_id="">A</channel></channels>');
+
+      const { code, stderr } = await run([
+        'channels',
+        '-c',
+        config,
+        '--against',
+        file,
+        '-o',
+        join(dir, 'nope.xml'),
+      ]);
+
+      expect(code).toBe(1);
+      expect(stderr).toContain('takes -o only with --write');
+    });
+
+    it('leaves the file alone when there is nothing to write', async () => {
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'd.channels.xml');
+      const before =
+        `<?xml version="1.0" encoding="UTF-8"?>\n<channels site="example.tv">\n` +
+        `  <channel site_id="9" xmltv_id="">Nobody Has This</channel>\n</channels>\n`;
+
+      await writeFile(file, before);
+
+      const { code, stdout } = await run(['channels', '-c', config, '--against', file, '--write']);
+
+      expect(code).toBe(0);
+      expect(stdout).not.toContain('Wrote');
+      expect(await readFile(file, 'utf8')).toBe(before);
+    });
+
+    // Fixing them and then failing the run that fixed them would be a strange
+    // thing for a --check to do.
+    it('passes --check for what it just wrote, and fails for what it could not', async () => {
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const fixable = join(dir, 'e.channels.xml');
+
+      await writeFile(
+        fixable,
+        `<?xml version="1.0"?>\n<channels site="example.tv">\n` +
+          `  <channel site_id="1" xmltv_id="">BBC One</channel>\n</channels>\n`,
+      );
+
+      expect(
+        (await run(['channels', '-c', config, '--against', fixable, '--write', '--check'])).code,
+      ).toBe(0);
+
+      const hopeless = join(dir, 'f.channels.xml');
+
+      await writeFile(
+        hopeless,
+        `<?xml version="1.0"?>\n<channels site="example.tv">\n` +
+          `  <channel site_id="9" xmltv_id="">Nobody Has This</channel>\n</channels>\n`,
+      );
+
+      expect(
+        (await run(['channels', '-c', config, '--against', hopeless, '--write', '--check'])).code,
+      ).toBe(1);
+    });
+  });
+
   describe('filter', () => {
     const GUIDE =
       `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE tv SYSTEM "xmltv.dtd">` +
