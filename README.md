@@ -201,7 +201,7 @@ decides what to refetch are in [Configuration and CLI](./docs/configuration.md).
 | page | what is in it |
 |---|---|
 | [Configuration and CLI](./docs/configuration.md) | Every `EpgConfig` field and default, the cache, the `epg` commands and options, merge strategies |
-| [Site configuration](./docs/site-config.md) | Writing a site: channels, `request`, `parseDay`, batching, per-site HTTP and proxies, rate limits and backoff |
+| [Site configuration](./docs/site-config.md) | Writing a site: channels, `request`, `parseDay`, batching, per-site HTTP and proxies, rate limits and backoff — and the ready-made sources: a published guide, an M3U playlist, an Xtream Codes panel |
 | [XMLTV parser, serializer and builders](./docs/xmltv.md) | The standalone `epg-tools/xmltv` entry point — parsing, warnings, serializing, the stream `Transform`s, builders, dates |
 | [M3U playlists](./docs/m3u.md) | The standalone `epg-tools/m3u` entry point — parsing, the model, warnings, serializing, and reading a playlist as a channel list |
 | [Channel lists and matching](./docs/channels.md) | The standalone `epg-tools/channels` entry point — reading and writing `*.channels.xml`, matching two channel lists, `epg channels` |

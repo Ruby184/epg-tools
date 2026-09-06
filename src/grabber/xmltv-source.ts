@@ -322,8 +322,15 @@ export async function* documentBytes(
   yield* out;
 }
 
-/** The day a programme falls on, however this site reckons days. */
-function dayOf(start: XmltvProgramme['start'], zone: XmltvDayZone): string {
+/**
+ * The day a programme falls on, however this site reckons days.
+ *
+ * Exported because a second source adapter wants the same reckoning and a
+ * second copy of it would be a second answer — see `defineXtreamSite`, whose
+ * listings carry an offset derived from the panel rather than read from a
+ * document.
+ */
+export function dayOf(start: XmltvProgramme['start'], zone: XmltvDayZone): string {
   if (zone === 'utc') {
     return toDayString(start);
   }
