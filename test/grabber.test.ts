@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   CacheEntryMeta,
   CacheStore,
@@ -146,18 +146,6 @@ function programme(start: string, channel = 'raw.source'): XmltvProgramme {
 
 function channel(id: string): GrabberChannel {
   return { xmltvId: id, siteId: `site-${id}` };
-}
-
-/**
- * Timers this process is still holding open.
- *
- * A hold's `setTimeout` is deliberately not unref'd — a run in the middle of one
- * has to stay alive — so one left behind keeps the whole process alive with it.
- * A count either side of a run is the only way to see that from inside a test
- * runner, which tears its workers down whatever they are still waiting for.
- */
-function pendingTimers(): number {
-  return process.getActiveResourcesInfo().filter((resource) => resource === 'Timeout').length;
 }
 
 function makeConfig(overrides: Partial<SiteConfig<unknown>> = {}): SiteConfig<unknown> {
@@ -3031,9 +3019,21 @@ describe('what a run reports', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const { port } = server.address() as AddressInfo;
 
+    // Watched rather than counted. `process.getActiveResourcesInfo()` was the
+    // obvious way and the wrong one — it is process-wide, and this test makes
+    // real HTTP calls, so Node's own client and server timers came and went
+    // between the two readings and failed it about one run in ten under load.
+    // `vi.getTimerCount()` has the same trouble for the same reason.
+    //
+    // A hold is identified by its duration, which is the one thing no other
+    // timer here shares: `ky`'s own default timeout is ten seconds, this is
+    // thirty. So: was one set, and was it cleared.
+    const HOLD_MS = 30_000;
+    const set = vi.spyOn(globalThis, 'setTimeout');
+    const cleared = vi.spyOn(globalThis, 'clearTimeout');
+
     try {
       const report = collect();
-      const timersBefore = pendingTimers();
       const config = makeConfig({
         backoff: { fallbackMs: 30_000, maxMs: 30_000 },
         async channels({ http }) {
@@ -3056,13 +3056,22 @@ describe('what a run reports', () => {
       expect(report.of('pacing:held')).toEqual([
         expect.objectContaining({ site: 'example.com', status: 429 }),
       ]);
-      expect(pendingTimers()).toBe(timersBefore);
+      const holds = set.mock.calls
+        .map((call, index) => ({ ms: call[1], handle: set.mock.results[index]?.value }))
+        .filter((call) => call.ms === HOLD_MS);
+
+      // One was set — without this the test would pass by holding nothing —
+      // and it was cleared rather than left counting down.
+      expect(holds).toHaveLength(1);
+      expect(cleared.mock.calls.map(([handle]) => handle)).toContain(holds[0]!.handle);
       expect(summary).toMatchObject({ failed: 0, sitesFailed: 1 });
       expect(report.of('site:failed')).toHaveLength(1);
       expect(report.of('site:done')).toEqual([
         expect.objectContaining({ site: 'example.com', fetched: 0, failed: 0, sitesFailed: 1 }),
       ]);
     } finally {
+      set.mockRestore();
+      cleared.mockRestore();
       server.close();
     }
   });
