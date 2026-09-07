@@ -783,6 +783,76 @@ describe('epg', () => {
       expect(await readFile(file, 'utf8')).toBe(before);
     });
 
+    it('keeps a guide indented as it found it', async () => {
+      // Renaming ids must not reflow the document. Serializing with no indent
+      // is compact, so a pretty guide would come back as a single line and the
+      // diff for two renamed attributes would be the whole file.
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'pretty.xml');
+
+      await writeFile(
+        file,
+        `<?xml version="1.0" encoding="UTF-8"?>\n<tv>\n` +
+          `  <channel id="THEIR-1">\n    <display-name>BBC One</display-name>\n  </channel>\n` +
+          `  <programme start="20260906060000 +0000" channel="THEIR-1">\n` +
+          `    <title>Breakfast</title>\n  </programme>\n</tv>\n`,
+        'utf8',
+      );
+
+      expect((await run(['channels', '-c', config, '--against', file, '--write'])).code).toBe(0);
+
+      const written = await readFile(file, 'utf8');
+
+      expect(written).toContain('\n  <channel id="bbcone.uk">\n');
+      expect(written).toContain('\n    <display-name>BBC One</display-name>\n');
+    });
+
+    it('leaves a compact guide compact', async () => {
+      // The other half: detection must not turn a one-line guide into a pretty
+      // one either. What the file had is what it keeps.
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'flat.xml');
+
+      await writeFile(
+        file,
+        `<?xml version="1.0" encoding="UTF-8"?><tv>` +
+          `<channel id="THEIR-1"><display-name>BBC One</display-name></channel></tv>`,
+        'utf8',
+      );
+
+      expect((await run(['channels', '-c', config, '--against', file, '--write'])).code).toBe(0);
+
+      expect(await readFile(file, 'utf8')).toContain(
+        '<channel id="bbcone.uk"><display-name>BBC One</display-name></channel>',
+      );
+    });
+
+    it('keeps the line endings a list already used', async () => {
+      // A playlist from a set-top box is routinely CRLF, and both writers
+      // default to `\n` — so without this, renaming one id rewrites every line.
+      const dir = await tempDir();
+      const config = await siteConfig(dir);
+      const file = join(dir, 'crlf.channels.xml');
+
+      await writeFile(
+        file,
+        `<?xml version="1.0" encoding="UTF-8"?>\r\n<channels>\r\n` +
+          `  <channel site="example.com" site_id="1" xmltv_id="">BBC One</channel>\r\n` +
+          `</channels>\r\n`,
+        'utf8',
+      );
+
+      expect((await run(['channels', '-c', config, '--against', file, '--write'])).code).toBe(0);
+
+      const written = await readFile(file, 'utf8');
+
+      expect(written).toContain('xmltv_id="bbcone.uk"');
+      expect(written).toContain('\r\n');
+      expect(written.replace(/\r\n/g, '')).not.toContain('\n');
+    });
+
     it('refuses -o without --write, which would write nothing anywhere', async () => {
       const dir = await tempDir();
       const config = await siteConfig(dir);
