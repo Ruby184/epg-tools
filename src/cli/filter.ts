@@ -15,7 +15,7 @@ import { pipeline } from 'node:stream/promises';
 import type { Writable } from 'node:stream';
 import { guideBytes, writeOutput, type OutputTarget } from '../core/output.js';
 import { parseXmltvStream } from '../xmltv/parse.js';
-import { XmltvSerializeStream } from '../xmltv/serialize.js';
+import { outputOptions, XmltvSerializeStream } from '../xmltv/serialize.js';
 import type { SerializeOptions } from '../xmltv/serialize.js';
 import type { XmltvParseEvent } from '../xmltv/types.js';
 
@@ -81,8 +81,7 @@ export async function filterGuide(file: string, options: FilterOptions): Promise
   }
 
   const serializer = new XmltvSerializeStream({
-    ...(options.extensions !== undefined ? { extensions: options.extensions } : {}),
-    ...(options.indent !== undefined ? { indent: options.indent } : {}),
+    ...outputOptions(options),
     ...(signal ? { signal } : {}),
   });
 

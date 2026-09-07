@@ -97,6 +97,7 @@ export type {
   ValidationReport,
   ExtensionRef,
   FormatXmltvDateOptions,
+  GuideOutputOptions,
   SerializeOptions,
   XmltvDate,
   XmltvDateOptions,

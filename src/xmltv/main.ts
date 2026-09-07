@@ -39,6 +39,7 @@ export type {
   DocumentBoundaryOptions,
   ExtensionFilter,
   ExtensionRef,
+  GuideOutputOptions,
 } from './serialize.js';
 export { parseXmltvStream, parseXmltvFile, parseXmltvString, XmltvParseStream } from './parse.js';
 export { validateXmltv } from './validate.js';

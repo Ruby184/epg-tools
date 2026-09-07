@@ -81,6 +81,36 @@ export interface SerializeOptions {
 }
 
 /**
+ * The output-shaping options a configuration carries, and the subset of
+ * {@link SerializeOptions} every writer in this package accepts.
+ *
+ * These travel together because they answer the same question — what the
+ * document coming out looks like — and because they reach the writers by five
+ * different routes (`epg build`, `epg merge`, `epg serve`, `epg filter` and
+ * `--list-channels`). Spelling them out at each of those was how `serve` came
+ * to be missing one.
+ */
+export type GuideOutputOptions = Pick<SerializeOptions, 'indent' | 'extensions'>;
+
+/**
+ * The output options a source actually set, ready to spread into a writer's.
+ *
+ * Absent stays absent rather than becoming `undefined`, so a caller's option
+ * still wins over a default further down — which is why the parameter is the
+ * looser shape a config declares (`extensions?: SerializeOptions['extensions']`
+ * admits an explicit `undefined`) and the result is the strict one.
+ */
+export function outputOptions(from: {
+  indent?: string | number | undefined;
+  extensions?: SerializeOptions['extensions'];
+}): GuideOutputOptions {
+  return {
+    ...(from.indent !== undefined ? { indent: from.indent } : {}),
+    ...(from.extensions !== undefined ? { extensions: from.extensions } : {}),
+  };
+}
+
+/**
  * What the two ends of a document take on top of the formatting: the processing
  * instructions, all of them, at either end.
  *

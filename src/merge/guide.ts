@@ -6,6 +6,7 @@ import type { Says } from '../core/events.js';
 import { channelElement, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
 import type { GrabberChannel } from '../grabber/types.js';
 import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
+import { outputOptions } from '../xmltv/serialize.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import { mergeChannels } from './channel.js';
 import { derivedChannelElement, resolveDerived, shiftProgrammes } from './derive.js';
@@ -743,10 +744,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       channels,
       programmes: programmes(),
     },
-    {
-      ...(options.indent !== undefined ? { indent: options.indent } : {}),
-      ...(options.extensions !== undefined ? { extensions: options.extensions } : {}),
-    },
+    outputOptions(options),
   );
 }
 

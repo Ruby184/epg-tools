@@ -30,6 +30,7 @@ import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { generateGuide } from '../merge/guide.js';
 import { channelSelection } from '../merge/select.js';
 import type { BuildGuideOptions } from '../merge/types.js';
+import { outputOptions } from '../xmltv/serialize.js';
 
 /** Where the guide is served from when nothing says otherwise. */
 export const DEFAULT_SERVE_PATH = '/guide.xml';
@@ -551,8 +552,7 @@ export async function serveGuide(
       ...(config.derived ? { derived: config.derived } : {}),
       ...(config.channels ? { channels: config.channels } : {}),
       ...(config.meta ? { meta: config.meta } : {}),
-      ...(config.indent !== undefined ? { indent: config.indent } : {}),
-      ...(config.extensions !== undefined ? { extensions: config.extensions } : {}),
+      ...outputOptions(config),
     };
   };
 
