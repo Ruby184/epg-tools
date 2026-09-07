@@ -28,6 +28,7 @@ import { compressor, type CompressionFormat } from '../core/output.js';
 import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { generateGuide } from '../merge/guide.js';
+import { channelSelection } from '../merge/select.js';
 import type { BuildGuideOptions } from '../merge/types.js';
 
 /** Where the guide is served from when nothing says otherwise. */
@@ -409,6 +410,16 @@ export async function serveGuide(
   const cache = options.cache ?? (await createCacheStore(config, options.signal));
 
   /**
+   * What `config.channels` narrows the guide to, resolved once.
+   *
+   * `generateGuide` asks for this itself, so passing `channels` through
+   * `guideOptions` is what makes the served guide honour it. This copy is for
+   * the snapshot below, which would otherwise resolve — and fingerprint —
+   * channels that are never served.
+   */
+  const selection = channelSelection(config);
+
+  /**
    * What the cache amounted to when it was last looked at, and the channel
    * lists that grid was built from.
    *
@@ -445,6 +456,7 @@ export async function serveGuide(
         emit,
         ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
+        ...(selection ? { select: selection.select } : {}),
         store: cache,
         now,
       }));
@@ -537,6 +549,7 @@ export async function serveGuide(
       ...(config.localConcurrency !== undefined ? { readAhead: config.localConcurrency } : {}),
       ...(config.merge ? { merge: config.merge } : {}),
       ...(config.derived ? { derived: config.derived } : {}),
+      ...(config.channels ? { channels: config.channels } : {}),
       ...(config.meta ? { meta: config.meta } : {}),
       ...(config.indent !== undefined ? { indent: config.indent } : {}),
       ...(config.extensions !== undefined ? { extensions: config.extensions } : {}),

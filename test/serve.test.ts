@@ -727,6 +727,45 @@ describe('serveGuide', () => {
     // started is the storm the in-flight promise exists to prevent.
     expect(sweeps).toBe(1);
   });
+
+  it('serves only the channels the config asks for', async () => {
+    // `--channels` is accepted for `serve` and sets `config.channels`, so a
+    // guide carrying every channel anyway is the flag doing nothing.
+    const cache = cacheWith({ one: [programme('one', 6)], two: [programme('two', 7)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve({ ...configFor(['one', 'two']), channels: ['one'] }, cache);
+    const body = await (await fetch(server.url)).text();
+
+    expect(body).toContain('<channel id="one">');
+    expect(body).not.toContain('<channel id="two">');
+    expect(body).not.toContain('channel="two"');
+  });
+
+  it('does not move the etag when a channel it does not serve changes', async () => {
+    // The snapshot is fingerprinted over the resolved channels, so resolving
+    // the unselected ones too would let a grab of `two` expire every consumer's
+    // copy of a guide that has never contained it.
+    const cache = cacheWith({ one: [programme('one', 6)], two: [programme('two', 7)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const config = { ...configFor(['one', 'two']), channels: ['one'] };
+    const server = await serve(config, cache, { revalidateMs: 0, sitesMaxAgeMs: 0 });
+    const first = await fetch(server.url);
+
+    await first.text();
+
+    await cache.write({ site: 'example.tv', channelId: 'two', day: DAY }, [
+      programme('two', 7),
+      programme('two', 8, 'Later'),
+    ]);
+
+    const again = await fetch(server.url, {
+      headers: { 'if-none-match': first.headers.get('etag')! },
+    });
+
+    expect(again.status).toBe(304);
+  });
 });
 
 describe('serveGuide over a cache on disk', () => {
