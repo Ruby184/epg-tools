@@ -1,6 +1,8 @@
 import { Readable } from 'node:stream';
 import { xmltvDate } from './date.js';
 import type { DateInput, XmltvDateOptions } from './date.js';
+import { formatOnscreenEpisodeNum, formatXmltvNsEpisodeNum } from './episode-num.js';
+import type { EpisodeNumbers } from './episode-num.js';
 import {
   serializeChannel,
   serializeDocumentFooter,
@@ -763,29 +765,25 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     season: number | string,
     opts: EpisodeOptions,
   ): XmltvEpisodeNum[] {
-    const seasonNum = Number(season);
-    const episodeNum = Number(episode);
-
-    const part = opts.part ?? 1;
-    const parts = opts.parts ?? 1;
-
-    // Each xmltv_ns field is a 0-based index with an optional `/total` count;
-    // an unspecified part means "part 1 of 1" (`0/1`).
-    const dim = (index: number, total?: number): string =>
-      total !== undefined ? `${index}/${total}` : `${index}`;
-    const xmltvNs = [
-      dim(seasonNum - 1, opts.seasons),
-      dim(episodeNum - 1, opts.episodes),
-      `${part - 1}/${parts}`,
-    ].join('.');
-
-    // onscreen is free-form display text; show a 1-based part only when multi-part.
-    let onscreen = `S${String(seasonNum).padStart(2, '0')}E${String(episodeNum).padStart(2, '0')}`;
-    if (parts > 1) onscreen += ` (${part}/${parts})`;
+    // The 1-based numbers a caller gives, as the 0-based indices both wire
+    // formats use. An unspecified part means "part 1 of 1" (`0/1`).
+    const numbers: EpisodeNumbers = {
+      season: {
+        index: Number(season) - 1,
+        ...(opts.seasons === undefined ? {} : { total: opts.seasons }),
+      },
+      episode: {
+        index: Number(episode) - 1,
+        ...(opts.episodes === undefined ? {} : { total: opts.episodes }),
+      },
+      part: { index: (opts.part ?? 1) - 1, total: opts.parts ?? 1 },
+    };
 
     return [
-      { system: 'xmltv_ns', value: xmltvNs },
-      { system: 'onscreen', value: onscreen },
+      { system: 'xmltv_ns', value: formatXmltvNsEpisodeNum(numbers) },
+      // Only ever undefined for numbers that name no episode, and `episode` is
+      // this method's required argument.
+      { system: 'onscreen', value: formatOnscreenEpisodeNum(numbers)! },
     ];
   }
 }

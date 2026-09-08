@@ -41,6 +41,15 @@ export type {
   ExtensionRef,
   GuideOutputOptions,
 } from './serialize.js';
+export {
+  formatDdProgidEpisodeNum,
+  formatOnscreenEpisodeNum,
+  formatXmltvNsEpisodeNum,
+  parseDdProgidEpisodeNum,
+  parseOnscreenEpisodeNum,
+  parseXmltvNsEpisodeNum,
+} from './episode-num.js';
+export type { DdProgid, DdProgidType, EpisodeField, EpisodeNumbers } from './episode-num.js';
 export { parseXmltvStream, parseXmltvFile, parseXmltvString, XmltvParseStream } from './parse.js';
 export { validateXmltv } from './validate.js';
 export type {
