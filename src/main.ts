@@ -92,6 +92,9 @@ export {
   parseDdProgidEpisodeNum,
   parseOnscreenEpisodeNum,
   parseXmltvNsEpisodeNum,
+  DVB_GENRES,
+  genreKey,
+  genreOf,
 } from './xmltv/main.js';
 export type {
   DateInput,
@@ -100,6 +103,7 @@ export type {
   EpisodeField,
   EpisodeNumbers,
   ExtensionFilter,
+  Genre,
   FindingCode,
   FindingSeverity,
   ValidateOptions,

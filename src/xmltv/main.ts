@@ -50,6 +50,8 @@ export {
   parseXmltvNsEpisodeNum,
 } from './episode-num.js';
 export type { DdProgid, DdProgidType, EpisodeField, EpisodeNumbers } from './episode-num.js';
+export { DVB_GENRES, genreKey, genreOf } from './genres.js';
+export type { Genre } from './genres.js';
 export { parseXmltvStream, parseXmltvFile, parseXmltvString, XmltvParseStream } from './parse.js';
 export { validateXmltv } from './validate.js';
 export type {
