@@ -181,10 +181,15 @@ interface Fmt {
    */
   keep: boolean | ExtensionFilter;
   /**
-   * {@link SerializeOptions.profile} resolved, absent when there is none —
-   * which is the fast path every existing caller stays on.
+   * {@link SerializeOptions.profile} resolved, `undefined` when there is none.
+   *
+   * Declared as always-present-possibly-undefined rather than optional, and set
+   * unconditionally below, so every `Fmt` in a run has one shape. Making it
+   * optional cost ~10% on a guide that passes an empty profile: two hidden
+   * classes turned `f.unit`, `f.nl` and `f.keep` polymorphic in the hottest
+   * loop this package has.
    */
-  profile?: ResolvedProfile;
+  profile: ResolvedProfile | undefined;
 }
 
 /** Shared, so nothing is allocated for an element that is absent or dropped. */
@@ -253,10 +258,10 @@ function makeFmt(options: SerializeOptions | undefined): Fmt {
     unit,
     nl: unit === '' ? '' : '\n',
     keep: keepFrom(options?.extensions),
-    // Absent unless asked for, so `profile` stays undefined on every existing
-    // caller's `Fmt` and the guards below cost one property load. `resolveProfile`
-    // caches, so this is a map lookup rather than a compile per element.
-    ...(profile === undefined ? {} : { profile: resolveProfile(profile) }),
+    // Set either way, to keep one hidden class — see `Fmt.profile`.
+    // `resolveProfile` caches, so this is a lookup rather than a compile per
+    // element.
+    profile: profile === undefined ? undefined : resolveProfile(profile),
   };
 }
 

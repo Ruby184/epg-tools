@@ -458,8 +458,6 @@ function episodeNumRewrite(policy: EpisodeNumPolicy): ResolvedProfile['episodeNu
     return undefined;
   }
 
-  const order = systems === undefined ? undefined : new Map(systems.map((s, at) => [s, at]));
-
   return (entries) => {
     let kept: XmltvEpisodeNum[] = normalizeDdProgid
       ? entries.map((entry) => {
@@ -495,16 +493,24 @@ function episodeNumRewrite(policy: EpisodeNumPolicy): ResolvedProfile['episodeNu
       }
     }
 
-    if (order !== undefined) {
-      kept = kept
-        .filter((entry) => order.has(systemOf(entry)))
-        // By the index in `systems`, so they come out in the order asked for,
-        // and by original position within a system, which keeps a source's own.
-        .map((entry, at) => ({ entry, at }))
-        .sort(
-          (a, b) => order.get(systemOf(a.entry))! - order.get(systemOf(b.entry))! || a.at - b.at,
-        )
-        .map(({ entry }) => entry);
+    if (systems !== undefined) {
+      // Walking the wanted systems and collecting what matches does the filter
+      // and the ordering in one pass, and is stable within a system for free.
+      //
+      // The obvious `filter().map().sort().map()` costs four arrays and a
+      // wrapper object per entry to sort by index — for a list that is almost
+      // always two or three long, on every programme in the guide.
+      const ordered: XmltvEpisodeNum[] = [];
+
+      for (const system of systems) {
+        for (const entry of kept) {
+          if (systemOf(entry) === system) {
+            ordered.push(entry);
+          }
+        }
+      }
+
+      kept = ordered;
     }
 
     return single ? kept.slice(0, 1) : kept;
@@ -581,6 +587,14 @@ function categoryRewrite(
   };
 
   return (values) => {
+    // One category cannot collide with anything, and that is the overwhelmingly
+    // common case — so the dedupe below allocates nothing for it.
+    if (values.length < 2) {
+      const only = values.length === 0 ? undefined : one(values[0]!);
+
+      return only === undefined ? [] : [only];
+    }
+
     const out: XmltvTextValue[] = [];
     // Two categories in different languages can canonicalise onto one, and the
     // merge deduped before any of this ran, so the rewrite dedupes its own
