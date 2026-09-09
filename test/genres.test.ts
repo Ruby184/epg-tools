@@ -37,12 +37,15 @@ describe('the DVB genre table', () => {
     expect(new Set(codes).size).toBe(codes.length);
   });
 
-  it('never lets two genres claim the same name', () => {
-    // The guard a contributor needs: adding `Documentary` to a second genre
-    // would silently steal it from the first, and the table is long enough
-    // that nobody would notice. Checked here rather than at module load, so a
-    // data typo fails CI instead of every process that imports the library.
-    const claimed = new Map<string, Genre>();
+  it('never lets two names fold to the same key', () => {
+    // Two guards in one, because both failures are invisible by inspection in
+    // a table this long. A key claimed by a *different* genre is a real bug —
+    // adding `Documentary` to a second genre silently steals it from the
+    // first. A key repeated within *one* genre is dead data: the alias already
+    // folds onto something listed, so it looks like coverage and adds none.
+    // Checked here rather than at module load, so a data mistake fails CI
+    // instead of every process that imports the library.
+    const claimed = new Map<string, { genre: Genre; name: string }>();
 
     for (const genre of DVB_GENRES) {
       for (const name of [genre.name, ...(genre.aliases ?? [])]) {
@@ -50,11 +53,13 @@ describe('the DVB genre table', () => {
         const already = claimed.get(key);
 
         expect(
-          already === undefined || already === genre,
-          `"${name}" folds to "${key}", claimed by both ${already?.name} and ${genre.name}`,
-        ).toBe(true);
+          already,
+          already?.genre === genre
+            ? `"${name}" is redundant: it folds to "${key}", same as "${already.name}"`
+            : `"${name}" folds to "${key}", claimed by both ${already?.genre.name} and ${genre.name}`,
+        ).toBeUndefined();
 
-        claimed.set(key, genre);
+        claimed.set(key, { genre, name });
       }
     }
   });
@@ -108,6 +113,43 @@ describe('genreOf', () => {
     expect(genreOf('Science fiction')?.eit).toBe('0x13');
     // A real public guide spells it this way, a couple of hundred times.
     expect(genreOf('Gradening')?.eit).toBe('0xa7');
+  });
+
+  it('finds a genre by what the big upstream feeds write', () => {
+    // Gracenote's taxonomy, which reaches XMLTV through the Schedules Direct
+    // grabbers — the strings are its own, not paraphrases.
+    expect(genreOf('Miniseries')?.eit).toBe('0x10');
+    expect(genreOf('Crime drama')?.eit).toBe('0x11');
+    // `Newsmagazine` needs no alias: it folds onto the canonical name.
+    expect(genreOf('Newsmagazine')?.eit).toBe('0x22');
+    expect(genreOf('Docudrama')?.eit).toBe('0x23');
+    expect(genreOf('Sports non-event')?.eit).toBe('0x40');
+    expect(genreOf('How-to')?.eit).toBe('0xa0');
+
+    // FAST channel buckets, which bleed straight into their guides.
+    expect(genreOf('Classic TV')?.eit).toBe('0x10');
+    expect(genreOf('Home & Garden')?.eit).toBe('0xa0');
+
+    // And what an IPTV panel injects.
+    expect(genreOf('PPV')?.eit).toBe('0x41');
+    expect(genreOf('MMA')?.eit).toBe('0x4b');
+    expect(genreOf('UFC')?.eit).toBe('0x4b');
+  });
+
+  it('does not fold an ampersand away, so both spellings are not one key', () => {
+    // `/` and `&` are kept — dropping `/` would merge two real genres — so an
+    // `&` alias covers the `&` spelling only. Real feeds write `&`.
+    expect(genreOf('Home & Garden')?.eit).toBe('0xa0');
+    expect(genreOf('home&garden')?.eit).toBe('0xa0');
+    expect(genreOf('Home and Garden')).toBeUndefined();
+  });
+
+  it('keeps romance-comedy apart from romantic comedy, which do not fold together', () => {
+    // `romancecomedy` and `romanticcomedy` are different strings, so the
+    // hyphen-stripping does not make one cover the other — a near-miss that
+    // would otherwise fail silently. Both are listed.
+    expect(genreOf('Romance-comedy')?.eit).toBe('0x16');
+    expect(genreOf('Romantic comedy')?.eit).toBe('0x16');
   });
 
   it('finds a genre by ETSI’s own wording, not just the consumer’s', () => {

@@ -108,12 +108,26 @@ export const DVB_GENRES: readonly Genre[] = [
       'Feature film',
       'Drama',
       'Feature',
+      'Miniseries',
+      'Made-for-TV movie',
+      'Anthology',
+      'Classic TV',
+      'Action & Drama',
     ],
   },
   {
     name: 'Detective / Thriller',
     eit: '0x11',
-    aliases: ['Detective', 'Thriller', 'Suspense', 'Crime', 'True crime', 'Mystery'],
+    aliases: [
+      'Detective',
+      'Thriller',
+      'Suspense',
+      'Crime',
+      'True crime',
+      'Crime drama',
+      'Police',
+      'Mystery',
+    ],
   },
   {
     name: 'Adventure / Western / War',
@@ -125,19 +139,19 @@ export const DVB_GENRES: readonly Genre[] = [
     eit: '0x13',
     // `Science fiction` alone is one of the commonest categories a real feed
     // emits, and it does not fold onto the full canonical name.
-    aliases: ['Science fiction', 'Sci-Fi', 'Fantasy', 'Horror'],
+    aliases: ['Science fiction', 'Sci-Fi', 'Fantasy', 'Horror', 'Paranormal', 'Supernatural'],
   },
   {
     name: 'Comedy',
     eit: '0x14',
-    aliases: ['Sitcom', 'Stand-up', 'Stand-up comedy', 'Humour', 'Humor'],
+    aliases: ['Sitcom', 'Stand-up', 'Stand-up comedy', 'Dark comedy', 'Humour', 'Humor'],
   },
   {
     name: 'Soap / Melodrama / Folkloric',
     eit: '0x15',
     aliases: ['Soap', 'Soap opera', 'Telenovela', 'Melodrama'],
   },
-  { name: 'Romance', eit: '0x16', aliases: ['Romantic', 'Romantic comedy'] },
+  { name: 'Romance', eit: '0x16', aliases: ['Romantic', 'Romantic comedy', 'Romance-comedy'] },
   {
     name: 'Serious / Classical / Religious / Historical movie / Drama',
     eit: '0x17',
@@ -164,7 +178,14 @@ export const DVB_GENRES: readonly Genre[] = [
   {
     name: 'Documentary',
     eit: '0x23',
-    aliases: ['Documentaries', 'Docu', 'Factual', 'News & Documentary', 'News & Documentaries'],
+    aliases: [
+      'Documentaries',
+      'Docu',
+      'Docudrama',
+      'Factual',
+      'News & Documentary',
+      'News & Documentaries',
+    ],
   },
   {
     name: 'Discussion / Interview / Debate',
@@ -183,6 +204,7 @@ export const DVB_GENRES: readonly Genre[] = [
       'Light entertainment',
       'Reality',
       'Reality TV',
+      'Awards',
     ],
   },
   { name: 'Game show / Quiz / Contest', eit: '0x31', aliases: ['Game show', 'Quiz', 'Contest'] },
@@ -197,10 +219,15 @@ export const DVB_GENRES: readonly Genre[] = [
       'Sports (general)', // ETSI
       'Sport',
       'Sports event',
+      'Sports non-event',
       'Live sports',
     ],
   },
-  { name: 'Special events (Olympic Games, World Cup, etc.)', eit: '0x41' },
+  {
+    name: 'Special events (Olympic Games, World Cup, etc.)',
+    eit: '0x41',
+    aliases: ['PPV', 'Pay Per View'],
+  },
   { name: 'Sports magazines', eit: '0x42', aliases: ['Sports magazine'] },
   { name: 'Football / Soccer', eit: '0x43', aliases: ['Football', 'Soccer'] },
   { name: 'Tennis / Squash', eit: '0x44', aliases: ['Tennis', 'Squash'] },
@@ -216,12 +243,16 @@ export const DVB_GENRES: readonly Genre[] = [
   {
     name: 'Motor sport',
     eit: '0x47',
-    aliases: ['Motorsport', 'Motor sports', 'Racing', 'Auto racing', 'Formula 1'],
+    aliases: ['Motor sports', 'Racing', 'Auto racing', 'Formula 1'],
   },
   { name: 'Water sport', eit: '0x48', aliases: ['Swimming'] },
   { name: 'Winter sports', eit: '0x49', aliases: ['Skiing'] },
   { name: 'Equestrian', eit: '0x4a', aliases: ['Horse racing'] },
-  { name: 'Martial sports', eit: '0x4b', aliases: ['Martial arts', 'Boxing', 'Wrestling'] },
+  {
+    name: 'Martial sports',
+    eit: '0x4b',
+    aliases: ['Martial arts', 'Mixed martial arts', 'MMA', 'UFC', 'WWE', 'Boxing', 'Wrestling'],
+  },
 
   // Children's / Youth programs. Canonically American, which is tvheadend's
   // spelling; ETSI's `programmes` is aliased on all five.
@@ -349,7 +380,7 @@ export const DVB_GENRES: readonly Genre[] = [
   {
     name: 'Economics / Social advisory',
     eit: '0x82',
-    aliases: ['Business', 'Business & Finance', 'Finance', 'Economics'],
+    aliases: ['Business', 'Business & Finance', 'Finance', 'Financial', 'Consumer', 'Economics'],
   },
   { name: 'Remarkable people', eit: '0x83', aliases: ['Biography'] },
 
@@ -367,9 +398,13 @@ export const DVB_GENRES: readonly Genre[] = [
   {
     name: 'Nature / Animals / Environment',
     eit: '0x91',
-    aliases: ['Nature', 'Animals', 'Wildlife', 'Environment'],
+    aliases: ['Nature', 'Animals', 'Wildlife', 'Environment', 'Agriculture'],
   },
-  { name: 'Technology / Natural sciences', eit: '0x92', aliases: ['Technology', 'Tech'] },
+  {
+    name: 'Technology / Natural sciences',
+    eit: '0x92',
+    aliases: ['Technology', 'Tech', 'Computers', 'Aviation'],
+  },
   {
     name: 'Medicine / Physiology / Psychology',
     eit: '0x93',
@@ -390,6 +425,12 @@ export const DVB_GENRES: readonly Genre[] = [
       'Lifestyle',
       'Lifestyles',
       'Home & Lifestyle',
+      'Home & DIY',
+      'Home & Garden',
+      'Home improvement',
+      'How-to',
+      'Collectibles',
+      'Arts/crafts',
     ],
   },
   { name: 'Tourism / Travel', eit: '0xa1', aliases: ['Travel', 'Tourism'] },
