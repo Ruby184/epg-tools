@@ -10,10 +10,17 @@
  * guide is a generator, so its bytes cannot be hashed without buffering the
  * document this package exists to avoid buffering. The cache answers instead:
  * the newest `grabbedAt` across the window, with how many entries are in it.
- * Nothing else can change what the merge would produce, since the merge reads
- * exactly those entries.
+ *
+ * That is not quite everything, and the gap is worth naming because it is
+ * invisible when wrong. The cache says what the *content* would be; it says
+ * nothing about the *shape* it would be written in, so `indent`, `extensions`
+ * and a profile leave no trace in it. Change one, restart, and a consumer's
+ * conditional request matches a validator built from the same entries and is
+ * told 304 — forever, for a document that did change.
+ * {@link outputFingerprint} is the other half of the validator.
  */
 
+import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Readable } from 'node:stream';
@@ -31,6 +38,7 @@ import { generateGuide } from '../merge/guide.js';
 import { channelSelection } from '../merge/select.js';
 import type { BuildGuideOptions } from '../merge/types.js';
 import { outputOptions } from '../xmltv/serialize.js';
+import type { GuideOutputOptions } from '../xmltv/serialize.js';
 
 /** Where the guide is served from when nothing says otherwise. */
 export const DEFAULT_SERVE_PATH = '/guide.xml';
@@ -270,6 +278,61 @@ async function metasOf(
 }
 
 /**
+ * A value as a string that is the same every run for the same value.
+ *
+ * `JSON.stringify` will not do: object key order is insertion order, so two
+ * structurally identical configs can serialize differently, and a function
+ * stringifies to nothing at all — which would silently drop a category mapper
+ * out of the fingerprint below.
+ *
+ * A function becomes its source, which is stable for a given build and changes
+ * exactly when the behaviour does. Array order is kept, because for
+ * `episodeNum.systems` the order *is* the meaning.
+ */
+function canonical(value: unknown): string {
+  if (typeof value === 'function') {
+    return `fn(${value.toString()})`;
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map(canonical).join(',')}]`;
+  }
+
+  if (typeof value === 'object' && value !== null) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${key}:${canonical((value as Record<string, unknown>)[key])}`)
+      .join(',')}}`;
+  }
+
+  return String(value);
+}
+
+/**
+ * What the served document's *shape* amounts to, for the validators.
+ *
+ * Without this a profile is invisible to a polling consumer: the fingerprint
+ * below counts cache entries and their ages, so switching profile and
+ * restarting leaves the etag byte-identical and every client is told 304
+ * forever. Latent for `indent` and `extensions` already; fatal for a knob whose
+ * whole purpose is to be changed and observed.
+ *
+ * Computed once, where the options are resolved — never per request.
+ */
+export function outputFingerprint(options: GuideOutputOptions): string {
+  // A list of extension names is a set, so its order is not part of the answer
+  // — unlike everything else here.
+  const extensions = Array.isArray(options.extensions)
+    ? [...options.extensions].sort()
+    : options.extensions;
+
+  return createHash('sha1')
+    .update(canonical({ indent: options.indent, extensions, profile: options.profile }))
+    .digest('base64url')
+    .slice(0, 10);
+}
+
+/**
  * Read the window's metadata and say what it amounts to.
  *
  * Metadata only — no payloads, no parsing, no serializing. How much that saves
@@ -280,6 +343,7 @@ async function fingerprintOf(
   cache: CacheStore,
   keys: ChannelDayKey[],
   window: string,
+  shape: string,
 ): Promise<Fingerprint> {
   const metas = await metasOf(cache, keys);
   let newest = 0;
@@ -305,7 +369,7 @@ async function fingerprintOf(
 
   // Weak, because two responses that mean the same guide are not required to be
   // byte-identical — a different `Accept-Encoding` alone changes the bytes.
-  return { etag: `W/"${present}-${newest}-${window}"`, lastModified };
+  return { etag: `W/"${present}-${newest}-${window}-${shape}"`, lastModified };
 }
 
 /**
@@ -421,6 +485,14 @@ export async function serveGuide(
   const selection = channelSelection(config);
 
   /**
+   * What the served document's shape amounts to, in the validators.
+   *
+   * Once, here — a config cannot change under a running server, and this is
+   * the only thing the fingerprint cannot read off the cache.
+   */
+  const shape = outputFingerprint(outputOptions(config));
+
+  /**
    * What the cache amounted to when it was last looked at, and the channel
    * lists that grid was built from.
    *
@@ -462,7 +534,10 @@ export async function serveGuide(
         now,
       }));
 
-    return { print: await fingerprintOf(cache, keysFor(sites, window.days), window.id), sites };
+    return {
+      print: await fingerprintOf(cache, keysFor(sites, window.days), window.id, shape),
+      sites,
+    };
   };
 
   /**

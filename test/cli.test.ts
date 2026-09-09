@@ -1014,7 +1014,7 @@ describe('epg', () => {
       expect(gunzipSync(await readFile(out)).toString()).toContain('<channel id="one.uk">');
     });
 
-    it('needs a guide and a selection', async () => {
+    it('needs a guide, and something to do to it', async () => {
       const dir = await tempDir();
       const file = await guide(dir);
 
@@ -1022,9 +1022,50 @@ describe('epg', () => {
       expect(missing.code).toBe(2);
       expect(missing.stderr).toContain('needs a guide');
 
-      const unselected = await run(['filter', file]);
-      expect(unselected.code).toBe(2);
-      expect(unselected.stderr).toContain('needs --channels');
+      // Nothing named at all is `cp`, and saying so beats copying silently.
+      const idle = await run(['filter', file]);
+      expect(idle.code).toBe(2);
+      expect(idle.stderr).toContain('needs something to do');
+    });
+
+    it('reshapes without a selection, which is the whole point of --no-extensions', async () => {
+      // The docs already recommend this for making somebody else's guide
+      // validate, and it needs no `--channels` — the old guard refused it.
+      const dir = await tempDir();
+      const file = await guide(dir);
+      const out = join(dir, 'plain.xml');
+
+      const { code } = await run(['filter', file, '--no-extensions', '-o', out]);
+
+      expect(code).toBe(0);
+
+      const written = await readFile(out, 'utf8');
+
+      // Every channel is still there, and the extension is gone.
+      expect(written).toContain('<channel id="one.uk">');
+      expect(written).toContain('<channel id="two.uk">');
+      expect(written).not.toContain('<lcn>');
+    });
+
+    it('reshapes for a consumer with --profile', async () => {
+      const dir = await tempDir();
+      const file = await guide(dir);
+      const out = join(dir, 'shaped.xml');
+
+      const { code } = await run(['filter', file, '--profile', 'tvheadend', '-o', out]);
+
+      expect(code).toBe(0);
+      expect(await readFile(out, 'utf8')).toContain('<channel id="one.uk">');
+    });
+
+    it('refuses a profile it does not ship', async () => {
+      const dir = await tempDir();
+      const file = await guide(dir);
+      const { code, stderr } = await run(['filter', file, '--profile', 'plex']);
+
+      expect(code).toBe(2);
+      expect(stderr).toContain('Invalid --profile value: plex');
+      expect(stderr).toContain('tvheadend, jellyfin');
     });
 
     // A guide named on the command line is the whole of what this needs.

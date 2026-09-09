@@ -24,6 +24,9 @@ import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js
 import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
 import { REPORT_FORMATS, type ReportFormat } from './format.js';
+import { OUTPUT_PROFILE_NAMES } from '../xmltv/profile.js';
+import type { OutputProfileName } from '../xmltv/profile.js';
+import { outputOptions } from '../xmltv/serialize.js';
 import { renderReport, validateFile } from './validate.js';
 import type { CompressionFormat } from '../core/output.js';
 import type { GrabSummary } from '../grabber/types.js';
@@ -58,10 +61,13 @@ Options:
       --no-extensions   build/merge only: leave every provider extension out,
                         for a guide that validates against the DTD
       --indent <n|str>  build/merge/filter: pretty-print with this indentation
+      --profile <name>  Shape the guide for one consumer: tvheadend or jellyfin.
+                        build/merge/serve/filter. Changes the guide, never the
+                        cache, so switching it refetches nothing
       --channels <what> keep only these channels, and fetch nothing for the
                         rest. Ids, or a file naming them — a playlist, a
                         *.channels.xml, a guide, or a plain list. Repeatable.
-                        build/grab/merge/serve, and required by filter
+                        build/grab/merge/serve/filter
       --against <file>  channels only: what you want a guide for — an M3U
                         playlist, a *.channels.xml, or an XMLTV guide
       --check           channels only: exit 1 unless every wanted channel
@@ -357,6 +363,7 @@ async function filterCommand(
     output?: string;
     extensions?: string[] | null;
     indent?: string | number;
+    profile?: OutputProfileName;
   },
   stdout: Writable,
   stderr: Writable,
@@ -366,33 +373,41 @@ async function filterCommand(
     throw new UsageError('epg filter needs a guide: epg filter <guide.xml> --channels <what>');
   }
 
-  if (values.channels === undefined) {
-    // Without one this is `cp`, and silently copying is a worse answer than
-    // saying what was left out.
-    throw new UsageError('epg filter needs --channels: without it there is nothing to filter');
+  // Something has to change, or this is `cp` — and silently copying is a worse
+  // answer than saying so. Narrowing the channels is the usual reason, but
+  // reshaping the document is a real one too: `--no-extensions` on somebody
+  // else's guide is what makes it validate, and that needs no `--channels`.
+  if (
+    values.channels === undefined &&
+    values.profile === undefined &&
+    values.extensions === undefined &&
+    values.indent === undefined
+  ) {
+    throw new UsageError(
+      'epg filter needs something to do: --channels, --profile, --extensions/--no-extensions or --indent',
+    );
   }
 
   const { wantedIds } = await import('./lists.js');
   const { filterGuide } = await import('./filter.js');
-  const channels = new Set<string>();
+  const channels = values.channels === undefined ? undefined : new Set<string>();
 
-  for (const value of values.channels) {
+  for (const value of values.channels ?? []) {
     for (const id of await wantedIds(value)) {
-      channels.add(id);
+      channels!.add(id);
     }
   }
 
-  if (channels.size === 0) {
-    throw new UsageError(`--channels named no channels: ${values.channels.join(' ')}`);
+  if (channels !== undefined && channels.size === 0) {
+    throw new UsageError(`--channels named no channels: ${values.channels!.join(' ')}`);
   }
 
   const report = await filterGuide(file, {
-    channels,
+    ...(channels ? { channels } : {}),
     // The caller's stdout when nothing was named, so it pipes — and so a test
     // reads it rather than the process's.
     output: values.output ?? stdout,
-    ...(values.extensions !== undefined ? { extensions: values.extensions ?? false } : {}),
-    ...(values.indent !== undefined ? { indent: values.indent } : {}),
+    ...outputOptions(values),
     stderr,
     ...(signal ? { signal } : {}),
   });
@@ -403,7 +418,7 @@ async function filterCommand(
     stderr,
     ...(report.missing.length > 0
       ? [
-          `${report.missing.length} of ${channels.size} channels are not in ${file}: ${report.missing.join(', ')}`,
+          `${report.missing.length} of ${channels?.size ?? 0} channels are not in ${file}: ${report.missing.join(', ')}`,
         ]
       : []),
     `${plural(report.kept, 'channel')}, ${plural(report.programmes, 'programme')}`,
@@ -506,6 +521,9 @@ async function execute(
       // point at a filter of its own by passing a function, which is not
       // something a command line can do.
       extensions: { type: 'string', negatable: true, transform: extensionNames },
+      // A shipped name only. A config can pass a profile of its own, which is
+      // not something a command line can do — the same limit as `extensions`.
+      profile: { type: 'string', choices: OUTPUT_PROFILE_NAMES },
       before: { type: 'string', transform: dayString },
       quiet: { type: 'boolean', short: 'q' },
       verbose: { type: 'boolean', short: 'v' },
@@ -577,12 +595,6 @@ async function execute(
     config = { ...config, cache: { ...config.cache, driver: values['cache-driver'] } };
   }
 
-  // `null` is `--no-extensions` — the third state a negatable option has, and
-  // the one that means "none" rather than "the config decides".
-  if (values.extensions !== undefined) {
-    config = { ...config, extensions: values.extensions ?? false };
-  }
-
   if (
     values.port !== undefined ||
     values.host !== undefined ||
@@ -637,9 +649,10 @@ async function execute(
     config = { ...config, channels: [...selected] };
   }
 
-  if (values.indent !== undefined) {
-    config = { ...config, indent: values.indent };
-  }
+  // The three that shape the document, overlaid by the one helper that knows
+  // how — including that a `null` from `--no-extensions` means "none" rather
+  // than "the config decides", which is the third state a negatable option has.
+  config = { ...config, ...outputOptions(values) };
 
   if (values.refresh) {
     // The reading of the cache is what this turns off, not the writing: the days

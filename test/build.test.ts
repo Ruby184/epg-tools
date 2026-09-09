@@ -733,3 +733,76 @@ describe('naming a driver a config does not have', () => {
     expect(fetchedDays).toEqual([TODAY]);
   });
 });
+
+describe('an output profile', () => {
+  /** A site whose programme carries the things a profile reshapes. */
+  function shapedSite(fetchedDays: string[]): SiteConfig<unknown> {
+    return {
+      ...site(fetchedDays),
+      parseDay({ day }): XmltvProgramme[] {
+        return [
+          {
+            channel: 'one.example',
+            start: new Date(`${day}T06:00:00.000Z`),
+            title: [{ value: `p-${day}` }],
+            category: [{ value: 'Movie', lang: 'en' }],
+            review: [{ type: 'text', value: 'Good' }],
+          },
+        ];
+      },
+    };
+  }
+
+  it('shapes the guide and leaves the cache holding what the site said', async () => {
+    // The property the whole design rests on: a profile applies as the document
+    // is written, so the cache stays a record of what each source produced.
+    const dir = await tempDir();
+    const fetchedDays: string[] = [];
+    const epgConfig = config(dir, { sites: [shapedSite(fetchedDays)], profile: 'tvheadend' });
+
+    await build(epgConfig, { now: NOW });
+
+    const guide = await readFile(epgConfig.output, 'utf8');
+
+    expect(guide).toContain('Movie / Drama');
+    expect(guide).toContain('eit="0x10"');
+    // tvheadend reads no `<review>`, so the profile drops it.
+    expect(guide).not.toContain('<review');
+
+    // The cache, meanwhile, is untouched by any of it.
+    const cached = await readFile(
+      join(dir, 'cache', 'example.com', 'one.example', `${TODAY}.ndjson`),
+      'utf8',
+    );
+
+    expect(cached).toContain('Movie');
+    expect(cached).not.toContain('Movie / Drama');
+    expect(cached).toContain('Good');
+  });
+
+  it('answers two consumers from one grab, fetching nothing the second time', async () => {
+    // Which is the point of shaping on the way out rather than on the way in:
+    // switching profile is a re-merge, not a re-grab.
+    const dir = await tempDir();
+    const fetchedDays: string[] = [];
+    const base = config(dir, { sites: [shapedSite(fetchedDays)] });
+
+    await build({ ...base, profile: 'tvheadend' }, { now: NOW });
+    expect(fetchedDays).toEqual([TODAY]);
+
+    const plain = join(dir, 'plain.xml');
+
+    await runMerge({ ...base, output: plain, profile: 'jellyfin' }, { now: NOW });
+
+    // No second grab, and a different document.
+    expect(fetchedDays).toEqual([TODAY]);
+
+    const shaped = await readFile(base.output, 'utf8');
+    const other = await readFile(plain, 'utf8');
+
+    // Only the tvheadend profile asks for the genre code.
+    expect(shaped).toContain('eit="0x10"');
+    expect(other).not.toContain('eit=');
+    expect(other).toContain('Movie / Drama');
+  });
+});

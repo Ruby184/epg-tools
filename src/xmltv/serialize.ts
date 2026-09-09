@@ -122,12 +122,13 @@ export type GuideOutputOptions = Pick<SerializeOptions, 'indent' | 'extensions' 
  */
 export function outputOptions(from: {
   indent?: string | number | undefined;
-  extensions?: SerializeOptions['extensions'];
+  /** `null` is a negated flag — `--no-extensions` — and means `false`. */
+  extensions?: SerializeOptions['extensions'] | null;
   profile?: SerializeOptions['profile'];
 }): GuideOutputOptions {
   return {
     ...(from.indent !== undefined ? { indent: from.indent } : {}),
-    ...(from.extensions !== undefined ? { extensions: from.extensions } : {}),
+    ...(from.extensions !== undefined ? { extensions: from.extensions ?? false } : {}),
     ...(from.profile !== undefined ? { profile: from.profile } : {}),
   };
 }

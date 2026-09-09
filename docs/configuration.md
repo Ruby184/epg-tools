@@ -58,6 +58,7 @@ hardcode — a username, a password, a region. See
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 | `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — all of them | Which provider extensions the guide carries — see [Provider extensions](#provider-extensions). `false` leaves every one out, which is what makes the guide valid against the DTD. |
+| `profile` | `'tvheadend' \| 'jellyfin' \| OutputProfile` | none | Shape the guide for the consumer that reads it — see [Output profiles](#output-profiles). Applies on the way out, so switching it refetches nothing. |
 | `serve` | `{ port?, host?, path?, compress?, cors? }` | `8080`, `127.0.0.1`, `/guide.xml`, `gzip`, off | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). |
 | `allowMissing` | `number \| string` | none — anything missing fails | How much of the guide may be missing and the run still exit **0**: a number of channel-days, or a share like `'5%'` — see [allowing some of the guide to be missing](#allowing-some-of-the-guide-to-be-missing). |
 | `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'progress'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
@@ -141,6 +142,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--strict` | `validate` only: count warnings as failures too |
 | `--channels <what>` | `build`/`grab`/`merge`/`serve`, and required by `filter`: keep only these channels and fetch nothing for the rest — ids, or a file naming them. Repeatable — see [subsetting a guide](#keeping-only-some-channels) |
 | `--indent <n\|str>` | `build`/`merge`/`filter`: pretty-print with this indentation, mirroring `JSON.stringify` |
+| `--profile <name>` | `build`/`merge`/`serve`/`filter`: shape the guide for one consumer — `tvheadend` or `jellyfin`. See [Output profiles](#output-profiles) |
 | `--against <file>` | `channels` only: what you want a guide for — an M3U playlist, a `*.channels.xml` or an XMLTV guide |
 | `--write` | `channels` only: write the ids the report suggested back into `--against`, in place — or to `-o` |
 | `--check` | `channels` only: exit 1 unless every wanted channel matched by id |
@@ -349,6 +351,112 @@ epg merge --no-extensions -o plain.xml     # and a DTD-valid one, no refetching
 An element left holding nothing collapses to what the DTD allows rather than
 being written empty: `<credits>` with only extensions in it is not written at
 all, and `<video>` becomes `<video/>`.
+
+### Output profiles
+
+A correct XMLTV document is not the same as one a particular consumer
+understands. `profile` bundles the knobs that close that gap, and ships two
+named for the consumers whose handling of a guide was read out of their source:
+
+```ts
+export default defineConfig({
+  sites: [...],
+  profile: 'tvheadend',
+});
+```
+
+`--profile tvheadend` on `build`, `merge`, `serve` and `filter` does the same,
+and overrides the config field. By name only — a command line cannot pass a
+profile object, the same limit `--extensions` has.
+
+Like extensions, this applies **on the way out**. The cache keeps what each
+source said, so switching profile refetches nothing and one grab can answer two
+consumers that want different documents.
+
+Spread a shipped profile to start from one, or write your own:
+
+```ts
+profile: {
+  // Which `<episode-num>` systems go out, best first.
+  episodeNum: {
+    systems: ['xmltv_ns', 'dd_progid'],
+    deriveMissing: true,      // build a wanted system from one that is present
+    normalizeDdProgid: true,  // rewrite a dd_progid to its canonical form
+  },
+  // Elements to leave out, as paths from the document root.
+  drop: ['programme/review', 'programme/image'],
+  // Which of a repeated element to write: a count, or a function given all of
+  // them that returns the ones to keep.
+  keep: {
+    'programme/icon': 1,
+    'programme/desc': (all) => {
+      const english = all.filter((desc) => desc.lang === 'en');
+
+      // One language, but not at the cost of having none.
+      return english.length > 0 ? english : all.slice(0, 1);
+    },
+  },
+  categories: true,  // rewrite category text to the DVB genre vocabulary
+  eit: true,         // and attach the genre code as `eit="0xNN"`
+}
+```
+
+#### Why the ordering matters more than the selection
+
+The obvious reading of "this consumer only understands one `episode-num`" is to
+emit one. That would be wrong for both shipped profiles. tvheadend takes the
+series identity from a `dd_progid` and Jellyfin uses it as the programme's own
+id, so dropping it loses something both want — but each resolves the *episode
+number* from whichever entry comes first, as does MediaPortal, which reads the
+first `<episode-num>` and skips the rest. So `['xmltv_ns', 'dd_progid']` fixes
+all three by ordering rather than by dropping.
+
+That matters because a `dd_progid`'s trailing digits are **not** an episode
+number: in real Schedules Direct data, Seinfeld S9E17 carries `0196`. tvheadend
+reads that tail as an episode number and is wrong to; putting `xmltv_ns` first
+is what stops it.
+
+#### Categories, and what `eit` is really worth
+
+`categories: true` rewrites category text to the DVB genre vocabulary — `Movie`
+becomes `Movie / Drama` — because the consumer that reads categories matches
+them exactly and drops a near-miss **silently**. That is the half that works on
+a default install. A map of your own takes precedence for a source the shipped
+aliases do not cover:
+
+```ts
+categories: { Spielfilm: 'Movie / Drama', Krimi: 'Detective / Thriller' }
+```
+
+A rewrite from the shipped table sets `lang="en"`, because the vocabulary is
+English and leaving a `lang="de"` on English text is a claim the merge would
+believe. A rewrite from *your* map keeps the original `lang`, since mapping into
+canonical German is a reasonable thing to want.
+
+`eit` is opt-in and worth less than it looks: tvheadend reads a code only when
+its **Category Code XPath** setting is pointed at `@eit`, and that field is
+empty by default. Set it, and the code wins over the text; leave it, and the
+code is inert and the text is doing the work.
+
+> **`--no-extensions` removes `eit`, even under a profile that asks for it.** The
+> code is a non-DTD attribute, so it is an extension like any other — which is
+> what keeps "no extensions" meaning "a document that validates". If you want
+> both, you want two documents, which is what one cache is for.
+
+#### Against `transform`
+
+`merge.transform` can do anything a profile can and more, so the difference is
+worth stating. A profile is declarative, per-consumer and applied as the
+document is written, so it never touches the cache and switching it is free.
+`transform` is arbitrary code, runs at merge time, and is the only one of the
+two that can drop a whole programme or look at its neighbours — see
+[cleaning up the output](#cleaning-up-the-output). Reach for a profile when the
+question is "what does this consumer need"; reach for `transform` when the
+question is about the content itself.
+
+`epg try` deliberately ignores profiles. It answers what one *site* produced for
+one channel-day — which is what lands in the cache — and a profile shapes the
+guide several steps later.
 
 ### Trying one channel-day
 
@@ -649,6 +757,20 @@ epg filter guide.xml --channels my-60.m3u -o small.xml
 epg filter big.xml.gz --channels bbc1.uk,bbc2.uk     # to stdout
 ```
 
+`--channels` is the usual reason to run it, but not the only one: reshaping the
+document counts too, and needs no selection.
+
+```sh
+epg filter theirs.xml --no-extensions -o plain.xml       # make it validate
+epg filter theirs.xml --profile tvheadend -o shaped.xml  # for one consumer
+```
+
+It refuses only when *nothing* would change — no `--channels`, no `--profile`,
+no `--extensions`, no `--indent` — because that is `cp`, and saying so beats
+copying silently. A profile here is never taken from a config, unlike
+everywhere else: this rewrites somebody else's guide, and reshaping it is a
+thing to ask for each time rather than a setting to forget.
+
 It needs **no config at all** — a guide named on the command line is the whole
 of what it wants — and streams, so the memory it uses does not depend on the
 size of the guide: measured over a generated document, the live heap is 8.5 MiB
@@ -658,7 +780,8 @@ document.)
 What survives is what a subset should: the root `<tv>` attributes, processing
 instructions wherever they were, and provider extensions on the channels kept.
 `--no-extensions` strips those, which is the way to take somebody's guide and
-make it validate against the DTD; `--indent` gives it back a shape.
+make it validate against the DTD; `--indent` gives it back a shape; `--profile`
+reshapes it for a particular consumer.
 
 Two things do **not** survive, being things the parser does not model: XML
 comments, and a `DOCTYPE` other than the standard one, which is rewritten as

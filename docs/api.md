@@ -238,6 +238,26 @@ filter decides one at a time. The cache keeps everything either way, so two
 documents come out of one grab — see [leaving extensions
 out](./xmltv.md#leaving-extensions-out).
 
+`profile` is the third, through the same entry points: a bundle of the knobs
+that shape the DTD's own elements for a particular consumer — which
+`<episode-num>` systems go out and in what order, what a `<category>` is
+called, how many `<icon>`s a programme needs, which optional elements are left
+out. `'tvheadend'` and `'jellyfin'` ship; anything else is yours. See
+[output profiles](./configuration.md#output-profiles).
+
+The two compose rather than overlap: `extensions` decides whether non-DTD data
+leaves the document at all, a profile decides how the DTD data is shaped. So
+`extensions: false` removes a profile's `eit` code, because that code is a
+non-DTD attribute — which is what keeps "no extensions" meaning "a document
+that validates".
+
+Reading the systems back is available on its own, without a profile:
+`parseXmltvNsEpisodeNum`, `parseOnscreenEpisodeNum` and
+`parseDdProgidEpisodeNum`, with a `format*` counterpart for each, plus
+`DVB_GENRES` and `genreOf` for the genre vocabulary. Each parser **fails
+closed** — a value it cannot read with certainty yields nothing rather than a
+guess.
+
 ## Serving a guide
 
 `serveGuide(config, options)` is `guideStream` behind an HTTP server that

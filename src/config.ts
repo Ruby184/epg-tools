@@ -149,6 +149,21 @@ export interface EpgConfig {
    */
   extensions?: SerializeOptions['extensions'];
   /**
+   * Shape the guide for the consumer that will read it: which `<episode-num>`
+   * systems go out and in what order, what a `<category>` is called, how many
+   * `<icon>`s a programme needs, which optional elements are left out.
+   *
+   * A name this package ships (`'tvheadend'`, `'jellyfin'`) or a profile of
+   * your own; spread a shipped one to start from it. Off by default, and it
+   * shapes only the guide — the cache keeps what each source actually said, so
+   * changing profile costs no refetch. See
+   * [output profiles](../docs/configuration.md#output-profiles).
+   *
+   * `--profile` overrides it, but only by name: a command line cannot pass a
+   * profile object, the same limit `extensions` has.
+   */
+  profile?: SerializeOptions['profile'];
+  /**
    * Where `epg serve` listens, and what it serves — see
    * [serving the guide](../docs/configuration.md#serving-the-guide).
    *
