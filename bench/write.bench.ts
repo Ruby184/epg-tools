@@ -45,6 +45,38 @@ describe(`write XMLTV (${guide.programmes.length} programmes)`, () => {
     }
   });
 
+  // Another guard: an output profile is opt-in, and a guide written without
+  // one must not pay for the feature existing. An empty profile is the worst
+  // case for that — every guard runs and none of them has anything to say — so
+  // this should read the same as the baseline above. A gap means the per-element
+  // path grew work that belongs in `resolveProfile`.
+  bench('epg-tools writeXmltvStream (empty profile)', async () => {
+    let out = '';
+
+    for await (const chunk of writeXmltvStream(
+      { channels: guide.channels, programmes: guide.programmes },
+      { profile: {} },
+    )) {
+      out += chunk;
+    }
+  });
+
+  // And the real thing: reorders episode-nums, derives a missing one,
+  // normalises a dd_progid, rewrites every category through the genre table and
+  // attaches its code, and drops two elements. Slower than the baseline is
+  // expected — what would not be is *scaling* differently, which is what a
+  // per-element resolve would look like.
+  bench('epg-tools writeXmltvStream (profile: tvheadend)', async () => {
+    let out = '';
+
+    for await (const chunk of writeXmltvStream(
+      { channels: guide.channels, programmes: guide.programmes },
+      { profile: 'tvheadend' },
+    )) {
+      out += chunk;
+    }
+  });
+
   bench('epg-tools XmltvSerializeStream (Node Transform)', async () => {
     await pipeline(
       Readable.from(events),

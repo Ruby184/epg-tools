@@ -385,4 +385,9 @@ export interface BuildGuideOptions {
    * {@link SerializeOptions.extensions}.
    */
   extensions?: SerializeOptions['extensions'];
+  /**
+   * Shape the guide for one consumer — see {@link SerializeOptions.profile}.
+   * Applies as the document is written, so the cache is untouched.
+   */
+  profile?: SerializeOptions['profile'];
 }

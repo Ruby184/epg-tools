@@ -5,6 +5,8 @@ import { getDefaultHighWaterMark, Readable, Transform, type TransformCallback } 
 import { pipeline } from 'node:stream/promises';
 import { escapeXml } from './escape.js';
 import { formatXmltvDate } from './date.js';
+import { pick, resolveProfile } from './profile.js';
+import type { DropRef, ProfileRef, ResolvedProfile } from './profile.js';
 import type {
   XmltvProcessingInstruction,
   XmltvProcessingInstructionPosition,
@@ -14,6 +16,7 @@ import type {
   XmltvChannel,
   XmltvCredits,
   XmltvDocumentMeta,
+  XmltvEpisodeNum,
   XmltvExtraElement,
   XmltvIcon,
   XmltvImage,
@@ -78,6 +81,56 @@ export interface SerializeOptions {
    * stream `highWaterMark` (16 KiB before Node 22, 64 KiB since).
    */
   highWaterMark?: number;
+  /**
+   * Shape the document for the consumer that will read it: which
+   * `<episode-num>` systems go out and in what order, what a `<category>` is
+   * called, how many `<icon>`s a programme needs, which optional elements are
+   * left out. A name this package ships (`'tvheadend'`, `'jellyfin'`) or an
+   * `OutputProfile` of your own — spread a shipped one to start from it.
+   *
+   * Off by default: a document written without a profile is exactly the
+   * document this package has always written.
+   *
+   * It shapes what the DTD describes. Which *extensions* go out is
+   * {@link extensions}, and the two compose deliberately — a profile's `eit`
+   * code is a non-DTD attribute, so `extensions: false` removes it even under a
+   * profile that asks for one, and "no extensions" keeps meaning "a document
+   * that validates".
+   */
+  profile?: ProfileRef;
+}
+
+/**
+ * The output-shaping options a configuration carries, and the subset of
+ * {@link SerializeOptions} every writer in this package accepts.
+ *
+ * These travel together because they answer the same question — what the
+ * document coming out looks like — and because they reach the writers by five
+ * different routes (`epg build`, `epg merge`, `epg serve`, `epg filter` and
+ * `--list-channels`). Spelling them out at each of those was how `serve` came
+ * to be missing one.
+ */
+export type GuideOutputOptions = Pick<SerializeOptions, 'indent' | 'extensions' | 'profile'>;
+
+/**
+ * The output options a source actually set, ready to spread into a writer's.
+ *
+ * Absent stays absent rather than becoming `undefined`, so a caller's option
+ * still wins over a default further down — which is why the parameter is the
+ * looser shape a config declares (`extensions?: SerializeOptions['extensions']`
+ * admits an explicit `undefined`) and the result is the strict one.
+ */
+export function outputOptions(from: {
+  indent?: string | number | undefined;
+  /** `null` is a negated flag — `--no-extensions` — and means `false`. */
+  extensions?: SerializeOptions['extensions'] | null;
+  profile?: SerializeOptions['profile'];
+}): GuideOutputOptions {
+  return {
+    ...(from.indent !== undefined ? { indent: from.indent } : {}),
+    ...(from.extensions !== undefined ? { extensions: from.extensions ?? false } : {}),
+    ...(from.profile !== undefined ? { profile: from.profile } : {}),
+  };
 }
 
 /**
@@ -122,7 +175,52 @@ export interface WriteOptions extends SerializeOptions {
 interface Fmt {
   unit: string;
   nl: string;
+  /**
+   * The extension policy. Not to be confused with `profile.keep`, which is
+   * about how many of a repeated DTD element go out; this one is about
+   * non-DTD attributes and elements.
+   */
   keep: boolean | ExtensionFilter;
+  /**
+   * {@link SerializeOptions.profile} resolved, `undefined` when there is none.
+   *
+   * Declared as always-present-possibly-undefined rather than optional, and set
+   * unconditionally below, so every `Fmt` in a run has one shape. Making it
+   * optional cost ~10% on a guide that passes an empty profile: two hidden
+   * classes turned `f.unit`, `f.nl` and `f.keep` polymorphic in the hottest
+   * loop this package has.
+   */
+  profile: ResolvedProfile | undefined;
+}
+
+/** Shared, so nothing is allocated for an element that is absent or dropped. */
+const NONE: readonly never[] = [];
+
+/**
+ * Whether an element at this path is written at all.
+ *
+ * One property load and, at most, one `Set.has` on a literal string. The
+ * `profile?.drop === undefined` guard is what keeps an unprofiled document
+ * from paying for any of this.
+ */
+function kept(f: Fmt, path: string): boolean {
+  return f.profile?.drop === undefined || !f.profile.drop.has(path);
+}
+
+/**
+ * The elements at this path that survive `OutputProfile`'s `drop` and `keep`, in the order they should be written.
+ *
+ * Hands back the caller's own array when no profile has an opinion, so a
+ * document that is not being shaped copies nothing.
+ */
+function chosen<T>(f: Fmt, path: string, elements: readonly T[] | undefined): readonly T[] {
+  if (elements === undefined || !kept(f, path)) {
+    return NONE;
+  }
+
+  const rule = f.profile?.keep?.get(path);
+
+  return rule === undefined ? elements : pick(rule, elements);
 }
 
 /**
@@ -155,8 +253,17 @@ function keepFrom(extensions: SerializeOptions['extensions'] = true): boolean | 
 function makeFmt(options: SerializeOptions | undefined): Fmt {
   const indent = options?.indent;
   const unit = typeof indent === 'number' ? ' '.repeat(Math.max(0, indent)) : (indent ?? '');
+  const profile = options?.profile;
 
-  return { unit, nl: unit === '' ? '' : '\n', keep: keepFrom(options?.extensions) };
+  return {
+    unit,
+    nl: unit === '' ? '' : '\n',
+    keep: keepFrom(options?.extensions),
+    // Set either way, to keep one hidden class — see `Fmt.profile`.
+    // `resolveProfile` caches, so this is a lookup rather than a compile per
+    // element.
+    profile: profile === undefined ? undefined : resolveProfile(profile),
+  };
 }
 
 type AttrValue = string | number | undefined;
@@ -219,16 +326,67 @@ function textAttrPairs(f: Fmt, on: string, value: XmltvTextValue): [string, Attr
   return [['lang', value.lang], ...extraAttrPairs(f, on, value.extraAttributes)];
 }
 
+/**
+ * `path` is given only for elements a profile may shape. `title` and
+ * `display-name` are required by the DTD, so they are called without one and
+ * cannot be touched. It is passed as a literal rather than built from `name`,
+ * so nothing is concatenated per element written.
+ */
 function langElements(
   f: Fmt,
   pad: string,
   name: string,
   values: XmltvTextValue[] | undefined,
+  path?: DropRef,
 ): string {
   let out = '';
 
-  for (const value of values ?? []) {
+  for (const value of path === undefined ? (values ?? []) : chosen(f, path, values)) {
     out += element(f, pad, name, textAttrPairs(f, name, value), value.value);
+  }
+
+  return out;
+}
+
+/**
+ * The `<episode-num>` entries to write: the profile's policy first — which
+ * filters, orders, derives and normalises — then the count, so `keep` applies
+ * to what survived rather than to what a source happened to send.
+ */
+function episodeNumElements(
+  f: Fmt,
+  entries: XmltvEpisodeNum[] | undefined,
+): readonly XmltvEpisodeNum[] {
+  if (entries === undefined || !kept(f, 'programme/episode-num')) {
+    return NONE;
+  }
+
+  const policy = f.profile?.episodeNum;
+  const shaped = policy === undefined ? entries : policy(entries);
+  const rule = f.profile?.keep?.get('programme/episode-num');
+
+  return rule === undefined ? shaped : pick(rule, shaped);
+}
+
+/**
+ * `<category>`, which is the one text element a profile rewrites rather than
+ * only selecting from — so it does not go through {@link langElements}.
+ *
+ * The rewrite runs first and the count after it, so `keep` counts distinct
+ * genres rather than the source's spellings of them.
+ */
+function categoryElements(f: Fmt, pad: string, values: XmltvTextValue[] | undefined): string {
+  if (values === undefined || !kept(f, 'programme/category')) {
+    return '';
+  }
+
+  const rewrite = f.profile?.categories;
+  const rewritten = rewrite === undefined ? values : rewrite(values);
+  const rule = f.profile?.keep?.get('programme/category');
+  let out = '';
+
+  for (const value of rule === undefined ? rewritten : pick(rule, rewritten)) {
+    out += element(f, pad, 'category', textAttrPairs(f, 'category', value), value.value);
   }
 
   return out;
@@ -290,10 +448,17 @@ function extraElements(
   return out;
 }
 
-function iconElements(f: Fmt, pad: string, icons: XmltvIcon[] | undefined): string {
+/**
+ * `path` is where these sit in the document, which a profile needs in order to
+ * tell them apart: `<icon>` occurs under four different elements, and dropping
+ * a programme's stills is not the same as dropping a channel's logo. The
+ * extension `on` stays the bare element name, which is a different vocabulary
+ * on purpose — an extension hangs off an element, wherever that element is.
+ */
+function iconElements(f: Fmt, pad: string, path: DropRef, icons: XmltvIcon[] | undefined): string {
   let out = '';
 
-  for (const icon of icons ?? []) {
+  for (const icon of chosen(f, path, icons)) {
     out += element(f, pad, 'icon', [
       ['src', icon.src],
       ['width', icon.width],
@@ -305,10 +470,15 @@ function iconElements(f: Fmt, pad: string, icons: XmltvIcon[] | undefined): stri
   return out;
 }
 
-function urlElements(f: Fmt, pad: string, urls: XmltvUrlValue[] | undefined): string {
+function urlElements(
+  f: Fmt,
+  pad: string,
+  path: DropRef,
+  urls: XmltvUrlValue[] | undefined,
+): string {
   let out = '';
 
-  for (const url of urls ?? []) {
+  for (const url of chosen(f, path, urls)) {
     out +=
       typeof url === 'string'
         ? element(f, pad, 'url', [], url)
@@ -354,6 +524,26 @@ const CREDIT_ORDER = [
   'guest',
 ] as const;
 
+type CreditRole = (typeof CREDIT_ORDER)[number];
+
+/**
+ * The three paths each credit role owns, built once at module load.
+ *
+ * A guide has as many credits blocks as it has programmes, so concatenating
+ * ten of these per programme would be thirty string builds per element for
+ * something that never changes.
+ */
+const CREDIT_PATHS = Object.fromEntries(
+  CREDIT_ORDER.map((role) => [
+    role,
+    {
+      role: `programme/credits/${role}`,
+      image: `programme/credits/${role}/image`,
+      url: `programme/credits/${role}/url`,
+    },
+  ]),
+) as Record<CreditRole, { role: DropRef; image: DropRef; url: DropRef }>;
+
 /**
  * One credits person element. The DTD content model is
  * `(#PCDATA | image | url)*`, so image/url children are emitted inline
@@ -362,7 +552,7 @@ const CREDIT_ORDER = [
 function personElement(
   f: Fmt,
   pad: string,
-  role: string,
+  role: CreditRole,
   person: XmltvPersonValue | XmltvActor,
 ): string {
   const attrPairs: [string, AttrValue][] = [];
@@ -380,9 +570,14 @@ function personElement(
     return element(f, pad, role, attrPairs, person);
   }
 
+  const paths = CREDIT_PATHS[role];
   const children =
-    (person.image ?? []).map((image) => inlineImage(f, image)).join('') +
-    (person.url ?? []).map((url) => inlineUrl(f, url)).join('') +
+    chosen(f, paths.image, person.image)
+      .map((image) => inlineImage(f, image))
+      .join('') +
+    chosen(f, paths.url, person.url)
+      .map((url) => inlineUrl(f, url))
+      .join('') +
     extraInline(f, role, person.extra);
 
   if (!children) {
@@ -393,7 +588,10 @@ function personElement(
 }
 
 function creditsElement(f: Fmt, pad: string, credits: XmltvCredits | undefined): string {
-  if (!credits) {
+  // The container short-circuits: dropping `programme/credits` generates none
+  // of the markup, where dropping all ten roles builds each and lets the empty
+  // parent collapse below. Same bytes out, one guard instead of eleven.
+  if (!credits || !kept(f, 'programme/credits')) {
     return '';
   }
 
@@ -401,7 +599,7 @@ function creditsElement(f: Fmt, pad: string, credits: XmltvCredits | undefined):
   let inner = '';
 
   for (const role of CREDIT_ORDER) {
-    for (const person of credits[role] ?? []) {
+    for (const person of chosen(f, CREDIT_PATHS[role].role, credits[role])) {
       inner += personElement(f, childPad, role, person);
     }
   }
@@ -416,16 +614,26 @@ function yesNo(value: boolean): string {
 }
 
 function videoElement(f: Fmt, pad: string, video: XmltvVideo | undefined): string {
-  if (!video) {
+  if (!video || !kept(f, 'programme/video')) {
     return '';
   }
 
   const childPad = pad + f.unit;
+  // Dropping every detail leaves `<video/>`, which the DTD allows — the
+  // collapse below decides on `inner` after the children are generated.
   const inner =
-    (video.present !== undefined ? element(f, childPad, 'present', [], yesNo(video.present)) : '') +
-    (video.colour !== undefined ? element(f, childPad, 'colour', [], yesNo(video.colour)) : '') +
-    (video.aspect !== undefined ? element(f, childPad, 'aspect', [], video.aspect) : '') +
-    (video.quality !== undefined ? element(f, childPad, 'quality', [], video.quality) : '') +
+    (video.present !== undefined && kept(f, 'programme/video/present')
+      ? element(f, childPad, 'present', [], yesNo(video.present))
+      : '') +
+    (video.colour !== undefined && kept(f, 'programme/video/colour')
+      ? element(f, childPad, 'colour', [], yesNo(video.colour))
+      : '') +
+    (video.aspect !== undefined && kept(f, 'programme/video/aspect')
+      ? element(f, childPad, 'aspect', [], video.aspect)
+      : '') +
+    (video.quality !== undefined && kept(f, 'programme/video/quality')
+      ? element(f, childPad, 'quality', [], video.quality)
+      : '') +
     extraElements(f, 'video', childPad, video.extra);
 
   const open = `<video${attrs(extraAttrPairs(f, 'video', video.extraAttributes))}`;
@@ -433,14 +641,18 @@ function videoElement(f: Fmt, pad: string, video: XmltvVideo | undefined): strin
 }
 
 function audioElement(f: Fmt, pad: string, audio: XmltvAudio | undefined): string {
-  if (!audio) {
+  if (!audio || !kept(f, 'programme/audio')) {
     return '';
   }
 
   const childPad = pad + f.unit;
   const inner =
-    (audio.present !== undefined ? element(f, childPad, 'present', [], yesNo(audio.present)) : '') +
-    (audio.stereo !== undefined ? element(f, childPad, 'stereo', [], audio.stereo) : '') +
+    (audio.present !== undefined && kept(f, 'programme/audio/present')
+      ? element(f, childPad, 'present', [], yesNo(audio.present))
+      : '') +
+    (audio.stereo !== undefined && kept(f, 'programme/audio/stereo')
+      ? element(f, childPad, 'stereo', [], audio.stereo)
+      : '') +
     extraElements(f, 'audio', childPad, audio.extra);
 
   const open = `<audio${attrs(extraAttrPairs(f, 'audio', audio.extraAttributes))}`;
@@ -450,10 +662,10 @@ function audioElement(f: Fmt, pad: string, audio: XmltvAudio | undefined): strin
 function flagElement(
   f: Fmt,
   pad: string,
-  name: string,
+  name: 'premiere' | 'last-chance',
   value: XmltvTextValue | true | undefined,
 ): string {
-  if (value === undefined) {
+  if (value === undefined || !kept(f, `programme/${name}`)) {
     return '';
   }
 
@@ -467,16 +679,20 @@ function flagElement(
 function ratingElements(
   f: Fmt,
   pad: string,
-  name: string,
+  name: 'rating' | 'star-rating',
   ratings: (XmltvRating | XmltvStarRating)[] | undefined,
 ): string {
   const childPad = pad + f.unit;
+  // Built once rather than per rating: the two paths are fixed by `name`.
+  const path = `programme/${name}` as const;
+  const iconPath = `${path}/icon` as const;
   let out = '';
 
-  for (const rating of ratings ?? []) {
+  for (const rating of chosen(f, path, ratings)) {
     out += `${pad}<${name}${attrs([['system', rating.system], ...extraAttrPairs(f, name, rating.extraAttributes)])}>${f.nl}`;
+    // `<value>` is required by the DTD, so no profile can take it away.
     out += `${childPad}<value>${escapeXml(rating.value)}</value>${f.nl}`;
-    out += iconElements(f, childPad, rating.icon);
+    out += iconElements(f, childPad, iconPath, rating.icon);
     out += extraElements(f, name, childPad, rating.extra);
     out += `${pad}</${name}>${f.nl}`;
   }
@@ -491,9 +707,10 @@ export function serializeChannel(channel: XmltvChannel, options?: SerializeOptio
   const childPad = pad + f.unit;
 
   let out = `${pad}<channel${attrs([['id', channel.id], ...extraAttrPairs(f, 'channel', channel.extraAttributes)])}>${f.nl}`;
+  // `display-name+` is required, so it is not a path a profile can name.
   out += langElements(f, childPad, 'display-name', channel.displayName);
-  out += iconElements(f, childPad, channel.icon);
-  out += urlElements(f, childPad, channel.url);
+  out += iconElements(f, childPad, 'channel/icon', channel.icon);
+  out += urlElements(f, childPad, 'channel/url', channel.url);
   out += extraElements(f, 'channel', childPad, channel.extra);
   return `${out}${pad}</channel>${f.nl}`;
 }
@@ -517,18 +734,18 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
   ])}>${f.nl}`;
 
   out += langElements(f, I, 'title', programme.title);
-  out += langElements(f, I, 'sub-title', programme.subTitle);
-  out += langElements(f, I, 'desc', programme.desc);
+  out += langElements(f, I, 'sub-title', programme.subTitle, 'programme/sub-title');
+  out += langElements(f, I, 'desc', programme.desc, 'programme/desc');
   out += creditsElement(f, I, programme.credits);
 
-  if (programme.date !== undefined) {
+  if (programme.date !== undefined && kept(f, 'programme/date')) {
     out += element(f, I, 'date', [], formatXmltvDate(programme.date, { offset: false }));
   }
 
-  out += langElements(f, I, 'category', programme.category);
-  out += langElements(f, I, 'keyword', programme.keyword);
+  out += categoryElements(f, I, programme.category);
+  out += langElements(f, I, 'keyword', programme.keyword, 'programme/keyword');
 
-  if (programme.language) {
+  if (programme.language && kept(f, 'programme/language')) {
     out += element(
       f,
       I,
@@ -538,7 +755,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
     );
   }
 
-  if (programme.origLanguage) {
+  if (programme.origLanguage && kept(f, 'programme/orig-language')) {
     out += element(
       f,
       I,
@@ -548,7 +765,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
     );
   }
 
-  if (programme.length) {
+  if (programme.length && kept(f, 'programme/length')) {
     out += element(
       f,
       I,
@@ -561,11 +778,11 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
     );
   }
 
-  out += iconElements(f, I, programme.icon);
-  out += urlElements(f, I, programme.url);
-  out += langElements(f, I, 'country', programme.country);
+  out += iconElements(f, I, 'programme/icon', programme.icon);
+  out += urlElements(f, I, 'programme/url', programme.url);
+  out += langElements(f, I, 'country', programme.country, 'programme/country');
 
-  for (const episode of programme.episodeNum ?? []) {
+  for (const episode of episodeNumElements(f, programme.episodeNum)) {
     out += element(
       f,
       I,
@@ -578,7 +795,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
   out += videoElement(f, I, programme.video);
   out += audioElement(f, I, programme.audio);
 
-  if (programme.previouslyShown) {
+  if (programme.previouslyShown && kept(f, 'programme/previously-shown')) {
     out += element(f, I, 'previously-shown', [
       [
         'start',
@@ -594,11 +811,11 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
   out += flagElement(f, I, 'premiere', programme.premiere);
   out += flagElement(f, I, 'last-chance', programme.lastChance);
 
-  if (programme.new) {
+  if (programme.new && kept(f, 'programme/new')) {
     out += `${I}<new/>${f.nl}`;
   }
 
-  for (const subtitles of programme.subtitles ?? []) {
+  for (const subtitles of chosen(f, 'programme/subtitles', programme.subtitles)) {
     const subtitlesAttrs: [string, AttrValue][] = [
       ['type', subtitles.type],
       ...extraAttrPairs(f, 'subtitles', subtitles.extraAttributes),
@@ -606,7 +823,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
 
     const childPad = I + f.unit;
     const inner =
-      (subtitles.language
+      (subtitles.language && kept(f, 'programme/subtitles/language')
         ? element(
             f,
             childPad,
@@ -626,7 +843,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
   out += ratingElements(f, I, 'rating', programme.rating);
   out += ratingElements(f, I, 'star-rating', programme.starRating);
 
-  for (const review of programme.review ?? []) {
+  for (const review of chosen(f, 'programme/review', programme.review)) {
     out += element(
       f,
       I,
@@ -642,7 +859,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
     );
   }
 
-  for (const image of programme.image ?? []) {
+  for (const image of chosen(f, 'programme/image', programme.image)) {
     out += element(
       f,
       I,

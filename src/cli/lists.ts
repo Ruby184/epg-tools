@@ -74,7 +74,7 @@ export async function readChannelList(file: string): Promise<ChannelListFile> {
   const entries = new Map<WantedChannel, Entry>();
   const built =
     source.format === 'guide'
-      ? guideList(file, await guideChannels(source.whole()))
+      ? guideList(file, await guideChannels(source.whole()), source.indent)
       : textList(file, await source.text(), source.format);
 
   for (const [channel, entry] of built.entries) {
@@ -121,6 +121,13 @@ interface Built {
  * checks that every line looks like an id rather than accepting anything.
  */
 function textList(file: string, text: string, format: ListFormat | undefined): Built {
+  // The line ending the file already uses, for the same reason the guide path
+  // keeps its indentation: this rewrites ids and must not also rewrite every
+  // line. Both writers below default to `\n`, so a CRLF playlist — which is
+  // what a set-top box is most likely to have handed the user — would come
+  // back with every line changed.
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+
   if (format === 'm3u') {
     const playlist = parseM3uString(text);
 
@@ -143,8 +150,8 @@ function textList(file: string, text: string, format: ListFormat | undefined): B
       write: (to) =>
         writeFile(
           to,
-          serializeM3uHeader(playlist.header) +
-            playlist.entries.map((entry) => serializeM3uEntry(entry)).join(''),
+          serializeM3uHeader(playlist.header, { eol }) +
+            playlist.entries.map((entry) => serializeM3uEntry(entry, { eol })).join(''),
           'utf8',
         ),
     };
@@ -164,7 +171,7 @@ function textList(file: string, text: string, format: ListFormat | undefined): B
           },
         },
       ]),
-      write: (to) => writeFile(to, serializeChannelsXml(list), 'utf8'),
+      write: (to) => writeFile(to, serializeChannelsXml(list, { eol }), 'utf8'),
     };
   }
 
@@ -197,7 +204,11 @@ function textList(file: string, text: string, format: ListFormat | undefined): B
  * Which is why it streams — the same parse-map-serialize `epg filter` runs, and
  * for the same reason. The document is never held, on the way in or out.
  */
-function guideList(file: string, found: readonly WantedChannel[]): Built {
+function guideList(
+  file: string,
+  found: readonly WantedChannel[],
+  indent: string | undefined,
+): Built {
   const renames = new Map<string, string>();
 
   return {
@@ -213,7 +224,12 @@ function guideList(file: string, found: readonly WantedChannel[]): Built {
       },
     ]),
     write: async (to) => {
-      const serializer = new XmltvSerializeStream();
+      // Only the indentation, and only what the file already had: this rewrites
+      // ids in somebody's own guide, so it must change those and nothing else.
+      // Deliberately not `outputOptions` — an extension policy or an output
+      // profile here would reshape a document the user asked to rename channels
+      // in.
+      const serializer = new XmltvSerializeStream(indent === undefined ? {} : { indent });
 
       serializer.setEncoding('utf8');
 
@@ -311,8 +327,26 @@ const SNIFF_BYTES = 4096;
  * The alternative is reading it whole to find out, which for the one format
  * that is routinely 90 MiB gives away the streaming before it starts.
  */
+/**
+ * The indentation a guide already uses, read off the head that was sniffed
+ * anyway — the whitespace before the first child of `<tv>`.
+ *
+ * `undefined` for a compact document, which is what the serializer defaults to,
+ * so a one-line guide stays one line and a pretty one keeps its shape. Without
+ * it, rewriting ids reflows the file: a 90 MiB guide comes back as a single
+ * line, and the diff for a few renamed attributes is the whole document.
+ *
+ * The separator is `\s*?\n` so a blank line after `<tv>` does not defeat it,
+ * but the captured unit is `[ \t]` only — `\s` there would fold that blank
+ * line's newline into the indent, and the unit is repeated once per level.
+ */
+function indentOf(head: string): string | undefined {
+  return /<tv(?:\s[^>]*)?>\s*?\n([ \t]+)</.exec(head)?.[1];
+}
+
 async function sniff(file: string): Promise<{
   format: ListFormat | undefined;
+  indent: string | undefined;
   whole: () => AsyncGenerator<Uint8Array>;
   text: () => Promise<string>;
 }> {
@@ -346,6 +380,7 @@ async function sniff(file: string): Promise<{
 
   return {
     format: formatOf(sniffed),
+    indent: indentOf(sniffed),
     whole,
     text: async () => {
       const rest = new TextDecoder();

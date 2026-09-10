@@ -309,6 +309,12 @@ export async function tryChannelDay(
   );
 
   for (const programme of programmes) {
+    // Deliberately unshaped: no `outputOptions`, no profile, whatever the
+    // config says. This command answers "what did this site produce for this
+    // channel-day", which is what lands in the cache — and a profile shapes the
+    // *guide*, several steps later. Showing a reshaped programme here would
+    // misattribute the reshaping to the site's own parsing, which is the one
+    // thing this command exists to show plainly.
     out.push(indent(serializeProgramme(programme, { indent: 2 }).trimEnd(), '  '));
   }
 

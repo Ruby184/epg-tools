@@ -39,7 +39,33 @@ export type {
   DocumentBoundaryOptions,
   ExtensionFilter,
   ExtensionRef,
+  GuideOutputOptions,
 } from './serialize.js';
+export {
+  formatDdProgidEpisodeNum,
+  formatOnscreenEpisodeNum,
+  formatXmltvNsEpisodeNum,
+  parseDdProgidEpisodeNum,
+  parseOnscreenEpisodeNum,
+  parseXmltvNsEpisodeNum,
+} from './episode-num.js';
+export type { DdProgid, DdProgidType, EpisodeField, EpisodeNumbers } from './episode-num.js';
+export { DVB_GENRES, genreKey, genreOf } from './genres.js';
+export type { Genre } from './genres.js';
+export { OUTPUT_PROFILE_NAMES, OUTPUT_PROFILES, resolveProfile } from './profile.js';
+export type {
+  CategoryMap,
+  CategoryMapper,
+  DropRef,
+  ElementPicker,
+  EpisodeNumPolicy,
+  KeepRule,
+  OutputProfile,
+  OutputProfileName,
+  ProfileRef,
+  RepeatableRef,
+  ResolvedProfile,
+} from './profile.js';
 export { parseXmltvStream, parseXmltvFile, parseXmltvString, XmltvParseStream } from './parse.js';
 export { validateXmltv } from './validate.js';
 export type {

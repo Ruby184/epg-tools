@@ -271,6 +271,64 @@ An element left holding nothing collapses to what the DTD allows rather than
 being written empty — `<credits>` with only extensions in it is not written at
 all, and `<video>` becomes `<video/>`.
 
+### Episode numbers
+
+The DTD predefines two `<episode-num>` systems and Schedules Direct made a third
+ubiquitous. All three can be read as well as written:
+
+```ts
+parseXmltvNsEpisodeNum('0 . 12/13 . 0/3');
+// { season: { index: 0 }, episode: { index: 12, total: 13 }, part: { index: 0, total: 3 } }
+
+formatOnscreenEpisodeNum(parseXmltvNsEpisodeNum('1.5.')!);  // 'S02E06'
+formatDdProgidEpisodeNum(parseDdProgidEpisodeNum('EP010068860028')!);
+// 'EP01006886.0028' — the dotted form every consumer reads
+```
+
+Indices are zero-based throughout, as the wire format has them, and every field
+is optional because the DTD says so: `'0..'` is legal and means "season 1,
+episode unknown". An empty field reads as **absent**, never as zero — the trap
+being that `Number('')` is `0`, which would turn that value into episode 1.
+
+`parseOnscreenEpisodeNum` reads one grammar — `[Sn[/St]] En[/Et] [Pn[/Pt]]`,
+which covers `S01E02`, `S1 E10`, `E12` and `Ep 5` — and refuses everything else,
+including a bare number and a trailing `(1/2)`. Both are common; neither is
+recoverable. A bare number is an episode in one grabber, a *season* in another
+and a distributor's own code in a third, and a parenthesised `n/m` after an
+episode means *n of m* wherever it really occurs, so reading it as a part would
+invert real data.
+
+A `dd_progid` is taken apart but never turned into an episode number. Its
+trailing digits identify *which* episode of a show, not the broadcaster's
+ordinal: in real data, Seinfeld S9E17 carries `0196`.
+
+```ts
+parseDdProgidEpisodeNum('EP01006886.0028');
+// { type: 'EP', rootId: '01006886', discriminator: '0028' }
+```
+
+The three fields partition the id, and `rootId` deliberately excludes the
+prefix — the same digits appear as `SH01006886.0000` for the series, so
+`` `SH${rootId}0000` `` is how one is derived from the other.
+
+### Genres
+
+`DVB_GENRES` is the ETSI EN 300 468 vocabulary with the `content_nibble` that
+means each entry, and `genreOf` looks one up by canonical name or by what real
+guides actually write:
+
+```ts
+genreOf('Movie');       // { name: 'Movie / Drama', eit: '0x10', … }
+genreOf('Kids');        // { name: "Children's / Youth programs", eit: '0x50', … }
+genreOf('Series');      // undefined — not a DVB genre, and one of the commonest
+```
+
+Matching ignores case, spacing, underscores and hyphens (`genreKey` is the same
+fold, exported so your own table can be keyed the same way). The canonical
+spellings are tvheadend's rather than ETSI's, because it is the side doing the
+matching; ETSI's wording is carried as an alias on each cell where the two
+differ.
+
 ## Serializing
 
 | function | gives |

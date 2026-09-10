@@ -11,6 +11,7 @@ import type { GrabberChannel, GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
 import { channelSelection, unmatched, unmatchedMessage } from './merge/select.js';
 import type { BuildGuideOptions } from './merge/types.js';
+import { outputOptions } from './xmltv/serialize.js';
 import { addDays, toDayString } from './core/days.js';
 import { GrabberError } from './core/error.js';
 import type { Reporter } from './core/events.js';
@@ -202,8 +203,7 @@ function guideOptions(
     ...(config.derived ? { derived: config.derived } : {}),
     ...(config.channels ? { channels: config.channels } : {}),
     ...(config.meta ? { meta: config.meta } : {}),
-    ...(config.indent !== undefined ? { indent: config.indent } : {}),
-    ...(config.extensions !== undefined ? { extensions: config.extensions } : {}),
+    ...outputOptions(config),
     ...reported(options),
     ...(options.signal ? { signal: options.signal } : {}),
   };

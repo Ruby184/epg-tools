@@ -25,6 +25,22 @@ import type { XmltvProgramme } from '../xmltv/types.js';
 import { FsCacheDriver } from './fs-driver.js';
 import type { FoundEntry, StoredEntryMeta } from './types.js';
 
+/**
+ * How a cache entry is written — and deliberately a constant, not anything a
+ * caller can reach.
+ *
+ * The invariant is that the cache holds what a **source said**, not what some
+ * consumer wanted to read. Let an output profile in here and the shaping
+ * becomes permanent and invisible: `isStale` knows nothing about the form an
+ * entry was written in, so a profiled entry stays "fresh" for its whole
+ * `maxAgeDays`, and by the time anyone notices the dropped `<image>` the
+ * source's own window has rolled past it. Nothing but `--refetch-all` would
+ * recover it.
+ *
+ * So: no `profile`, and no `extensions` either. If cache formatting ever does
+ * become configurable, it must stay a separate setting from the one that shapes
+ * output — see the test that asserts an entry is unchanged with a profile set.
+ */
 const FORMATTING: SerializeOptions = { indent: 2 };
 
 /**

@@ -10,6 +10,8 @@ import {
   XmltvSerializeStream,
   parseXmltvDate,
   parseXmltvString,
+  parseOnscreenEpisodeNum,
+  parseXmltvNsEpisodeNum,
   serializeChannel,
   serializeProgramme,
   writeXmltvStream,
@@ -191,10 +193,39 @@ describe('ProgrammeBuilder', () => {
     // An explicit later part.
     expect(xmltvNs({ part: 2, parts: 2 })).toEqual({ system: 'xmltv_ns', value: '1.5.1/2' });
 
-    // onscreen stays plain for a single part, and shows a 1-based ratio when multi-part.
+    // onscreen stays plain for a single part, and marks a 1-based part with `P`
+    // when multi-part. `P` and not a parenthesised ratio: a `(n/m)` after an
+    // episode number means episode *n of m* everywhere it really occurs, so
+    // that spelling said one thing and meant another.
     expect(onscreen({ episodes: 13 })).toEqual({ system: 'onscreen', value: 'S02E06' });
-    expect(onscreen({ parts: 2 })).toEqual({ system: 'onscreen', value: 'S02E06 (1/2)' });
-    expect(onscreen({ part: 2, parts: 2 })).toEqual({ system: 'onscreen', value: 'S02E06 (2/2)' });
+    expect(onscreen({ parts: 2 })).toEqual({ system: 'onscreen', value: 'S02E06 P1/2' });
+    expect(onscreen({ part: 2, parts: 2 })).toEqual({ system: 'onscreen', value: 'S02E06 P2/2' });
+  });
+
+  it('writes episode numbers that can be read back', () => {
+    // The builder and the parsers are the same two functions in both
+    // directions now, so this guards the pair rather than either alone.
+    const built = new ProgrammeBuilder({
+      channel: 'c',
+      start: '20260717200000 +0000',
+      title: 'T',
+    })
+      .episode(6, 2, { episodes: 13, seasons: 3, part: 1, parts: 2 })
+      .build().episodeNum;
+    const value = (system: string): string =>
+      built!.find((entry) => entry.system === system)!.value;
+
+    expect(parseXmltvNsEpisodeNum(value('xmltv_ns'))).toEqual({
+      season: { index: 1, total: 3 },
+      episode: { index: 5, total: 13 },
+      part: { index: 0, total: 2 },
+    });
+    // onscreen carries no totals, so it reads back as the numbers alone.
+    expect(parseOnscreenEpisodeNum(value('onscreen'))).toEqual({
+      season: { index: 1 },
+      episode: { index: 5 },
+      part: { index: 0, total: 2 },
+    });
   });
 
   it('keeps episodeNum as an explicit escape hatch alongside the season/episode shortcut', () => {

@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/types.js';
 import type { EpgConfig } from '../src/config.js';
-import { serveGuide, type GuideServer } from '../src/serve/main.js';
+import { outputFingerprint, serveGuide, type GuideServer } from '../src/serve/main.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 import { collect } from './reporting.js';
 
@@ -726,6 +726,134 @@ describe('serveGuide', () => {
     // One sweep, not eight: what the polls arriving together would each have
     // started is the storm the in-flight promise exists to prevent.
     expect(sweeps).toBe(1);
+  });
+
+  it('serves only the channels the config asks for', async () => {
+    // `--channels` is accepted for `serve` and sets `config.channels`, so a
+    // guide carrying every channel anyway is the flag doing nothing.
+    const cache = cacheWith({ one: [programme('one', 6)], two: [programme('two', 7)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve({ ...configFor(['one', 'two']), channels: ['one'] }, cache);
+    const body = await (await fetch(server.url)).text();
+
+    expect(body).toContain('<channel id="one">');
+    expect(body).not.toContain('<channel id="two">');
+    expect(body).not.toContain('channel="two"');
+  });
+
+  it('shapes the served guide for the configured profile', async () => {
+    const cache = cacheWith({
+      one: [{ ...programme('one', 6), category: [{ value: 'Movie', lang: 'en' }] }],
+    });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve({ ...configFor(['one']), profile: 'tvheadend' }, cache);
+    const body = await (await fetch(server.url)).text();
+
+    expect(body).toContain('Movie / Drama');
+    expect(body).toContain('eit="0x10"');
+  });
+
+  it('moves the etag when the profile changes, rather than answering 304 forever', async () => {
+    // The fingerprint is built from cache metadata, which knows nothing about
+    // the shape a guide is written in — so without the shape in the validator,
+    // switching profile and restarting leaves every consumer holding the old
+    // document and being told it is current.
+    const entries = {
+      one: [{ ...programme('one', 6), category: [{ value: 'Movie', lang: 'en' }] }],
+    };
+    const plain = cacheWith(entries);
+    await plain.seed('2026-09-03T04:00:00.000Z');
+
+    const first = await serve(configFor(['one']), plain);
+    const before = await fetch(first.url);
+
+    await before.text();
+
+    const shaped = cacheWith(entries);
+    await shaped.seed('2026-09-03T04:00:00.000Z');
+
+    const second = await serve({ ...configFor(['one']), profile: 'tvheadend' }, shaped);
+    const after = await fetch(second.url, {
+      headers: { 'if-none-match': before.headers.get('etag')! },
+    });
+
+    expect(after.status).toBe(200);
+    expect(after.headers.get('etag')).not.toBe(before.headers.get('etag'));
+    expect(await after.text()).toContain('Movie / Drama');
+  });
+
+  it('does not move the etag when a channel it does not serve changes', async () => {
+    // The snapshot is fingerprinted over the resolved channels, so resolving
+    // the unselected ones too would let a grab of `two` expire every consumer's
+    // copy of a guide that has never contained it.
+    const cache = cacheWith({ one: [programme('one', 6)], two: [programme('two', 7)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const config = { ...configFor(['one', 'two']), channels: ['one'] };
+    const server = await serve(config, cache, { revalidateMs: 0, sitesMaxAgeMs: 0 });
+    const first = await fetch(server.url);
+
+    await first.text();
+
+    await cache.write({ site: 'example.tv', channelId: 'two', day: DAY }, [
+      programme('two', 7),
+      programme('two', 8, 'Later'),
+    ]);
+
+    const again = await fetch(server.url, {
+      headers: { 'if-none-match': first.headers.get('etag')! },
+    });
+
+    expect(again.status).toBe(304);
+  });
+});
+
+/** A fingerprint of a profile carrying one category mapper. */
+function withMapper(categories: (value: { value: string }) => string): string {
+  return outputFingerprint({ profile: { categories: categories as never } });
+}
+
+describe('outputFingerprint', () => {
+  it('is the same for two options that mean the same thing', () => {
+    // Deterministic across restarts is the whole requirement: key order is
+    // insertion order, so `JSON.stringify` would give these different answers
+    // and a restart would invalidate every client for nothing.
+    expect(outputFingerprint({ indent: 2, extensions: false })).toBe(
+      outputFingerprint({ extensions: false, indent: 2 }),
+    );
+    // A list of extension names is a set, so its order is not part of it.
+    expect(outputFingerprint({ extensions: ['lcn', 'uniqueID'] })).toBe(
+      outputFingerprint({ extensions: ['uniqueID', 'lcn'] }),
+    );
+    expect(outputFingerprint({ profile: { drop: ['programme/review'] } })).toBe(
+      outputFingerprint({ profile: { drop: ['programme/review'] } }),
+    );
+  });
+
+  it('tells apart every option that changes the document', () => {
+    const of = outputFingerprint;
+
+    expect(of({})).not.toBe(of({ indent: 2 }));
+    expect(of({ indent: 2 })).not.toBe(of({ indent: '\t' }));
+    expect(of({})).not.toBe(of({ profile: 'tvheadend' }));
+    expect(of({ profile: 'tvheadend' })).not.toBe(of({ profile: 'jellyfin' }));
+    // Two different allowlists, which a truthiness check would have collapsed
+    // into one — and then answered 304 on a guide that had changed.
+    expect(of({ extensions: ['lcn'] })).not.toBe(of({ extensions: ['uniqueID'] }));
+    expect(of({ extensions: true })).not.toBe(of({ extensions: ['lcn'] }));
+    expect(of({ extensions: true })).not.toBe(of({ extensions: false }));
+  });
+
+  it('notices a function’s body changing, which JSON cannot see at all', () => {
+    // `JSON.stringify` drops a function entirely, so a category mapper or a
+    // keep picker would vanish from the validator and its change go unnoticed.
+    const upper = withMapper((value) => value.value.toUpperCase());
+    const lower = withMapper((value) => value.value.toLowerCase());
+
+    expect(upper).not.toBe(lower);
+    expect(upper).not.toBe(outputFingerprint({}));
   });
 });
 

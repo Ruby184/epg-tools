@@ -15,19 +15,31 @@ import { pipeline } from 'node:stream/promises';
 import type { Writable } from 'node:stream';
 import { guideBytes, writeOutput, type OutputTarget } from '../core/output.js';
 import { parseXmltvStream } from '../xmltv/parse.js';
-import { XmltvSerializeStream } from '../xmltv/serialize.js';
+import { outputOptions, XmltvSerializeStream } from '../xmltv/serialize.js';
 import type { SerializeOptions } from '../xmltv/serialize.js';
 import type { XmltvParseEvent } from '../xmltv/types.js';
 
 export interface FilterOptions {
-  /** Keep only these channels. Required: without it this copies a file. */
-  channels: ReadonlySet<string>;
+  /**
+   * Keep only these channels. Omit to keep every one, which is only useful
+   * alongside something that reshapes the guide instead — a profile, an
+   * extension policy, an indent.
+   */
+  channels?: ReadonlySet<string>;
   /** Where it goes. */
   output: OutputTarget;
   /** Which provider extensions survive — `--extensions` / `--no-extensions`. */
   extensions?: SerializeOptions['extensions'];
   /** Pretty-print with this indentation. Compact by default. */
   indent?: string | number;
+  /**
+   * Shape the guide for one consumer — see {@link SerializeOptions.profile}.
+   *
+   * Never inherited from a config here, unlike everywhere else: on a guide
+   * somebody else wrote, and which this rewrites in place or to one output,
+   * reshaping is a thing to ask for each time rather than a setting to forget.
+   */
+  profile?: SerializeOptions['profile'];
   /** Where a parse warning and the shortfall are said. */
   stderr?: Writable;
   signal?: AbortSignal;
@@ -60,7 +72,7 @@ export async function filterGuide(file: string, options: FilterOptions): Promise
 
     for await (const event of source) {
       if (event.type === 'channel') {
-        if (!wanted.has(event.value.id)) {
+        if (wanted !== undefined && !wanted.has(event.value.id)) {
           continue;
         }
 
@@ -69,7 +81,7 @@ export async function filterGuide(file: string, options: FilterOptions): Promise
         // By the channel it names, not by what was kept above: a guide is not
         // obliged to describe a channel before it schedules one, and dropping a
         // programme for arriving early would silently lose a day of it.
-        if (!wanted.has(event.value.channel)) {
+        if (wanted !== undefined && !wanted.has(event.value.channel)) {
           continue;
         }
 
@@ -81,8 +93,7 @@ export async function filterGuide(file: string, options: FilterOptions): Promise
   }
 
   const serializer = new XmltvSerializeStream({
-    ...(options.extensions !== undefined ? { extensions: options.extensions } : {}),
-    ...(options.indent !== undefined ? { indent: options.indent } : {}),
+    ...outputOptions(options),
     ...(signal ? { signal } : {}),
   });
 
@@ -110,6 +121,7 @@ export async function filterGuide(file: string, options: FilterOptions): Promise
   return {
     kept: seen.size,
     programmes,
-    missing: [...wanted].filter((id) => !seen.has(id)),
+    // Nothing was asked for, so nothing can be missing.
+    missing: wanted === undefined ? [] : [...wanted].filter((id) => !seen.has(id)),
   };
 }
