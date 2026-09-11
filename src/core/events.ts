@@ -296,6 +296,16 @@ export type EpgEventInput =
   | { type: 'serve:disconnected'; path: string; ms: number }
   /** A request that could not be answered — the merge threw, or worse. */
   | { type: 'serve:failed'; path: string; error: unknown }
+  /**
+   * A scheduled grab that threw.
+   *
+   * Distinct from `site:failed`, which is one site of a run that otherwise
+   * finished. This is the run never happening at all — a config factory that
+   * could not get a token, a cache that would not open — and without it a
+   * scheduler would have nowhere to say so, since a grab reports its own site
+   * failures as counts and returns normally.
+   */
+  | { type: 'serve:grabFailed'; error: unknown }
   | { type: 'serve:stopped' };
 
 export type EpgEventType = EpgEventInput['type'];
@@ -350,6 +360,7 @@ export const EVENT_KINDS = {
   'serve:response': { level: 'debug', phase: 'serve' },
   'serve:disconnected': { level: 'debug', phase: 'serve' },
   'serve:failed': { level: 'error', phase: 'serve' },
+  'serve:grabFailed': { level: 'error', phase: 'serve' },
   'serve:stopped': { level: 'info', phase: 'serve' },
 } as const satisfies Record<EpgEventType, EventKind>;
 

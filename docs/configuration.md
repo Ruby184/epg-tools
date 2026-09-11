@@ -137,6 +137,8 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--port <n>` | `serve` only: port to listen on, default `8080` |
 | `--host <h>` | `serve` only: address to bind, default `127.0.0.1` — see [serving the guide](#serving-the-guide) |
 | `--serve-path <p>` | `serve` only: the path that answers with the guide, default `/guide.xml` |
+| `--grab-every <d>` | `serve` only: also grab on this interval — `6h`, `30m`, `1d`. Off unless said — see [grabbing on a schedule](#grabbing-on-a-schedule) |
+| `--grab-at <t>` | `serve` only: a local time of day to line `--grab-every` up with, as `04:00`. On its own it means once a day, at that time |
 | `--raw` | `try` only: print the whole payload, not the first 2000 characters |
 | `--format <how>` | `validate` and `channels`: `text` (default) or `json` |
 | `--strict` | `validate` only: count warnings as failures too |
@@ -516,6 +518,7 @@ nightly spends twenty-three of those asks receiving a document it already has.
 epg serve                          # http://127.0.0.1:8080/guide.xml
 epg serve --port 9000 --host 0.0.0.0
 epg serve --serve-path /xmltv.xml
+epg serve --grab-at 04:00          # and grab nightly, instead of leaving it to cron
 ```
 
 ```
@@ -629,12 +632,83 @@ once. `--host 0.0.0.0` is one word, and is a decision.
 
 `SIGINT` or `SIGTERM` stops it, and it exits **0**: a server that was asked to
 stop did what it was asked, so this is not the **130** a cancelled grab answers
-with. `SIGHUP` reloads rather than stops, as [above](#serving-the-guide). It
-does not grab — it serves what is in the cache, so run `epg grab` on whatever
-schedule suits and leave this listening.
+with. `SIGHUP` reloads rather than stops, as [above](#serving-the-guide).
 
 `serveGuide(config, options)` is the same thing as a library, returning
 `{ url, port, reload, close, closed }` — see [the API reference](./api.md).
+
+#### Grabbing on a schedule
+
+By default it does not grab: it serves what is in the cache, and `epg grab` on a
+cron runs beside it. Say `serve.grab` and the one process does both.
+
+```sh
+epg serve --grab-at 04:00             # nightly at four
+epg serve --grab-every 6h --grab-at 04:00   # 04:00, 10:00, 16:00, 22:00
+epg serve --grab-every 6h             # at startup, then every six hours
+```
+
+```ts
+import { defineConfig, grabEvery } from 'epg-tools';
+
+export default defineConfig({
+  serve: { grab: grabEvery('6h', { at: '04:00' }) },
+});
+```
+
+The two halves answer each other. An interval alone **drifts** — restart at
+three in the afternoon and that is when you grab from then on, which is wrong
+when a source publishes overnight. A time of day alone can only mean once a day.
+Together the next run is the earliest `at + n × every` still ahead of now, so
+`--grab-at 04:00` on its own is nightly at four and `--grab-every 6h --grab-at
+04:00` is four-hourly from four.
+
+With **no** `at`, the first run is at startup — which is what "every six hours"
+means for something long-running, and what stops a fresh deployment serving an
+empty cache until the first interval is up. Naming an `at` is saying when you
+want it, so startup is not a run.
+
+The grab shares this server's cache rather than opening one of its own, so what
+it writes is what the very next request is served. It is the same run `epg grab`
+performs, reported through the same events, interleaved with the server's own.
+
+**`serve.grab` is a function**, and `grabEvery` is one way of building it. Its
+whole contract is to say when the next run is due:
+
+```ts
+type NextGrab = (from: Date, runs: number) => Date | number | undefined;
+```
+
+Called once at startup and again after each grab **finishes** — after, so a grab
+that overruns its own interval can never stack another behind itself. Return a
+`Date` or an epoch millisecond count; return something at or before `from` to
+run as soon as possible, and `undefined` to stop scheduling and carry on
+serving. `runs` is how many have already finished, `0` at startup.
+
+Which is how a cron expression gets in without this package carrying a cron
+parser — the next timestamp is exactly what a cron library already hands out:
+
+```ts
+import { CronExpressionParser } from 'cron-parser';
+
+export default defineConfig({
+  serve: {
+    grab: (from) =>
+      CronExpressionParser.parse('0 4 * * *', { currentDate: from }).next().toDate(),
+  },
+});
+```
+
+The same door covers everything a fixed interval cannot — skip weekends, back
+off after a failure, stop after a number of runs.
+
+Two things worth knowing before leaving one up. The **progress reporter** is
+built for a run that ends, and inside a server it will redraw a progress line
+over your log; `--reporter text` or `--reporter json` is what a served process
+wants anyway. And a scheduled grab makes the `cacheChannels` advice
+[above](#serving-the-guide) matter more, not less: the grab and the poll now
+share a process, and a site whose channel list is fetched pays for it on both
+sides.
 
 ### Validating a guide
 

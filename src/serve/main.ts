@@ -39,6 +39,7 @@ import { channelSelection } from '../merge/select.js';
 import type { BuildGuideOptions } from '../merge/types.js';
 import { outputOptions } from '../xmltv/serialize.js';
 import type { GuideOutputOptions } from '../xmltv/serialize.js';
+import type { NextGrab } from './schedule.js';
 
 /** Where the guide is served from when nothing says otherwise. */
 export const DEFAULT_SERVE_PATH = '/guide.xml';
@@ -80,6 +81,21 @@ export const DEFAULT_SITES_MAX_AGE_MS = 10 * 60 * 1000;
 
 /** How many guides are generated at once, when nothing says. */
 const DEFAULT_CONCURRENCY = 2;
+
+/**
+ * The shortest gap allowed *between* two scheduled grabs.
+ *
+ * A schedule is asked again only once a grab has finished, so a working one
+ * paces itself and never reaches this. It is here for the one that does not — a
+ * function that always answers with a time already past — which without a floor
+ * would grab back to back for as long as the server ran.
+ *
+ * A second rather than a few milliseconds because a grab already costs tens of
+ * them, and a floor under that throttles nothing. It is not charged to the
+ * first call: a schedule asking to run at startup is asking for something it
+ * cannot repeat, since there is no run behind it to loop with.
+ */
+const MIN_GRAB_GAP_MS = 1000;
 
 /**
  * How long an idle connection is held open, and how long a request's headers
@@ -170,6 +186,11 @@ export interface ServeOptions {
    * did not open.
    */
   cache?: CacheStore;
+  /**
+   * Grab on a schedule as well as serving — see {@link EpgServeConfig.grab}.
+   * Overrides the config's, as every other option here does.
+   */
+  grab?: NextGrab;
 }
 
 export interface GuideServer {
@@ -508,6 +529,7 @@ export async function serveGuide(
   const revalidateMs = options.revalidateMs ?? DEFAULT_REVALIDATE_MS;
   const cors = options.cors ?? config.serve?.cors ?? false;
   const sitesMaxAgeMs = options.sitesMaxAgeMs ?? DEFAULT_SITES_MAX_AGE_MS;
+  const schedule = options.grab ?? config.serve?.grab;
 
   const opened = options.cache === undefined;
   const cache = options.cache ?? (await createCacheStore(config, options.signal));
@@ -850,10 +872,103 @@ export async function serveGuide(
   const host = address.address.includes(':') ? `[${address.address}]` : address.address;
   const url = `http://${host}:${address.port}${path}`;
 
+  /**
+   * The scheduled grab, if there is one.
+   *
+   * All of it created **after** `listen` resolved. A timer started before it
+   * would outlive a `listen` that rejects, since that rejection leaves
+   * `serveGuide` without anyone ever calling `close`.
+   */
+  let timer: NodeJS.Timeout | undefined;
+  /** Aborts a grab in flight, so stopping does not wait for one to finish. */
+  let grabbing: AbortController | undefined;
+  /** The grab now running, so `close` can let it unwind before the cache shuts. */
+  let running: Promise<void> | undefined;
+  let runs = 0;
+  let stopped = false;
+
+  /**
+   * Run one, then ask when the next should be.
+   *
+   * Wrapped whole, because `runGrab` can reject for reasons a grab's own counts
+   * never cover — a config factory that could not get a token, a cache that
+   * would not open, a prune that failed — and an unhandled rejection out of a
+   * timer ends the process. A server that cannot grab tonight should still be
+   * serving what it already has.
+   */
+  const grabNow = async (): Promise<void> => {
+    const { runGrab } = await import('../build.js');
+    const stops = new AbortController();
+
+    grabbing = stops;
+
+    try {
+      await runGrab(config, {
+        // This server's own store rather than one of its own: `RunOptions.cache`
+        // is the caller's and is left open. A second store would be wasteful for
+        // a file cache and silently useless for `memory`, where the grab would
+        // fill a different cache than the one being served.
+        cache,
+        ...(options.reporter ? { reporter: options.reporter } : {}),
+        ...(options.offset === undefined ? {} : { offset: options.offset }),
+        signal: stops.signal,
+      });
+    } catch (error) {
+      emit({ type: 'serve:grabFailed', error });
+    } finally {
+      grabbing = undefined;
+      runs++;
+      // The held snapshot predates everything this wrote, so the next poll has
+      // to sweep rather than trust it.
+      checkedAt = 0;
+    }
+  };
+
+  /**
+   * Ask the schedule when to run, and set the timer it asks for.
+   *
+   * Only ever called once nothing is running — at startup, and from the
+   * `finally` of the grab before — so two can never overlap and there is no
+   * overlap to detect. A grab that overruns its own interval simply pushes the
+   * next question later, and the schedule answers from the finish time.
+   */
+  const planNext = (from: Date): void => {
+    if (schedule === undefined || stopped) {
+      return;
+    }
+
+    const next = schedule(from, runs);
+
+    if (next === undefined) {
+      return;
+    }
+
+    const at = typeof next === 'number' ? next : next.getTime();
+    const delay = Math.max(runs === 0 ? 0 : MIN_GRAB_GAP_MS, at - from.getTime());
+
+    // Not `unref`'d: a server whose only remaining work is the next grab is
+    // still a server that should be running.
+    timer = setTimeout(() => {
+      running = grabNow().finally(() => {
+        running = undefined;
+        planNext(new Date());
+      });
+    }, delay);
+  };
+
+  planNext(options.now ?? new Date());
+
   let closing: Promise<void> | undefined;
 
   const close = async (): Promise<void> => {
     closing ??= (async () => {
+      // Before anything else: `planNext` schedules from a grab's `finally`, so
+      // a stop that did not say so first would have the run in flight plan
+      // another on its way out.
+      stopped = true;
+      clearTimeout(timer);
+      grabbing?.abort();
+
       const shut = new Promise<void>((resolve) => {
         server.close(() => resolve());
       });
@@ -868,6 +983,9 @@ export async function serveGuide(
       server.closeAllConnections();
 
       await shut;
+      // Aborted above, awaited here: a grab still unwinding would otherwise be
+      // reading a store that `cache.close()` is about to take away.
+      await running;
       guides.clear();
       // A target is the caller's and may outlive this server — one left
       // listening would hold the whole closure, cache and all.
@@ -916,3 +1034,5 @@ export async function serveGuide(
 }
 
 export type { EpgServeConfig } from './config.js';
+export { grabEvery } from './schedule.js';
+export type { GrabEveryOptions, NextGrab } from './schedule.js';

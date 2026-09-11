@@ -1353,6 +1353,29 @@ describe('epg', () => {
     expect(stderr).toContain('Usage: epg');
   });
 
+  it('refuses a --grab-every that is not a duration, with the usage', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+    const { code, stderr } = await run(['serve', '--config', config, '--grab-every', 'often']);
+
+    expect(code).toBe(2);
+    expect(stderr).toContain('expected a duration like 6h, 30m or 1d');
+    // Named as the flag it was written as, not as the config field behind it.
+    expect(stderr).toContain('--grab-every');
+    expect(stderr).toContain('Usage: epg');
+  });
+
+  it('refuses a --grab-at that is not a time of day', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+    // On its own, which is the daily shorthand — so this is the interval
+    // defaulting and the time still being read, not the flag being ignored.
+    const { code, stderr } = await run(['serve', '--config', config, '--grab-at', '4pm']);
+
+    expect(code).toBe(2);
+    expect(stderr).toContain('expected a time of day like 04:00');
+  });
+
   it('refuses an allowMissing in the config before the run, not after it', async () => {
     const dir = await tempDir();
     const config = await configFile(

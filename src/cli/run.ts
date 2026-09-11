@@ -15,6 +15,7 @@ import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../confi
 import { build, createCacheStore, runGrab, runMerge } from '../build.js';
 import { CACHE_DRIVER_NAMES } from '../cache/main.js';
 import { fellShort, resolveAllowance } from '../grabber/main.js';
+import { grabEvery, resolveInterval, resolveTimeOfDay } from '../serve/schedule.js';
 import type { MissingAllowance } from '../grabber/main.js';
 import { GrabberError } from '../core/error.js';
 import { OptionError, parseOptions } from '../core/options.js';
@@ -93,6 +94,9 @@ serve options:
       --port <n>        Port to listen on (default: 8080)
       --host <h>        Address to bind (default: 127.0.0.1 — loopback only)
       --serve-path <p>  Path that answers with the guide (default: /guide.xml)
+      --grab-every <d>  Also grab on this interval — 6h, 30m, 1d (default: never)
+      --grab-at <t>     Local time of day to line it up with, as 04:00. On its
+                        own it means once a day, at that time
 
 validate options:
       --format <how>    text (default) or json
@@ -121,21 +125,30 @@ function dayString(raw: string, flag: string): string {
 }
 
 /**
- * An `--allow-missing` value, checked before the run rather than after it.
+ * A flag checked by whatever reads the config field behind it.
  *
- * The same reading the config field gets, so `20`, `5%` and the ways of getting
- * either wrong mean one thing wherever they are written — but reported as
- * something typed, which is what puts the usage on screen and exits 2.
+ * Three flags mean exactly what a config field means — `--allow-missing` is
+ * `allowMissing`, `--grab-every` and `--grab-at` are the two halves of
+ * `grabEvery` — so each is read by the function that defines the meaning, and
+ * a value that cannot work is refused where somebody typed it rather than on
+ * the night it would first have mattered. What changes is only the reporting:
+ * an {@link OptionError} is what puts the usage on screen and exits 2.
  */
-function allowance(raw: string, flag: string): string {
-  try {
-    resolveAllowance(raw, flag);
-  } catch (error) {
-    throw new OptionError(error instanceof Error ? error.message : String(error));
-  }
+function reader(resolve: (raw: string, label: string) => unknown) {
+  return (raw: string, flag: string): string => {
+    try {
+      resolve(raw, flag);
+    } catch (error) {
+      throw new OptionError(error instanceof Error ? error.message : String(error));
+    }
 
-  return raw;
+    return raw;
+  };
 }
+
+const allowance = reader(resolveAllowance);
+const interval = reader(resolveInterval);
+const timeOfDay = reader(resolveTimeOfDay);
 
 /**
  * The extension names of `--extensions a,b`, and at least one of them.
@@ -500,6 +513,8 @@ async function execute(
       port: { type: 'number', min: 0, max: 65_535 },
       host: { type: 'string' },
       'serve-path': { type: 'string' },
+      'grab-every': { type: 'string', transform: interval },
+      'grab-at': { type: 'string', transform: timeOfDay },
       raw: { type: 'boolean' },
       format: { type: 'string', choices: REPORT_FORMATS },
       strict: { type: 'boolean' },
@@ -598,7 +613,9 @@ async function execute(
   if (
     values.port !== undefined ||
     values.host !== undefined ||
-    values['serve-path'] !== undefined
+    values['serve-path'] !== undefined ||
+    values['grab-every'] !== undefined ||
+    values['grab-at'] !== undefined
   ) {
     config = {
       ...config,
@@ -607,6 +624,18 @@ async function execute(
         ...(values.port !== undefined ? { port: values.port } : {}),
         ...(values.host !== undefined ? { host: values.host } : {}),
         ...(values['serve-path'] !== undefined ? { path: values['serve-path'] } : {}),
+        // Through the shipped helper rather than a second reading of the same
+        // words: the flags and `grabEvery` cannot drift if one builds the other.
+        //
+        // A time of day on its own is a daily grab, which is what naming one
+        // and no interval means — and the commonest of the two to want.
+        ...(values['grab-every'] !== undefined || values['grab-at'] !== undefined
+          ? {
+              grab: grabEvery(values['grab-every'] ?? '1d', {
+                ...(values['grab-at'] !== undefined ? { at: values['grab-at'] } : {}),
+              }),
+            }
+          : {}),
       },
     };
   }

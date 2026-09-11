@@ -7,8 +7,25 @@
  */
 
 import type { CompressionFormat } from '../core/output.js';
+import type { NextGrab } from './schedule.js';
 
 export interface EpgServeConfig {
+  /**
+   * Grab on a schedule as well as serving, instead of leaving that to cron.
+   *
+   * A function saying when the next run is due — `grabEvery('6h', { at: '04:00' })`
+   * builds the usual one, and anything that can produce a next timestamp works,
+   * which is how a cron expression gets in without this package carrying a cron
+   * parser. See {@link NextGrab}.
+   *
+   * Off by default: without it a server serves what is in the cache and never
+   * fetches, which is what it has always done.
+   *
+   * A scheduled grab shares this server's cache rather than opening its own, so
+   * it is the *same* cache being served — and it shares the resolved channel
+   * lists, so it does not ask every site for one that the server already has.
+   */
+  grab?: NextGrab;
   /** Defaults to 8080. */
   port?: number;
   /**

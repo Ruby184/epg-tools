@@ -9,7 +9,9 @@ import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/types.js';
 import type { EpgConfig } from '../src/config.js';
 import { outputFingerprint, serveGuide, type GuideServer } from '../src/serve/main.js';
+import type { NextGrab } from '../src/serve/schedule.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
+import { toDayString } from '../src/core/days.js';
 import { collect } from './reporting.js';
 
 const NOW = new Date('2026-09-03T05:00:00.000Z');
@@ -913,5 +915,187 @@ describe('serveGuide over a cache on disk', () => {
 
     expect(response.status).toBe(200);
     expect(await response.text()).toContain('<channel id="one">');
+  });
+});
+
+describe('serveGuide grabbing on a schedule', () => {
+  /**
+   * A config whose grab actually produces something, so a run that happened is
+   * visible in the guide rather than only in the events.
+   */
+  function grabbable(): EpgConfig {
+    return {
+      ...configFor(['one']),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: [{ xmltvId: 'one', siteId: 'one', name: 'one' }],
+          request: async () => ({}),
+          parseDay: ({ day }) => [
+            {
+              channel: 'one',
+              start: new Date(`${day}T06:00:00.000Z`),
+              title: [{ value: 'Grabbed' }],
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  /** A schedule that runs once, at startup, and then stops. */
+  const once: NextGrab = (from, runs) => (runs === 0 ? from : undefined);
+
+  /**
+   * On the wall clock, unlike every other test here.
+   *
+   * A scheduled grab is deliberately *not* handed the server's `now`: that is a
+   * fixed instant, and a grab that took one would fetch the same window for as
+   * long as the process ran. So the window it fills is today's, and the server
+   * has to be looking at today's for the two to meet.
+   */
+  async function serveNow(
+    config: EpgConfig,
+    cache: CacheStore,
+    options: Parameters<typeof serveGuide>[1],
+  ): Promise<GuideServer> {
+    return serve(config, cache, { ...options, now: new Date() });
+  }
+
+  it('grabs at startup when the schedule asks for now, into the served cache', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    const server = await serveNow(grabbable(), cache, { grab: once, reporter: log.reporter });
+
+    await vi.waitFor(() => expect(log.of('grab:done')).toHaveLength(1));
+
+    // The point of sharing the store: what the grab wrote is what is served.
+    expect(await (await fetch(server.url)).text()).toContain('Grabbed');
+  });
+
+  it('is off unless a schedule says otherwise', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    const server = await serveNow(grabbable(), cache, { reporter: log.reporter });
+
+    expect(await (await fetch(server.url)).text()).not.toContain('Grabbed');
+    expect(log.of('grab:done')).toHaveLength(0);
+  });
+
+  it('takes the schedule from the config when no option overrides it', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    const config: EpgConfig = { ...grabbable(), serve: { grab: once } };
+
+    await serveNow(config, cache, { reporter: log.reporter });
+
+    await vi.waitFor(() => expect(log.of('grab:done')).toHaveLength(1));
+  });
+
+  it('asks again after each run, with the count of those already finished', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    const seen: number[] = [];
+    const grab: NextGrab = (from, runs) => {
+      seen.push(runs);
+
+      // A tiny interval rather than fake timers, as `pacing.test.ts` does.
+      return runs < 3 ? from.getTime() + 5 : undefined;
+    };
+
+    await serveNow(grabbable(), cache, { grab, reporter: log.reporter });
+
+    await vi.waitFor(() => expect(log.of('grab:done')).toHaveLength(3), { timeout: 5000 });
+    // Asked once at startup and once after each run — never while one is running,
+    // which is what makes an overlap check unnecessary.
+    expect(seen).toEqual([0, 1, 2, 3]);
+  });
+
+  it('stops scheduling when the schedule answers with nothing', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+
+    await serveNow(grabbable(), cache, { grab: () => undefined, reporter: log.reporter });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(log.of('grab:done')).toHaveLength(0);
+  });
+
+  it('keeps serving when a grab throws, and reports it', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const log = collect();
+
+    // The post-grab prune, which `runGrab` awaits outside everything that counts
+    // a site failure — so this rejects the whole run, the case a scheduler has
+    // nowhere else to report.
+    cache.prune = async () => {
+      throw new Error('disk gone');
+    };
+
+    const server = await serveNow(grabbable(), cache, { grab: once, reporter: log.reporter });
+
+    await vi.waitFor(() => expect(log.of('serve:grabFailed')).toHaveLength(1));
+    expect(log.messages.join('\n')).toContain('disk gone');
+
+    const response = await fetch(server.url);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('<channel id="one">');
+  });
+
+  it('does not grab again after it has been closed', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    const server = await serveNow(grabbable(), cache, {
+      grab: (from) => from.getTime() + 5,
+      reporter: log.reporter,
+    });
+
+    await vi.waitFor(() => expect(log.of('grab:done').length).toBeGreaterThan(0));
+    await server.close();
+
+    const after = log.of('grab:done').length;
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    // A timer left running is exactly what this catches: the schedule above
+    // would have fired several more times in that window.
+    expect(log.of('grab:done')).toHaveLength(after);
+  });
+
+  it('leaves a handed-in cache open, having grabbed into it', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    const server = await serveNow(grabbable(), cache, { grab: once, reporter: log.reporter });
+
+    await vi.waitFor(() => expect(log.of('grab:done')).toHaveLength(1));
+    await server.close();
+
+    // Still usable, and still holding what the grab put there: closing a store
+    // this server did not open would make the read throw.
+    const grabbed = await cache.read({
+      site: 'example.tv',
+      channelId: 'one',
+      day: toDayString(new Date()),
+    });
+
+    expect(grabbed).toHaveLength(1);
+  });
+
+  it('spaces runs when the schedule keeps answering with the past', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+
+    await serveNow(grabbable(), cache, { grab: () => 0, reporter: log.reporter });
+
+    // The first is free — a schedule asking for "now" at startup is honoured —
+    // and the floor holds the rest a second apart, so only one lands here.
+    await vi.waitFor(() => expect(log.of('grab:done')).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(log.of('grab:done')).toHaveLength(1);
   });
 });

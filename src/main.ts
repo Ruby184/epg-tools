@@ -241,8 +241,14 @@ export type {
 } from './grabber/main.js';
 export type * from './grabber/types.js';
 
-export { serveGuide } from './serve/main.js';
-export type { EpgServeConfig, GuideServer, ServeOptions } from './serve/main.js';
+export { grabEvery, serveGuide } from './serve/main.js';
+export type {
+  EpgServeConfig,
+  GrabEveryOptions,
+  GuideServer,
+  NextGrab,
+  ServeOptions,
+} from './serve/main.js';
 
 export {
   DEFAULT_MATCH,
