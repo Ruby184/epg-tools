@@ -137,6 +137,8 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--port <n>` | `serve` only: port to listen on, default `8080` |
 | `--host <h>` | `serve` only: address to bind, default `127.0.0.1` — see [serving the guide](#serving-the-guide) |
 | `--serve-path <p>` | `serve` only: the path that answers with the guide, default `/guide.xml` |
+| `--health <p>` | `serve` only: the path that answers a health check, default `/health` |
+| `--no-health` | `serve` only: do not answer one at all |
 | `--grab-every <d>` | `serve` only: also grab on this interval — `6h`, `30m`, `1d`. Off unless said — see [grabbing on a schedule](#grabbing-on-a-schedule) |
 | `--grab-at <t>` | `serve` only: a local time of day to line `--grab-every` up with, as `04:00`. On its own it means once a day, at that time |
 | `--raw` | `try` only: print the whole payload, not the first 2000 characters |
@@ -636,6 +638,53 @@ with. `SIGHUP` reloads rather than stops, as [above](#serving-the-guide).
 
 `serveGuide(config, options)` is the same thing as a library, returning
 `{ url, port, reload, close, closed }` — see [the API reference](./api.md).
+
+#### Is it healthy
+
+`GET /health` says whether the server is serving anything, without generating a
+guide — it reads the same metadata sweep the ETag comes from, so a container
+healthcheck costs what a poll's `304` costs.
+
+```json
+{
+  "ok": true,
+  "grabbedAt": "2026-09-09T04:00:00.000Z",
+  "ageSeconds": 3600,
+  "window": { "startDay": "2026-09-09", "days": 7 },
+  "counts": { "present": 1386, "expected": 1400 },
+  "shape": "kQ3nR8vTdA"
+}
+```
+
+`counts` is **coverage**: how many of the window's channel-days the cache holds
+against how many it would hold if every site had answered for every day. That is
+the number to alert on — a guide can be fresh and most of the way missing.
+
+`ok` is narrow on purpose. It is `false`, with a **503**, only when nothing at
+all is cached: the one unambiguous "cannot do its job", so a healthcheck fails
+until the first grab lands and passes after. How stale is too stale is your
+judgement, not this server's, so the age is reported and not ruled on. With
+nothing cached `grabbedAt` is `null` rather than 1970.
+
+It says nothing about *which* sites or channels — the line binding to loopback
+draws, for the same reason. `HEAD` works, `POST` is the same `405` the guide
+gives, and nothing is cached or compressed: the document changes every second,
+so a validator on it could never match.
+
+```sh
+epg serve --health /-/ready        # somewhere else
+epg serve --no-health              # or nowhere
+```
+
+```yaml
+# compose.yml
+healthcheck:
+  test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8080/health']
+  interval: 30s
+```
+
+If `serve.path` is pointed at `/health` the guide wins: a path named explicitly
+beats one that defaulted.
 
 #### Grabbing on a schedule
 

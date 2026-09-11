@@ -79,6 +79,14 @@ export const DEFAULT_REVALIDATE_MS = 1000;
  */
 export const DEFAULT_SITES_MAX_AGE_MS = 10 * 60 * 1000;
 
+/**
+ * Where a health check is answered, when nothing says otherwise.
+ *
+ * `serve.health: false` switches it off, as `serve.path` does not — a guide has
+ * to be somewhere, a health check does not have to exist.
+ */
+export const DEFAULT_HEALTH_PATH = '/health';
+
 /** How many guides are generated at once, when nothing says. */
 const DEFAULT_CONCURRENCY = 2;
 
@@ -121,6 +129,8 @@ export interface ServeOptions {
   host?: string;
   /** The one path that answers with a guide. Defaults to `/guide.xml`. */
   path?: string;
+  /** Where the health check answers. Defaults to `/health`; `false` is off. */
+  health?: string | false;
   /**
    * How many guides may be generated at once. Defaults to 2.
    *
@@ -222,6 +232,16 @@ interface Fingerprint {
   etag: string;
   /** The newest `grabbedAt` in the window, to the second. */
   lastModified: Date;
+  /**
+   * How many of the window's channel-days the cache actually holds, against how
+   * many it would hold if every site had answered for every day.
+   *
+   * Counted here because the sweep has them in hand and nothing else does — and
+   * a share is the one thing a health check can say about a guide without
+   * generating it. See {@link ServeOptions.health}.
+   */
+  present: number;
+  expected: number;
 }
 
 /**
@@ -394,6 +414,7 @@ async function fingerprintOf(
    */
   const content = createHash('sha1');
   let newest = 0;
+  let present = 0;
 
   for (const meta of metas) {
     if (meta === undefined) {
@@ -405,6 +426,7 @@ async function fingerprintOf(
     }
 
     content.update(`${meta.grabbedAt}:${meta.programmeCount}${END_OF_ENTRY}`);
+    present++;
 
     const at = Date.parse(meta.grabbedAt);
 
@@ -428,6 +450,8 @@ async function fingerprintOf(
   return {
     etag: `W/"${content.digest('base64url').slice(0, 16)}-${window}-${shape}"`,
     lastModified,
+    present,
+    expected: metas.length,
   };
 }
 
@@ -525,6 +549,7 @@ export async function serveGuide(
   const config = await resolveConfigSource(source);
   const emit = emitter(options);
   const path = options.path ?? config.serve?.path ?? DEFAULT_SERVE_PATH;
+  const health = options.health ?? config.serve?.health ?? DEFAULT_HEALTH_PATH;
   const compress = options.compress ?? config.serve?.compress ?? 'gzip';
   const revalidateMs = options.revalidateMs ?? DEFAULT_REVALIDATE_MS;
   const cors = options.cors ?? config.serve?.cors ?? false;
@@ -751,6 +776,60 @@ export async function serveGuide(
           .end();
 
         return done(405);
+      }
+
+      // The guide first, so an operator who pointed `serve.path` at `/health`
+      // gets the guide there — the path they named explicitly beats the one
+      // that defaulted.
+      if (requestPath !== path && requestPath === health) {
+        // `current` rather than a stored snapshot: a server whose only traffic
+        // is its own health check would otherwise never take one and would
+        // report unhealthy for as long as it ran. It is throttled and
+        // single-flighted, and reads metadata only.
+        const { print } = await current(options.now ?? new Date());
+        const window = windowOf(options.now ?? new Date());
+        // The one unambiguous "cannot do its job": nothing at all is cached, so
+        // there is no guide to serve. How stale is too stale is the operator's
+        // judgement and not this server's, so age is reported and not ruled on.
+        const ok = print.present > 0;
+        const body = `${JSON.stringify(
+          {
+            ok,
+            // Not 1970: with nothing cached the newest `grabbedAt` is zero, and
+            // a date is a worse answer than saying there is none.
+            grabbedAt: ok ? print.lastModified.toISOString() : null,
+            ageSeconds: ok
+              ? Math.max(0, Math.round((Date.now() - print.lastModified.getTime()) / 1000))
+              : null,
+            window: { startDay: window.startDay, days: window.days.length },
+            // Coverage, not a bare count — the share of the grid that answered
+            // is the thing worth alerting on, and the sweep has both numbers.
+            counts: { present: print.present, expected: print.expected },
+            // No site or channel names, which is the same line
+            // `DEFAULT_SERVE_HOST` draws. Aggregates only.
+            shape,
+          },
+          undefined,
+          2,
+        )}\n`;
+
+        const headers = {
+          'content-type': 'application/json; charset=utf-8',
+          // No etag and no compression: the body changes every second by
+          // construction, so a validator would never match and a few hundred
+          // bytes are not worth a compressor.
+          'cache-control': 'no-store',
+          'content-length': String(Buffer.byteLength(body)),
+          ...allowed,
+        };
+
+        // HEAD reaches here too, the method gate being above the routing — and
+        // a body on one is a protocol error, not a waste.
+        response
+          .writeHead(ok ? 200 : 503, headers)
+          .end(request.method === 'HEAD' ? undefined : body);
+
+        return done(ok ? 200 : 503);
       }
 
       if (requestPath !== path) {

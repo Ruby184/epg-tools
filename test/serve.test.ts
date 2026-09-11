@@ -900,6 +900,145 @@ describe('outputFingerprint', () => {
   });
 });
 
+describe('serveGuide health', () => {
+  /** What the health document says, as far as a test asserts on it. */
+  interface Health {
+    ok: boolean;
+    grabbedAt: string | null;
+    ageSeconds: number | null;
+    window: { startDay: string; days: number };
+    counts: { present: number; expected: number };
+    shape: string;
+  }
+
+  async function health(
+    server: GuideServer,
+    path = '/health',
+  ): Promise<{ response: Response; body: Health }> {
+    const response = await fetch(new URL(path, server.url));
+
+    return { response, body: (await response.json()) as Health };
+  }
+
+  it('reports the window, its age and how much of it is there', async () => {
+    // Two channels of one day, one of which was never grabbed: coverage is the
+    // thing a bare count cannot say.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one', 'two']), cache);
+    const { response, body } = await health(server);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('application/json');
+    // Never cached: the body is a different document every second, so a
+    // validator on it could not match and a store would only serve stale ones.
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('etag')).toBeNull();
+
+    expect(body).toMatchObject({
+      ok: true,
+      grabbedAt: '2026-09-03T04:00:00.000Z',
+      window: { startDay: DAY, days: 1 },
+      counts: { present: 1, expected: 2 },
+    });
+    // An hour, against the frozen `NOW` — as a number, so it is a fact and not
+    // a sentence to parse.
+    expect(typeof body.ageSeconds).toBe('number');
+    expect(body.shape).toEqual(expect.any(String));
+  });
+
+  it('says nothing about which sites or channels they are', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['sky-atlantic.uk']), cache);
+    const text = await (await fetch(new URL('/health', server.url))).text();
+
+    // The same line `DEFAULT_SERVE_HOST` draws: a guide is not a secret, but
+    // which sites you grab and what you watch is not nothing. Aggregates only.
+    expect(text).not.toContain('example.tv');
+    expect(text).not.toContain('sky-atlantic');
+  });
+
+  it('fails, with no date it does not have, until something is cached', async () => {
+    const cache = cacheWith({});
+    const server = await serve(configFor(['one']), cache);
+    const { response, body } = await health(server);
+
+    // 503, so a container healthcheck fails until the first grab lands.
+    expect(response.status).toBe(503);
+    expect(body).toMatchObject({ ok: false, counts: { present: 0, expected: 1 } });
+    // Not 1970, which is what the newest of no timestamps comes to.
+    expect(body.grabbedAt).toBeNull();
+    expect(body.ageSeconds).toBeNull();
+  });
+
+  it('answers HEAD with the headers and no body', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one']), cache);
+    const response = await fetch(new URL('/health', server.url), { method: 'HEAD' });
+
+    expect(response.status).toBe(200);
+    // The method gate sits above the routing, so HEAD reaches here — and a body
+    // on one is a protocol error rather than a waste.
+    expect(await response.text()).toBe('');
+    expect(response.headers.get('content-type')).toContain('application/json');
+  });
+
+  it('answers the method gate before the path, as the guide does', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one']), cache);
+    const response = await fetch(new URL('/health', server.url), { method: 'POST' });
+
+    expect(response.status).toBe(405);
+  });
+
+  it('moves where it is asked to, and goes away when told false', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const moved = await serve(configFor(['one']), cache, { health: '/-/ready' });
+
+    expect((await health(moved, '/-/ready')).response.status).toBe(200);
+    expect((await fetch(new URL('/health', moved.url))).status).toBe(404);
+
+    const off = await serve(configFor(['one']), cache, { health: false });
+
+    expect((await fetch(new URL('/health', off.url))).status).toBe(404);
+  });
+
+  it('leaves the guide where it is when the two paths collide', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    // A path named explicitly beats one that defaulted.
+    const server = await serve(configFor(['one']), cache, { path: '/health' });
+    const response = await fetch(new URL('/health', server.url));
+
+    expect(response.headers.get('content-type')).toContain('application/xml');
+    expect(await response.text()).toContain('<channel id="one">');
+  });
+
+  it('answers while a guide is being merged, which is the point of it', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    // One slot, and it is held for the whole response — so a health check that
+    // queued behind a merge would be useless exactly when it was needed.
+    const server = await serve(configFor(['one']), cache, { concurrency: 1 });
+    const guide = fetch(server.url);
+    const { response } = await health(server);
+
+    expect(response.status).toBe(200);
+    expect((await guide).status).toBe(200);
+  });
+});
+
 describe('serveGuide over a cache on disk', () => {
   it('opens and closes a cache of its own when handed none', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'epg-serve-'));

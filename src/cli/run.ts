@@ -94,6 +94,8 @@ serve options:
       --port <n>        Port to listen on (default: 8080)
       --host <h>        Address to bind (default: 127.0.0.1 — loopback only)
       --serve-path <p>  Path that answers with the guide (default: /guide.xml)
+      --health <p>      Path that answers a health check (default: /health)
+      --no-health       Do not answer one at all
       --grab-every <d>  Also grab on this interval — 6h, 30m, 1d (default: never)
       --grab-at <t>     Local time of day to line it up with, as 04:00. On its
                         own it means once a day, at that time
@@ -513,6 +515,9 @@ async function execute(
       port: { type: 'number', min: 0, max: 65_535 },
       host: { type: 'string' },
       'serve-path': { type: 'string' },
+      // Negatable, because a health check is a thing a deployment may not want
+      // at all — unlike the guide path, which has to be somewhere.
+      health: { type: 'string', negatable: true },
       'grab-every': { type: 'string', transform: interval },
       'grab-at': { type: 'string', transform: timeOfDay },
       raw: { type: 'boolean' },
@@ -614,6 +619,7 @@ async function execute(
     values.port !== undefined ||
     values.host !== undefined ||
     values['serve-path'] !== undefined ||
+    values.health !== undefined ||
     values['grab-every'] !== undefined ||
     values['grab-at'] !== undefined
   ) {
@@ -624,6 +630,9 @@ async function execute(
         ...(values.port !== undefined ? { port: values.port } : {}),
         ...(values.host !== undefined ? { host: values.host } : {}),
         ...(values['serve-path'] !== undefined ? { path: values['serve-path'] } : {}),
+        // `null` is `--no-health`, which is off — not the "let the config
+        // decide" that `undefined` means.
+        ...(values.health !== undefined ? { health: values.health ?? false } : {}),
         // Through the shipped helper rather than a second reading of the same
         // words: the flags and `grabEvery` cannot drift if one builds the other.
         //

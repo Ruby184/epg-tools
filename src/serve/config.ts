@@ -40,6 +40,20 @@ export interface EpgServeConfig {
   /** The one path that answers with a guide. Defaults to `/guide.xml`. */
   path?: string;
   /**
+   * Where a container's healthcheck can ask whether this is serving anything.
+   *
+   * Defaults to `/health`; `false` switches it off. It answers **503** only
+   * when nothing at all is cached — the one unambiguous "cannot do its job" —
+   * so a healthcheck fails until the first grab lands and passes after. How
+   * stale is too stale is a judgement this server does not make: the age and
+   * the share of the window that is present are reported, and what to alert on
+   * is yours.
+   *
+   * Aggregates only, never a site or channel name — the same line
+   * {@link EpgServeConfig.host} draws by binding to loopback.
+   */
+  health?: string | false;
+  /**
    * What to compress a served guide with, when the client accepts it.
    * Defaults to `'gzip'`; `false` never compresses.
    */
