@@ -333,6 +333,16 @@ export function outputFingerprint(options: GuideOutputOptions): string {
 }
 
 /**
+ * Ends one entry's contribution to the content digest below, so the digest is a
+ * run of terminated fields and an empty one means "nothing cached here".
+ *
+ * A character that cannot occur in either field it follows: `grabbedAt` is an
+ * ISO timestamp and `programmeCount` a number, so no entry can run into the
+ * next and two different windows cannot digest alike.
+ */
+const END_OF_ENTRY = '|';
+
+/**
  * Read the window's metadata and say what it amounts to.
  *
  * Metadata only — no payloads, no parsing, no serializing. How much that saves
@@ -346,15 +356,35 @@ async function fingerprintOf(
   shape: string,
 ): Promise<Fingerprint> {
   const metas = await metasOf(cache, keys);
+  /**
+   * Every entry's own state, rather than the newest of them.
+   *
+   * The newest alone is not a validator. A grab stamps one `grabbedAt`, taken
+   * once at the start, onto every entry it writes — so the maximum reaches its
+   * final, post-grab value the moment the **first** entry lands, while the rest
+   * of the window is still last night's. A poll in that gap would be handed a
+   * half-updated guide wearing the finished grab's tag, and every poll after it
+   * answered 304 against that tag until the next grab moved it: not a moment's
+   * skew, a consumer pinned to half a guide for a day.
+   *
+   * Digesting each entry instead means the tag settles only when the content
+   * does. The sweep already visits all of them, so this costs a hash and no
+   * extra reads.
+   */
+  const content = createHash('sha1');
   let newest = 0;
-  let present = 0;
 
   for (const meta of metas) {
     if (meta === undefined) {
+      // An empty field, so the gap keeps its place — which is what carries how
+      // many entries there are and which ones they were. One appearing as
+      // another disappears leaves the count unmoved and only the order differs.
+      content.update(END_OF_ENTRY);
       continue;
     }
 
-    present++;
+    content.update(`${meta.grabbedAt}:${meta.programmeCount}${END_OF_ENTRY}`);
+
     const at = Date.parse(meta.grabbedAt);
 
     if (Number.isFinite(at) && at > newest) {
@@ -365,11 +395,19 @@ async function fingerprintOf(
   // Truncated to the second, because `Last-Modified` has no more than that and
   // the two must agree: a validator finer than the header it travels in would
   // make every conditional request a miss.
+  //
+  // Still the newest, because a date is what this header is. It is the weaker
+  // of the two validators for exactly the reason above — a client sending only
+  // `If-Modified-Since` can still be told 304 mid-grab — and HTTP prefers the
+  // etag whenever both are present, which is whenever this server answered.
   const lastModified = new Date(Math.floor(newest / 1000) * 1000);
 
   // Weak, because two responses that mean the same guide are not required to be
   // byte-identical — a different `Accept-Encoding` alone changes the bytes.
-  return { etag: `W/"${present}-${newest}-${window}-${shape}"`, lastModified };
+  return {
+    etag: `W/"${content.digest('base64url').slice(0, 16)}-${window}-${shape}"`,
+    lastModified,
+  };
 }
 
 /**

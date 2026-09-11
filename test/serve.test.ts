@@ -241,6 +241,47 @@ describe('serveGuide', () => {
     expect(asked.reduce((sum, n) => sum + n, 0)).toBe(ids.length);
   });
 
+  it('does not settle the validator until the whole window has', async () => {
+    // A grab stamps every entry it writes with one `grabbedAt`, taken once at
+    // the start. So a validator built from the *newest* of those reaches its
+    // final, post-grab value the moment the first entry lands — and a poll in
+    // that window would be handed a half-updated guide wearing the finished
+    // grab's etag, then told 304 against it until the next grab moved it again.
+    const cache = cacheWith({ one: [programme('one', 6)], two: [programme('two', 7)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one', 'two']), cache, { revalidateMs: 0 });
+    const before = await fetch(server.url);
+
+    await before.text();
+
+    // One channel of two refreshed, as a grab part way through looks.
+    await cache.write({ site: 'example.tv', channelId: 'one', day: DAY }, [programme('one', 6)], {
+      grabbedAt: '2026-09-03T05:00:00.000Z',
+    });
+
+    const midway = await fetch(server.url, {
+      headers: { 'if-none-match': before.headers.get('etag')! },
+    });
+
+    await midway.text();
+    expect(midway.status).toBe(200);
+
+    const half = midway.headers.get('etag');
+
+    // And the second half must move it again, or a consumer that polled during
+    // the grab is pinned to what it got.
+    await cache.write({ site: 'example.tv', channelId: 'two', day: DAY }, [programme('two', 7)], {
+      grabbedAt: '2026-09-03T05:00:00.000Z',
+    });
+
+    const after = await fetch(server.url, { headers: { 'if-none-match': half! } });
+
+    await after.text();
+    expect(after.status).toBe(200);
+    expect(after.headers.get('etag')).not.toBe(half);
+  });
+
   it('does not re-send a guide for a reload that changed nothing', async () => {
     // A stray signal must not cost every consumer a full guide: reloading asks
     // a question, and an unchanged answer keeps the etag it had.
