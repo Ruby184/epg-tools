@@ -22,8 +22,9 @@ export interface EpgServeConfig {
    * fetches, which is what it has always done.
    *
    * A scheduled grab shares this server's cache rather than opening its own, so
-   * it is the *same* cache being served — and it shares the resolved channel
-   * lists, so it does not ask every site for one that the server already has.
+   * what it writes is what the very next request is served. It does **not**
+   * share the server's resolved channel lists: those may be `sitesMaxAgeMs`
+   * old, and a grab that reused them would miss a channel added since.
    */
   grab?: NextGrab;
   /** Defaults to 8080. */

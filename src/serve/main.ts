@@ -786,8 +786,12 @@ export async function serveGuide(
         // is its own health check would otherwise never take one and would
         // report unhealthy for as long as it ran. It is throttled and
         // single-flighted, and reads metadata only.
-        const { print } = await current(options.now ?? new Date());
-        const window = windowOf(options.now ?? new Date());
+        // One reading of the clock, not two: the window and the sweep that
+        // counts it must be the same window, and two `new Date()` either side
+        // of midnight would not be.
+        const now = options.now ?? new Date();
+        const { print } = await current(now);
+        const window = windowOf(now);
         // The one unambiguous "cannot do its job": nothing at all is cached, so
         // there is no guide to serve. How stale is too stale is the operator's
         // judgement and not this server's, so age is reported and not ruled on.
@@ -799,7 +803,7 @@ export async function serveGuide(
             // a date is a worse answer than saying there is none.
             grabbedAt: ok ? print.lastModified.toISOString() : null,
             ageSeconds: ok
-              ? Math.max(0, Math.round((Date.now() - print.lastModified.getTime()) / 1000))
+              ? Math.max(0, Math.round((now.getTime() - print.lastModified.getTime()) / 1000))
               : null,
             window: { startDay: window.startDay, days: window.days.length },
             // Coverage, not a bare count — the share of the grid that answered
@@ -976,12 +980,24 @@ export async function serveGuide(
    * serving what it already has.
    */
   const grabNow = async (): Promise<void> => {
-    const { runGrab } = await import('../build.js');
+    // Before the import, not after it: `close` aborts whatever `grabbing`
+    // holds, and on the first run that import is a real module load. A
+    // controller published only afterwards leaves a window in which stopping
+    // the server aborts nothing and then waits out the whole grab.
     const stops = new AbortController();
 
     grabbing = stops;
 
+    const { runGrab } = await import('../build.js');
+
     try {
+      // `close` may have happened while that import was resolving, and an
+      // aborted signal is not enough on its own: `runGrab` opens the cache and
+      // resolves the config before it looks at one.
+      if (stopped) {
+        return;
+      }
+
       await runGrab(config, {
         // This server's own store rather than one of its own: `RunOptions.cache`
         // is the caller's and is left open. A second store would be wasteful for

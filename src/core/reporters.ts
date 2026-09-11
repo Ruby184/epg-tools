@@ -204,9 +204,6 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       // somebody stops it — possibly in a fortnight.
       return `${event.path}: ${errorChain(event.error)}`;
     case 'serve:grabFailed':
-      // Rendered here for the same reason as `serve:failed`: a held-back
-      // failure is flushed when the run ends, and this run ends whenever
-      // somebody stops the server.
       return `Scheduled grab failed: ${errorChain(event.error)}`;
     case 'serve:stopped':
       return 'Stopped serving';

@@ -1205,6 +1205,44 @@ describe('serveGuide grabbing on a schedule', () => {
     expect(log.of('grab:done')).toHaveLength(after);
   });
 
+  it('stops a grab in flight rather than waiting it out', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    let asked: (() => void) | undefined;
+    const reached = new Promise<void>((resolve) => {
+      asked = resolve;
+    });
+
+    const config: EpgConfig = {
+      ...grabbable(),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: [{ xmltvId: 'one', siteId: 'one', name: 'one' }],
+          // Never answers on its own: only the abort ends this, so a `close`
+          // that failed to abort would hang here rather than fail an assertion.
+          request: async ({ signal }) => {
+            asked?.();
+
+            return new Promise((_, reject) => {
+              signal?.addEventListener('abort', () => reject(new Error('stopped')));
+            });
+          },
+          parseDay: () => [],
+        },
+      ],
+    };
+
+    const server = await serveNow(config, cache, { grab: once, reporter: log.reporter });
+
+    await reached;
+    // The controller is published before the dynamic import that loads
+    // `runGrab`, so there is no window in which this aborts nothing.
+    await server.close();
+
+    expect(log.of('serve:stopped')).toHaveLength(1);
+  });
+
   it('leaves a handed-in cache open, having grabbed into it', async () => {
     const cache = cacheWith({});
     const log = collect();
