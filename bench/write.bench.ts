@@ -1,10 +1,11 @@
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { parseXmltv, writeXmltv } from '@iptv/xmltv';
-import { bench, describe } from 'vitest';
+import { test } from 'vitest';
 import { writeXmltvStream, XmltvSerializeStream } from '../src/xmltv/main.js';
 import type { XmltvParseEvent } from '../src/xmltv/main.js';
-import { guideToXml, INSTRUCTIONS, makeGuide } from './fixture.js';
+import { speedup, TIMEOUT, tracked } from './harness.js';
+import { guideToXml, makeGuide } from './fixture.js';
 
 const guide = makeGuide(20, 3, 24); // 20 channels × 3 days × 24 = 1440 programmes
 // The same guide in @iptv/xmltv's own object shape, via its own parser.
@@ -16,80 +17,37 @@ const events: XmltvParseEvent[] = [
   ...guide.programmes.map((value): XmltvParseEvent => ({ type: 'programme', value })),
 ];
 
-describe(`write XMLTV (${guide.programmes.length} programmes)`, () => {
-  bench('epg-tools writeXmltvStream', async () => {
-    let out = '';
+test(
+  `write XMLTV (${guide.programmes.length} programmes)`,
+  { timeout: TIMEOUT },
+  async ({ annotate, bench }) => {
+    const results = await bench.compare(
+      ...tracked(bench, 'epg-tools writeXmltvStream', async () => {
+        let out = '';
 
-    for await (const chunk of writeXmltvStream({
-      channels: guide.channels,
-      programmes: guide.programmes,
-    })) {
-      out += chunk;
-    }
-  });
-
-  // A guard rather than a measurement, like its counterpart in parse.bench.ts:
-  // this should read the same as the line above. The list is read once up front
-  // (a prolog one has to be in hand before the header) and a guide with none
-  // allocates nothing for them at all, so a gap here means the placing moved
-  // into the per-element path.
-  bench('epg-tools writeXmltvStream (with processing instructions)', async () => {
-    let out = '';
-
-    for await (const chunk of writeXmltvStream({
-      processingInstructions: INSTRUCTIONS,
-      channels: guide.channels,
-      programmes: guide.programmes,
-    })) {
-      out += chunk;
-    }
-  });
-
-  // Another guard: an output profile is opt-in, and a guide written without
-  // one must not pay for the feature existing. An empty profile is the worst
-  // case for that — every guard runs and none of them has anything to say — so
-  // this should read the same as the baseline above. A gap means the per-element
-  // path grew work that belongs in `resolveProfile`.
-  bench('epg-tools writeXmltvStream (empty profile)', async () => {
-    let out = '';
-
-    for await (const chunk of writeXmltvStream(
-      { channels: guide.channels, programmes: guide.programmes },
-      { profile: {} },
-    )) {
-      out += chunk;
-    }
-  });
-
-  // And the real thing: reorders episode-nums, derives a missing one,
-  // normalises a dd_progid, rewrites every category through the genre table and
-  // attaches its code, and drops two elements. Slower than the baseline is
-  // expected — what would not be is *scaling* differently, which is what a
-  // per-element resolve would look like.
-  bench('epg-tools writeXmltvStream (profile: tvheadend)', async () => {
-    let out = '';
-
-    for await (const chunk of writeXmltvStream(
-      { channels: guide.channels, programmes: guide.programmes },
-      { profile: 'tvheadend' },
-    )) {
-      out += chunk;
-    }
-  });
-
-  bench('epg-tools XmltvSerializeStream (Node Transform)', async () => {
-    await pipeline(
-      Readable.from(events),
-      new XmltvSerializeStream(),
-      async (chunks: AsyncIterable<string>) => {
-        for await (const _chunk of chunks) {
-          // consume
+        for await (const chunk of writeXmltvStream({
+          channels: guide.channels,
+          programmes: guide.programmes,
+        })) {
+          out += chunk;
         }
-      },
+      }),
+      ...tracked(bench, 'epg-tools XmltvSerializeStream (Node Transform)', async () => {
+        await pipeline(
+          Readable.from(events),
+          new XmltvSerializeStream(),
+          async (chunks: AsyncIterable<string>) => {
+            for await (const _chunk of chunks) {
+              // consume
+            }
+          },
+        );
+      }),
+      bench('@iptv/xmltv writeXmltv', () => {
+        writeXmltv(iptvGuide);
+      }),
     );
-  });
 
-  bench('@iptv/xmltv writeXmltv', () => {
-    writeXmltv(iptvGuide);
-  });
-});
+    await speedup(annotate, results, 'epg-tools writeXmltvStream', ['@iptv/xmltv writeXmltv']);
+  },
+);

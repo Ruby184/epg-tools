@@ -5,6 +5,9 @@ dist/
 # npm pack output
 *.tgz
 
+# what the last local `npm run bench` measured, replayed as the next run's baseline
+bench/.baseline/
+
 # runtime artifacts from running the CLI in-repo
 .epg-cache/
 public/

@@ -43,6 +43,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # 20 is this package's own floor. Vitest 5 declares >= 22.12 and `npm
+        # ci` says so, but it runs the suite on 20 today — the leg is here to
+        # prove the sources work on the version the package promises, so if a
+        # future Vitest actually stops running there, run the suite on 22 and
+        # 24 and give 20 a smoke test of the bundle instead of dropping it.
         node: [20, 22, 24]
     steps:
       - uses: actions/checkout@v7

@@ -52,6 +52,32 @@ Tests live in `test/**/*.test.ts` and benchmarks in `bench/**/*.bench.ts` —
 `vitest.config.ts` keeps the two apart, so a benchmark never runs as part of
 `npm test`.
 
+### Benchmarks compare against the arm beside them, and against your last run
+
+A benchmark is a `test` that builds its arms with the `bench` fixture and hands
+them to `bench.compare()`, so one comparison is one test and one table. The
+`epg-tools` arms go through `tracked()` from [`bench/harness.ts`](bench/harness.ts):
+each one writes its result to `bench/.baseline/` (gitignored) and replays the
+previous one beside itself as a `— previous run` row. So a second `npm run
+bench` shows what moved since the first, on your machine rather than on
+someone else's.
+
+`speedup()` from the same file prints the `1.89× faster than @iptv/xmltv
+parseXmltv` line above each table — the shape of claim the README makes,
+recomputed from the run rather than read off a column by hand. Vitest printed
+those as a `BENCH Summary` until v5 retired it, which is also why `npm run
+bench` asks for `--reporter=verbose`: the default reporter prints no table for
+a passing test.
+
+[`bench/guards.bench.ts`](bench/guards.bench.ts) is the other kind: features
+that are supposed to cost nothing per element — a processing instruction, an
+output profile — asserted with `not.toBeSlowerThan(…, { delta })` instead of
+left in a table to be noticed. It is a separate file because two arms doing
+identical work still drift up to ~12% apart over a run, and a worker that has
+not already run a benchmark is the cleanest ground available; the deltas are
+set for that, so the guards catch a feature that started charging per element,
+not a few percent.
+
 ### `xmllint` is optional, and silently skips
 
 Some suites validate generated output against the official

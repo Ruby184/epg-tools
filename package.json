@@ -88,7 +88,7 @@
     "dev": "tsdown --watch",
     "test": "vitest run",
     "test:watch": "vitest",
-    "bench": "vitest bench --run",
+    "bench": "vitest bench --run --reporter=verbose",
     "bench:memory": "npm run build && node bench/memory.mjs",
     "bench:memory:m3u": "npm run build && node bench/memory-m3u.mjs",
     "typecheck": "tsc --noEmit",
@@ -100,7 +100,7 @@
     "prepare": "husky"
   },
   "dependencies": {
-    "ky": "^2.0.2",
+    "ky": "^2.1.0",
     "p-queue": "^9.3.0"
   },
   "devDependencies": {
@@ -109,18 +109,18 @@
     "@conventional-commits/parser": "^0.4.1",
     "@iptv/playlist": "^1.2.1",
     "@iptv/xmltv": "^1.0.1",
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.5.1",
     "epg-parser": "^0.5.0",
-    "fast-xml-parser": "^5.10.1",
+    "fast-xml-parser": "^5.11.1",
     "husky": "^9.1.7",
     "iptv-playlist-parser": "^0.15.2",
-    "lint-staged": "^17.3.0",
+    "lint-staged": "^17.5.1",
     "m3u-parser-generator": "^5.0.2",
-    "oxfmt": "0.64.0",
-    "oxlint": "^1.79.0",
-    "tsdown": "^0.22.14",
+    "oxfmt": "0.67.0",
+    "oxlint": "^1.82.0",
+    "tsdown": "^0.23.0",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.0"
   },
   "lint-staged": {
     "*.{ts,mts,cts,js,mjs,cjs,json}": "oxfmt",
