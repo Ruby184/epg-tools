@@ -1488,6 +1488,85 @@ describe('epg', () => {
       expect(stdout).toContain('2 channels (from the cache)');
     });
 
+    it('covers the window a run would, when the config names none', async () => {
+      const dir = await tempDir();
+      // No `days`, so both this and a run fall back to the same seven.
+      const config = await configFile(
+        dir,
+        `export default {
+        sites: [${siteSource()}],
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+
+      const { stdout } = await run(['grab', '--config', config, '--dry-run']);
+
+      // Seven, not one: a number passed to `resolveSite` overrides its own
+      // default, which is how a report came to describe a seventh of a run.
+      expect(stdout).toContain('7 days from');
+      expect(stdout).toContain('7 channel-days: 0 cached, 7 to fetch in 7 requests');
+    });
+
+    it('reports a site it could not plan, and plans the rest', async () => {
+      const dir = await tempDir();
+      const config = await configFile(
+        dir,
+        `export default {
+        sites: [
+          { site: 'bad.tv', channels: async () => { throw new Error('source is down'); },
+            request: async () => ({}), parseDay: () => [] },
+          ${siteSource()},
+        ],
+        days: 1,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+
+      const { code, stdout } = await run(['grab', '--config', config, '--dry-run']);
+
+      // A run reports the site and grabs the other one; so does this, rather
+      // than taking the whole document down with the first unreachable source.
+      expect(stdout).toContain('bad.tv — could not be planned: source is down');
+      expect(stdout).toContain('example.tv — 1 channel');
+      expect(stdout).toContain('1 site could not be planned');
+      // And exits as a run would, rather than being the quieter of the two.
+      expect(code).toBe(1);
+    });
+
+    it('selects channels for build and not for grab, as each command does', async () => {
+      const dir = await tempDir();
+      const config = await configFile(
+        dir,
+        `export default {
+        sites: [{
+          site: 'example.tv',
+          channels: [
+            { xmltvId: 'one.example.tv', siteId: '1', name: 'One' },
+            { xmltvId: 'two.example.tv', siteId: '2', name: 'Two' },
+          ],
+          request: async () => ({}),
+          parseDay: () => [],
+        }],
+        days: 1,
+        channels: ['one.example.tv'],
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+
+      // `build` narrows before it grabs; `runGrab` does not select at all, so a
+      // report that applied the selection to `grab` would name half the
+      // requests `epg grab` goes on to make.
+      expect((await run(['build', '--config', config, '--dry-run'])).stdout).toContain(
+        '1 site, 1 channel',
+      );
+      expect((await run(['grab', '--config', config, '--dry-run'])).stdout).toContain(
+        '1 site, 2 channels',
+      );
+    });
+
     it('answers as one JSON document for something to read', async () => {
       const dir = await tempDir();
       const config = await plainConfig(dir);

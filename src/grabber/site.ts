@@ -19,8 +19,14 @@ import type {
   StreamSiteConfig,
 } from './types.js';
 
-/** How many days a run covers when neither the site nor the run says. */
-const DEFAULT_DAYS = 7;
+/**
+ * How many days a run covers when neither the site nor the run says.
+ *
+ * Exported because `--dry-run` has to name the window before a site is
+ * resolved, and a second copy of this number is a report that disagrees with
+ * the run it describes.
+ */
+export const DEFAULT_DAYS = 7;
 
 /**
  * A site's settings as the run needs them: checked, and with the run's defaults

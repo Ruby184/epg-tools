@@ -1064,10 +1064,29 @@ a time, and the other one asking per channel-day. Freshness is read from the
 same policy a run uses, `--refresh` and `cache.staleness` included, so today is
 "to fetch" whatever is cached (see [`alwaysRefetchDays`](#how-caching-works)).
 
+A site that cannot be planned — a channel list whose source is down, a config
+this refuses to read — is **one row, not the end of the report**. A run reports
+that site and grabs the other thirty-nine, so this does the same, and exits
+**1** as the run would:
+
+```
+  bad.tv — could not be planned: source is down
+  example.tv — 1 channel (in the config)
+      1 channel-day: 0 cached, 1 to fetch in 1 request (1 channel × 1 day)
+
+  1 of 1 channel-day to fetch, in 1 request
+  1 site could not be planned
+```
+
+Each command is described as it actually behaves, which is not the same for
+both: `build` narrows to [`channels`](#keeping-only-some-channels) before it
+grabs, and `grab` does not narrow at all — so the two can report different
+counts for one config, and each is right about itself.
+
 `--format json` gives the same thing as one document, with `window`, `totals`
-and a `sites` array — for a CI step that wants to fail when a config would make
-more requests than someone expected. `build --dry-run` reports the same and
-writes no guide.
+(`failed` included) and a `sites` array — for a CI step that wants to fail when
+a config would make more requests than someone expected. `build --dry-run`
+reports the same and writes no guide.
 
 ### `--offset`
 

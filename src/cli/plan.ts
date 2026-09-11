@@ -31,17 +31,28 @@ import { addDays, toDayString } from '../core/days.js';
 import { writeLines } from '../core/streams.js';
 import { resolveChannels } from '../grabber/channels.js';
 import { planRequests } from '../grabber/planner.js';
-import { resolveSite } from '../grabber/site.js';
+import { DEFAULT_DAYS, resolveSite } from '../grabber/site.js';
 import { SiteStateHandle } from '../grabber/state.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import type { ReportFormat } from './format.js';
 
 /** Where a site's channel list came from, which is what it cost to know it. */
-export type ChannelsFrom = 'config' | 'cache' | 'fetched';
+export type ChannelsFrom = 'config' | 'cache' | 'fetched' | 'failed';
 
 export interface PlanSite {
   site: string;
+  /**
+   * Why this site could not be planned, when it could not be.
+   *
+   * Every count below is then zero, and the row is still here — a run reports a
+   * site that answered nothing and grabs the rest, so a report that threw on
+   * the first unreachable source would be useless on exactly the config this
+   * command is for.
+   */
+  error?: string;
   channels: { count: number; from: ChannelsFrom };
+  /** This site's own window, which it may have shortened. */
+  days: number;
   /** Channel-days in this site's window — always `fresh + stale`. */
   entries: number;
   /** Cached and recent enough that a run would not ask again. */
@@ -62,6 +73,8 @@ export interface PlanReport {
     fresh: number;
     stale: number;
     requests: number;
+    /** Sites that could not be planned at all — see {@link PlanSite.error}. */
+    failed: number;
   };
   sites: PlanSite[];
 }
@@ -70,7 +83,14 @@ export interface PlanOptions {
   now?: Date;
   offset?: number;
   signal?: AbortSignal;
-  /** Keep only these channels — `EpgConfig.channels` and `--channels`. */
+  /**
+   * Keep only these channels.
+   *
+   * Handed in rather than read off `config.channels`, because the two commands
+   * that take `--dry-run` do different things with it: `build` selects before
+   * it grabs, and `grab` does not select at all. A report that decided for
+   * itself would be describing neither.
+   */
   select?: ReadonlySet<string>;
 }
 
@@ -97,7 +117,8 @@ async function planSite(
     cache: CacheStore;
     startDay: string;
     now: Date;
-    days: number;
+    /** The run's window, or absent to let `resolveSite` use its own default. */
+    days?: number;
     /** The run's policy, under which a site's own override still wins. */
     staleness?: Partial<StalenessPolicy>;
   } & PlanOptions,
@@ -105,9 +126,13 @@ async function planSite(
   const resolved = resolveSite(
     config,
     {
-      days: options.days,
-      // The same two the run assembles, or a report would call fresh what a run
-      // is about to refetch — `--refresh` above all, which makes everything stale.
+      // Spread rather than defaulted: `resolveSite` falls back to its own
+      // `DEFAULT_DAYS`, and a number passed here would *override* that — which
+      // is how a report came to describe one day of a run that covers seven.
+      ...(options.days === undefined ? {} : { days: options.days }),
+      // The same policy the run assembles, or a report would call fresh what a
+      // run is about to refetch — `--refresh` above all, which makes everything
+      // stale.
       ...(options.staleness ? { staleness: options.staleness } : {}),
     },
     options.startDay,
@@ -159,11 +184,36 @@ async function planSite(
   return {
     site: resolved.site,
     channels: { count: channels.length, from },
+    days: window.length,
     entries: channels.length * window.length,
     fresh: channels.length * window.length - stale.length,
     stale: stale.length,
     requests: requests.length,
     batching: batchingOf(batching.maxChannels, batching.maxDays),
+  };
+}
+
+/**
+ * A site that could not be planned, as a row rather than a thrown report.
+ *
+ * `resolveSite` refuses a config it cannot read and `resolveChannels` fails
+ * with whatever the source did — and either would otherwise take the whole
+ * document with it. A run does not work that way: it reports the site and
+ * grabs the other thirty-nine.
+ */
+function unplannable(config: AnySiteConfig, error: unknown): PlanSite {
+  return {
+    // Straight off the config, since the failure may be `resolveSite` refusing
+    // the very field this reads. Only a string can be a heading.
+    site: typeof config.site === 'string' && config.site !== '' ? config.site : '(unnamed site)',
+    error: error instanceof Error ? error.message : String(error),
+    channels: { count: 0, from: 'failed' },
+    days: 0,
+    entries: 0,
+    fresh: 0,
+    stale: 0,
+    requests: 0,
+    batching: '—',
   };
 }
 
@@ -182,40 +232,42 @@ export async function planRun(
   const config: EpgConfig = await resolveConfigSource(source);
   const now = options.now ?? new Date();
   const startDay = options.offset ? addDays(toDayString(now), options.offset) : toDayString(now);
-  const select =
-    options.select ??
-    (Array.isArray(config.channels) ? new Set<string>(config.channels) : undefined);
 
   const sites: PlanSite[] = [];
 
   for (const site of config.sites) {
-    sites.push(
-      await planSite(site, {
-        cache,
-        startDay,
-        now,
-        days: config.days ?? 1,
-        ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
-        ...(options.offset === undefined ? {} : { offset: options.offset }),
-        ...(options.signal ? { signal: options.signal } : {}),
-        ...(select ? { select } : {}),
-      }),
-    );
+    try {
+      sites.push(
+        await planSite(site, {
+          cache,
+          startDay,
+          now,
+          ...(config.days === undefined ? {} : { days: config.days }),
+          ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
+          ...(options.offset === undefined ? {} : { offset: options.offset }),
+          ...(options.signal ? { signal: options.signal } : {}),
+          ...(options.select ? { select: options.select } : {}),
+        }),
+      );
+    } catch (error) {
+      sites.push(unplannable(site, error));
+    }
   }
 
   const total = (of: (site: PlanSite) => number): number =>
     sites.reduce((sum, site) => sum + of(site), 0);
 
   return {
-    // The window as the run would see it, which is the config's `days` — a site
-    // that overrides it says so in its own row's `entries`.
-    window: { startDay, days: config.days ?? 1 },
+    // The run's own window — `DEFAULT_DAYS` when the config is silent, which is
+    // what a run would use. A site that shortened it says so in its own row.
+    window: { startDay, days: config.days ?? DEFAULT_DAYS },
     totals: {
       channels: total((site) => site.channels.count),
       entries: total((site) => site.entries),
       fresh: total((site) => site.fresh),
       stale: total((site) => site.stale),
       requests: total((site) => site.requests),
+      failed: sites.filter((site) => site.error !== undefined).length,
     },
     sites,
   };
@@ -231,6 +283,7 @@ const FROM: Record<ChannelsFrom, string> = {
   config: 'in the config',
   cache: 'from the cache',
   fetched: 'fetched just now',
+  failed: 'could not be read',
 };
 
 export async function writePlanReport(
@@ -250,8 +303,16 @@ export async function writePlanReport(
   ];
 
   for (const site of report.sites) {
+    if (site.error !== undefined) {
+      lines.push(`  ${site.site} — could not be planned: ${site.error}`);
+      continue;
+    }
+
     lines.push(
-      `  ${site.site} — ${count(site.channels.count, 'channel')} (${FROM[site.channels.from]})`,
+      `  ${site.site} — ${count(site.channels.count, 'channel')} (${FROM[site.channels.from]})` +
+        // Only when it differs, since repeating the heading on every row would
+        // bury the one site that shortened its window.
+        (site.days === window.days ? '' : `, over its own ${count(site.days, 'day')}`),
       `      ${count(site.entries, 'channel-day')}: ${site.fresh} cached, ` +
         `${site.stale} to fetch in ${count(site.requests, 'request')} (${site.batching})`,
     );
@@ -261,6 +322,15 @@ export async function writePlanReport(
     '',
     `  ${totals.stale} of ${count(totals.entries, 'channel-day')} to fetch, ` +
       `in ${count(totals.requests, 'request')}`,
+  );
+
+  if (totals.failed > 0) {
+    // What a run would say too: the sites that answered nothing are counted
+    // apart from the channel-days, because they are not a share of anything.
+    lines.push(`  ${count(totals.failed, 'site')} could not be planned`);
+  }
+
+  lines.push(
     // Said plainly, because "dry" does not mean what it looks like it means and
     // a report that let somebody believe it did would be the worse failure.
     '',

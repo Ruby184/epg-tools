@@ -735,20 +735,29 @@ async function execute(
     // `cacheChannels` list should be read rather than asked.
     const { createCacheStore } = await import('../build.js');
     const { planRun, writePlanReport } = await import('./plan.js');
+    const { channelSelection } = await import('../merge/select.js');
     const cache = await createCacheStore(config, signal);
+    // Only `build` narrows before it grabs — `runGrab` does not select at all,
+    // so a report that applied `config.channels` to `grab --dry-run` would name
+    // fewer requests than `epg grab` goes on to make.
+    const selection = command === 'build' ? channelSelection(config) : undefined;
 
     try {
       const report = await planRun(config, cache, {
         ...(values.offset !== undefined ? { offset: values.offset } : {}),
         ...(signal ? { signal } : {}),
+        ...(selection ? { select: selection.select } : {}),
       });
 
       await writePlanReport(report, stdout, values.format ?? 'text');
+
+      // A site that could not be planned is a site a run would have reported as
+      // answering nothing, and that exits 1 — a report of the same config should
+      // not be the quieter of the two.
+      return report.totals.failed > 0 ? 1 : 0;
     } finally {
       await cache.close();
     }
-
-    return 0;
   }
 
   switch (command) {
