@@ -4,11 +4,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/main.js';
 import { defineXtreamSite, grab, resolveChannels } from '../src/grabber/main.js';
+import { SiteStateHandle } from '../src/grabber/state.js';
 import { generateGuide } from '../src/merge/main.js';
 import type { EpgEvent } from '../src/core/events.js';
 
 const NOW = new Date('2026-09-06T05:00:00.000Z');
 const DAY = '2026-09-06';
+const NEXT = '2026-09-07';
 
 let running: Server | undefined;
 
@@ -434,24 +436,68 @@ describe('defineXtreamSite', () => {
     expect(await guide(source)).toContain('start="20260906200000 +0200"');
   });
 
-  it('carries the panel`s timezone on the channel list, so a cached one keeps it', async () => {
+  it('keeps the panel`s timezone in the site`s state, not on every channel', async () => {
     const source = await panel();
+    const cache = store();
 
-    const channels = await resolveChannels(site(source.url));
+    await grab([site(source.url)], { cache, now: NOW });
 
-    expect(channels[0]?.data).toMatchObject({ timezone: 'Europe/Bratislava' });
+    const state = SiteStateHandle.open(cache, 'panel.example');
+
+    expect(await (await state.bag()).get('timezone')).toBe('Europe/Bratislava');
+    expect(await resolveChannels(site(source.url))).toEqual([
+      expect.objectContaining({
+        data: expect.not.objectContaining({ timezone: expect.anything() }),
+      }),
+    ]);
+  });
+
+  // The point of keeping it: a run that takes its channel list from the cache
+  // never calls `channels`, and so never asks the panel about itself again —
+  // but a listing with no wall clock still has to land in the panel's zone.
+  it('still has it on a run whose channel list came from the cache', async () => {
+    const source = await panel({
+      // Neither carries a wall clock, so both need the panel's own zone to land
+      // anywhere. One per day, since the second run is asked for the day after.
+      listings: () => ({
+        epg_listings: [
+          { ...listing(`${DAY}T20:00:00`, `${DAY}T21:00:00`, 'No wall clock'), start: undefined },
+          { ...listing(`${NEXT}T20:00:00`, `${NEXT}T21:00:00`, 'Nor this one'), start: undefined },
+        ],
+      }),
+    });
+    const cache = store();
+    const sites = [site(source.url, { cacheChannels: true })];
+
+    await grab(sites, { cache, now: NOW });
+    // The day after, which nothing has cached — so this run fetches listings
+    // while its channel list comes back from the cache.
+    await grab(sites, { cache, now: NOW, startDay: NEXT });
+
+    // The panel was asked about itself once, for the first run's list, and the
+    // second run still writes the offset it answered with then.
+    expect(source.asked.filter((request) => !request.url?.includes('action=')).length).toBe(1);
+
+    let xml = '';
+
+    for await (const chunk of generateGuide({ sites, cache, days: 1, startDay: NEXT, now: NOW })) {
+      xml += chunk;
+    }
+
+    expect(xml).toContain('start="20260907200000 +0200"');
   });
 
   it('ignores a timezone the panel made up', async () => {
     const source = await panel({
       profile: { user_info: { auth: 1 }, server_info: { timezone: 'Nowhere/Fictional' } },
     });
+    const cache = store();
 
-    const channels = await resolveChannels(site(source.url));
+    await grab([site(source.url)], { cache, now: NOW });
 
     // An unknown zone throws where it is used rather than where it was read,
     // which would be a channel failing for a reason nothing names.
-    expect(channels[0]?.data).not.toHaveProperty('timezone');
+    expect((await SiteStateHandle.open(cache, 'panel.example').bag()).has('timezone')).toBe(false);
   });
 
   it('takes a hook for the extensions, on either element', async () => {

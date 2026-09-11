@@ -12,14 +12,19 @@
  * instance are the only place a url exists, and they are composed the way
  * `revalidationHooks` composes: ours around the site's, never instead of them.
  *
- * Nothing is written, and no cache is opened at all. Trying a site cannot
- * poison the guide a run would build — and, just as important, cannot make the
- * next run think the day is already done. A site that keeps its channel list
- * between runs is asked for it afresh here, which is what trying it means.
+ * Nothing is written, and the only store opened keeps nothing: a site's state
+ * is held over `NoCacheDriver`, so its channel list and the request after it
+ * share one bag for the length of the command and none of it outlives the
+ * command. Trying a site cannot poison the guide a run would build — and, just
+ * as important, cannot make the next run think the day is already done. A site
+ * that keeps its channel list between runs is asked for it afresh here, which
+ * is what trying it means.
  */
 
 import type { KyInstance, KyRequest, Options as KyOptions } from 'ky';
 import type { Writable } from 'node:stream';
+import { CacheManager } from '../cache/manager.js';
+import { NoCacheDriver } from '../cache/no-cache-driver.js';
 import { resolveConfigSource, type ConfigSource } from '../config.js';
 import { toDayString } from '../core/days.js';
 import { GrabberError } from '../core/error.js';
@@ -28,6 +33,7 @@ import { resolveChannels, siteHttp } from '../grabber/channels.js';
 import { parseContext, requestContext, streamContext } from '../grabber/context.js';
 import { planRequests } from '../grabber/planner.js';
 import { resolveSite } from '../grabber/site.js';
+import { SiteStateHandle } from '../grabber/state.js';
 import type { AnySiteConfig, GrabberChannel, ParsedProgramme } from '../grabber/types.js';
 import { ProgrammeBuilder } from '../xmltv/builder.js';
 import { serializeProgramme } from '../xmltv/serialize.js';
@@ -213,9 +219,16 @@ export async function tryChannelDay(
     warn: (message: string) => lines.push(`    [warn] ${message}`),
   };
 
+  // A handle over a store that keeps nothing, which is not the same as no
+  // handle at all: the bag it hands out lives as long as this command, so what
+  // the site learns while fetching its channel list is there for the request
+  // being tried — exactly as in a run, and remembered afterwards by neither.
+  const state = SiteStateHandle.open(new CacheManager({ driver: new NoCacheDriver() }), site.site);
+
   const channels = await resolveChannels(site, {
     http,
     says,
+    state,
     ...(options.signal ? { signal: options.signal } : {}),
   });
   const channel = channelNamed(channels, channelName);
@@ -238,7 +251,7 @@ export async function tryChannelDay(
 
   const deps = {
     http,
-    state: new Map<string, unknown>(),
+    state: await state.bag(),
     says,
     ...(options.signal ? { signal: options.signal } : {}),
   };

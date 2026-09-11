@@ -107,6 +107,22 @@ const example = defineSiteConfig({
 `data` is per channel and so optional; read it as `data?.x` unless you know
 every channel in your list carries one. The grabber never looks inside it.
 
+Beside `http` the function is handed `log`, `warn`, `signal` and `state` — the
+site's own bag, [the same one](#remembering-something-between-runs) every
+request and parse of the run is given. Which is where what the *list* taught the
+site goes, as opposed to what it taught you about a channel:
+
+```ts
+async channels({ http, state }) {
+  const { token, zone, items } = await http.get('channels').json<Listing>();
+
+  state.set('token', token);          // every request that follows has it
+  state.set('zone', zone);
+
+  return items.map((item) => ({ xmltvId: `${item.id}.example.tv`, siteId: item.id }));
+}
+```
+
 The function is called only when channels are actually wanted, so
 `--capabilities`, `--description` and `--version` still answer without touching
 the network, and `--configure` resolves the list *after* asking for the
@@ -234,7 +250,13 @@ worth knowing.
 
 - It is **one `Map` per site for the whole run**, not one per channel-day. A
   value written by one request is there for every later request and for every
-  `parseDay`, and two of this site's pipelines running at once share it.
+  `parseDay`, and two of this site's pipelines running at once share it. A
+  fetched [channel list](#a-channel-list-that-has-to-be-fetched) is handed the
+  same one, and goes first — so what it learns is there for all of them.
+- A list served from `cacheChannels` does **not** call `channels`, so whatever
+  that function would have put there is not put there on that run. What an
+  earlier run stored is still in the bag, which is usually the point; a value
+  that has to exist belongs where it is needed rather than assumed.
 - Whatever goes in must survive `JSON.stringify` — it is a cache file.
 - A store that remembers nothing (`NoCacheDriver`, a read-only filesystem) hands
   over an empty `Map` at the start of every run. Nothing breaks; nothing carries
@@ -688,9 +710,11 @@ already refused you. What it buys:
 - the panel's own **timezone** becomes the fallback for deciding which day a
   programme belongs to, where a listing gives nothing to work it out from.
 
-That timezone rides on the channel list — cached with it under `cacheChannels`,
-and asked for again exactly when the list is. The rest of that answer is *not*
-kept anywhere: it echoes your password straight back at you.
+That timezone is kept in the site's [own state](#remembering-something-between-runs),
+learnt when the channel list is fetched and read by every request after it —
+including on a run whose list came from `cacheChannels` and which therefore
+never asks the panel about itself again. The rest of that answer is *not* kept
+anywhere: it echoes your password straight back at you.
 
 **Everything the panel says is kept.** What the DTD has a place for goes there —
 the name, the icon, the channel number as `preset`, and the listing's own

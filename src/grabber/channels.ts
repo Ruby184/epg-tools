@@ -56,8 +56,10 @@ export interface ResolveChannelsOptions {
   signal?: AbortSignal;
   /**
    * This site's state, when the caller has opened it — where a cached channel
-   * list is read from and written to. Without one, a site that asked for
-   * `cacheChannels` is simply asked for its list like any other.
+   * list is read from and written to, and where the bag handed to the site's
+   * `channels` function comes from. Without one, a site that asked for
+   * `cacheChannels` is simply asked for its list like any other, and `channels`
+   * is handed a bag of its own.
    */
   state?: SiteStateHandle;
   /** Fetch the list whatever is cached — what `--refresh` amounts to here. */
@@ -129,6 +131,14 @@ export async function resolveChannels(
       http: options.http ?? siteHttp(config, options.signal),
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.says ?? SILENT),
+      // The site's own bag, the very `Map` its requests and parses are handed —
+      // so what fetching the list taught the site is there for everything that
+      // follows. Asked for here rather than up front, which keeps the handle's
+      // "reads nothing until asked" promise: a list written out in a config, or
+      // one still fresh in the cache, never reaches this. Without a handle it is
+      // an empty bag of its own, dropped afterwards, as a run over
+      // `NoCacheDriver` hands a request.
+      state: (await options.state?.bag()) ?? new Map(),
     });
 
   const maxAgeMs = channelsMaxAgeMs(config);

@@ -130,6 +130,26 @@ export interface ChannelsContext extends Says {
   http: KyInstance;
   /** As on a request context: already applied to {@link http}. */
   signal?: AbortSignal;
+  /**
+   * What this site remembers between runs — see {@link SiteState}, and the same
+   * `Map` every request and every `parseDay` of this run is handed.
+   *
+   * Fetching a channel list is where a site learns things that are not about
+   * one channel: the token the listing was fetched with, an account's region,
+   * a page count, the lookup the ids in the list have to be read through. Put
+   * them here and every request that follows has them, rather than each
+   * channel carrying its own copy in `data` — which is the place for what is
+   * genuinely per channel.
+   *
+   * Two things follow from where this sits. A list served from
+   * {@link BaseSiteConfig.cacheChannels} does not call `channels` at all, so
+   * whatever it would have put here is not put here — what a *previous* run
+   * stored is still in the bag, but a value that has to exist must be written
+   * where it is needed rather than assumed. And a caller with no cache store —
+   * `--list-channels` and friends — hands over an empty `Map` that is thrown
+   * away afterwards, exactly as `NoCacheDriver` does for a request.
+   */
+  state: SiteState;
 }
 
 /**

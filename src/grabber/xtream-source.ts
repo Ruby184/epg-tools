@@ -67,16 +67,6 @@ export interface XtreamChannel {
   categoryIds: string[];
   /** The first category's name, where the panel's category list gave one. */
   category?: string;
-  /**
-   * The zone the *panel* writes its listings in — not anything about this
-   * channel.
-   *
-   * It rides here because this is what travels with the channel list: learnt
-   * once when the list is asked for, cached with it under `cacheChannels`, and
-   * asked for again exactly when the list is. `ChannelsContext` has no `state`
-   * to leave it in, and a closure would not survive a cached list.
-   */
-  timezone?: string;
 }
 
 /** One programme of a panel, normalized: decoded, dated, and without the noise. */
@@ -336,14 +326,34 @@ export function xtreamChannelExtras(element: ChannelBuilder, channel: XtreamChan
 }
 
 /**
+ * Where the panel's own timezone is kept — see {@link XtreamSiteOptions.dayZone}.
+ *
+ * The site's state rather than each channel's `data`, because it is one fact
+ * about the panel and not a hundred copies of one about its channels. It is
+ * learnt where everything else about the account is, when the channel list is
+ * fetched, and read back by every request of every later run — including the
+ * runs that take their channel list from `cacheChannels` and so never ask the
+ * panel about itself again.
+ *
+ * A fallback, so its absence costs a listing that carries its own wall clock
+ * nothing: a command holding no state at all — `epg try` without a cache — just
+ * reads the offsets the panel wrote.
+ */
+const TIMEZONE = 'timezone';
+
+/**
  * The panel's timezone, if it named one a `Intl` has heard of.
  *
  * A panel is as likely to answer `""`, `"UTC"` or something misspelt, and an
  * unknown zone throws where it is used rather than where it was read — which
  * would be a channel failing for a reason nothing names.
+ *
+ * Takes `unknown` because it guards both readings: what the panel answered, and
+ * what comes back out of the state — a cache file, so a place a value can arrive
+ * from having been hand edited or written by a version that knew different.
  */
-function zoneOf(named: string | undefined): string | undefined {
-  const zone = named?.trim();
+function zoneOf(named: unknown): string | undefined {
+  const zone = typeof named === 'string' ? named.trim() : '';
 
   if (!zone) {
     return undefined;
@@ -433,7 +443,7 @@ export function defineXtreamSite(
     },
     batching: 'days',
 
-    async channels({ http, warn }) {
+    async channels({ http, warn, state }) {
       // First, and on its own: there is no sense asking a panel for channels it
       // has already refused you, and a panel that rate-limits or bans has one
       // fewer reason to.
@@ -482,6 +492,11 @@ export function defineXtreamSite(
       );
 
       const zone = zoneOf(about.server_info?.timezone);
+
+      if (zone !== undefined) {
+        state.set(TIMEZONE, zone);
+      }
+
       const channels: GrabberChannel<XtreamChannel>[] = [];
       const seen = new Set<string>();
       let duplicates = 0;
@@ -535,7 +550,6 @@ export function defineXtreamSite(
             ...(addedAt === undefined ? {} : { addedAt }),
             categoryIds: ids.filter((id) => id !== ''),
             ...(category ? { category } : {}),
-            ...(zone ? { timezone: zone } : {}),
           },
         });
       }
@@ -564,15 +578,20 @@ export function defineXtreamSite(
       return channels;
     },
 
-    async request({ channel, http }) {
+    async request({ channel, http, state }) {
       const payload = await http
         .get('player_api.php', {
           searchParams: { action: 'get_simple_data_table', stream_id: channel.siteId },
         })
         .json<{ epg_listings?: unknown }>();
 
+      // Once for the response, not once per listing: it comes back out of a
+      // cache file, so it is checked rather than trusted, and that check is an
+      // `Intl` lookup.
+      const zone = zoneOf(state.get(TIMEZONE));
+
       return asList<WireListing>(payload?.epg_listings)
-        .map((listing) => normalize(listing, channel.data?.timezone))
+        .map((listing) => normalize(listing, zone))
         .filter((listing): listing is XtreamProgramme => listing !== undefined);
     },
 

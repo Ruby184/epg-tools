@@ -641,7 +641,9 @@ several sites, to `emit` as the events they are) and are **dropped without
 one** — which is what a caller writing a channel list to stdout wants, and a
 surprise to anyone else. Given a `store`, both honour a site's
 [`cacheChannels`](./site-config.md#keeping-a-fetched-list): a list still inside
-its max age comes back without the source being asked. `siteHttp(config,
+its max age comes back without the source being asked, and a site's `channels`
+function is handed that handle's bag as its `state` — an empty one of its own
+where there is no store. `siteHttp(config,
 signal?)` builds the site's ky instance, and `sitePacing(config, { signal?, emit?
 })` its queue. `channelElement(config, channel)` is what every `<channel>` in the
 output goes through — the site's `channelInfo` if it has one,

@@ -576,6 +576,7 @@ describe('channelsFromChannelsXml, from a path', () => {
 
     await channelsFromChannelsXml(FIXTURE)({
       http: undefined as never,
+      state: new Map(),
       log: () => {},
       warn: (message) => said.push(message),
     });

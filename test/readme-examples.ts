@@ -238,6 +238,35 @@ const fetchedChannels = defineSiteConfig({
 
 export const fetched = defineConfig({ sites: [fetchedChannels], output: 'guide.xml' });
 
+// --- docs/site-config.md: A channel list that has to be fetched (its state) --
+interface Listing {
+  token: string;
+  zone: string;
+  items: { id: string }[];
+}
+
+export const channelsWithState = defineSiteConfig({
+  site: 'example.tv',
+  async channels({ http, state }) {
+    const { token, zone, items } = await http.get('channels').json<Listing>();
+
+    state.set('token', token); // every request that follows has it
+    state.set('zone', zone);
+
+    return items.map((item) => ({ xmltvId: `${item.id}.example.tv`, siteId: item.id }));
+  },
+  async request({ channel, http, state }) {
+    return http
+      .get(`epg/${channel.siteId}`, {
+        headers: { authorization: `Bearer ${String(state.get('token'))}` },
+      })
+      .json<{ items: RawProgramme[] }>();
+  },
+  parseDay({ payload, programme }) {
+    return payload.items.map((p) => programme(new Date(p.start), p.title));
+  },
+});
+
 // --- docs/site-config.md: Keeping a fetched list ----------------------------
 export const keptChannels = defineSiteConfig({
   site: 'example.tv',

@@ -775,6 +775,58 @@ describe('grab', () => {
       expect(seen.filter((entry) => entry === undefined)).toHaveLength(1);
     });
 
+    it('is the same bag its channel list was handed', async () => {
+      const cache = new MemoryCache();
+      const seen: unknown[] = [];
+      const config = makeConfig({
+        days: 2,
+        channels: ({ state }) => {
+          // What fetching a list teaches a site that is about nothing in the
+          // list: the token it was fetched with, the zone it is written in.
+          state.set('token', 'from-the-channel-list');
+
+          return [channel('one')];
+        },
+        async request({ state }) {
+          seen.push(state.get('token'));
+
+          return {};
+        },
+        parseDay({ state }) {
+          seen.push(state.get('token'));
+
+          return [];
+        },
+      });
+
+      await grab([config], { cache, now: NOW });
+
+      // Every request and every parse of the run, not a copy that starts empty
+      // — and it is kept, like anything else the site put there.
+      expect(seen).toEqual(Array.from({ length: 4 }, () => 'from-the-channel-list'));
+      expect(cache.state.get('example.com|state')?.data).toEqual([
+        ['token', 'from-the-channel-list'],
+      ]);
+    });
+
+    it('is a bag of its own where there is no state to share', async () => {
+      const said: string[] = [];
+      const config = makeConfig({
+        channels: ({ state }) => {
+          said.push(`started with ${String(state.size)}`);
+          state.set('token', 'nowhere to keep it');
+
+          return [channel('one')];
+        },
+      });
+
+      // `--list-channels` and friends: no store, so nothing to open a handle
+      // over. The site writes to its bag exactly as it would in a run, and what
+      // it wrote goes nowhere.
+      expect(await resolveChannels(config)).toEqual([channel('one')]);
+      expect(said).toEqual(['started with 0']);
+    });
+
     it('is written only when the site changed something', async () => {
       const cache = new MemoryCache();
       const config = makeConfig({
