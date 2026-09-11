@@ -131,6 +131,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--cache-dir <dir>` | override the cache directory |
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
+| `--dry-run` | `grab`/`build` only: say what a run would fetch, and stop — see [what a run would do](#what-a-run-would-do) |
 | `--allow-missing <n>` | exit 0 with up to this much of the guide missing: a number of channel-days, or a share like `5%` |
 | `--extensions <names>` | `build`/`merge` only: keep only these [provider extensions](#provider-extensions), comma-separated — `--extensions lcn,uniqueID` |
 | `--no-extensions` | `build`/`merge` only: leave every one out, for a guide that validates against the DTD |
@@ -142,7 +143,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--grab-every <d>` | `serve` only: also grab on this interval — `6h`, `30m`, `1d`. Off unless said — see [grabbing on a schedule](#grabbing-on-a-schedule) |
 | `--grab-at <t>` | `serve` only: a local time of day to line `--grab-every` up with, as `04:00`. On its own it means once a day, at that time |
 | `--raw` | `try` only: print the whole payload, not the first 2000 characters |
-| `--format <how>` | `validate` and `channels`: `text` (default) or `json` |
+| `--format <how>` | `validate`, `channels` and `--dry-run`: `text` (default) or `json` |
 | `--strict` | `validate` only: count warnings as failures too |
 | `--channels <what>` | `build`/`grab`/`merge`/`serve`, and required by `filter`: keep only these channels and fetch nothing for the rest — ids, or a file naming them. Repeatable — see [subsetting a guide](#keeping-only-some-channels) |
 | `--indent <n\|str>` | `build`/`merge`/`filter`: pretty-print with this indentation, mirroring `JSON.stringify` |
@@ -1021,6 +1022,52 @@ they always exit 1.
 
 A `tv_grab_*` shim reads the same field, for the same reason: it is the config's
 answer, not the command's.
+
+### What a run would do
+
+Adding a site to a config that already has forty of them means running it to
+find out what happens. `--dry-run` says instead:
+
+```sh
+epg grab --dry-run
+```
+
+```
+7 days from 2026-09-11 — 2 sites, 132 channels
+
+  example.tv — 120 channels (in the config)
+      840 channel-days: 0 cached, 840 to fetch in 120 requests (1 channel × 7 days)
+  other.tv — 12 channels (from the cache)
+      84 channel-days: 61 cached, 23 to fetch in 23 requests (1 channel × 1 day)
+
+  863 of 924 channel-days to fetch, in 143 requests
+
+Nothing was fetched except channel lists, and nothing was written.
+```
+
+**It means "fetches no listings", not "makes no requests"**, and the last line
+says so rather than letting you assume otherwise. Planning needs three things:
+the window, which is free; what is already cached, which is a metadata sweep;
+and the channel list, which for a site whose `channels` is a **function** means
+asking the source — once — unless [`cacheChannels`](./site-config.md#a-channel-list-that-has-to-be-fetched)
+has a list still fresh. A report whose channel counts read "unknown" for most
+sites would be worth nothing, so each row says which of the three its count came
+from: `in the config`, `from the cache`, or `fetched just now`.
+
+Nothing is written. A list it had to fetch is **not** stored, which matters more
+than it sounds: storing one would make the next real run skip a fetch it would
+otherwise have made, so the dry run would have changed the run it was describing.
+
+The `batching` in brackets is the resolved rule, so a surprising request count
+explains itself — 840 channel-days in 120 requests is a site batching a week at
+a time, and the other one asking per channel-day. Freshness is read from the
+same policy a run uses, `--refresh` and `cache.staleness` included, so today is
+"to fetch" whatever is cached (see [`alwaysRefetchDays`](#how-caching-works)).
+
+`--format json` gives the same thing as one document, with `window`, `totals`
+and a `sites` array — for a CI step that wants to fail when a config would make
+more requests than someone expected. `build --dry-run` reports the same and
+writes no guide.
 
 ### `--offset`
 

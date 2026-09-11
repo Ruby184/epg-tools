@@ -57,6 +57,8 @@ Options:
       --refresh         Refetch every day in the window, ignoring what is cached
       --allow-missing <n>   Exit 0 with up to this much of the guide missing:
                         a number of channel-days, or a share like 5%
+      --dry-run         grab/build only: say what a run would fetch, and stop.
+                        --format json for a machine-readable one
       --extensions <names>  build/merge only: keep only these provider
                         extensions, comma-separated (e.g. lcn,uniqueID)
       --no-extensions   build/merge only: leave every provider extension out,
@@ -511,6 +513,7 @@ async function execute(
       // can do.
       'cache-driver': { type: 'string', choices: CACHE_DRIVER_NAMES },
       refresh: { type: 'boolean' },
+      'dry-run': { type: 'boolean' },
       'allow-missing': { type: 'string', transform: allowance },
       port: { type: 'number', min: 0, max: 65_535 },
       host: { type: 'string' },
@@ -721,6 +724,32 @@ async function execute(
     ...(values.offset !== undefined ? { offset: values.offset } : {}),
     ...(signal ? { signal } : {}),
   };
+
+  if (values['dry-run']) {
+    if (command !== 'grab' && command !== 'build') {
+      throw new UsageError(`--dry-run is for grab, build, not ${command}`);
+    }
+
+    // The real cache, not a `NoCacheDriver` as `epg try` uses: what is already
+    // cached is half of what this report is about, and a site with a fresh
+    // `cacheChannels` list should be read rather than asked.
+    const { createCacheStore } = await import('../build.js');
+    const { planRun, writePlanReport } = await import('./plan.js');
+    const cache = await createCacheStore(config, signal);
+
+    try {
+      const report = await planRun(config, cache, {
+        ...(values.offset !== undefined ? { offset: values.offset } : {}),
+        ...(signal ? { signal } : {}),
+      });
+
+      await writePlanReport(report, stdout, values.format ?? 'text');
+    } finally {
+      await cache.close();
+    }
+
+    return 0;
+  }
 
   switch (command) {
     case 'build': {
