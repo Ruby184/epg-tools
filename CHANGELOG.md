@@ -11,6 +11,24 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.5.0](https://github.com/Ruby184/epg-tools/compare/v0.4.0...v0.5.0) (2026-09-12)
+
+
+### Features
+
+* a server that grabs on its own, and a way to see a run before making it ([933b366](https://github.com/Ruby184/epg-tools/commit/933b366b43c957b9bc7a3c149bb8792a661bbb8c))
+* **cli:** say what a run would fetch, with --dry-run ([55361d7](https://github.com/Ruby184/epg-tools/commit/55361d7a97f30bc62555e46a6d31eb5782fd5fea))
+* **grabber:** hand a fetched channel list the site's own state ([8cfa662](https://github.com/Ruby184/epg-tools/commit/8cfa6625d05a055bdf2fdb424e5016c8343df2b1))
+* **serve:** grab on a schedule, instead of leaving it to cron ([230f18c](https://github.com/Ruby184/epg-tools/commit/230f18c2e35a91613c1a8ba739b092b2353a63e3))
+* **serve:** say whether the guide is any good, at /health ([b93712b](https://github.com/Ruby184/epg-tools/commit/b93712bcec8b4f22bd453f00321a5ef174d98ae5))
+
+
+### Bug Fixes
+
+* **cli:** make --dry-run describe the run it claims to ([ec510bb](https://github.com/Ruby184/epg-tools/commit/ec510bb73e74ee74f09c87f2a0716bc78a836b57))
+* **serve:** abort a scheduled grab that is still starting up ([19f628c](https://github.com/Ruby184/epg-tools/commit/19f628ce62743a7ba4592c8ab6d80e4e349d326e))
+* **serve:** settle the validator only when the window has ([82b4f92](https://github.com/Ruby184/epg-tools/commit/82b4f920f78cce5050187a5b972d62b1d00ed13b))
+
 ## [0.4.0](https://github.com/Ruby184/epg-tools/compare/v0.3.0...v0.4.0) (2026-09-10)
 
 
