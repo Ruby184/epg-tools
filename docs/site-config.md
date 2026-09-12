@@ -848,6 +848,34 @@ Throwing fails exactly those and writes nothing — which, for anything built on
 Node streams, means being careful that a broken pipe surfaces as a rejection
 rather than as an end of iteration.
 
+### A pass paces its own requests
+
+`concurrency`, `rateLimit` and `backoff` pace **requests**, and a pass is one
+task of the run rather than one request — so a fetch it makes is paced only if it
+goes through `paced`, the same helper [a parse
+has](#a-parse-that-needs-another-request):
+
+```ts
+async *stream({ channelDays, http, paced }) {
+  for (const batch of batches(channelDays)) {
+    const airings = await paced(({ signal }) =>
+      http.post('schedules', { json: batch, signal }).json<Airing[]>());
+
+    yield* mapped(airings);
+  }
+}
+```
+
+A source that answers in one document has one fetch and little to gain from it;
+one that pages, or asks per batch, has everything — this is the difference
+between a `rateLimit` the source actually sees and one it does not.
+`defineXmltvSite` sends its document fetch through it, so that request is spaced
+against the channel list fetched before it.
+
+Only the fetch belongs inside `paced`, not the work its answer feeds: a slot is
+one request to the source, and holding one for the length of a pass would be
+holding it for the length of the run.
+
 Everything else about a site is the same: `channels`, `cacheChannels`,
 `concurrency`, `rateLimit`, `backoff`, `ky`, `staleness`, `transform`,
 `channelInfo` and `state` all mean what they mean anywhere else, and caching

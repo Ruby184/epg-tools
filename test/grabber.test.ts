@@ -2306,6 +2306,43 @@ describe('a site that streams its whole window', () => {
     expect(cache.state.get('stream.example|state')?.data).toEqual([['passes', 1]]);
   });
 
+  // A pass holds no queue slot of its own, so `paced` can take one. The test is
+  // that this finishes at all: a slot held for the length of the pass would have
+  // this waiting for itself, and the default concurrency of 1 has no second one.
+  it('paces a request of its own, without waiting for a slot it is holding', async () => {
+    const cache = new MemoryCache();
+    const at: number[] = [];
+
+    const summary = await grab(
+      [
+        {
+          ...streamSite(() => []),
+          rateLimit: { requests: 1, perMs: 20 },
+          async *stream({ channelDays, paced }) {
+            for (const { channel: ch, day } of channelDays) {
+              const found = await paced(async ({ signal }) => {
+                at.push(Date.now());
+
+                return { day, ch, aborted: signal?.aborted === true };
+              });
+
+              expect(found.aborted).toBe(false);
+
+              yield some(found.day, found.ch);
+            }
+          },
+        },
+      ],
+      { cache, now: NOW },
+    );
+
+    expect(summary.fetched).toBe(4);
+    expect(at).toHaveLength(4);
+    // And they went through the site's queue rather than around it: four tasks
+    // at one per 20ms cannot have run inside one window.
+    expect(at[at.length - 1]! - at[0]!).toBeGreaterThanOrEqual(55);
+  });
+
   it('is refused when it defines both a stream and a request', async () => {
     // Two answers to one question: `stream` would win and `request` would never
     // be called, which is the kind of thing that looks like a working site.

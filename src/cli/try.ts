@@ -254,6 +254,10 @@ export async function tryChannelDay(
     state: await state.bag(),
     says,
     ...(options.signal ? { signal: options.signal } : {}),
+    // A request a pass or a parse makes of its own simply runs: there is no
+    // queue to pace it against, since this is the only thing happening.
+    paced: <T>(task: (o: { signal?: AbortSignal | undefined }) => Promise<T>): Promise<T> =>
+      task({ ...(options.signal ? { signal: options.signal } : {}) }),
   };
 
   const began = Date.now();
@@ -282,11 +286,7 @@ export async function tryChannelDay(
     payload = `(a stream site: ${wanted.length} programmes came out of the pass)`;
   } else {
     payload = await resolved.config.request(requestContext(request, resolved.batching, deps));
-    parsed = await resolved.config.parseDay(
-      // A request made from inside a parse simply runs: there is no queue to
-      // pace it against, since this is the only thing happening.
-      parseContext(channel, day, payload, { ...deps, paced: (task) => task({}) }),
-    );
+    parsed = await resolved.config.parseDay(parseContext(channel, day, payload, deps));
   }
 
   const programmes = built(parsed);

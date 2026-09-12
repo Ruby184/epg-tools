@@ -107,18 +107,19 @@ export function requestContext(
  * assertion to say which — a member added to `StreamContext` fails to compile
  * here instead of being quietly missing at runtime.
  */
-export function streamContext(request: Request, deps: ContextDeps): StreamContext {
+export function streamContext(request: Request, deps: PacedDeps): StreamContext {
   return {
     ...baseContext(request, deps),
     ...manyDays(request),
     channels: request.channels,
+    paced: deps.paced,
   };
 }
 
-/** What a parse needs that a request context does not carry. */
-export interface ParseDeps extends ContextDeps {
+/** What a context that may make a request of its own needs. */
+export interface PacedDeps extends ContextDeps {
   /**
-   * How a request made *from inside* a parse is paced.
+   * How a request made *from inside* a parse or a pass is paced.
    *
    * A run puts it on the site's own queue ahead of the planned ones, so a
    * channel-day in hand is finished rather than joined by another. Anything
@@ -137,7 +138,7 @@ export function parseContext<TRaw>(
   channel: GrabberChannel,
   day: string,
   payload: TRaw,
-  deps: ParseDeps,
+  deps: PacedDeps,
 ): ParseContext<TRaw> {
   return {
     channel,

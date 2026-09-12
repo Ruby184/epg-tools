@@ -653,17 +653,31 @@ export type StreamedChannelDay<TData = unknown> =
     };
 
 /**
- * What a stream is given: the same context a `both`-batched request gets —
- * every channel and day it is being asked about at once.
- *
- * Which now includes {@link BaseRequestContext.log} and
- * {@link BaseRequestContext.warn}, so it is an alias rather than a shape of its
- * own: a whole-document source is the one place a parse has plenty to report —
- * a warning from the parser, a channel the list did not mention, a document not
- * sorted the way it usually is — but it stopped being the only place that has
- * anything.
+ * What a stream is given: everything a `both`-batched request gets — every
+ * channel and day it is being asked about at once, and somewhere to say what it
+ * noticed on the way through — plus {@link StreamContext.paced}.
  */
-export type StreamContext<TData = unknown> = ChannelsDaysRequestContext<TData>;
+export interface StreamContext<TData = unknown> extends ChannelsDaysRequestContext<TData> {
+  /**
+   * Make a request through the site's queue, so a pass is as polite as the grab
+   * around it: the site's `concurrency` counts it, its `rateLimit` spaces it,
+   * and a `429` anywhere holds it with everything else.
+   *
+   * A pass is one task of the run, not one request, so — unlike a
+   * {@link SiteConfig.request}, whose single fetch *is* the task — nothing here
+   * is paced unless it is sent through this. A source answered in one document
+   * has one fetch and little to gain; one that pages, or asks per batch, has
+   * everything:
+   *
+   * ```ts
+   * const page = await paced(({ signal }) => http.get('schedules', { signal }).json());
+   * ```
+   *
+   * Called with a signal of the queued task's own, following the run's, for
+   * anything inside that does not go through {@link BaseRequestContext.http}.
+   */
+  paced: PacedRequest;
+}
 
 /**
  * A site that answers its whole window in one pass: it streams, and says what it
