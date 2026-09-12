@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1351,6 +1352,281 @@ describe('epg', () => {
 
     expect(code).toBe(2);
     expect(stderr).toContain('Usage: epg');
+  });
+
+  describe('--dry-run', () => {
+    /** A config whose channel lists are fetched, so provenance has something to say. */
+    async function fetchedConfig(dir: string, cacheChannels?: string): Promise<string> {
+      return configFile(
+        dir,
+        `export default {
+        sites: [{
+          site: 'example.tv',
+          ${cacheChannels === undefined ? '' : `cacheChannels: ${cacheChannels},`}
+          channels: async () => {
+            const { appendFile } = await import('node:fs/promises');
+            await appendFile(${JSON.stringify(join(dir, 'asked.log'))}, 'x');
+            return [
+              { xmltvId: 'one.example.tv', siteId: '1', name: 'One' },
+              { xmltvId: 'two.example.tv', siteId: '2', name: 'Two' },
+            ];
+          },
+          batching: 'days',
+          request: async ({ days }) => ({ days }),
+          parseDay: () => [],
+        }],
+        days: 3,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+    }
+
+    /** How many times the site's `channels` function ran. */
+    async function asked(dir: string): Promise<number> {
+      return readFile(join(dir, 'asked.log'), 'utf8').then(
+        (text) => text.length,
+        () => 0,
+      );
+    }
+
+    it('counts what a run would fetch, and fetches none of it', async () => {
+      const dir = await tempDir();
+      const config = await plainConfig(dir);
+      const { code, stdout } = await run(['grab', '--config', config, '--dry-run']);
+
+      expect(code).toBe(0);
+      // One channel, one day, nothing cached.
+      expect(stdout).toContain('1 channel-day: 0 cached, 1 to fetch in 1 request');
+      expect(stdout).toContain('in the config');
+      // The honesty note, because "dry" does not mean what it looks like.
+      expect(stdout).toContain('Nothing was fetched except channel lists');
+
+      // Nothing written: no guide, and nothing put in the cache for the next
+      // run to skip.
+      expect(existsSync(join(dir, 'guide.xml'))).toBe(false);
+      expect((await run(['grab', '--config', config])).code).toBe(0);
+    });
+
+    it('says which days are already cached rather than counting them again', async () => {
+      const dir = await tempDir();
+      const config = await configFile(
+        dir,
+        `export default {
+        sites: [${siteSource()}],
+        days: 3,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+
+      await run(['grab', '--config', config]);
+
+      const { stdout } = await run(['grab', '--config', config, '--dry-run']);
+
+      // Two of three: today is stale whatever was grabbed, by the default
+      // `alwaysRefetchDays: 1` — which is the point of reading the run's own
+      // policy rather than deciding freshness here.
+      expect(stdout).toContain('3 channel-days: 2 cached, 1 to fetch in 1 request');
+      expect(stdout).toContain('1 of 3 channel-days to fetch, in 1 request');
+    });
+
+    it('calls everything stale under --refresh, as the run would', async () => {
+      const dir = await tempDir();
+      const config = await configFile(
+        dir,
+        `export default {
+        sites: [${siteSource()}],
+        days: 3,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))}, staleness: { refetchAll: true } },
+      };`,
+      );
+
+      await run(['grab', '--config', config]);
+
+      const { stdout } = await run(['grab', '--config', config, '--dry-run']);
+
+      expect(stdout).toContain('3 channel-days: 0 cached, 3 to fetch');
+    });
+
+    it('asks a fetched channel list exactly once, and says it did', async () => {
+      const dir = await tempDir();
+      const config = await fetchedConfig(dir);
+      const { stdout } = await run(['grab', '--config', config, '--dry-run']);
+
+      expect(await asked(dir)).toBe(1);
+      expect(stdout).toContain('2 channels (fetched just now)');
+      // Batched by day, uncapped: two channels of three days is one request each.
+      expect(stdout).toContain('6 channel-days: 0 cached, 6 to fetch in 2 requests');
+      expect(stdout).toContain('(1 channel × every day)');
+    });
+
+    it('does not persist a list it fetched, which would rob the next real run', async () => {
+      const dir = await tempDir();
+      const config = await fetchedConfig(dir, '{ maxAge: 86400000 }');
+
+      await run(['grab', '--config', config, '--dry-run']);
+      expect(await asked(dir)).toBe(1);
+
+      // Asked again, because the dry run kept nothing: a stored list would make
+      // this run skip a fetch it would otherwise have made.
+      await run(['grab', '--config', config, '--dry-run']);
+      expect(await asked(dir)).toBe(2);
+    });
+
+    it('reads a cacheChannels list a real run left, without asking', async () => {
+      const dir = await tempDir();
+      const config = await fetchedConfig(dir, '{ maxAge: 86400000 }');
+
+      await run(['grab', '--config', config]);
+
+      const before = await asked(dir);
+      const { stdout } = await run(['grab', '--config', config, '--dry-run']);
+
+      expect(await asked(dir)).toBe(before);
+      expect(stdout).toContain('2 channels (from the cache)');
+    });
+
+    it('covers the window a run would, when the config names none', async () => {
+      const dir = await tempDir();
+      // No `days`, so both this and a run fall back to the same seven.
+      const config = await configFile(
+        dir,
+        `export default {
+        sites: [${siteSource()}],
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+
+      const { stdout } = await run(['grab', '--config', config, '--dry-run']);
+
+      // Seven, not one: a number passed to `resolveSite` overrides its own
+      // default, which is how a report came to describe a seventh of a run.
+      expect(stdout).toContain('7 days from');
+      expect(stdout).toContain('7 channel-days: 0 cached, 7 to fetch in 7 requests');
+    });
+
+    it('reports a site it could not plan, and plans the rest', async () => {
+      const dir = await tempDir();
+      const config = await configFile(
+        dir,
+        `export default {
+        sites: [
+          { site: 'bad.tv', channels: async () => { throw new Error('source is down'); },
+            request: async () => ({}), parseDay: () => [] },
+          ${siteSource()},
+        ],
+        days: 1,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+
+      const { code, stdout } = await run(['grab', '--config', config, '--dry-run']);
+
+      // A run reports the site and grabs the other one; so does this, rather
+      // than taking the whole document down with the first unreachable source.
+      expect(stdout).toContain('bad.tv — could not be planned: source is down');
+      expect(stdout).toContain('example.tv — 1 channel');
+      expect(stdout).toContain('1 site could not be planned');
+      // And exits as a run would, rather than being the quieter of the two.
+      expect(code).toBe(1);
+    });
+
+    it('selects channels for build and not for grab, as each command does', async () => {
+      const dir = await tempDir();
+      const config = await configFile(
+        dir,
+        `export default {
+        sites: [{
+          site: 'example.tv',
+          channels: [
+            { xmltvId: 'one.example.tv', siteId: '1', name: 'One' },
+            { xmltvId: 'two.example.tv', siteId: '2', name: 'Two' },
+          ],
+          request: async () => ({}),
+          parseDay: () => [],
+        }],
+        days: 1,
+        channels: ['one.example.tv'],
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+
+      // `build` narrows before it grabs; `runGrab` does not select at all, so a
+      // report that applied the selection to `grab` would name half the
+      // requests `epg grab` goes on to make.
+      expect((await run(['build', '--config', config, '--dry-run'])).stdout).toContain(
+        '1 site, 1 channel',
+      );
+      expect((await run(['grab', '--config', config, '--dry-run'])).stdout).toContain(
+        '1 site, 2 channels',
+      );
+    });
+
+    it('answers as one JSON document for something to read', async () => {
+      const dir = await tempDir();
+      const config = await plainConfig(dir);
+      const { stdout } = await run(['grab', '--config', config, '--dry-run', '--format', 'json']);
+
+      const report = JSON.parse(stdout) as {
+        window: { days: number };
+        totals: { channels: number; stale: number; requests: number };
+        sites: Array<{ site: string; channels: { from: string } }>;
+      };
+
+      expect(report.window.days).toBe(1);
+      expect(report.totals).toMatchObject({ channels: 1, stale: 1, requests: 1 });
+      expect(report.sites[0]).toMatchObject({
+        site: 'example.tv',
+        channels: { from: 'config' },
+      });
+    });
+
+    it('writes no guide under build either, and says nothing was', async () => {
+      const dir = await tempDir();
+      const config = await plainConfig(dir);
+      const { code, stdout } = await run(['build', '--config', config, '--dry-run']);
+
+      expect(code).toBe(0);
+      expect(stdout).toContain('nothing was written');
+      expect(existsSync(join(dir, 'guide.xml'))).toBe(false);
+    });
+
+    it('is refused on the commands it cannot mean anything for', async () => {
+      const dir = await tempDir();
+      const config = await plainConfig(dir);
+      const { code, stderr } = await run(['merge', '--config', config, '--dry-run']);
+
+      expect(code).toBe(2);
+      expect(stderr).toContain('--dry-run is for grab, build');
+    });
+  });
+
+  it('refuses a --grab-every that is not a duration, with the usage', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+    const { code, stderr } = await run(['serve', '--config', config, '--grab-every', 'often']);
+
+    expect(code).toBe(2);
+    expect(stderr).toContain('expected a duration like 6h, 30m or 1d');
+    // Named as the flag it was written as, not as the config field behind it.
+    expect(stderr).toContain('--grab-every');
+    expect(stderr).toContain('Usage: epg');
+  });
+
+  it('refuses a --grab-at that is not a time of day', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+    // On its own, which is the daily shorthand — so this is the interval
+    // defaulting and the time still being read, not the flag being ignored.
+    const { code, stderr } = await run(['serve', '--config', config, '--grab-at', '4pm']);
+
+    expect(code).toBe(2);
+    expect(stderr).toContain('expected a time of day like 04:00');
   });
 
   it('refuses an allowMissing in the config before the run, not after it', async () => {

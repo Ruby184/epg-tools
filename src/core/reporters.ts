@@ -203,6 +203,8 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       // back and flushed when the run ends, and a server's run ends when
       // somebody stops it — possibly in a fortnight.
       return `${event.path}: ${errorChain(event.error)}`;
+    case 'serve:grabFailed':
+      return `Scheduled grab failed: ${errorChain(event.error)}`;
     case 'serve:stopped':
       return 'Stopped serving';
     case 'prune:done':

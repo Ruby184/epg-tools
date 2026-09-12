@@ -39,6 +39,7 @@ import { channelSelection } from '../merge/select.js';
 import type { BuildGuideOptions } from '../merge/types.js';
 import { outputOptions } from '../xmltv/serialize.js';
 import type { GuideOutputOptions } from '../xmltv/serialize.js';
+import type { NextGrab } from './schedule.js';
 
 /** Where the guide is served from when nothing says otherwise. */
 export const DEFAULT_SERVE_PATH = '/guide.xml';
@@ -78,8 +79,31 @@ export const DEFAULT_REVALIDATE_MS = 1000;
  */
 export const DEFAULT_SITES_MAX_AGE_MS = 10 * 60 * 1000;
 
+/**
+ * Where a health check is answered, when nothing says otherwise.
+ *
+ * `serve.health: false` switches it off, as `serve.path` does not — a guide has
+ * to be somewhere, a health check does not have to exist.
+ */
+export const DEFAULT_HEALTH_PATH = '/health';
+
 /** How many guides are generated at once, when nothing says. */
 const DEFAULT_CONCURRENCY = 2;
+
+/**
+ * The shortest gap allowed *between* two scheduled grabs.
+ *
+ * A schedule is asked again only once a grab has finished, so a working one
+ * paces itself and never reaches this. It is here for the one that does not — a
+ * function that always answers with a time already past — which without a floor
+ * would grab back to back for as long as the server ran.
+ *
+ * A second rather than a few milliseconds because a grab already costs tens of
+ * them, and a floor under that throttles nothing. It is not charged to the
+ * first call: a schedule asking to run at startup is asking for something it
+ * cannot repeat, since there is no run behind it to loop with.
+ */
+const MIN_GRAB_GAP_MS = 1000;
 
 /**
  * How long an idle connection is held open, and how long a request's headers
@@ -105,6 +129,8 @@ export interface ServeOptions {
   host?: string;
   /** The one path that answers with a guide. Defaults to `/guide.xml`. */
   path?: string;
+  /** Where the health check answers. Defaults to `/health`; `false` is off. */
+  health?: string | false;
   /**
    * How many guides may be generated at once. Defaults to 2.
    *
@@ -170,6 +196,11 @@ export interface ServeOptions {
    * did not open.
    */
   cache?: CacheStore;
+  /**
+   * Grab on a schedule as well as serving — see {@link EpgServeConfig.grab}.
+   * Overrides the config's, as every other option here does.
+   */
+  grab?: NextGrab;
 }
 
 export interface GuideServer {
@@ -201,6 +232,16 @@ interface Fingerprint {
   etag: string;
   /** The newest `grabbedAt` in the window, to the second. */
   lastModified: Date;
+  /**
+   * How many of the window's channel-days the cache actually holds, against how
+   * many it would hold if every site had answered for every day.
+   *
+   * Counted here because the sweep has them in hand and nothing else does — and
+   * a share is the one thing a health check can say about a guide without
+   * generating it. See {@link ServeOptions.health}.
+   */
+  present: number;
+  expected: number;
 }
 
 /**
@@ -333,6 +374,16 @@ export function outputFingerprint(options: GuideOutputOptions): string {
 }
 
 /**
+ * Ends one entry's contribution to the content digest below, so the digest is a
+ * run of terminated fields and an empty one means "nothing cached here".
+ *
+ * A character that cannot occur in either field it follows: `grabbedAt` is an
+ * ISO timestamp and `programmeCount` a number, so no entry can run into the
+ * next and two different windows cannot digest alike.
+ */
+const END_OF_ENTRY = '|';
+
+/**
  * Read the window's metadata and say what it amounts to.
  *
  * Metadata only — no payloads, no parsing, no serializing. How much that saves
@@ -346,15 +397,37 @@ async function fingerprintOf(
   shape: string,
 ): Promise<Fingerprint> {
   const metas = await metasOf(cache, keys);
+  /**
+   * Every entry's own state, rather than the newest of them.
+   *
+   * The newest alone is not a validator. A grab stamps one `grabbedAt`, taken
+   * once at the start, onto every entry it writes — so the maximum reaches its
+   * final, post-grab value the moment the **first** entry lands, while the rest
+   * of the window is still last night's. A poll in that gap would be handed a
+   * half-updated guide wearing the finished grab's tag, and every poll after it
+   * answered 304 against that tag until the next grab moved it: not a moment's
+   * skew, a consumer pinned to half a guide for a day.
+   *
+   * Digesting each entry instead means the tag settles only when the content
+   * does. The sweep already visits all of them, so this costs a hash and no
+   * extra reads.
+   */
+  const content = createHash('sha1');
   let newest = 0;
   let present = 0;
 
   for (const meta of metas) {
     if (meta === undefined) {
+      // An empty field, so the gap keeps its place — which is what carries how
+      // many entries there are and which ones they were. One appearing as
+      // another disappears leaves the count unmoved and only the order differs.
+      content.update(END_OF_ENTRY);
       continue;
     }
 
+    content.update(`${meta.grabbedAt}:${meta.programmeCount}${END_OF_ENTRY}`);
     present++;
+
     const at = Date.parse(meta.grabbedAt);
 
     if (Number.isFinite(at) && at > newest) {
@@ -365,11 +438,21 @@ async function fingerprintOf(
   // Truncated to the second, because `Last-Modified` has no more than that and
   // the two must agree: a validator finer than the header it travels in would
   // make every conditional request a miss.
+  //
+  // Still the newest, because a date is what this header is. It is the weaker
+  // of the two validators for exactly the reason above — a client sending only
+  // `If-Modified-Since` can still be told 304 mid-grab — and HTTP prefers the
+  // etag whenever both are present, which is whenever this server answered.
   const lastModified = new Date(Math.floor(newest / 1000) * 1000);
 
   // Weak, because two responses that mean the same guide are not required to be
   // byte-identical — a different `Accept-Encoding` alone changes the bytes.
-  return { etag: `W/"${present}-${newest}-${window}-${shape}"`, lastModified };
+  return {
+    etag: `W/"${content.digest('base64url').slice(0, 16)}-${window}-${shape}"`,
+    lastModified,
+    present,
+    expected: metas.length,
+  };
 }
 
 /**
@@ -466,10 +549,12 @@ export async function serveGuide(
   const config = await resolveConfigSource(source);
   const emit = emitter(options);
   const path = options.path ?? config.serve?.path ?? DEFAULT_SERVE_PATH;
+  const health = options.health ?? config.serve?.health ?? DEFAULT_HEALTH_PATH;
   const compress = options.compress ?? config.serve?.compress ?? 'gzip';
   const revalidateMs = options.revalidateMs ?? DEFAULT_REVALIDATE_MS;
   const cors = options.cors ?? config.serve?.cors ?? false;
   const sitesMaxAgeMs = options.sitesMaxAgeMs ?? DEFAULT_SITES_MAX_AGE_MS;
+  const schedule = options.grab ?? config.serve?.grab;
 
   const opened = options.cache === undefined;
   const cache = options.cache ?? (await createCacheStore(config, options.signal));
@@ -693,6 +778,64 @@ export async function serveGuide(
         return done(405);
       }
 
+      // The guide first, so an operator who pointed `serve.path` at `/health`
+      // gets the guide there — the path they named explicitly beats the one
+      // that defaulted.
+      if (requestPath !== path && requestPath === health) {
+        // `current` rather than a stored snapshot: a server whose only traffic
+        // is its own health check would otherwise never take one and would
+        // report unhealthy for as long as it ran. It is throttled and
+        // single-flighted, and reads metadata only.
+        // One reading of the clock, not two: the window and the sweep that
+        // counts it must be the same window, and two `new Date()` either side
+        // of midnight would not be.
+        const now = options.now ?? new Date();
+        const { print } = await current(now);
+        const window = windowOf(now);
+        // The one unambiguous "cannot do its job": nothing at all is cached, so
+        // there is no guide to serve. How stale is too stale is the operator's
+        // judgement and not this server's, so age is reported and not ruled on.
+        const ok = print.present > 0;
+        const body = `${JSON.stringify(
+          {
+            ok,
+            // Not 1970: with nothing cached the newest `grabbedAt` is zero, and
+            // a date is a worse answer than saying there is none.
+            grabbedAt: ok ? print.lastModified.toISOString() : null,
+            ageSeconds: ok
+              ? Math.max(0, Math.round((now.getTime() - print.lastModified.getTime()) / 1000))
+              : null,
+            window: { startDay: window.startDay, days: window.days.length },
+            // Coverage, not a bare count — the share of the grid that answered
+            // is the thing worth alerting on, and the sweep has both numbers.
+            counts: { present: print.present, expected: print.expected },
+            // No site or channel names, which is the same line
+            // `DEFAULT_SERVE_HOST` draws. Aggregates only.
+            shape,
+          },
+          undefined,
+          2,
+        )}\n`;
+
+        const headers = {
+          'content-type': 'application/json; charset=utf-8',
+          // No etag and no compression: the body changes every second by
+          // construction, so a validator would never match and a few hundred
+          // bytes are not worth a compressor.
+          'cache-control': 'no-store',
+          'content-length': String(Buffer.byteLength(body)),
+          ...allowed,
+        };
+
+        // HEAD reaches here too, the method gate being above the routing — and
+        // a body on one is a protocol error, not a waste.
+        response
+          .writeHead(ok ? 200 : 503, headers)
+          .end(request.method === 'HEAD' ? undefined : body);
+
+        return done(ok ? 200 : 503);
+      }
+
       if (requestPath !== path) {
         response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('Not found\n');
 
@@ -812,10 +955,115 @@ export async function serveGuide(
   const host = address.address.includes(':') ? `[${address.address}]` : address.address;
   const url = `http://${host}:${address.port}${path}`;
 
+  /**
+   * The scheduled grab, if there is one.
+   *
+   * All of it created **after** `listen` resolved. A timer started before it
+   * would outlive a `listen` that rejects, since that rejection leaves
+   * `serveGuide` without anyone ever calling `close`.
+   */
+  let timer: NodeJS.Timeout | undefined;
+  /** Aborts a grab in flight, so stopping does not wait for one to finish. */
+  let grabbing: AbortController | undefined;
+  /** The grab now running, so `close` can let it unwind before the cache shuts. */
+  let running: Promise<void> | undefined;
+  let runs = 0;
+  let stopped = false;
+
+  /**
+   * Run one, then ask when the next should be.
+   *
+   * Wrapped whole, because `runGrab` can reject for reasons a grab's own counts
+   * never cover — a config factory that could not get a token, a cache that
+   * would not open, a prune that failed — and an unhandled rejection out of a
+   * timer ends the process. A server that cannot grab tonight should still be
+   * serving what it already has.
+   */
+  const grabNow = async (): Promise<void> => {
+    // Before the import, not after it: `close` aborts whatever `grabbing`
+    // holds, and on the first run that import is a real module load. A
+    // controller published only afterwards leaves a window in which stopping
+    // the server aborts nothing and then waits out the whole grab.
+    const stops = new AbortController();
+
+    grabbing = stops;
+
+    const { runGrab } = await import('../build.js');
+
+    try {
+      // `close` may have happened while that import was resolving, and an
+      // aborted signal is not enough on its own: `runGrab` opens the cache and
+      // resolves the config before it looks at one.
+      if (stopped) {
+        return;
+      }
+
+      await runGrab(config, {
+        // This server's own store rather than one of its own: `RunOptions.cache`
+        // is the caller's and is left open. A second store would be wasteful for
+        // a file cache and silently useless for `memory`, where the grab would
+        // fill a different cache than the one being served.
+        cache,
+        ...(options.reporter ? { reporter: options.reporter } : {}),
+        ...(options.offset === undefined ? {} : { offset: options.offset }),
+        signal: stops.signal,
+      });
+    } catch (error) {
+      emit({ type: 'serve:grabFailed', error });
+    } finally {
+      grabbing = undefined;
+      runs++;
+      // The held snapshot predates everything this wrote, so the next poll has
+      // to sweep rather than trust it.
+      checkedAt = 0;
+    }
+  };
+
+  /**
+   * Ask the schedule when to run, and set the timer it asks for.
+   *
+   * Only ever called once nothing is running — at startup, and from the
+   * `finally` of the grab before — so two can never overlap and there is no
+   * overlap to detect. A grab that overruns its own interval simply pushes the
+   * next question later, and the schedule answers from the finish time.
+   */
+  const planNext = (from: Date): void => {
+    if (schedule === undefined || stopped) {
+      return;
+    }
+
+    const next = schedule(from, runs);
+
+    if (next === undefined) {
+      return;
+    }
+
+    const at = typeof next === 'number' ? next : next.getTime();
+    const delay = Math.max(runs === 0 ? 0 : MIN_GRAB_GAP_MS, at - from.getTime());
+
+    // Not `unref`'d: a server whose only remaining work is the next grab is
+    // still a server that should be running.
+    timer = setTimeout(() => {
+      running = grabNow().finally(() => {
+        running = undefined;
+        planNext(new Date());
+      });
+    }, delay);
+  };
+
+  planNext(options.now ?? new Date());
+
   let closing: Promise<void> | undefined;
 
   const close = async (): Promise<void> => {
     closing ??= (async () => {
+      // Before anything else: `planNext` schedules from a grab's `finally`, so
+      // a stop that did not say so first would have the run in flight plan
+      // another on its way out.
+      stopped = true;
+      clearTimeout(timer);
+      grabbing?.abort();
+
       const shut = new Promise<void>((resolve) => {
         server.close(() => resolve());
       });
@@ -830,6 +1078,9 @@ export async function serveGuide(
       server.closeAllConnections();
 
       await shut;
+      // Aborted above, awaited here: a grab still unwinding would otherwise be
+      // reading a store that `cache.close()` is about to take away.
+      await running;
       guides.clear();
       // A target is the caller's and may outlive this server — one left
       // listening would hold the whole closure, cache and all.
@@ -878,3 +1129,5 @@ export async function serveGuide(
 }
 
 export type { EpgServeConfig } from './config.js';
+export { grabEvery } from './schedule.js';
+export type { GrabEveryOptions, NextGrab } from './schedule.js';

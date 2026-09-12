@@ -9,7 +9,9 @@ import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/types.js';
 import type { EpgConfig } from '../src/config.js';
 import { outputFingerprint, serveGuide, type GuideServer } from '../src/serve/main.js';
+import type { NextGrab } from '../src/serve/schedule.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
+import { toDayString } from '../src/core/days.js';
 import { collect } from './reporting.js';
 
 const NOW = new Date('2026-09-03T05:00:00.000Z');
@@ -239,6 +241,47 @@ describe('serveGuide', () => {
     expect(mostOpenAtOnce).toBeLessThanOrEqual(8);
     // Every key still answered for, in order — the fingerprint depends on it.
     expect(asked.reduce((sum, n) => sum + n, 0)).toBe(ids.length);
+  });
+
+  it('does not settle the validator until the whole window has', async () => {
+    // A grab stamps every entry it writes with one `grabbedAt`, taken once at
+    // the start. So a validator built from the *newest* of those reaches its
+    // final, post-grab value the moment the first entry lands — and a poll in
+    // that window would be handed a half-updated guide wearing the finished
+    // grab's etag, then told 304 against it until the next grab moved it again.
+    const cache = cacheWith({ one: [programme('one', 6)], two: [programme('two', 7)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one', 'two']), cache, { revalidateMs: 0 });
+    const before = await fetch(server.url);
+
+    await before.text();
+
+    // One channel of two refreshed, as a grab part way through looks.
+    await cache.write({ site: 'example.tv', channelId: 'one', day: DAY }, [programme('one', 6)], {
+      grabbedAt: '2026-09-03T05:00:00.000Z',
+    });
+
+    const midway = await fetch(server.url, {
+      headers: { 'if-none-match': before.headers.get('etag')! },
+    });
+
+    await midway.text();
+    expect(midway.status).toBe(200);
+
+    const half = midway.headers.get('etag');
+
+    // And the second half must move it again, or a consumer that polled during
+    // the grab is pinned to what it got.
+    await cache.write({ site: 'example.tv', channelId: 'two', day: DAY }, [programme('two', 7)], {
+      grabbedAt: '2026-09-03T05:00:00.000Z',
+    });
+
+    const after = await fetch(server.url, { headers: { 'if-none-match': half! } });
+
+    await after.text();
+    expect(after.status).toBe(200);
+    expect(after.headers.get('etag')).not.toBe(half);
   });
 
   it('does not re-send a guide for a reload that changed nothing', async () => {
@@ -857,6 +900,145 @@ describe('outputFingerprint', () => {
   });
 });
 
+describe('serveGuide health', () => {
+  /** What the health document says, as far as a test asserts on it. */
+  interface Health {
+    ok: boolean;
+    grabbedAt: string | null;
+    ageSeconds: number | null;
+    window: { startDay: string; days: number };
+    counts: { present: number; expected: number };
+    shape: string;
+  }
+
+  async function health(
+    server: GuideServer,
+    path = '/health',
+  ): Promise<{ response: Response; body: Health }> {
+    const response = await fetch(new URL(path, server.url));
+
+    return { response, body: (await response.json()) as Health };
+  }
+
+  it('reports the window, its age and how much of it is there', async () => {
+    // Two channels of one day, one of which was never grabbed: coverage is the
+    // thing a bare count cannot say.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one', 'two']), cache);
+    const { response, body } = await health(server);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('application/json');
+    // Never cached: the body is a different document every second, so a
+    // validator on it could not match and a store would only serve stale ones.
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(response.headers.get('etag')).toBeNull();
+
+    expect(body).toMatchObject({
+      ok: true,
+      grabbedAt: '2026-09-03T04:00:00.000Z',
+      window: { startDay: DAY, days: 1 },
+      counts: { present: 1, expected: 2 },
+    });
+    // An hour, against the frozen `NOW` — as a number, so it is a fact and not
+    // a sentence to parse.
+    expect(typeof body.ageSeconds).toBe('number');
+    expect(body.shape).toEqual(expect.any(String));
+  });
+
+  it('says nothing about which sites or channels they are', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['sky-atlantic.uk']), cache);
+    const text = await (await fetch(new URL('/health', server.url))).text();
+
+    // The same line `DEFAULT_SERVE_HOST` draws: a guide is not a secret, but
+    // which sites you grab and what you watch is not nothing. Aggregates only.
+    expect(text).not.toContain('example.tv');
+    expect(text).not.toContain('sky-atlantic');
+  });
+
+  it('fails, with no date it does not have, until something is cached', async () => {
+    const cache = cacheWith({});
+    const server = await serve(configFor(['one']), cache);
+    const { response, body } = await health(server);
+
+    // 503, so a container healthcheck fails until the first grab lands.
+    expect(response.status).toBe(503);
+    expect(body).toMatchObject({ ok: false, counts: { present: 0, expected: 1 } });
+    // Not 1970, which is what the newest of no timestamps comes to.
+    expect(body.grabbedAt).toBeNull();
+    expect(body.ageSeconds).toBeNull();
+  });
+
+  it('answers HEAD with the headers and no body', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one']), cache);
+    const response = await fetch(new URL('/health', server.url), { method: 'HEAD' });
+
+    expect(response.status).toBe(200);
+    // The method gate sits above the routing, so HEAD reaches here — and a body
+    // on one is a protocol error rather than a waste.
+    expect(await response.text()).toBe('');
+    expect(response.headers.get('content-type')).toContain('application/json');
+  });
+
+  it('answers the method gate before the path, as the guide does', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(configFor(['one']), cache);
+    const response = await fetch(new URL('/health', server.url), { method: 'POST' });
+
+    expect(response.status).toBe(405);
+  });
+
+  it('moves where it is asked to, and goes away when told false', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const moved = await serve(configFor(['one']), cache, { health: '/-/ready' });
+
+    expect((await health(moved, '/-/ready')).response.status).toBe(200);
+    expect((await fetch(new URL('/health', moved.url))).status).toBe(404);
+
+    const off = await serve(configFor(['one']), cache, { health: false });
+
+    expect((await fetch(new URL('/health', off.url))).status).toBe(404);
+  });
+
+  it('leaves the guide where it is when the two paths collide', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    // A path named explicitly beats one that defaulted.
+    const server = await serve(configFor(['one']), cache, { path: '/health' });
+    const response = await fetch(new URL('/health', server.url));
+
+    expect(response.headers.get('content-type')).toContain('application/xml');
+    expect(await response.text()).toContain('<channel id="one">');
+  });
+
+  it('answers while a guide is being merged, which is the point of it', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    // One slot, and it is held for the whole response — so a health check that
+    // queued behind a merge would be useless exactly when it was needed.
+    const server = await serve(configFor(['one']), cache, { concurrency: 1 });
+    const guide = fetch(server.url);
+    const { response } = await health(server);
+
+    expect(response.status).toBe(200);
+    expect((await guide).status).toBe(200);
+  });
+});
+
 describe('serveGuide over a cache on disk', () => {
   it('opens and closes a cache of its own when handed none', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'epg-serve-'));
@@ -872,5 +1054,225 @@ describe('serveGuide over a cache on disk', () => {
 
     expect(response.status).toBe(200);
     expect(await response.text()).toContain('<channel id="one">');
+  });
+});
+
+describe('serveGuide grabbing on a schedule', () => {
+  /**
+   * A config whose grab actually produces something, so a run that happened is
+   * visible in the guide rather than only in the events.
+   */
+  function grabbable(): EpgConfig {
+    return {
+      ...configFor(['one']),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: [{ xmltvId: 'one', siteId: 'one', name: 'one' }],
+          request: async () => ({}),
+          parseDay: ({ day }) => [
+            {
+              channel: 'one',
+              start: new Date(`${day}T06:00:00.000Z`),
+              title: [{ value: 'Grabbed' }],
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  /** A schedule that runs once, at startup, and then stops. */
+  const once: NextGrab = (from, runs) => (runs === 0 ? from : undefined);
+
+  /**
+   * On the wall clock, unlike every other test here.
+   *
+   * A scheduled grab is deliberately *not* handed the server's `now`: that is a
+   * fixed instant, and a grab that took one would fetch the same window for as
+   * long as the process ran. So the window it fills is today's, and the server
+   * has to be looking at today's for the two to meet.
+   */
+  async function serveNow(
+    config: EpgConfig,
+    cache: CacheStore,
+    options: Parameters<typeof serveGuide>[1],
+  ): Promise<GuideServer> {
+    return serve(config, cache, { ...options, now: new Date() });
+  }
+
+  it('grabs at startup when the schedule asks for now, into the served cache', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    const server = await serveNow(grabbable(), cache, { grab: once, reporter: log.reporter });
+
+    await vi.waitFor(() => expect(log.of('grab:done')).toHaveLength(1));
+
+    // The point of sharing the store: what the grab wrote is what is served.
+    expect(await (await fetch(server.url)).text()).toContain('Grabbed');
+  });
+
+  it('is off unless a schedule says otherwise', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    const server = await serveNow(grabbable(), cache, { reporter: log.reporter });
+
+    expect(await (await fetch(server.url)).text()).not.toContain('Grabbed');
+    expect(log.of('grab:done')).toHaveLength(0);
+  });
+
+  it('takes the schedule from the config when no option overrides it', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    const config: EpgConfig = { ...grabbable(), serve: { grab: once } };
+
+    await serveNow(config, cache, { reporter: log.reporter });
+
+    await vi.waitFor(() => expect(log.of('grab:done')).toHaveLength(1));
+  });
+
+  it('asks again after each run, with the count of those already finished', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    const seen: number[] = [];
+    const grab: NextGrab = (from, runs) => {
+      seen.push(runs);
+
+      // A tiny interval rather than fake timers, as `pacing.test.ts` does.
+      return runs < 3 ? from.getTime() + 5 : undefined;
+    };
+
+    await serveNow(grabbable(), cache, { grab, reporter: log.reporter });
+
+    await vi.waitFor(() => expect(log.of('grab:done')).toHaveLength(3), { timeout: 5000 });
+    // Asked once at startup and once after each run — never while one is running,
+    // which is what makes an overlap check unnecessary.
+    expect(seen).toEqual([0, 1, 2, 3]);
+  });
+
+  it('stops scheduling when the schedule answers with nothing', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+
+    await serveNow(grabbable(), cache, { grab: () => undefined, reporter: log.reporter });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(log.of('grab:done')).toHaveLength(0);
+  });
+
+  it('keeps serving when a grab throws, and reports it', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const log = collect();
+
+    // The post-grab prune, which `runGrab` awaits outside everything that counts
+    // a site failure — so this rejects the whole run, the case a scheduler has
+    // nowhere else to report.
+    cache.prune = async () => {
+      throw new Error('disk gone');
+    };
+
+    const server = await serveNow(grabbable(), cache, { grab: once, reporter: log.reporter });
+
+    await vi.waitFor(() => expect(log.of('serve:grabFailed')).toHaveLength(1));
+    expect(log.messages.join('\n')).toContain('disk gone');
+
+    const response = await fetch(server.url);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('<channel id="one">');
+  });
+
+  it('does not grab again after it has been closed', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    const server = await serveNow(grabbable(), cache, {
+      grab: (from) => from.getTime() + 5,
+      reporter: log.reporter,
+    });
+
+    await vi.waitFor(() => expect(log.of('grab:done').length).toBeGreaterThan(0));
+    await server.close();
+
+    const after = log.of('grab:done').length;
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    // A timer left running is exactly what this catches: the schedule above
+    // would have fired several more times in that window.
+    expect(log.of('grab:done')).toHaveLength(after);
+  });
+
+  it('stops a grab in flight rather than waiting it out', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    let asked: (() => void) | undefined;
+    const reached = new Promise<void>((resolve) => {
+      asked = resolve;
+    });
+
+    const config: EpgConfig = {
+      ...grabbable(),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: [{ xmltvId: 'one', siteId: 'one', name: 'one' }],
+          // Never answers on its own: only the abort ends this, so a `close`
+          // that failed to abort would hang here rather than fail an assertion.
+          request: async ({ signal }) => {
+            asked?.();
+
+            return new Promise((_, reject) => {
+              signal?.addEventListener('abort', () => reject(new Error('stopped')));
+            });
+          },
+          parseDay: () => [],
+        },
+      ],
+    };
+
+    const server = await serveNow(config, cache, { grab: once, reporter: log.reporter });
+
+    await reached;
+    // The controller is published before the dynamic import that loads
+    // `runGrab`, so there is no window in which this aborts nothing.
+    await server.close();
+
+    expect(log.of('serve:stopped')).toHaveLength(1);
+  });
+
+  it('leaves a handed-in cache open, having grabbed into it', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+    const server = await serveNow(grabbable(), cache, { grab: once, reporter: log.reporter });
+
+    await vi.waitFor(() => expect(log.of('grab:done')).toHaveLength(1));
+    await server.close();
+
+    // Still usable, and still holding what the grab put there: closing a store
+    // this server did not open would make the read throw.
+    const grabbed = await cache.read({
+      site: 'example.tv',
+      channelId: 'one',
+      day: toDayString(new Date()),
+    });
+
+    expect(grabbed).toHaveLength(1);
+  });
+
+  it('spaces runs when the schedule keeps answering with the past', async () => {
+    const cache = cacheWith({});
+    const log = collect();
+
+    await serveNow(grabbable(), cache, { grab: () => 0, reporter: log.reporter });
+
+    // The first is free — a schedule asking for "now" at startup is honoured —
+    // and the floor holds the rest a second apart, so only one lands here.
+    await vi.waitFor(() => expect(log.of('grab:done')).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(log.of('grab:done')).toHaveLength(1);
   });
 });

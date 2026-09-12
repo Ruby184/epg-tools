@@ -15,6 +15,7 @@ import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../confi
 import { build, createCacheStore, runGrab, runMerge } from '../build.js';
 import { CACHE_DRIVER_NAMES } from '../cache/main.js';
 import { fellShort, resolveAllowance } from '../grabber/main.js';
+import { grabEvery, resolveInterval, resolveTimeOfDay } from '../serve/schedule.js';
 import type { MissingAllowance } from '../grabber/main.js';
 import { GrabberError } from '../core/error.js';
 import { OptionError, parseOptions } from '../core/options.js';
@@ -56,6 +57,8 @@ Options:
       --refresh         Refetch every day in the window, ignoring what is cached
       --allow-missing <n>   Exit 0 with up to this much of the guide missing:
                         a number of channel-days, or a share like 5%
+      --dry-run         grab/build only: say what a run would fetch, and stop.
+                        --format json for a machine-readable one
       --extensions <names>  build/merge only: keep only these provider
                         extensions, comma-separated (e.g. lcn,uniqueID)
       --no-extensions   build/merge only: leave every provider extension out,
@@ -93,6 +96,11 @@ serve options:
       --port <n>        Port to listen on (default: 8080)
       --host <h>        Address to bind (default: 127.0.0.1 — loopback only)
       --serve-path <p>  Path that answers with the guide (default: /guide.xml)
+      --health <p>      Path that answers a health check (default: /health)
+      --no-health       Do not answer one at all
+      --grab-every <d>  Also grab on this interval — 6h, 30m, 1d (default: never)
+      --grab-at <t>     Local time of day to line it up with, as 04:00. On its
+                        own it means once a day, at that time
 
 validate options:
       --format <how>    text (default) or json
@@ -121,21 +129,30 @@ function dayString(raw: string, flag: string): string {
 }
 
 /**
- * An `--allow-missing` value, checked before the run rather than after it.
+ * A flag checked by whatever reads the config field behind it.
  *
- * The same reading the config field gets, so `20`, `5%` and the ways of getting
- * either wrong mean one thing wherever they are written — but reported as
- * something typed, which is what puts the usage on screen and exits 2.
+ * Three flags mean exactly what a config field means — `--allow-missing` is
+ * `allowMissing`, `--grab-every` and `--grab-at` are the two halves of
+ * `grabEvery` — so each is read by the function that defines the meaning, and
+ * a value that cannot work is refused where somebody typed it rather than on
+ * the night it would first have mattered. What changes is only the reporting:
+ * an {@link OptionError} is what puts the usage on screen and exits 2.
  */
-function allowance(raw: string, flag: string): string {
-  try {
-    resolveAllowance(raw, flag);
-  } catch (error) {
-    throw new OptionError(error instanceof Error ? error.message : String(error));
-  }
+function reader(resolve: (raw: string, label: string) => unknown) {
+  return (raw: string, flag: string): string => {
+    try {
+      resolve(raw, flag);
+    } catch (error) {
+      throw new OptionError(error instanceof Error ? error.message : String(error));
+    }
 
-  return raw;
+    return raw;
+  };
 }
+
+const allowance = reader(resolveAllowance);
+const interval = reader(resolveInterval);
+const timeOfDay = reader(resolveTimeOfDay);
 
 /**
  * The extension names of `--extensions a,b`, and at least one of them.
@@ -496,10 +513,16 @@ async function execute(
       // can do.
       'cache-driver': { type: 'string', choices: CACHE_DRIVER_NAMES },
       refresh: { type: 'boolean' },
+      'dry-run': { type: 'boolean' },
       'allow-missing': { type: 'string', transform: allowance },
       port: { type: 'number', min: 0, max: 65_535 },
       host: { type: 'string' },
       'serve-path': { type: 'string' },
+      // Negatable, because a health check is a thing a deployment may not want
+      // at all — unlike the guide path, which has to be somewhere.
+      health: { type: 'string', negatable: true },
+      'grab-every': { type: 'string', transform: interval },
+      'grab-at': { type: 'string', transform: timeOfDay },
       raw: { type: 'boolean' },
       format: { type: 'string', choices: REPORT_FORMATS },
       strict: { type: 'boolean' },
@@ -598,7 +621,10 @@ async function execute(
   if (
     values.port !== undefined ||
     values.host !== undefined ||
-    values['serve-path'] !== undefined
+    values['serve-path'] !== undefined ||
+    values.health !== undefined ||
+    values['grab-every'] !== undefined ||
+    values['grab-at'] !== undefined
   ) {
     config = {
       ...config,
@@ -607,6 +633,21 @@ async function execute(
         ...(values.port !== undefined ? { port: values.port } : {}),
         ...(values.host !== undefined ? { host: values.host } : {}),
         ...(values['serve-path'] !== undefined ? { path: values['serve-path'] } : {}),
+        // `null` is `--no-health`, which is off — not the "let the config
+        // decide" that `undefined` means.
+        ...(values.health !== undefined ? { health: values.health ?? false } : {}),
+        // Through the shipped helper rather than a second reading of the same
+        // words: the flags and `grabEvery` cannot drift if one builds the other.
+        //
+        // A time of day on its own is a daily grab, which is what naming one
+        // and no interval means — and the commonest of the two to want.
+        ...(values['grab-every'] !== undefined || values['grab-at'] !== undefined
+          ? {
+              grab: grabEvery(values['grab-every'] ?? '1d', {
+                ...(values['grab-at'] !== undefined ? { at: values['grab-at'] } : {}),
+              }),
+            }
+          : {}),
       },
     };
   }
@@ -683,6 +724,41 @@ async function execute(
     ...(values.offset !== undefined ? { offset: values.offset } : {}),
     ...(signal ? { signal } : {}),
   };
+
+  if (values['dry-run']) {
+    if (command !== 'grab' && command !== 'build') {
+      throw new UsageError(`--dry-run is for grab, build, not ${command}`);
+    }
+
+    // The real cache, not a `NoCacheDriver` as `epg try` uses: what is already
+    // cached is half of what this report is about, and a site with a fresh
+    // `cacheChannels` list should be read rather than asked.
+    const { createCacheStore } = await import('../build.js');
+    const { planRun, writePlanReport } = await import('./plan.js');
+    const { channelSelection } = await import('../merge/select.js');
+    const cache = await createCacheStore(config, signal);
+    // Only `build` narrows before it grabs — `runGrab` does not select at all,
+    // so a report that applied `config.channels` to `grab --dry-run` would name
+    // fewer requests than `epg grab` goes on to make.
+    const selection = command === 'build' ? channelSelection(config) : undefined;
+
+    try {
+      const report = await planRun(config, cache, {
+        ...(values.offset !== undefined ? { offset: values.offset } : {}),
+        ...(signal ? { signal } : {}),
+        ...(selection ? { select: selection.select } : {}),
+      });
+
+      await writePlanReport(report, stdout, values.format ?? 'text');
+
+      // A site that could not be planned is a site a run would have reported as
+      // answering nothing, and that exits 1 — a report of the same config should
+      // not be the quieter of the two.
+      return report.totals.failed > 0 ? 1 : 0;
+    } finally {
+      await cache.close();
+    }
+  }
 
   switch (command) {
     case 'build': {

@@ -131,14 +131,19 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--cache-dir <dir>` | override the cache directory |
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
+| `--dry-run` | `grab`/`build` only: say what a run would fetch, and stop — see [what a run would do](#what-a-run-would-do) |
 | `--allow-missing <n>` | exit 0 with up to this much of the guide missing: a number of channel-days, or a share like `5%` |
 | `--extensions <names>` | `build`/`merge` only: keep only these [provider extensions](#provider-extensions), comma-separated — `--extensions lcn,uniqueID` |
 | `--no-extensions` | `build`/`merge` only: leave every one out, for a guide that validates against the DTD |
 | `--port <n>` | `serve` only: port to listen on, default `8080` |
 | `--host <h>` | `serve` only: address to bind, default `127.0.0.1` — see [serving the guide](#serving-the-guide) |
 | `--serve-path <p>` | `serve` only: the path that answers with the guide, default `/guide.xml` |
+| `--health <p>` | `serve` only: the path that answers a health check, default `/health` |
+| `--no-health` | `serve` only: do not answer one at all |
+| `--grab-every <d>` | `serve` only: also grab on this interval — `6h`, `30m`, `1d`. Off unless said — see [grabbing on a schedule](#grabbing-on-a-schedule) |
+| `--grab-at <t>` | `serve` only: a local time of day to line `--grab-every` up with, as `04:00`. On its own it means once a day, at that time |
 | `--raw` | `try` only: print the whole payload, not the first 2000 characters |
-| `--format <how>` | `validate` and `channels`: `text` (default) or `json` |
+| `--format <how>` | `validate`, `channels` and `--dry-run`: `text` (default) or `json` |
 | `--strict` | `validate` only: count warnings as failures too |
 | `--channels <what>` | `build`/`grab`/`merge`/`serve`, and required by `filter`: keep only these channels and fetch nothing for the rest — ids, or a file naming them. Repeatable — see [subsetting a guide](#keeping-only-some-channels) |
 | `--indent <n\|str>` | `build`/`merge`/`filter`: pretty-print with this indentation, mirroring `JSON.stringify` |
@@ -516,6 +521,7 @@ nightly spends twenty-three of those asks receiving a document it already has.
 epg serve                          # http://127.0.0.1:8080/guide.xml
 epg serve --port 9000 --host 0.0.0.0
 epg serve --serve-path /xmltv.xml
+epg serve --grab-at 04:00          # and grab nightly, instead of leaving it to cron
 ```
 
 ```
@@ -629,12 +635,130 @@ once. `--host 0.0.0.0` is one word, and is a decision.
 
 `SIGINT` or `SIGTERM` stops it, and it exits **0**: a server that was asked to
 stop did what it was asked, so this is not the **130** a cancelled grab answers
-with. `SIGHUP` reloads rather than stops, as [above](#serving-the-guide). It
-does not grab — it serves what is in the cache, so run `epg grab` on whatever
-schedule suits and leave this listening.
+with. `SIGHUP` reloads rather than stops, as [above](#serving-the-guide).
 
 `serveGuide(config, options)` is the same thing as a library, returning
 `{ url, port, reload, close, closed }` — see [the API reference](./api.md).
+
+#### Is it healthy
+
+`GET /health` says whether the server is serving anything, without generating a
+guide — it reads the same metadata sweep the ETag comes from, so a container
+healthcheck costs what a poll's `304` costs.
+
+```json
+{
+  "ok": true,
+  "grabbedAt": "2026-09-09T04:00:00.000Z",
+  "ageSeconds": 3600,
+  "window": { "startDay": "2026-09-09", "days": 7 },
+  "counts": { "present": 1386, "expected": 1400 },
+  "shape": "kQ3nR8vTdA"
+}
+```
+
+`counts` is **coverage**: how many of the window's channel-days the cache holds
+against how many it would hold if every site had answered for every day. That is
+the number to alert on — a guide can be fresh and most of the way missing.
+
+`ok` is narrow on purpose. It is `false`, with a **503**, only when nothing at
+all is cached: the one unambiguous "cannot do its job", so a healthcheck fails
+until the first grab lands and passes after. How stale is too stale is your
+judgement, not this server's, so the age is reported and not ruled on. With
+nothing cached `grabbedAt` is `null` rather than 1970.
+
+It says nothing about *which* sites or channels — the line binding to loopback
+draws, for the same reason. `HEAD` works, `POST` is the same `405` the guide
+gives, and nothing is cached or compressed: the document changes every second,
+so a validator on it could never match.
+
+```sh
+epg serve --health /-/ready        # somewhere else
+epg serve --no-health              # or nowhere
+```
+
+```yaml
+# compose.yml
+healthcheck:
+  test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8080/health']
+  interval: 30s
+```
+
+If `serve.path` is pointed at `/health` the guide wins: a path named explicitly
+beats one that defaulted.
+
+#### Grabbing on a schedule
+
+By default it does not grab: it serves what is in the cache, and `epg grab` on a
+cron runs beside it. Say `serve.grab` and the one process does both.
+
+```sh
+epg serve --grab-at 04:00             # nightly at four
+epg serve --grab-every 6h --grab-at 04:00   # 04:00, 10:00, 16:00, 22:00
+epg serve --grab-every 6h             # at startup, then every six hours
+```
+
+```ts
+import { defineConfig, grabEvery } from 'epg-tools';
+
+export default defineConfig({
+  serve: { grab: grabEvery('6h', { at: '04:00' }) },
+});
+```
+
+The two halves answer each other. An interval alone **drifts** — restart at
+three in the afternoon and that is when you grab from then on, which is wrong
+when a source publishes overnight. A time of day alone can only mean once a day.
+Together the next run is the earliest `at + n × every` still ahead of now, so
+`--grab-at 04:00` on its own is nightly at four and `--grab-every 6h --grab-at
+04:00` is four-hourly from four.
+
+With **no** `at`, the first run is at startup — which is what "every six hours"
+means for something long-running, and what stops a fresh deployment serving an
+empty cache until the first interval is up. Naming an `at` is saying when you
+want it, so startup is not a run.
+
+The grab shares this server's cache rather than opening one of its own, so what
+it writes is what the very next request is served. It is the same run `epg grab`
+performs, reported through the same events, interleaved with the server's own.
+
+**`serve.grab` is a function**, and `grabEvery` is one way of building it. Its
+whole contract is to say when the next run is due:
+
+```ts
+type NextGrab = (from: Date, runs: number) => Date | number | undefined;
+```
+
+Called once at startup and again after each grab **finishes** — after, so a grab
+that overruns its own interval can never stack another behind itself. Return a
+`Date` or an epoch millisecond count; return something at or before `from` to
+run as soon as possible, and `undefined` to stop scheduling and carry on
+serving. `runs` is how many have already finished, `0` at startup.
+
+Which is how a cron expression gets in without this package carrying a cron
+parser — the next timestamp is exactly what a cron library already hands out:
+
+```ts
+import { CronExpressionParser } from 'cron-parser';
+
+export default defineConfig({
+  serve: {
+    grab: (from) =>
+      CronExpressionParser.parse('0 4 * * *', { currentDate: from }).next().toDate(),
+  },
+});
+```
+
+The same door covers everything a fixed interval cannot — skip weekends, back
+off after a failure, stop after a number of runs.
+
+Two things worth knowing before leaving one up. The **progress reporter** is
+built for a run that ends, and inside a server it will redraw a progress line
+over your log; `--reporter text` or `--reporter json` is what a served process
+wants anyway. And a scheduled grab makes the `cacheChannels` advice
+[above](#serving-the-guide) matter more, not less: the grab and the poll now
+share a process, and a site whose channel list is fetched pays for it on both
+sides.
 
 ### Validating a guide
 
@@ -898,6 +1022,71 @@ they always exit 1.
 
 A `tv_grab_*` shim reads the same field, for the same reason: it is the config's
 answer, not the command's.
+
+### What a run would do
+
+Adding a site to a config that already has forty of them means running it to
+find out what happens. `--dry-run` says instead:
+
+```sh
+epg grab --dry-run
+```
+
+```
+7 days from 2026-09-11 — 2 sites, 132 channels
+
+  example.tv — 120 channels (in the config)
+      840 channel-days: 0 cached, 840 to fetch in 120 requests (1 channel × 7 days)
+  other.tv — 12 channels (from the cache)
+      84 channel-days: 61 cached, 23 to fetch in 23 requests (1 channel × 1 day)
+
+  863 of 924 channel-days to fetch, in 143 requests
+
+Nothing was fetched except channel lists, and nothing was written.
+```
+
+**It means "fetches no listings", not "makes no requests"**, and the last line
+says so rather than letting you assume otherwise. Planning needs three things:
+the window, which is free; what is already cached, which is a metadata sweep;
+and the channel list, which for a site whose `channels` is a **function** means
+asking the source — once — unless [`cacheChannels`](./site-config.md#a-channel-list-that-has-to-be-fetched)
+has a list still fresh. A report whose channel counts read "unknown" for most
+sites would be worth nothing, so each row says which of the three its count came
+from: `in the config`, `from the cache`, or `fetched just now`.
+
+Nothing is written. A list it had to fetch is **not** stored, which matters more
+than it sounds: storing one would make the next real run skip a fetch it would
+otherwise have made, so the dry run would have changed the run it was describing.
+
+The `batching` in brackets is the resolved rule, so a surprising request count
+explains itself — 840 channel-days in 120 requests is a site batching a week at
+a time, and the other one asking per channel-day. Freshness is read from the
+same policy a run uses, `--refresh` and `cache.staleness` included, so today is
+"to fetch" whatever is cached (see [`alwaysRefetchDays`](#how-caching-works)).
+
+A site that cannot be planned — a channel list whose source is down, a config
+this refuses to read — is **one row, not the end of the report**. A run reports
+that site and grabs the other thirty-nine, so this does the same, and exits
+**1** as the run would:
+
+```
+  bad.tv — could not be planned: source is down
+  example.tv — 1 channel (in the config)
+      1 channel-day: 0 cached, 1 to fetch in 1 request (1 channel × 1 day)
+
+  1 of 1 channel-day to fetch, in 1 request
+  1 site could not be planned
+```
+
+Each command is described as it actually behaves, which is not the same for
+both: `build` narrows to [`channels`](#keeping-only-some-channels) before it
+grabs, and `grab` does not narrow at all — so the two can report different
+counts for one config, and each is right about itself.
+
+`--format json` gives the same thing as one document, with `window`, `totals`
+(`failed` included) and a `sites` array — for a CI step that wants to fail when
+a config would make more requests than someone expected. `build --dry-run`
+reports the same and writes no guide.
 
 ### `--offset`
 

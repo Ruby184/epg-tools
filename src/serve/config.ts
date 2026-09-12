@@ -7,8 +7,26 @@
  */
 
 import type { CompressionFormat } from '../core/output.js';
+import type { NextGrab } from './schedule.js';
 
 export interface EpgServeConfig {
+  /**
+   * Grab on a schedule as well as serving, instead of leaving that to cron.
+   *
+   * A function saying when the next run is due — `grabEvery('6h', { at: '04:00' })`
+   * builds the usual one, and anything that can produce a next timestamp works,
+   * which is how a cron expression gets in without this package carrying a cron
+   * parser. See {@link NextGrab}.
+   *
+   * Off by default: without it a server serves what is in the cache and never
+   * fetches, which is what it has always done.
+   *
+   * A scheduled grab shares this server's cache rather than opening its own, so
+   * what it writes is what the very next request is served. It does **not**
+   * share the server's resolved channel lists: those may be `sitesMaxAgeMs`
+   * old, and a grab that reused them would miss a channel added since.
+   */
+  grab?: NextGrab;
   /** Defaults to 8080. */
   port?: number;
   /**
@@ -22,6 +40,20 @@ export interface EpgServeConfig {
   host?: string;
   /** The one path that answers with a guide. Defaults to `/guide.xml`. */
   path?: string;
+  /**
+   * Where a container's healthcheck can ask whether this is serving anything.
+   *
+   * Defaults to `/health`; `false` switches it off. It answers **503** only
+   * when nothing at all is cached — the one unambiguous "cannot do its job" —
+   * so a healthcheck fails until the first grab lands and passes after. How
+   * stale is too stale is a judgement this server does not make: the age and
+   * the share of the window that is present are reported, and what to alert on
+   * is yours.
+   *
+   * Aggregates only, never a site or channel name — the same line
+   * {@link EpgServeConfig.host} draws by binding to loopback.
+   */
+  health?: string | false;
   /**
    * What to compress a served guide with, when the client accepts it.
    * Defaults to `'gzip'`; `false` never compresses.
