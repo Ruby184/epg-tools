@@ -255,6 +255,15 @@ export function schedulesDirectProgrammeExtras(
   programme: SchedulesDirectProgramme,
 ): void {
   element.extraAttributes({
+    // Two the DTD has no word for, and both on hundreds of real airings:
+    // `dvs` is audio description, `letterbox` is how it is framed — which is
+    // not an aspect ratio, whatever it implies about one.
+    ...(programme.audioProperties.some((one) => one.toLowerCase() === 'dvs')
+      ? { audioDescribed: 'yes' }
+      : {}),
+    ...(programme.videoProperties.some((one) => one.toLowerCase() === 'letterbox')
+      ? { letterbox: 'yes' }
+      : {}),
     programId: programme.programID,
     ...(programme.entityType === undefined ? {} : { entityType: programme.entityType }),
     ...(programme.liveTapeDelay === undefined ? {} : { live: programme.liveTapeDelay }),
@@ -338,6 +347,16 @@ export function ratingCountryFor(
 const TELETEXT = new Set(['cc', 'subtitled']);
 
 /**
+ * ISO 639-2 for "we do not know which language", which is what the service
+ * sends on every subtitled airing of a real day.
+ *
+ * It says the airing *is* subtitled, which is worth writing — and says nothing
+ * about the language, so writing `und` into a `<language>` would be inventing a
+ * language called `und`.
+ */
+const UNDETERMINED = 'und';
+
+/**
  * The ratings worth writing, of every board's opinion the service holds.
  *
  * A well-known film carries two dozen, from Canada to Indonesia, and a guide
@@ -388,19 +407,31 @@ function ratingsOf(
  */
 function subtitlesOf(airing: WireAiring): SchedulesDirectProgramme['subtitles'] {
   const out: SchedulesDirectProgramme['subtitles'] = [];
+  const said = airing.subtitledLanguage ?? [];
+  // One string or a list of them. Taken for the other, `und` becomes three
+  // subtitle elements reading `u`, `n` and `d` — which is what a real guide
+  // showed before this read the wire rather than the documentation.
+  const languages = (typeof said === 'string' ? [said] : said).filter((one) => one !== '');
 
-  for (const language of airing.subtitledLanguage ?? []) {
-    out.push({ type: 'teletext', language });
+  for (const language of languages) {
+    out.push({
+      type: 'teletext',
+      // `und` is ISO 639-2 for "undetermined": it says the airing is subtitled
+      // and says nothing about the language, so writing it into a `<language>`
+      // would be inventing a language called `und`.
+      ...(language.toLowerCase() === UNDETERMINED ? {} : { language }),
+    });
   }
 
-  if (
-    out.length === 0 &&
-    (airing.audioProperties ?? []).some((one) => TELETEXT.has(one.toLowerCase()))
-  ) {
+  const audio = (airing.audioProperties ?? []).map((one) => one.toLowerCase());
+
+  if (out.length === 0 && audio.some((one) => TELETEXT.has(one))) {
     out.push({ type: 'teletext' });
   }
 
-  if (airing.signed === true) {
+  // Said in two places on the wire, and the one that is populated is not the
+  // flag: 27 real airings said `signed` here and nowhere else.
+  if (airing.signed === true || audio.includes('signed')) {
     out.push({ type: 'deaf-signed' });
   }
 
@@ -720,7 +751,10 @@ export function buildProgramme(
   }
 
   for (const country of programme.countries) {
-    element.country(country);
+    // No language on it: `USA` is an ISO code, and tagging it `en` claims it is
+    // a word in English. An empty `lang` is how the builder is told to leave the
+    // attribute off entirely.
+    element.country(country, '');
   }
 
   for (const url of programme.urls) {
@@ -730,7 +764,8 @@ export function buildProgramme(
   for (const subtitles of programme.subtitles) {
     element.subtitles({
       type: subtitles.type as 'teletext' | 'deaf-signed',
-      ...(subtitles.language === undefined ? {} : { language: subtitles.language }),
+      // The same as a country: a language tag is a code, not English text.
+      ...(subtitles.language === undefined ? {} : { language: subtitles.language, lang: '' }),
     });
   }
 

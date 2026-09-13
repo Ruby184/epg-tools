@@ -399,11 +399,33 @@ describe('a programme', () => {
       expect(carried({ subtitledLanguage: ['en-GB'] })).toEqual([
         { type: 'teletext', language: 'en-GB' },
       ]);
-      // And it reaches the element with the language on it, tagged with the
-      // programme's own language as every text element is — `<language>` holds
-      // a language *name*, so the tag says what that name is written in.
+      // And reaches the element as a code rather than as English text.
       expect(built({ subtitledLanguage: ['en-GB'] }).subtitles).toEqual([
-        { type: 'teletext', language: { value: 'en-GB', lang: 'en' } },
+        { type: 'teletext', language: { value: 'en-GB' } },
+      ]);
+    });
+
+    // The wire sends one string where the documentation's examples suggest a
+    // list. Taken for the other, `und` becomes three subtitle elements reading
+    // `u`, `n` and `d` — which is what shipped before a real guide was read.
+    it('reads one language as one language, not as three letters', () => {
+      expect(carried({ subtitledLanguage: 'en-GB' })).toEqual([
+        { type: 'teletext', language: 'en-GB' },
+      ]);
+    });
+
+    it('says a programme is subtitled without inventing a language called und', () => {
+      // ISO 639-2 for "undetermined", and what the service sends on every
+      // subtitled airing of a real day.
+      expect(carried({ subtitledLanguage: 'und' })).toEqual([{ type: 'teletext' }]);
+    });
+
+    it('finds a signed presentation in the audio properties too', () => {
+      // Where the flag beside it is not set: 27 real airings said it here and
+      // nowhere else, alongside `subtitled`.
+      expect(carried({ audioProperties: ['subtitled', 'signed'] })).toEqual([
+        { type: 'teletext' },
+        { type: 'deaf-signed' },
       ]);
     });
 
@@ -425,9 +447,9 @@ describe('a programme', () => {
         { country: ['FRA'], officialURL: 'https://example.test/just-mercy' },
       );
 
-      // Tagged with the programme's language like every other text element —
-      // meaningless on a country code, and not worth a special case to avoid.
-      expect(programme.country).toEqual([{ value: 'FRA', lang: 'en' }]);
+      // No language on it: `FRA` is an ISO code, and tagging it `en` would
+      // claim it is a word in English.
+      expect(programme.country).toEqual([{ value: 'FRA' }]);
       expect(programme.url).toEqual(['https://example.test/just-mercy']);
     });
   });

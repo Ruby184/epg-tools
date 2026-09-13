@@ -177,9 +177,15 @@ export interface WireAiring {
   isPremiereOrFinale?: string;
   audioProperties?: string[];
   videoProperties?: string[];
-  /** The languages it is subtitled in — on nearly every airing, unlike `cc`. */
-  subtitledLanguage?: string[];
-  /** Presented in sign language. */
+  /**
+   * What it is subtitled in — on nearly every airing, unlike `cc`.
+   *
+   * A **string** on the wire (`und`, meaning undetermined, on all 425 of a real
+   * day's airings), though a list is the shape its own examples suggest. Read as
+   * either, since one of them iterates into letters if taken for the other.
+   */
+  subtitledLanguage?: string | string[];
+  /** Presented in sign language — said here, and again in `audioProperties`. */
   signed?: boolean;
   ratings?: { body?: string; code?: string; country?: string }[];
   multipart?: { partNumber?: number; totalParts?: number };
