@@ -28,6 +28,7 @@ import {
   SCHEDULES_DIRECT_URL,
   wireMessage,
   type WireArtwork,
+  type WireHeadend,
   type WireLineup,
   type WireMd5Response,
   type WireProgram,
@@ -122,6 +123,8 @@ export interface SchedulesDirectClientOptions {
  */
 export interface SchedulesDirectClient {
   status: () => Promise<WireStatus>;
+  /** What a region has on offer, which needs no lineup on the account. */
+  headends: (where: { country: string; postalCode: string }) => Promise<WireHeadend[]>;
   lineup: (id: string) => Promise<WireLineup>;
   schedulesMd5: (stations: StationDays[]) => Promise<WireMd5Response>;
   schedules: (stations: StationDays[]) => Promise<WireSchedule[]>;
@@ -129,20 +132,15 @@ export interface SchedulesDirectClient {
   artwork: (ids: string[]) => Promise<WireArtwork[]>;
 }
 
-/** When a stored token expires, whichever of the two forms the service sent. */
+/**
+ * When a token expires, as milliseconds.
+ *
+ * Epoch **seconds** on the wire — what the service documents and what it really
+ * sends. The check is not about the wire: this value comes back out of a cache
+ * file, where anything could be sitting.
+ */
 function expiryOf(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    // Epoch seconds, which is what the documentation promises.
-    return value * 1000;
-  }
-
-  if (typeof value === 'string') {
-    const parsed = Date.parse(value);
-
-    return Number.isNaN(parsed) ? undefined : parsed;
-  }
-
-  return undefined;
+  return typeof value === 'number' && Number.isFinite(value) ? value * 1000 : undefined;
 }
 
 /**
@@ -162,24 +160,6 @@ function storedToken(session: SchedulesDirectSession | undefined, now: number): 
     expires - now > EXPIRY_MARGIN_MS
     ? token
     : undefined;
-}
-
-/**
- * Split a list into requests the service will accept.
- *
- * Its own cap is 5000 per call for every batched endpoint; this takes the size
- * from the caller because the reason to go lower is never the cap — it is how
- * much of an answer is worth holding in memory at once.
- */
-export function chunk<T>(items: readonly T[], size: number): T[][] {
-  const width = Math.max(1, size);
-  const out: T[][] = [];
-
-  for (let index = 0; index < items.length; index += width) {
-    out.push(items.slice(index, index + width));
-  }
-
-  return out;
 }
 
 /**
@@ -284,7 +264,7 @@ export function createSchedulesDirectClient(
     session?.set(TOKEN, answer.token);
 
     if (expiryOf(answer.tokenExpires) !== undefined) {
-      session?.set(TOKEN_EXPIRES, answer.tokenExpires as number | string);
+      session?.set(TOKEN_EXPIRES, answer.tokenExpires);
     }
 
     return answer.token;
@@ -387,6 +367,12 @@ export function createSchedulesDirectClient(
 
   return {
     status: () => request<WireStatus>('status'),
+    headends: (where) =>
+      // Its own spelling: the service takes `postalcode`, all lower case.
+      requestList<WireHeadend>(
+        `headends?${new URLSearchParams({ country: where.country, postalcode: where.postalCode }).toString()}`,
+        undefined,
+      ),
     lineup: (id) => request<WireLineup>(`lineups/${encodeURIComponent(id)}`),
     schedulesMd5: (stations) => request<WireMd5Response>('schedules/md5', stations),
     schedules: (stations) => requestList<WireSchedule>('schedules', stations),

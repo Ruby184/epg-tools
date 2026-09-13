@@ -61,15 +61,18 @@ export interface WireResponse {
   maxDate?: string;
 }
 
-/** `POST /token`. `tokenExpires` is epoch seconds, though some deployments send an ISO string. */
+/** `POST /token`. */
 export interface WireToken extends WireResponse {
   token?: string;
-  tokenExpires?: number | string;
+  /** Epoch **seconds**, which is what the service sends and what it documents. */
+  tokenExpires?: number;
 }
 
 /** One lineup on the account, as `GET /status` lists it. */
 export interface WireAccountLineup {
   lineup?: string;
+  /** What a person calls it — `Freeview` for `GBR-1000014-DEFAULT`. */
+  name?: string;
   /** When the lineup itself last changed — not its schedules. */
   modified?: string;
   uri?: string;
@@ -85,6 +88,12 @@ export interface WireStatus extends WireResponse {
     maxLineups?: number;
   };
   lineups?: WireAccountLineup[];
+  /**
+   * How the service says it is, which its own documentation asks clients to
+   * read: `Online` when all is well, and something else when a run is about to
+   * go badly for reasons that are nobody's fault locally.
+   */
+  systemStatus?: { date?: string; status?: string; message?: string }[];
 }
 
 /** A station's logo, which carries its own dimensions. */
@@ -105,8 +114,15 @@ export interface WireStation {
   broadcastLanguage?: string[];
   /** The language its descriptions arrive in, which need not be the same. */
   descriptionLanguage?: string[];
+  /** Its own site, upper-cased as often as not: `WWW.BBC.CO.UK`. */
+  URL?: string;
+  /** Who runs it, and from where — the country is what a rating is chosen by. */
+  broadcaster?: { city?: string; state?: string; postalcode?: string; country?: string };
+  /** Radio carried on a television lineup, which a guide is entitled to know. */
+  isRadioStation?: boolean;
   logo?: WireLogo;
-  stationLogo?: WireLogo[];
+  /** The same logo in `dark`, `light`, `white` and `gray`. */
+  stationLogo?: (WireLogo & { category?: string; source?: string })[];
   isCommercialFree?: boolean;
 }
 
@@ -115,6 +131,20 @@ export interface WireLineup extends WireResponse {
   /** The channel numbers, as a separate list keyed by station. */
   map?: { stationID?: string; channel?: string }[];
   stations?: WireStation[];
+}
+
+/**
+ * One headend of `GET /headends`, and the lineups it offers.
+ *
+ * The one call that answers before an account has a lineup on it, which is what
+ * makes it the way to find one to add.
+ */
+export interface WireHeadend extends WireResponse {
+  headend?: string;
+  /** `Antenna`, `Cable`, `Satellite`, `IPTV`. */
+  transport?: string;
+  location?: string;
+  lineups?: { name?: string; lineup?: string; uri?: string }[];
 }
 
 /** One station-day of `POST /schedules/md5`. */
@@ -147,7 +177,11 @@ export interface WireAiring {
   isPremiereOrFinale?: string;
   audioProperties?: string[];
   videoProperties?: string[];
-  ratings?: { body?: string; code?: string }[];
+  /** The languages it is subtitled in — on nearly every airing, unlike `cc`. */
+  subtitledLanguage?: string[];
+  /** Presented in sign language. */
+  signed?: boolean;
+  ratings?: { body?: string; code?: string; country?: string }[];
   multipart?: { partNumber?: number; totalParts?: number };
 }
 
@@ -185,14 +219,47 @@ export interface WireProgram extends WireResponse {
   entityType?: string;
   /**
    * Where the season and episode live, and why this is an array of one-key
-   * objects: the service keys it by the vocabulary that assigned the numbers,
-   * `Gracenote` being the one that matters here.
+   * objects: the service keys it by the vocabulary that assigned the numbers.
+   * `Gracenote` is the usual one and `TVmaze` turns up beside it — sometimes
+   * with an episode where Gracenote has only a season.
    */
-  metadata?: Record<string, { season?: number; episode?: number; totalEpisodes?: number }>[];
+  metadata?: Record<
+    string,
+    { season?: number; episode?: number; totalEpisodes?: number; url?: string }
+  >[];
+  /** Where it was made, as ISO-3166 three-letter codes. */
+  country?: string[];
+  /** How long the programme is, in seconds — not how long this airing of it is. */
+  duration?: number;
   cast?: WirePerson[];
   crew?: WirePerson[];
-  contentRating?: { body?: string; code?: string }[];
-  movie?: { year?: string; duration?: number };
+  /**
+   * Every board's opinion, from every country the service covers — two dozen of
+   * them on a well-known film. Which is why one is chosen by country rather than
+   * all of them written out.
+   */
+  contentRating?: {
+    body?: string;
+    code?: string;
+    country?: string;
+    contentWarning?: string[];
+  }[];
+  movie?: {
+    year?: string;
+    duration?: number;
+    /** A score with its own scale — `3` of `1` to `4`, by `Gracenote`. */
+    qualityRating?: {
+      ratingsBody?: string;
+      rating?: string;
+      minRating?: string;
+      maxRating?: string;
+      increment?: string;
+    }[];
+  };
+  /** The programme's own page, where it has one. */
+  officialURL?: string;
+  /** Advisories the rating boards attach — `Violence`, `Disturbing Content`. */
+  contentAdvisory?: string[];
   hasImageArtwork?: boolean;
   md5?: string;
 }

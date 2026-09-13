@@ -47,6 +47,13 @@ export interface SchedulesDirectStation {
   /** What its descriptions arrive in, which need not be the same. */
   descriptionLanguage?: string;
   logo?: { url: string; width?: number; height?: number };
+  /** Its own site, where it gave one. */
+  url?: string;
+  /** Where the broadcaster is, which is one way a content rating is chosen. */
+  country?: string;
+  /** The lineup it came from — `GBR-1000014-DEFAULT`, and so a British guide. */
+  lineup?: string;
+  isRadioStation?: boolean;
   isCommercialFree?: boolean;
 }
 
@@ -78,9 +85,17 @@ export interface SchedulesDirectProgramme {
   genres: string[];
   showType?: string;
   entityType?: string;
+  /** Where it was made, as ISO-3166 three-letter codes. */
+  countries: string[];
+  /** Its own page, and the episode page of whichever vocabulary gave one. */
+  urls: string[];
+  /** A score on its own scale: `3/4`, by `Gracenote`. */
+  starRating?: { value: string; system?: string };
+  /** The languages it is subtitled in, and whether it is signed. */
+  subtitles: { type: string; language?: string }[];
   cast: SchedulesDirectPerson[];
   crew: SchedulesDirectPerson[];
-  ratings: { body?: string; code: string }[];
+  ratings: { body?: string; code: string; country?: string; warnings?: string[] }[];
   audioProperties: string[];
   videoProperties: string[];
   isNew: boolean;
@@ -110,6 +125,15 @@ export interface SchedulesDirectMapOptions {
   descriptions?: 'short' | 'long' | 'both';
   /** What to call the language of a text the service did not label. */
   language?: string;
+  /**
+   * Whose content ratings to write, as an ISO-3166 three-letter code.
+   *
+   * The service carries every board's opinion — two dozen countries on a
+   * well-known film, of which a British guide wants one. Unset, the station's
+   * own country decides, and failing that every rating is written, which is
+   * honest but noisy. `false` writes none.
+   */
+  ratingCountry?: string | false;
   /** See {@link SCHEDULES_DIRECT_CHANNEL_ID}. */
   channelId?: ChannelIdFormat;
   /** Replaces {@link schedulesDirectProgrammeExtras}; `false` writes no extensions. */
@@ -148,6 +172,7 @@ export function schedulesDirectStation(
   wire: WireStation,
   channel: string | undefined,
   options: SchedulesDirectMapOptions = {},
+  lineup?: string,
 ): GrabberChannel<SchedulesDirectStation> | undefined {
   const stationID = wire.stationID;
 
@@ -178,6 +203,14 @@ export function schedulesDirectStation(
             ...(logo.height === undefined ? {} : { height: logo.height }),
           },
         }),
+    ...(wire.URL === undefined || wire.URL === ''
+      ? {}
+      : // Upper-cased as often as not on the wire: a host is not case-sensitive
+        // but a url in a guide is read by people.
+        { url: wire.URL.toLowerCase() }),
+    ...(wire.broadcaster?.country === undefined ? {} : { country: wire.broadcaster.country }),
+    ...(lineup === undefined ? {} : { lineup }),
+    ...(wire.isRadioStation === undefined ? {} : { isRadioStation: wire.isRadioStation }),
     ...(wire.isCommercialFree === undefined ? {} : { isCommercialFree: wire.isCommercialFree }),
   };
 
@@ -198,10 +231,18 @@ export function schedulesDirectChannelExtras(
   element: ChannelBuilder,
   station: SchedulesDirectStation,
 ): void {
+  if (station.url !== undefined) {
+    // A DTD element rather than an extension: `<channel>` has had `<url>` all
+    // along, and a fifth of stations give one.
+    element.url(station.url);
+  }
+
   element.extraAttributes({
     stationId: station.stationID,
     ...(station.callsign === undefined ? {} : { callsign: station.callsign }),
     ...(station.affiliate === undefined ? {} : { affiliate: station.affiliate }),
+    ...(station.country === undefined ? {} : { country: station.country }),
+    ...(station.isRadioStation === undefined ? {} : { radio: String(station.isRadioStation) }),
     ...(station.isCommercialFree === undefined
       ? {}
       : { commercialFree: String(station.isCommercialFree) }),
@@ -272,6 +313,101 @@ function people(
 }
 
 /**
+ * Whose content rating this station's viewers want.
+ *
+ * The **lineup** first: `GBR-1000014-DEFAULT` is a British lineup, and a British
+ * lineup carrying CNN wants the British rating for it rather than the American
+ * one — so where the broadcaster sits is the weaker answer, and only used when
+ * the lineup does not say. With neither, nothing is chosen and every rating is
+ * written, which is noisy but not a guess.
+ */
+export function ratingCountryFor(
+  station: SchedulesDirectStation | undefined,
+  options: SchedulesDirectMapOptions = {},
+): string | undefined {
+  if (options.ratingCountry === false) {
+    return undefined;
+  }
+
+  return (
+    options.ratingCountry ?? /^([A-Z]{3})-/.exec(station?.lineup ?? '')?.[1] ?? station?.country
+  );
+}
+
+/** What an `audioProperties` entry has to say about subtitling. */
+const TELETEXT = new Set(['cc', 'subtitled']);
+
+/**
+ * The ratings worth writing, of every board's opinion the service holds.
+ *
+ * A well-known film carries two dozen, from Canada to Indonesia, and a guide
+ * wants the one its viewers recognise. The country is the caller's if it named
+ * one, else the station's own — and with neither to go on every rating is
+ * written, which is noisy but not a guess.
+ */
+function ratingsOf(
+  ratings: { body?: string; code?: string; country?: string; contentWarning?: string[] }[],
+  options: SchedulesDirectMapOptions,
+  station: SchedulesDirectStation | undefined,
+): SchedulesDirectProgramme['ratings'] {
+  if (options.ratingCountry === false) {
+    return [];
+  }
+
+  const wanted = ratingCountryFor(station, options);
+  const usable = ratings.filter((rating) => (rating.code ?? '') !== '');
+  const mine = wanted === undefined ? [] : usable.filter((rating) => rating.country === wanted);
+  // Nothing for this country: the ones that named no country at all, which is
+  // what an airing's own `ratings` are and what older data is throughout. A
+  // rating with no country is not somebody else's — it is just untagged, and
+  // dropping it would lose the only one some programmes have.
+  const kept =
+    wanted === undefined
+      ? usable
+      : mine.length > 0
+        ? mine
+        : usable.filter((rating) => rating.country === undefined);
+
+  return kept.map((rating) => ({
+    code: rating.code!,
+    ...(rating.body === undefined ? {} : { body: rating.body }),
+    ...(rating.country === undefined ? {} : { country: rating.country }),
+    ...(rating.contentWarning === undefined || rating.contentWarning.length === 0
+      ? {}
+      : { warnings: rating.contentWarning }),
+  }));
+}
+
+/**
+ * How this airing is carried for those who cannot hear it.
+ *
+ * `subtitledLanguage` is on nearly every airing where `cc` is on some, and it
+ * says which language as well — so it is the better source, and `cc` only
+ * stands in when it is absent. `signed` is its own kind of subtitling, and the
+ * DTD has a word for it.
+ */
+function subtitlesOf(airing: WireAiring): SchedulesDirectProgramme['subtitles'] {
+  const out: SchedulesDirectProgramme['subtitles'] = [];
+
+  for (const language of airing.subtitledLanguage ?? []) {
+    out.push({ type: 'teletext', language });
+  }
+
+  if (
+    out.length === 0 &&
+    (airing.audioProperties ?? []).some((one) => TELETEXT.has(one.toLowerCase()))
+  ) {
+    out.push({ type: 'teletext' });
+  }
+
+  if (airing.signed === true) {
+    out.push({ type: 'deaf-signed' });
+  }
+
+  return out;
+}
+
+/**
  * One airing and its programme, normalised.
  *
  * `undefined` when it cannot be written at all: an airing with no start is not
@@ -296,11 +432,38 @@ export function schedulesDirectProgramme(
   const long = textOf(program?.descriptions?.description1000, prefer);
   const short = textOf(program?.descriptions?.description100, prefer);
   const description = options.descriptions === 'short' ? (short ?? long) : (long ?? short);
-  const gracenote = program?.metadata?.find((entry) => entry['Gracenote'] !== undefined)?.[
-    'Gracenote'
-  ];
+  // Gracenote first, then whatever else numbered it: `TVmaze` turns up beside
+  // it and sometimes carries the episode where Gracenote has only the season.
+  // Only a vocabulary that gives *both* can stand in, and only when Gracenote
+  // gives neither or agrees about the season — two vocabularies' halves make a
+  // number that is nobody's.
+  const vocabularies = (program?.metadata ?? []).flatMap((entry) => Object.entries(entry));
+  const gracenote = vocabularies.find(([name]) => name === 'Gracenote')?.[1];
+  const numbering =
+    gracenote?.episode !== undefined
+      ? gracenote
+      : (vocabularies.find(
+          ([name, one]) =>
+            name !== 'Gracenote' &&
+            one.episode !== undefined &&
+            one.season !== undefined &&
+            (gracenote?.season === undefined || gracenote.season === one.season),
+        )?.[1] ?? gracenote);
   const credits = options.credits === false ? false : (options.credits ?? DEFAULT_CREDITS);
   const part = airing.multipart;
+  const scored = program?.movie?.qualityRating?.find((one) => (one.rating ?? '') !== '');
+  // `3` out of `1` to `4` becomes `3/4`, which is what `<star-rating>` means by
+  // a value: the scale is part of the number, not a separate field.
+  const quality =
+    scored === undefined
+      ? undefined
+      : {
+          value:
+            scored.maxRating === undefined
+              ? scored.rating!
+              : `${scored.rating!}/${scored.maxRating}`,
+          ...(scored.ratingsBody === undefined ? {} : { system: scored.ratingsBody }),
+        };
 
   return {
     programID: airing.programID,
@@ -319,8 +482,8 @@ export function schedulesDirectProgramme(
           description: description.value,
           ...(description.lang === undefined ? {} : { descriptionLanguage: description.lang }),
         }),
-    ...(gracenote?.season === undefined ? {} : { season: gracenote.season }),
-    ...(gracenote?.episode === undefined ? {} : { episode: gracenote.episode }),
+    ...(numbering?.season === undefined ? {} : { season: numbering.season }),
+    ...(numbering?.episode === undefined ? {} : { episode: numbering.episode }),
     ...(part?.partNumber === undefined || part.totalParts === undefined
       ? {}
       : { part: { number: part.partNumber, total: part.totalParts } }),
@@ -332,12 +495,22 @@ export function schedulesDirectProgramme(
     ...(program?.entityType === undefined ? {} : { entityType: program.entityType }),
     cast: credits === false ? [] : people(program?.cast, credits.cast),
     crew: credits === false ? [] : people(program?.crew, credits.crew),
-    ratings: [...(program?.contentRating ?? []), ...(airing.ratings ?? [])]
-      .filter((rating) => (rating.code ?? '') !== '')
-      .map((rating) => ({
-        code: rating.code!,
-        ...(rating.body === undefined ? {} : { body: rating.body }),
-      })),
+    ratings: ratingsOf(
+      [...(program?.contentRating ?? []), ...(airing.ratings ?? [])],
+      options,
+      station,
+    ),
+    countries: program?.country?.filter((one) => one !== '') ?? [],
+    urls: [
+      ...(program?.officialURL === undefined || program.officialURL === ''
+        ? []
+        : [program.officialURL]),
+      // The episode page a vocabulary gave, which is a different thing from the
+      // programme's own site and worth both.
+      ...vocabularies.flatMap(([, one]) => (one.url === undefined ? [] : [one.url])),
+    ],
+    ...(quality === undefined ? {} : { starRating: quality }),
+    subtitles: subtitlesOf(airing),
     audioProperties: airing.audioProperties ?? [],
     videoProperties: airing.videoProperties ?? [],
     isNew: airing.new === true,
@@ -353,9 +526,7 @@ export function schedulesDirectProgramme(
   };
 }
 
-/** Which builder method a crew role belongs on, where the DTD has one. */
-const CREW: Record<
-  string,
+type CreditElement =
   | 'director'
   | 'writer'
   | 'producer'
@@ -363,15 +534,42 @@ const CREW: Record<
   | 'editor'
   | 'presenter'
   | 'commentator'
-  | 'adapter'
-> = {
+  | 'guest'
+  | 'adapter';
+
+/**
+ * Which element a crew role belongs on, where the DTD has one.
+ *
+ * Taken from what the service actually sends rather than from a guess at what
+ * it might: a census of three hundred programmes found `Executive Producer`
+ * most common of all, then `Writer`, `Producer`, `Director`, `Creator` and
+ * `Screenwriter` — and a long tail of `Art Director`, `Casting` and
+ * `Cinematography`, which the DTD has nowhere to put and which become
+ * extensions rather than being dropped.
+ */
+const CREW: Record<string, CreditElement> = {
   director: 'director',
+  'first assistant director': 'director',
+  'voice director': 'director',
   writer: 'writer',
+  screenwriter: 'writer',
+  creator: 'writer',
+  'writer (novel)': 'writer',
+  'writer (book)': 'writer',
   producer: 'producer',
   'executive producer': 'producer',
+  'consulting producer': 'producer',
+  'supervising producer': 'producer',
+  'coordinating producer': 'producer',
+  'associate producer': 'producer',
+  'co-producer': 'producer',
   composer: 'composer',
+  music: 'composer',
+  'original music': 'composer',
+  'original song': 'composer',
   'musical director': 'composer',
   editor: 'editor',
+  'film editing': 'editor',
   'film editor': 'editor',
   host: 'presenter',
   presenter: 'presenter',
@@ -379,6 +577,19 @@ const CREW: Record<
   narrator: 'commentator',
   commentator: 'commentator',
   adapter: 'adapter',
+};
+
+/**
+ * The same for a cast role.
+ *
+ * `Actor` dominates, then `Voice`, `Host`, `Guest Star`, `Self`, `Guest Voice`
+ * and `Narrator`. All but the last three are someone playing a part, which is
+ * what `<actor>` is for — with a `characterName` where there is one.
+ */
+const CAST: Record<string, CreditElement> = {
+  host: 'presenter',
+  narrator: 'commentator',
+  guest: 'guest',
 };
 
 /** The quality a `videoProperties` entry names, in the DTD's spelling. */
@@ -457,9 +668,17 @@ export function buildProgramme(
   }
 
   for (const person of programme.cast) {
-    element.actor(person.name, {
-      ...(person.characterName === undefined ? {} : { role: person.characterName }),
-    });
+    const method = CAST[person.role?.toLowerCase() ?? ''];
+
+    if (method === undefined) {
+      element.actor(person.name, {
+        ...(person.characterName === undefined ? {} : { role: person.characterName }),
+        // A guest star is an actor who is also a guest, and the DTD can say both.
+        ...(person.role?.toLowerCase().includes('guest') === true ? { guest: true } : {}),
+      });
+    } else {
+      element[method](person.name);
+    }
   }
 
   for (const person of programme.crew) {
@@ -484,7 +703,35 @@ export function buildProgramme(
   }
 
   for (const rating of programme.ratings) {
-    element.rating(rating.code, { ...(rating.body === undefined ? {} : { system: rating.body }) });
+    element.rating(rating.code, {
+      ...(rating.body === undefined ? {} : { system: rating.body }),
+      // What the board warned about, which the DTD has no field for and a
+      // parental control has every use for.
+      ...(rating.warnings === undefined
+        ? {}
+        : { extra: rating.warnings.map((value) => ({ name: 'warning', value })) }),
+    });
+  }
+
+  if (programme.starRating !== undefined) {
+    element.starRating(programme.starRating.value, {
+      ...(programme.starRating.system === undefined ? {} : { system: programme.starRating.system }),
+    });
+  }
+
+  for (const country of programme.countries) {
+    element.country(country);
+  }
+
+  for (const url of programme.urls) {
+    element.url(url);
+  }
+
+  for (const subtitles of programme.subtitles) {
+    element.subtitles({
+      type: subtitles.type as 'teletext' | 'deaf-signed',
+      ...(subtitles.language === undefined ? {} : { language: subtitles.language }),
+    });
   }
 
   for (const property of programme.videoProperties) {
@@ -500,10 +747,6 @@ export function buildProgramme(
 
     if (stereo !== undefined) {
       element.audio({ stereo });
-    }
-
-    if (property.toLowerCase() === 'cc' || property.toLowerCase() === 'subtitled') {
-      element.subtitles({ type: 'teletext' });
     }
   }
 

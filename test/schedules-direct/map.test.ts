@@ -20,6 +20,9 @@ const STATION: WireStation = {
   affiliate: 'CBS',
   broadcastLanguage: ['en'],
   descriptionLanguage: ['en'],
+  // 58 of 148 real stations carry this, and it is what a content rating is
+  // chosen by when the caller names no country.
+  broadcaster: { city: 'London', country: 'GBR' },
   logo: { URL: 'https://example.test/wbbm.png', width: 360, height: 270 },
 };
 
@@ -286,6 +289,181 @@ describe('a programme', () => {
         entityType: 'Episode',
         live: 'Live',
       });
+    });
+  });
+
+  describe('and its ratings', () => {
+    // A census of 300 real programmes found ratings from 26 countries — 292
+    // Canadian ones on a British lineup. Writing them all is seven `<rating>`
+    // elements a programme, of which a viewer recognises one.
+    const many = {
+      contentRating: [
+        { body: 'Canadian Parental Rating', code: '14+', country: 'CAN' },
+        { body: 'British Board of Film Classification', code: 'PG', country: 'GBR' },
+        {
+          body: 'Mediakasvatus- ja kuvaohjelmayksikkö',
+          code: 'K12',
+          country: 'FIN',
+          contentWarning: ['Violence'],
+        },
+      ],
+    };
+
+    it('writes the one the lineup`s country uses', () => {
+      // The lineup decides, not the broadcaster: a British lineup carrying an
+      // American channel wants the British rating for it.
+      const onGbr = schedulesDirectStation(
+        { ...STATION, broadcaster: { country: 'USA' } },
+        '002',
+        {},
+        'GBR-1000014-DEFAULT',
+      )!.data!;
+      const normalised = schedulesDirectProgramme(AIRING, { ...PROGRAM, ...many }, onGbr)!;
+
+      expect(normalised.ratings).toEqual([expect.objectContaining({ code: 'PG', country: 'GBR' })]);
+    });
+
+    it('falls back to where the broadcaster is when no lineup says', () => {
+      const programme = built({}, many);
+
+      expect(programme.rating).toEqual([
+        { value: 'PG', system: 'British Board of Film Classification' },
+      ]);
+    });
+
+    it('takes the country the caller named over the station`s', () => {
+      const normalised = schedulesDirectProgramme({ ...AIRING }, { ...PROGRAM, ...many }, station, {
+        ratingCountry: 'FIN',
+      })!;
+
+      expect(normalised.ratings).toEqual([
+        expect.objectContaining({ code: 'K12', country: 'FIN', warnings: ['Violence'] }),
+      ]);
+      // What the board warned about, which the DTD has no field for and a
+      // parental control has every use for.
+      expect(buildProgramme('x', normalised).build().rating).toEqual([
+        expect.objectContaining({ extra: [{ name: 'warning', value: 'Violence' }] }),
+      ]);
+    });
+
+    it('keeps an untagged rating rather than dropping the only one there is', () => {
+      // An airing's own `ratings` carry no country, and older programmes carry
+      // none either — filtering those away would lose them entirely.
+      const programme = built({}, { contentRating: [{ body: 'UK Content Provider', code: '12' }] });
+
+      expect(programme.rating).toEqual([{ value: '12', system: 'UK Content Provider' }]);
+    });
+
+    it('writes them all when there is nothing to choose by', () => {
+      const { broadcaster: _nowhere, ...unplaced } = STATION;
+      const nowhere = schedulesDirectStation(unplaced, '002')!.data!;
+      const normalised = schedulesDirectProgramme(AIRING, { ...PROGRAM, ...many }, nowhere)!;
+
+      // Noisy, but not a guess — and the station said nothing about where it is.
+      expect(normalised.ratings).toHaveLength(3);
+    });
+
+    it('writes none when asked for none', () => {
+      const normalised = schedulesDirectProgramme(AIRING, { ...PROGRAM, ...many }, station, {
+        ratingCountry: false,
+      })!;
+
+      expect(normalised.ratings).toEqual([]);
+    });
+
+    it('writes a movie`s score on the scale it was given on', () => {
+      const programme = built(
+        {},
+        {
+          movie: {
+            year: '1989',
+            qualityRating: [
+              { ratingsBody: 'Gracenote', rating: '3', minRating: '1', maxRating: '4' },
+            ],
+          },
+        },
+      );
+
+      // The scale is part of the value: `<star-rating>` has no field for it.
+      expect(programme.starRating).toEqual([{ value: '3/4', system: 'Gracenote' }]);
+    });
+  });
+
+  describe('and how it is carried', () => {
+    /** What the mapping decided, before the builder turns it into elements. */
+    const carried = (extra: Partial<WireAiring>) =>
+      schedulesDirectProgramme({ ...AIRING, ...extra }, PROGRAM, station)!.subtitles;
+
+    it('says which language it is subtitled in, which `cc` cannot', () => {
+      // On 284 of 305 real airings, where `cc` was on far fewer.
+      expect(carried({ subtitledLanguage: ['en-GB'] })).toEqual([
+        { type: 'teletext', language: 'en-GB' },
+      ]);
+      // And it reaches the element with the language on it, tagged with the
+      // programme's own language as every text element is — `<language>` holds
+      // a language *name*, so the tag says what that name is written in.
+      expect(built({ subtitledLanguage: ['en-GB'] }).subtitles).toEqual([
+        { type: 'teletext', language: { value: 'en-GB', lang: 'en' } },
+      ]);
+    });
+
+    it('falls back to the audio property when the service named no language', () => {
+      // `cc` and nothing else, which is the older half of the wire.
+      expect(carried({})).toEqual([{ type: 'teletext' }]);
+    });
+
+    it('says a signed presentation in the word the DTD has for it', () => {
+      expect(carried({ signed: true, subtitledLanguage: ['en-GB'] })).toEqual([
+        { type: 'teletext', language: 'en-GB' },
+        { type: 'deaf-signed' },
+      ]);
+    });
+
+    it('writes where it was made, and where to read about it', () => {
+      const programme = built(
+        {},
+        { country: ['FRA'], officialURL: 'https://example.test/just-mercy' },
+      );
+
+      // Tagged with the programme's language like every other text element —
+      // meaningless on a country code, and not worth a special case to avoid.
+      expect(programme.country).toEqual([{ value: 'FRA', lang: 'en' }]);
+      expect(programme.url).toEqual(['https://example.test/just-mercy']);
+    });
+  });
+
+  describe('and its numbering across vocabularies', () => {
+    it('takes an episode from another vocabulary when Gracenote has only a season', () => {
+      // Real shape: Gracenote `{ season: 2026 }` beside TVmaze
+      // `{ season: 2026, episode: 36, url }`.
+      const programme = built(
+        {},
+        {
+          metadata: [
+            { TVmaze: { season: 2026, episode: 36, url: 'https://tvmaze.test/36' } },
+            { Gracenote: { season: 2026 } },
+          ],
+        },
+      );
+      const systems = new Map(programme.episodeNum?.map((one) => [one.system, one.value]) ?? []);
+
+      expect(systems.get('onscreen')).toBe('S2026E36');
+      // And the episode page it came with, which is not the programme's own site.
+      expect(programme.url).toEqual(['https://tvmaze.test/36']);
+    });
+
+    it('refuses to make a number out of two vocabularies` halves', () => {
+      const programme = built(
+        {},
+        {
+          metadata: [{ TVmaze: { season: 12, episode: 3 } }, { Gracenote: { season: 2026 } }],
+        },
+      );
+      const systems = new Map(programme.episodeNum?.map((one) => [one.system, one.value]) ?? []);
+
+      // They disagree about the season, so neither is used: a number that is
+      // nobody's is worse than none.
+      expect(systems.has('onscreen')).toBe(false);
     });
   });
 

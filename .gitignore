@@ -9,8 +9,9 @@ dist/
 bench/.baseline/
 
 # runtime artifacts from running the CLI in-repo
-.epg-cache/
+.epg-cache*/
 public/
+guide.xml
 epg.config.local.*
 
 # local env

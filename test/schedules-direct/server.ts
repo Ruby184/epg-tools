@@ -13,9 +13,11 @@
  * flaky endpoint is arranged without another server.
  */
 
+import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type {
+  WireAiring,
   WireArtwork,
   WireLineup,
   WireMd5Response,
@@ -37,7 +39,9 @@ export interface SdCall {
 export interface SdAnswers {
   status?: WireStatus;
   lineup?: WireLineup;
+  /** Answered instead of the md5s computed from {@link SdServer.setSchedule}. */
   md5?: WireMd5Response;
+  /** Answered instead of the schedules a test set up. */
   schedules?: WireSchedule[];
   programs?: WireProgram[];
   artwork?: WireArtwork[];
@@ -75,6 +79,19 @@ export interface SdServer {
   refuseAccount: (code: number, message: string) => void;
   /** Fail the next `times` calls to this path with a status. */
   failNext: (path: string, status: number, times?: number) => void;
+  /**
+   * What one station has on one day.
+   *
+   * The md5 is **computed from it**, so "unchanged" means what it means: a test
+   * that changes a schedule changes its md5, and one that does not leaves it
+   * alone. A stub returning a fixed hash would make every md5 case a test of the
+   * stub.
+   */
+  setSchedule: (stationID: string, day: string, airings: WireAiring[]) => void;
+  /** Answer for one station with a code instead of a schedule — `7020`, `7100`. */
+  failStation: (stationID: string, code: number) => void;
+  /** The programme detail to answer `/programs` with. */
+  setProgram: (program: WireProgram) => void;
 }
 
 let running: Server | undefined;
@@ -116,9 +133,18 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
   const valid = new Set<string>();
   const failures = new Map<string, { status: number; times: number }>();
 
+  /** What each station has, by day — and what its md5 is therefore. */
+  const schedules = new Map<string, Map<string, WireAiring[]>>();
+  const programs = new Map<string, WireProgram>();
+  const stationFailures = new Map<string, number>();
+
   let issued = 0;
   let alwaysExpired = false;
   let refusal: { code: number; message: string } | undefined;
+
+  /** The md5 of one station-day, as the service's own is: over its content. */
+  const md5Of = (airings: WireAiring[]): string =>
+    createHash('md5').update(JSON.stringify(airings)).digest('base64').slice(0, 22);
 
   const send = (response: ServerResponse, status: number, body: unknown): void => {
     response.writeHead(status, { 'content-type': 'application/json' });
@@ -192,11 +218,84 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
       } else if (path.startsWith('lineups/')) {
         send(response, 200, answers.lineup ?? { map: [], stations: [] });
       } else if (path === 'schedules/md5') {
-        send(response, 200, answers.md5 ?? {});
+        if (answers.md5 !== undefined) {
+          send(response, 200, answers.md5);
+
+          return;
+        }
+
+        const asked = (calls.at(-1)?.body ?? []) as { stationID: string; date?: string[] }[];
+        const out: WireMd5Response = {};
+
+        for (const { stationID, date } of asked) {
+          const held = schedules.get(stationID);
+          const failure = stationFailures.get(stationID);
+          const forStation: Record<string, { code?: number; md5?: string; lastModified?: string }> =
+            {};
+
+          for (const day of date ?? [...(held?.keys() ?? [])]) {
+            const airings = held?.get(day);
+
+            if (failure !== undefined) {
+              forStation[day] = { code: failure };
+            } else if (airings !== undefined) {
+              forStation[day] = {
+                code: 0,
+                md5: md5Of(airings),
+                lastModified: '2026-09-12T00:00:00Z',
+              };
+            }
+          }
+
+          out[stationID] = forStation;
+        }
+
+        send(response, 200, out);
       } else if (path === 'schedules') {
-        send(response, 200, answers.schedules ?? []);
+        if (answers.schedules !== undefined) {
+          send(response, 200, answers.schedules);
+
+          return;
+        }
+
+        const asked = (calls.at(-1)?.body ?? []) as { stationID: string; date?: string[] }[];
+
+        send(
+          response,
+          200,
+          asked.map(({ stationID, date }): WireSchedule => {
+            const failure = stationFailures.get(stationID);
+
+            if (failure !== undefined) {
+              return { stationID, code: failure, minDate: '2026-09-01', maxDate: '2026-09-14' };
+            }
+
+            const held = schedules.get(stationID);
+
+            return {
+              stationID,
+              programs: (date ?? [...(held?.keys() ?? [])]).flatMap((day) => held?.get(day) ?? []),
+            };
+          }),
+        );
       } else if (path === 'programs') {
-        send(response, 200, answers.programs ?? []);
+        if (answers.programs !== undefined) {
+          send(response, 200, answers.programs);
+
+          return;
+        }
+
+        const asked = (calls.at(-1)?.body ?? []) as string[];
+
+        send(
+          response,
+          200,
+          asked.flatMap((id) => {
+            const held = programs.get(id);
+
+            return held === undefined ? [] : [held];
+          }),
+        );
       } else if (path === 'metadata/programs') {
         send(response, 200, answers.artwork ?? []);
       } else {
@@ -223,5 +322,13 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
       refusal = { code, message };
     },
     failNext: (path, status, times = 1) => failures.set(path, { status, times }),
+    setSchedule: (stationID, day, airings) => {
+      const held = schedules.get(stationID) ?? new Map<string, WireAiring[]>();
+
+      held.set(day, airings);
+      schedules.set(stationID, held);
+    },
+    failStation: (stationID, code) => void stationFailures.set(stationID, code),
+    setProgram: (program) => void programs.set(program.programID ?? '', program),
   };
 }

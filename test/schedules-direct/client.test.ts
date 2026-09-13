@@ -2,7 +2,6 @@ import ky from 'ky';
 import { afterEach, describe, expect, it } from 'vitest';
 import { GrabberError } from '../../src/core/error.js';
 import {
-  chunk,
   createSchedulesDirectClient,
   passwordHash,
   schedulesDirectHooks,
@@ -221,18 +220,5 @@ describe('the Schedules Direct client', () => {
     await expect(client(source).schedules([{ stationID: 'nope' }])).rejects.toThrow(
       /no such station/,
     );
-  });
-});
-
-describe('chunk', () => {
-  it('cuts a list into requests of at most the size asked for', () => {
-    expect(chunk([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
-    expect(chunk([1, 2], 5)).toEqual([[1, 2]]);
-    expect(chunk([], 5)).toEqual([]);
-  });
-
-  it('never asks for nothing, however small the size', () => {
-    // A size of zero would otherwise loop for ever rather than fail.
-    expect(chunk([1, 2], 0)).toEqual([[1], [2]]);
   });
 });

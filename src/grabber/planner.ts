@@ -7,6 +7,7 @@
  * with nothing in it to mock.
  */
 
+import { chunk } from '../core/chunk.js';
 import type { CacheEntryMeta } from '../cache/types.js';
 import type { BatchingOption, BatchMode, GrabberChannel } from './types.js';
 
@@ -69,23 +70,6 @@ export function resolveBatching(batching: BatchingOption | undefined): ResolvedB
     maxChannels: manyChannels ? cap(settings.channelsPerRequest) : 1,
     maxDays: manyDays ? cap(settings.daysPerRequest) : 1,
   };
-}
-
-function chunk<T>(items: T[], size: number): T[][] {
-  // Always a copy, even when the whole lot fits in one chunk: a chunk becomes
-  // the `channels` a site is handed, and site code sorting that in place must
-  // not reach back into the planner's own array.
-  if (items.length <= size) {
-    return items.length > 0 ? [[...items]] : [];
-  }
-
-  const chunks: T[][] = [];
-
-  for (let i = 0; i < items.length; i += size) {
-    chunks.push(items.slice(i, i + size));
-  }
-
-  return chunks;
 }
 
 /**
