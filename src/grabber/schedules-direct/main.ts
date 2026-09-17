@@ -620,6 +620,16 @@ export function defineSchedulesDirectSite(
 
               if (verdict === 'keep') {
                 yield { channel: pair.channel, day, unchanged: true };
+
+                if (decision.md5 !== undefined) {
+                  // The first time included, where the verdict came from
+                  // comparing clocks rather than content: what is cached
+                  // matches this md5, so writing it down turns every run after
+                  // it into the exact comparison instead of the approximate
+                  // one. An md5 that is already stored re-sets to the same
+                  // string, which `TrackedMap` does not count as a change.
+                  rememberMd5(state, stationID, day, decision.md5);
+                }
               } else if (verdict === 'empty') {
                 warn(`${stationID} on ${day}: ${decision.reason ?? 'nothing published'}`);
                 yield { channel: pair.channel, day, programmes: [] };
