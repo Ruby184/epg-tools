@@ -4,6 +4,7 @@ import {
   decideMd5,
   forgetMd5,
   MAX_MD5S,
+  MD5_INCOMPLETE,
   md5Key,
   pruneMd5,
   rememberMd5,
@@ -125,6 +126,19 @@ describe('decideMd5', () => {
       // alternative is what a real 21-day grab did: 435 channel-days reported
       // unchanged with nothing behind them, failing every run.
       expect(decideMd5(undefined, undefined, undefined)).toMatchObject({ verdict: 'fetch' });
+    });
+
+    it('fetches a day last written with something missing', () => {
+      // The marker a pass leaves on an incomplete day. Nothing stored would
+      // fall through to the clock rule below, which answers "keep" — true about
+      // the day's content, and wrong about the hole in it.
+      expect(
+        decideMd5(
+          MD5_INCOMPLETE,
+          { code: 0, md5: 'abc', lastModified: '2026-09-01T00:00:00Z' },
+          cached(),
+        ),
+      ).toMatchObject({ verdict: 'fetch' });
     });
 
     it('fetches when it answered without an md5 at all', () => {

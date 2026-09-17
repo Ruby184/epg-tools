@@ -63,10 +63,11 @@ import {
   type SchedulesDirectMapOptions,
   type SchedulesDirectStation,
 } from './map.js';
-import { decideMd5, forgetMd5, pruneMd5, rememberMd5, storedMd5 } from './md5.js';
+import { decideMd5, forgetMd5, MD5_INCOMPLETE, pruneMd5, rememberMd5, storedMd5 } from './md5.js';
 import {
   SD_DATE_OUT_OF_RANGE,
   SD_OK,
+  SD_PROGRAM_INVALID,
   type WireAccountLineup,
   type WireAiring,
   type WireLineupChange,
@@ -87,8 +88,16 @@ const MAPPING = 'mapping';
  */
 const MAPPING_VERSION = 1;
 
-/** How many station entries one schedule call may carry — the service's own cap. */
-const STATIONS_PER_REQUEST = 5000;
+/**
+ * How many station-days one md5 call may ask about — the service's own cap.
+ *
+ * Its words: "you may only request 5000 programIDs, schedules, or schedule
+ * MD5's per request". An md5 is per station-day, so that is what is counted. A
+ * hundred stations over a fortnight is 1,400 of them; nine hundred stations
+ * over the same fortnight is 12,600, which counting *stations* would have sent
+ * as a single request.
+ */
+const MD5S_PER_REQUEST = 5000;
 
 /**
  * How many programmes are kept in hand across the chunks of one pass.
@@ -316,7 +325,7 @@ function airingsOf(programs: WireAiring[] | undefined): Airing[] {
  * answer that has to fit in memory.
  */
 function chunkStationDays(
-  fetching: Map<string, Map<string, string | undefined>>,
+  fetching: ReadonlyMap<string, ReadonlyMap<string, unknown>>,
   size: number,
 ): StationDays[][] {
   const width = Math.max(1, size);
@@ -585,16 +594,12 @@ export function defineSchedulesDirectSite(
       // about each other, so holding them all would be memory spent to arrive
       // at the same verdicts later, and a batch that fails after an earlier one
       // succeeded leaves those channel-days already settled.
-      for (const batch of chunk([...asked], STATIONS_PER_REQUEST)) {
-        const md5s = await client.schedulesMd5(
-          batch.map(([stationID, byDay]): StationDays => ({
-            stationID,
-            date: [...byDay.keys()],
-          })),
-        );
+      for (const batch of chunkStationDays(asked, MD5S_PER_REQUEST)) {
+        const md5s = await client.schedulesMd5(batch);
 
-        for (const [stationID, byDay] of batch) {
-          for (const [day, pairs] of byDay) {
+        for (const { stationID, date } of batch) {
+          for (const day of date ?? []) {
+            const pairs = asked.get(stationID)?.get(day) ?? [];
             const wire = md5s[stationID]?.[day];
             const stored = storedMd5(state, stationID, day);
             let wanted = false;
@@ -643,6 +648,14 @@ export function defineSchedulesDirectSite(
 
       /** How many stations had nothing for a day, by day — see the warning below. */
       const beyond = new Map<string, number>();
+      /**
+       * Programmes the service says it will never have.
+       *
+       * Unbounded, unlike `known`, and deliberately: it holds ids rather than
+       * payloads, and a run that found thousands of them has a bigger problem
+       * than the memory.
+       */
+      const gone = new Set<string>();
 
       /** Programmes already in hand, across the chunks of this pass. */
       const known = new Map<string, WireProgram>();
@@ -720,9 +733,32 @@ export function defineSchedulesDirectSite(
         // The detail, once per programme however many airings carry it.
         for (const ids of chunk([...missing], programmesPerRequest)) {
           for (const program of await client.programs(ids)) {
-            if (program.programID !== undefined) {
-              known.set(program.programID, program);
+            if (program.programID === undefined) {
+              continue;
             }
+
+            const code = program.code ?? SD_OK;
+
+            if (code === SD_PROGRAM_INVALID) {
+              // The service will never have this one — `6000`, in-band at HTTP
+              // 200. Written down as such, because the difference between "not
+              // yet" and "never" is the difference between asking again next
+              // run and asking again for ever: the day is kept back until it is
+              // complete, and a day waiting on a programme that does not exist
+              // would never be complete.
+              gone.add(program.programID);
+              continue;
+            }
+
+            if (code !== SD_OK) {
+              // `6001` is a programme still being generated, and anything else
+              // is news. Neither is stored, so the airing has nothing to build
+              // from and its day is asked for again next run — which for a
+              // queued programme is exactly the retry it wants.
+              continue;
+            }
+
+            known.set(program.programID, program);
           }
         }
 
@@ -740,10 +776,14 @@ export function defineSchedulesDirectSite(
               );
 
               if (normalised === undefined) {
-                // No title, which the DTD requires — usually a programme the
-                // service could not describe. The day is written without it, and
-                // its md5 is not kept, so the next run asks again.
-                complete = false;
+                // No title, which the DTD requires. The day is written without
+                // it either way; what differs is whether it counts as finished.
+                // A programme the service says it will never have does not hold
+                // the day back — nothing would ever change — while one it has
+                // yet to write does, so the next run asks again.
+                if (!gone.has(airing.programID)) {
+                  complete = false;
+                }
 
                 return [];
               }
@@ -761,8 +801,15 @@ export function defineSchedulesDirectSite(
               };
             }
 
-            if (complete && md5 !== undefined) {
-              rememberMd5(state, stationID, day, md5);
+            if (complete) {
+              if (md5 !== undefined) {
+                rememberMd5(state, stationID, day, md5);
+              }
+            } else {
+              // Written down as unfinished rather than left unsaid: with
+              // nothing stored the next run falls back to comparing clocks,
+              // which says "keep" and leaves the hole where it is.
+              rememberMd5(state, stationID, day, MD5_INCOMPLETE);
             }
           }
         }

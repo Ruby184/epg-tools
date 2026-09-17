@@ -32,6 +32,21 @@ const PREFIX = 'md5:';
  */
 export const MAX_MD5S = 100_000;
 
+/**
+ * What is stored for a day that was written with something missing.
+ *
+ * Not an md5 and deliberately unlike one — the service's are 22 characters of
+ * base64 — so it can never match what the service sends, and the day is fetched
+ * again next run.
+ *
+ * It has to be *something* rather than nothing. Storing nothing falls through
+ * to the `lastModified` against `grabbedAt` rule below, which answers "keep":
+ * true about the day's content, and wrong here, because what is missing is a
+ * programme the service had not written yet rather than anything about the day.
+ * A day left incomplete would then keep its hole until something else moved it.
+ */
+export const MD5_INCOMPLETE = '?';
+
 /** The key one station-day is remembered under. */
 export function md5Key(stationID: string, day: string): string {
   return `${PREFIX}${stationID}:${day}`;

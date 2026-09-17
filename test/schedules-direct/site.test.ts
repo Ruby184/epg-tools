@@ -360,6 +360,78 @@ describe('defineSchedulesDirectSite', () => {
     expect(source.countOf(`lineups/${LINEUP}`)).toBe(2);
   });
 
+  it('settles a day whose programme the service will never have', async () => {
+    const source = await service();
+    const cache = store();
+
+    // `6000`, in-band at HTTP 200: the id is not one the service knows.
+    source.answer({
+      programs: [
+        { programID: 'EP000000010001', code: 6000, message: 'Could not find requested programID.' },
+        program('EP000000010002', 'The Seven O`Clock Show'),
+        program('EP000000020001', 'The Eight O`Clock Show'),
+      ],
+    });
+
+    await grab([site(source)], { cache, now: NOW });
+
+    const before = source.countOf('schedules');
+
+    await grab([site(source)], { cache, now: NOW, staleness: { alwaysRefetchDays: 7 } });
+
+    // Nothing would change by asking again, so the day is finished without it.
+    // Holding it back instead is a station-day refetched on every run for ever.
+    expect(source.countOf('schedules')).toBe(before);
+  });
+
+  it('asks again for a day whose programme is only queued', async () => {
+    const source = await service();
+    const cache = store();
+
+    // `6001`: being generated, so it is worth another run's asking.
+    source.answer({
+      programs: [
+        { programID: 'EP000000010001', code: 6001, message: 'Program is queued for generation.' },
+        program('EP000000010002', 'The Seven O`Clock Show'),
+        program('EP000000020001', 'The Eight O`Clock Show'),
+      ],
+    });
+
+    await grab([site(source)], { cache, now: NOW });
+
+    const before = source.countOf('schedules');
+
+    await grab([site(source)], { cache, now: NOW, staleness: { alwaysRefetchDays: 7 } });
+
+    expect(source.countOf('schedules')).toBeGreaterThan(before);
+  });
+
+  it('cuts a fetch into requests by station-day, not by station', async () => {
+    const source = await service();
+
+    source.setSchedule('101', '2026-09-13', [airing('EP000000010003', 18)]);
+    source.setSchedule('202', '2026-09-13', [airing('EP000000020002', 20)]);
+    source.setProgram(program('EP000000010003', 'Tomorrow at Six'));
+    source.setProgram(program('EP000000020002', 'Tomorrow at Eight'));
+
+    // Two stations over two days is four station-days, which at two per request
+    // is two requests — where counting stations would have made it one. The
+    // same helper bounds the md5 pass, at the service's own cap of 5,000.
+    await grab([site(source, { days: 2, stationDaysPerRequest: 2 })], {
+      cache: store(),
+      now: NOW,
+    });
+
+    const perCall = source
+      .callsTo('schedules')
+      .map((call) =>
+        (call.body as { date?: string[] }[]).reduce((sum, one) => sum + (one.date?.length ?? 0), 0),
+      );
+
+    expect(perCall.length).toBe(2);
+    expect(Math.max(...perCall)).toBeLessThanOrEqual(2);
+  });
+
   it('caches a day past what the service publishes, rather than failing it', async () => {
     const source = await service();
     const cache = store();
