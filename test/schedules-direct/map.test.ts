@@ -142,7 +142,10 @@ describe('a programme', () => {
       channel: 'I20454.json.schedulesdirect.org',
       title: [{ value: 'Blue Bloods', lang: 'en' }],
       subTitle: [{ value: 'Drawing Dead' }],
-      desc: [{ value: 'A Wall Street executive.', lang: 'en' }],
+      desc: [
+        { value: 'A Wall Street executive.', lang: 'en' },
+        { value: 'Short one.', lang: 'en' },
+      ],
       new: true,
     });
     // An hour after it started, from the duration in seconds.
@@ -275,16 +278,11 @@ describe('a programme', () => {
       // Out of order on the wire, which is the case a sort is for.
       const programme = built({}, { cast: cast.toReversed() });
 
-      expect(programme.credits?.actor).toHaveLength(8);
+      // All of them, billed order first: how many a guide shows is what
+      // `keep: { 'programme/credits/actor': 8 }` answers, without a refetch.
+      expect(programme.credits?.actor).toHaveLength(12);
       expect(programme.credits?.actor?.[0]).toMatchObject({ value: 'Actor 1' });
-      expect(programme.credits?.actor?.at(-1)).toMatchObject({ value: 'Actor 8' });
-    });
-
-    it('leaves them out when asked to', () => {
-      const normalised = schedulesDirectProgramme(AIRING, PROGRAM, station, { credits: false })!;
-
-      expect(normalised.cast).toEqual([]);
-      expect(buildProgramme('x', normalised).build().credits).toBeUndefined();
+      expect(programme.credits?.actor?.at(-1)).toMatchObject({ value: 'Actor 12' });
     });
   });
 
@@ -612,7 +610,12 @@ describe('a programme', () => {
 
   describe('and its description', () => {
     it('prefers the long one, and falls back to the short', () => {
-      expect(built().desc).toEqual([{ value: 'A Wall Street executive.', lang: 'en' }]);
+      // Both, the long one first — the short is separately written, not a
+      // truncation, and `keep: { 'programme/desc': 1 }` takes the long one.
+      expect(built().desc).toEqual([
+        { value: 'A Wall Street executive.', lang: 'en' },
+        { value: 'Short one.', lang: 'en' },
+      ]);
       // With no language of its own it takes the programme's, which is the
       // station's — text inherits, rather than being labelled twice.
       expect(
@@ -620,12 +623,13 @@ describe('a programme', () => {
       ).toEqual([{ value: 'Short one.', lang: 'en' }]);
     });
 
-    it('takes the short one when that is what was asked for', () => {
-      const normalised = schedulesDirectProgramme(AIRING, PROGRAM, station, {
-        descriptions: 'short',
-      })!;
+    it('writes the same words once, however many places the service wrote them', () => {
+      const twice = {
+        description1000: [{ descriptionLanguage: 'en', description: 'The same.' }],
+        description100: [{ descriptionLanguage: 'en', description: 'The same.' }],
+      };
 
-      expect(normalised.description).toBe('Short one.');
+      expect(built({}, { descriptions: twice }).desc).toEqual([{ value: 'The same.', lang: 'en' }]);
     });
 
     it('prefers the language the station describes itself in', () => {
@@ -643,8 +647,7 @@ describe('a programme', () => {
         station,
       )!;
 
-      expect(normalised.description).toBe('In English.');
-      expect(normalised.descriptionLanguage).toBe('en');
+      expect(normalised.descriptions[0]).toEqual({ value: 'In English.', lang: 'en' });
     });
   });
 });

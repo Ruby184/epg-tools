@@ -96,8 +96,14 @@ export interface SchedulesDirectProgramme {
   title: string;
   titleLanguage?: string;
   episodeTitle?: string;
-  description?: string;
-  descriptionLanguage?: string;
+  /**
+   * What the service wrote about it, the 1000-character one first.
+   *
+   * Both, because `<desc>` repeats and the short one is not a truncation of the
+   * long one — it is separately written. A guide that shows one takes the first:
+   * `keep: { 'programme/desc': 1 }`.
+   */
+  descriptions: { value: string; lang?: string }[];
   season?: number;
   episode?: number;
   /** Which part of a multi-part episode this airing is. */
@@ -158,19 +164,6 @@ export interface SchedulesDirectProgramme {
 
 /** How much of what the service sends is worth writing. */
 export interface SchedulesDirectMapOptions {
-  /**
-   * How many of each to keep, in the service's own billing order.
-   *
-   * It ships whole call sheets — forty names on a film — and unbounded they are
-   * most of a guide's bytes, for a field most consumers show three of. `false`
-   * leaves credits out altogether.
-   */
-  credits?: false | { cast?: number | false; crew?: number | false };
-  /**
-   * Which description to write. `long` prefers the 1000-character one and falls
-   * back to the short; `both` writes each, since `<desc>` may repeat.
-   */
-  descriptions?: 'short' | 'long' | 'both';
   /** What to call the language of a text the service did not label. */
   language?: string;
   /** See {@link SCHEDULES_DIRECT_CHANNEL_ID}. */
@@ -182,8 +175,6 @@ export interface SchedulesDirectMapOptions {
   /** Replaces {@link schedulesDirectChannelExtras}; `false` writes no extensions. */
   channelExtras?: false | ((element: ChannelBuilder, station: SchedulesDirectStation) => void);
 }
-
-const DEFAULT_CREDITS = { cast: 8, crew: 6 } as const;
 
 /**
  * An `originalAirDate` as XMLTV writes a date.
@@ -375,12 +366,16 @@ function textOf(
       };
 }
 
-/** The people of one list, in the order the service billed them, capped. */
-function people(
-  entries: WirePerson[] | undefined,
-  limit: number | false | undefined,
-): SchedulesDirectPerson[] {
-  if (limit === false || entries === undefined) {
+/**
+ * The people of one list, in the order the service billed them.
+ *
+ * All of them — the service ships whole call sheets and forty names is most of
+ * a film's bytes, but how many a guide shows is the guide's business and
+ * `keep: { 'programme/credits/actor': 8 }` answers it at serialize time. Capping
+ * here would put the answer in the cache, where changing it costs a refetch.
+ */
+function people(entries: WirePerson[] | undefined): SchedulesDirectPerson[] {
+  if (entries === undefined) {
     return [];
   }
 
@@ -392,7 +387,6 @@ function people(
       .toSorted((left, right) =>
         (left.billingOrder ?? '99').localeCompare(right.billingOrder ?? '99'),
       )
-      .slice(0, limit ?? Number.POSITIVE_INFINITY)
       .map((entry) => ({
         name: entry.name!,
         ...(entry.role === undefined ? {} : { role: entry.role }),
@@ -519,7 +513,17 @@ export function schedulesDirectProgramme(
   const prefer = options.language ?? station?.descriptionLanguage;
   const long = textOf(program?.descriptions?.description1000, prefer);
   const short = textOf(program?.descriptions?.description100, prefer);
-  const description = options.descriptions === 'short' ? (short ?? long) : (long ?? short);
+  // Longest first, which is what a `keep` of one leaves standing — and only
+  // once where the service wrote the same words in both.
+  const descriptions: SchedulesDirectProgramme['descriptions'] = [];
+
+  if (long !== undefined) {
+    descriptions.push(long);
+  }
+
+  if (short !== undefined && short.value !== long?.value) {
+    descriptions.push(short);
+  }
   // Gracenote first, then whatever else numbered it: `TVmaze` turns up beside
   // it and sometimes carries the episode where Gracenote has only the season.
   // Only a vocabulary that gives *both* can stand in, and only when Gracenote
@@ -537,7 +541,6 @@ export function schedulesDirectProgramme(
             one.season !== undefined &&
             (gracenote?.season === undefined || gracenote.season === one.season),
         )?.[1] ?? gracenote);
-  const credits = options.credits === false ? false : (options.credits ?? DEFAULT_CREDITS);
   const part = airing.multipart;
   const scored = program?.movie?.qualityRating?.find((one) => (one.rating ?? '') !== '');
   const runtime = program?.duration ?? program?.movie?.duration;
@@ -565,12 +568,7 @@ export function schedulesDirectProgramme(
     ...(program?.episodeTitle150 === undefined || program.episodeTitle150 === ''
       ? {}
       : { episodeTitle: program.episodeTitle150 }),
-    ...(description === undefined
-      ? {}
-      : {
-          description: description.value,
-          ...(description.lang === undefined ? {} : { descriptionLanguage: description.lang }),
-        }),
+    descriptions,
     ...(numbering?.season === undefined ? {} : { season: numbering.season }),
     ...(numbering?.episode === undefined ? {} : { episode: numbering.episode }),
     ...(part?.partNumber === undefined || part.totalParts === undefined
@@ -588,8 +586,8 @@ export function schedulesDirectProgramme(
     genres: program?.genres?.filter((genre) => genre !== '') ?? [],
     ...(program?.showType === undefined ? {} : { showType: program.showType }),
     ...(program?.entityType === undefined ? {} : { entityType: program.entityType }),
-    cast: credits === false ? [] : people(program?.cast, credits.cast),
-    crew: credits === false ? [] : people(program?.crew, credits.crew),
+    cast: people(program?.cast),
+    crew: people(program?.crew),
     ratings: ratingsOf([...(program?.contentRating ?? []), ...(airing.ratings ?? [])]),
     countries: program?.country?.filter((one) => one !== '') ?? [],
     urls: [
@@ -741,8 +739,8 @@ export function buildProgramme(
     element.subTitle(programme.episodeTitle);
   }
 
-  if (programme.description !== undefined) {
-    element.desc(programme.description, programme.descriptionLanguage);
+  for (const description of programme.descriptions) {
+    element.desc(description.value, description.lang);
   }
 
   if (programme.season !== undefined && programme.episode !== undefined) {

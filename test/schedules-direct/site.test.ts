@@ -333,7 +333,7 @@ describe('defineSchedulesDirectSite', () => {
     // A different mapping: what is cached is no longer what this site would
     // write, and every md5 still matches — so without the fingerprint this would
     // be a no-op for as long as the window lasts.
-    await grab([site(source, { credits: false, descriptions: 'short' })], {
+    await grab([site(source, { channelId: '%s.sd.test' })], {
       cache,
       now: NOW,
       staleness: { alwaysRefetchDays: 7 },

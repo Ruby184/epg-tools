@@ -65,7 +65,7 @@ const MAPPING = 'mapping';
  * day already cached, because its md5 still matches and nothing would ever ask
  * for it again.
  */
-const MAPPING_VERSION = 2;
+const MAPPING_VERSION = 1;
 
 /** How many station entries one schedule call may carry — the service's own cap. */
 const STATIONS_PER_REQUEST = 5000;
@@ -130,8 +130,6 @@ export interface SchedulesDirectSiteOptions
 function mappingFingerprint(options: SchedulesDirectSiteOptions): string {
   const shape = JSON.stringify({
     version: MAPPING_VERSION,
-    credits: options.credits ?? null,
-    descriptions: options.descriptions ?? null,
     language: options.language ?? null,
     // A function is its source: two different ones read differently, and the
     // same one across runs reads the same.
@@ -290,8 +288,6 @@ export function defineSchedulesDirectSite(
     programmesPerRequest = 500,
     persistToken = true,
     // Everything the mapping reads, kept together so it can be handed on whole.
-    credits,
-    descriptions,
     language,
     channelId,
     programmeExtras,
@@ -308,8 +304,6 @@ export function defineSchedulesDirectSite(
   const hashed = passwordSha1 ?? passwordHash(password!);
   const configured = lineup === undefined ? undefined : [lineup].flat();
   const mapping: SchedulesDirectMapOptions = {
-    ...(credits === undefined ? {} : { credits }),
-    ...(descriptions === undefined ? {} : { descriptions }),
     ...(language === undefined ? {} : { language }),
     ...(channelId === undefined ? {} : { channelId }),
     ...(programmeExtras === undefined ? {} : { programmeExtras }),
