@@ -203,6 +203,50 @@ describe('the Schedules Direct client', () => {
     ]);
   });
 
+  it('says what it is and which version, as the service asks every client to', async () => {
+    const source = await sdServer();
+
+    await client(source).status();
+
+    // Not decoration: the service uses it to tell a subscriber on an old
+    // release that there is a newer one, and to attribute a bug to the right
+    // software. Every call, the token call included.
+    for (const call of source.calls) {
+      expect(call.userAgent).toMatch(/^epg-tools\/\d+\.\d+\.\d+/);
+    }
+  });
+
+  it('leaves a user agent the caller set alone', async () => {
+    const source = await sdServer();
+
+    await client(source, {
+      http: ky.create({ headers: { 'user-agent': 'something-else/1.0' } }),
+    }).status();
+
+    expect(source.calls.map((call) => call.userAgent)).toEqual([
+      'something-else/1.0',
+      'something-else/1.0',
+    ]);
+  });
+
+  it('stops when the service says it is offline, rather than being refused call by call', async () => {
+    const source = await sdServer();
+
+    // At HTTP 200, with a token in hand and `tokenExpires: 0`: nothing but the
+    // code says anything is wrong.
+    source.answer({
+      token: {
+        response: 'SERVICE_OFFLINE',
+        code: 3000,
+        message: 'Server offline for maintenance.',
+        token: 'CAFEDEADBEEF',
+        tokenExpires: 0,
+      },
+    });
+
+    await expect(client(source).status()).rejects.toThrow(/offline.*wait at least half an hour/s);
+  });
+
   it('retries a POST, which ky on its own would not', async () => {
     const source = await sdServer({ programs: [{ programID: 'EP1' }] });
 

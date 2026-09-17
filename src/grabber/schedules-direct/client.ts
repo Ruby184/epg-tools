@@ -25,7 +25,9 @@ import { createHash } from 'node:crypto';
 import { GrabberError } from '../../core/error.js';
 import type { PacedRequest } from '../types.js';
 import {
+  codeOf,
   SCHEDULES_DIRECT_URL,
+  SD_SERVICE_OFFLINE,
   wireMessage,
   type WireArtwork,
   type WireHeadend,
@@ -37,6 +39,9 @@ import {
   type WireStatus,
   type WireToken,
 } from './wire.js';
+
+/** What this package calls itself to the service, version and all. */
+const USER_AGENT = `${__PKG_NAME__}/${__PKG_VERSION__}`;
 
 /** How the service wants a password: SHA1, hex, lower case. */
 export function passwordHash(password: string): string {
@@ -230,7 +235,23 @@ export function createSchedulesDirectClient(
   const paced: PacedRequest = options.paced ?? ((task) => task({}));
 
   /** The service, unauthenticated: what asks for a token, and nothing else. */
-  const client: KyInstance = http.extend({ prefix: url });
+  const client: KyInstance = http.extend({
+    prefix: url,
+    hooks: {
+      beforeRequest: [
+        ({ request }) => {
+          // The service asks every client for one, by name and **with a
+          // version**: it is how it tells a subscriber on an old release that
+          // there is a new one, and how a bug gets attributed to the right
+          // software. Only when the caller has not set their own — a site that
+          // wants to be seen as something else is entitled to say so.
+          if (!request.headers.has('user-agent')) {
+            request.headers.set('user-agent', USER_AGENT);
+          }
+        },
+      ],
+    },
+  });
 
   let pending: Promise<string> | undefined;
 
@@ -264,6 +285,15 @@ export function createSchedulesDirectClient(
       }
 
       throw new GrabberError(`${site}: Schedules Direct refused the account — ${said}`);
+    }
+
+    if (codeOf(answer) === SD_SERVICE_OFFLINE) {
+      // At HTTP 200, with a token and `tokenExpires: 0`: nothing but the code
+      // says the service is down, and its own instruction to clients is to stop
+      // rather than to carry on and be refused call by call.
+      throw new GrabberError(
+        `${site}: Schedules Direct is offline — ${wireMessage(answer)}. It asks clients to wait at least half an hour before trying again`,
+      );
     }
 
     if (typeof answer.token !== 'string' || answer.token === '') {

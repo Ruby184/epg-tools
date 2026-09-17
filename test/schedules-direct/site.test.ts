@@ -250,7 +250,7 @@ describe('defineSchedulesDirectSite', () => {
     expect((report.of('site:failed')[0]!.error as Error).message).toMatch(/no lineup on it/);
   });
 
-  it('warns when the service says it is not well', async () => {
+  it('stops when the service says it is offline, as the service asks', async () => {
     const source = await service();
     const report = collect();
 
@@ -264,9 +264,66 @@ describe('defineSchedulesDirectSite', () => {
 
     await grab([site(source)], { cache: store(), now: NOW, reporter: report.reporter });
 
-    // The difference between "the guide is short today" and "the guide is short
-    // today and it is not your configuration".
-    expect(report.messages.some((line) => line.includes('Maintenance until'))).toBe(true);
+    // The whole site, once, with the reason on it — rather than every
+    // channel-day failing separately at a server that is refusing everything.
+    expect((report.of('site:failed')[0]!.error as Error).message).toMatch(
+      /offline.*Maintenance until.*wait at least half an hour/s,
+    );
+    expect(source.countOf('schedules/md5')).toBe(0);
+  });
+
+  it('carries on when the service says something it has no name for', async () => {
+    const source = await service();
+    const report = collect();
+
+    source.answer({
+      status: {
+        account: { messages: [] },
+        lineups: [{ lineup: LINEUP }],
+        systemStatus: [{ status: 'Degraded', message: 'Slow today.' }],
+      },
+    });
+
+    const summary = await grab([site(source)], {
+      cache: store(),
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    // Only `Offline` is a state the service names, so anything else is news
+    // rather than a verdict: said out loud, and the guide still built.
+    expect(summary.fetched).toBe(2);
+    expect(report.messages.some((line) => line.includes('Slow today.'))).toBe(true);
+  });
+
+  it('says when a lineup has been deleted at the headend, and grabs the rest', async () => {
+    const source = await service();
+    const report = collect();
+
+    source.answer({
+      status: {
+        account: { messages: [] },
+        lineups: [
+          { lineup: LINEUP, name: 'Freeview' },
+          // The service's own shape for a deleted one: `ID` where every other
+          // entry says `lineup`, so a client reading one name cannot name it.
+          { ID: 'GBR-DEAD-DEFAULT', modified: '1970-01-01T00:00:00Z', isDeleted: true },
+        ],
+      },
+    });
+
+    await grab([site(source, { lineup: undefined })], {
+      cache: store(),
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    expect(report.messages).toContainEqual(
+      expect.stringContaining('GBR-DEAD-DEFAULT has been deleted at the headend'),
+    );
+    // Not fetched: taking it would be grabbing a list on its way to empty.
+    expect(source.callsTo('lineups/GBR-DEAD-DEFAULT')).toHaveLength(0);
+    expect(source.callsTo(`lineups/${LINEUP}`)).toHaveLength(1);
   });
 
   it('caches a day the station does not have as empty, and remembers that it said so', async () => {

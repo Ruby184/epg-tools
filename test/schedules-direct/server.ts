@@ -26,6 +26,7 @@ import type {
   WireProgram,
   WireSchedule,
   WireStatus,
+  WireToken,
 } from '../../src/grabber/schedules-direct/wire.js';
 
 /** One request as the service saw it. */
@@ -36,6 +37,8 @@ export interface SdCall {
   token: string | undefined;
   /** What came after the `?`, for the two calls that ask with one. */
   query: string;
+  /** What the client called itself, which the service asks every client to say. */
+  userAgent: string | undefined;
   body: unknown;
 }
 
@@ -51,6 +54,8 @@ export interface SdAnswers {
   artwork?: WireArtwork[];
   /** What `GET /headends` answers with — a region's offering, not the account's. */
   headends?: WireHeadend[];
+  /** Answered instead of a fresh token — for the shapes that are not a token. */
+  token?: WireToken;
 }
 
 export interface SdServer {
@@ -174,6 +179,7 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
         method: request.method ?? 'GET',
         token,
         query: asked.search.replace('?', ''),
+        userAgent: request.headers['user-agent'],
         body: await bodyOf(request),
       });
 
@@ -195,6 +201,14 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
           // — its own shape, because that is where the message has to be read
           // from to be reported.
           send(response, 400, { response: 'INVALID_USER', code, message });
+
+          return;
+        }
+
+        if (answers.token !== undefined) {
+          // At HTTP 200 whatever it says: an offline service answers with a
+          // token in hand, and only its code tells you not to use it.
+          send(response, 200, answers.token);
 
           return;
         }

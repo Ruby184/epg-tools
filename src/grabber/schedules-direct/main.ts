@@ -162,19 +162,37 @@ function mappingFingerprint(options: SchedulesDirectSiteOptions): string {
   return createHash('sha1').update(shape).digest('hex').slice(0, 16);
 }
 
-/** Warn about anything the account itself has to say. */
+/**
+ * Say what the account and the service have to say, and stop where asked to.
+ *
+ * `Offline` is the one that throws. It is the service's own instruction — "all
+ * further processing will be rejected at the server", and a client should wait
+ * rather than reconnect — so carrying on would be a run that fails call by call
+ * with worse messages than this one. Anything else unexpected is a warning:
+ * the service names no other state, and a guess at what `Degraded` means is not
+ * worth failing someone's guide over.
+ */
 function sayAboutAccount(
   status: Awaited<ReturnType<SchedulesDirectClient['status']>>,
   warn: ChannelsContext['warn'],
   now: number,
+  site: string,
 ): void {
   for (const trouble of status.systemStatus ?? []) {
-    // The service asks clients to read this, and it is the difference between
-    // "the guide is short today" and "the guide is short today and it is not
-    // your configuration".
-    if (trouble.status !== undefined && trouble.status !== 'Online') {
-      warn(`Schedules Direct is ${trouble.status}: ${trouble.message ?? 'no detail given'}`);
+    if (trouble.status === undefined || trouble.status === 'Online') {
+      continue;
     }
+
+    if (trouble.status === 'Offline') {
+      throw new GrabberError(
+        `${site}: Schedules Direct is offline — ${trouble.message ?? 'no detail given'}. It asks clients to wait at least half an hour before trying again`,
+      );
+    }
+
+    // Not a state the service documents, so it is news rather than a verdict —
+    // the difference between "the guide is short today" and "the guide is short
+    // today and it is not your configuration".
+    warn(`Schedules Direct is ${trouble.status}: ${trouble.message ?? 'no detail given'}`);
   }
 
   for (const message of status.account?.messages ?? []) {
@@ -380,17 +398,32 @@ export function defineSchedulesDirectSite(
         const client = clientFor(context);
         const status = await client.status();
 
-        sayAboutAccount(status, context.warn, Date.now());
+        sayAboutAccount(status, context.warn, Date.now(), site.site);
 
-        const onAccount = (status.lineups ?? []).filter((one) => one.lineup !== undefined);
-        const held = onAccount.map((one) => one.lineup!);
+        const onAccount = (status.lineups ?? [])
+          .map((one) => ({ ...one, lineup: lineupIdOf(one) }))
+          .filter((one) => one.lineup !== undefined);
+
+        for (const dead of onAccount.filter((one) => one.isDeleted === true)) {
+          // It still answers, with nothing new in it, so the guide thins out
+          // rather than failing — which is why the service asks that this be
+          // said out loud.
+          context.warn(
+            `the Schedules Direct lineup ${dead.lineup!} has been deleted at the headend and will stop being updated. Pick another at schedulesdirect.org`,
+          );
+        }
+
+        // A deleted one is not part of "every lineup on the account": taking it
+        // would be grabbing a list that is on its way to empty.
+        const live = onAccount.filter((one) => one.isDeleted !== true);
+        const held = live.map((one) => one.lineup!);
         const missing = configured?.filter((one) => !held.includes(one)) ?? [];
 
         if (missing.length > 0) {
           // Nothing here adds one, so this is where a run stops — and the
           // message has to be enough to act on, which means naming what the
           // account does have, the way a person would recognise them.
-          const names = onAccount
+          const names = live
             .map((one) => (one.name === undefined ? one.lineup! : `${one.lineup!} (${one.name})`))
             .join(', ');
 
@@ -689,6 +722,14 @@ export interface SchedulesDirectLineup {
   name?: string;
   /** When the lineup last changed, which is not when its schedules did. */
   modified?: string;
+  /**
+   * The headend stopped carrying it.
+   *
+   * It stays on the account and keeps answering with what it last had, so
+   * nothing fails — the guide just stops gaining days. A site takes every
+   * lineup on the account *except* these.
+   */
+  deleted?: boolean;
 }
 
 /** One headend of a region, and the lineups it offers. */
@@ -754,15 +795,25 @@ export interface SchedulesDirectAccount {
   removeLineup: (lineup: string) => Promise<SchedulesDirectLineupChange>;
 }
 
+/** What a lineup is called, under either of the two names the service uses. */
+function lineupIdOf(wire: WireAccountLineup): string | undefined {
+  const id = wire.lineup ?? wire.ID;
+
+  return id === undefined || id === '' ? undefined : id;
+}
+
 /** A lineup as the account lists it, or nothing where it has no id. */
 function accountLineup(wire: WireAccountLineup): SchedulesDirectLineup[] {
-  return wire.lineup === undefined || wire.lineup === ''
+  const id = lineupIdOf(wire);
+
+  return id === undefined
     ? []
     : [
         {
-          lineup: wire.lineup,
+          lineup: id,
           ...(wire.name === undefined ? {} : { name: wire.name }),
           ...(wire.modified === undefined ? {} : { modified: wire.modified }),
+          ...(wire.isDeleted === undefined ? {} : { deleted: wire.isDeleted }),
         },
       ];
 }

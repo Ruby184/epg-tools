@@ -35,6 +35,13 @@ export const SCHEDULES_DIRECT_URL = 'https://json.schedulesdirect.org/20141201/'
  */
 export const SD_OK = 0;
 /** The account has run out. Fatal for the site: nothing will be served. */
+/**
+ * The service is down for maintenance, and says so **at HTTP 200 with a token
+ * in hand** — `tokenExpires: 0` beside it. Only the code tells you, which is
+ * why the token call reads one.
+ */
+export const SD_SERVICE_OFFLINE = 3000;
+
 export const SD_ACCOUNT_EXPIRED = 4001;
 /** Wrong username or password. Fatal, and said in the service's own words. */
 export const SD_INVALID_ACCOUNT = 4003;
@@ -71,6 +78,25 @@ export interface WireToken extends WireResponse {
 /** One lineup on the account, as `GET /status` lists it. */
 export interface WireAccountLineup {
   lineup?: string;
+  /**
+   * The same thing under another name, on the entry that is `isDeleted`.
+   *
+   * The service's own `/status` example writes a live lineup as `lineup` and a
+   * deleted one as `ID` — so a client reading only the first sees an entry with
+   * no identity at all, which is exactly the entry it most needs to name.
+   */
+  ID?: string;
+  /**
+   * The headend stopped carrying it.
+   *
+   * `true` or absent, never `false` — the service writes the key only on the
+   * entry it applies to, so the type says what the wire says.
+   *
+   * It stays on the account and keeps answering, with nothing new in it, so a
+   * guide built from it quietly thins out instead of failing. The service asks
+   * that the user be told, and this is the whole reason why.
+   */
+  isDeleted?: true;
   /** What a person calls it — `Freeview` for `GBR-1000014-DEFAULT`. */
   name?: string;
   /** When the lineup itself last changed — not its schedules. */
