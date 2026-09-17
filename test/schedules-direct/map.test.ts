@@ -93,13 +93,43 @@ describe('a station', () => {
     expect(schedulesDirectStation({ name: 'Nameless' }, '001')).toBeUndefined();
   });
 
+  it('writes every logo the service holds, for a consumer to choose between', () => {
+    const many = schedulesDirectStation(
+      {
+        ...STATION,
+        stationLogo: [
+          { URL: 'https://example.test/wbbm.png', width: 360, height: 270 },
+          { URL: 'https://example.test/wbbm-dark.png', category: 'dark' },
+        ],
+      },
+      '002',
+    )!;
+    const element = ChannelBuilder.of('I20454.json.schedulesdirect.org', 'WBBMDT');
+
+    schedulesDirectChannelExtras(element, many.data!);
+
+    // The primary is the one `GrabberChannel.logo` carries and is written once,
+    // not twice, though the service lists it in both places.
+    expect(many.logo).toBe('https://example.test/wbbm.png');
+    expect(many.data!.logos).toHaveLength(2);
+    expect(element.build().icon).toEqual([
+      { src: 'https://example.test/wbbm-dark.png', extraAttributes: { category: 'dark' } },
+    ]);
+  });
+
   it('keeps what the DTD has no place for as extensions', () => {
     const element = ChannelBuilder.of('I20454.json.schedulesdirect.org', 'WBBMDT');
 
     schedulesDirectChannelExtras(element, station);
 
     expect(element.build()).toMatchObject({
-      extraAttributes: { stationId: '20454', callsign: 'WBBMDT', affiliate: 'CBS' },
+      extraAttributes: {
+        stationId: '20454',
+        callsign: 'WBBMDT',
+        affiliate: 'CBS',
+        country: 'GBR',
+        city: 'London',
+      },
     });
   });
 });
@@ -309,66 +339,157 @@ describe('a programme', () => {
       ],
     };
 
-    it('writes the one the lineup`s country uses', () => {
-      // The lineup decides, not the broadcaster: a British lineup carrying an
-      // American channel wants the British rating for it.
-      const onGbr = schedulesDirectStation(
-        { ...STATION, broadcaster: { country: 'USA' } },
-        '002',
-        {},
-        'GBR-1000014-DEFAULT',
-      )!.data!;
-      const normalised = schedulesDirectProgramme(AIRING, { ...PROGRAM, ...many }, onGbr)!;
+    it('writes every board`s, so a profile can choose between them', () => {
+      // Which one a guide shows is a question about the consumer reading it,
+      // and the cache serves all of them at once. Narrowing it here would be a
+      // refetch away from being undone.
+      const normalised = schedulesDirectProgramme(AIRING, { ...PROGRAM, ...many }, station)!;
 
-      expect(normalised.ratings).toEqual([expect.objectContaining({ code: 'PG', country: 'GBR' })]);
+      expect(normalised.ratings).toHaveLength(3);
     });
 
-    it('falls back to where the broadcaster is when no lineup says', () => {
-      const programme = built({}, many);
+    it('names the board in `system`, not the country', () => {
+      // tvheadend matches this against the `authority` of its own rating
+      // labels; a country there would match nothing.
+      const programme = built(
+        {},
+        {
+          contentRating: [
+            { body: 'British Board of Film Classification', code: 'PG', country: 'GBR' },
+          ],
+        },
+      );
 
       expect(programme.rating).toEqual([
-        { value: 'PG', system: 'British Board of Film Classification' },
+        {
+          value: 'PG',
+          system: 'British Board of Film Classification',
+          extraAttributes: { country: 'GBR' },
+        },
       ]);
     });
 
-    it('takes the country the caller named over the station`s', () => {
-      const normalised = schedulesDirectProgramme({ ...AIRING }, { ...PROGRAM, ...many }, station, {
-        ratingCountry: 'FIN',
-      })!;
+    it('carries the country as an extension, which is what narrows them', () => {
+      const all = buildProgramme(
+        'x',
+        schedulesDirectProgramme(AIRING, { ...PROGRAM, ...many }, station)!,
+      ).build().rating!;
 
-      expect(normalised.ratings).toEqual([
-        expect.objectContaining({ code: 'K12', country: 'FIN', warnings: ['Violence'] }),
+      expect(all.filter((one) => one.extraAttributes?.country === 'FIN')).toEqual([
+        expect.objectContaining({ value: 'K12' }),
       ]);
-      // What the board warned about, which the DTD has no field for and a
-      // parental control has every use for.
-      expect(buildProgramme('x', normalised).build().rating).toEqual([
+    });
+
+    it('writes what a board warned about, which the DTD has no field for', () => {
+      const programme = built(
+        {},
+        {
+          contentRating: [
+            {
+              body: 'Mediakasvatus- ja kuvaohjelmayksikkö',
+              code: 'K12',
+              contentWarning: ['Violence'],
+            },
+          ],
+        },
+      );
+
+      expect(programme.rating).toEqual([
         expect.objectContaining({ extra: [{ name: 'warning', value: 'Violence' }] }),
       ]);
     });
 
     it('keeps an untagged rating rather than dropping the only one there is', () => {
       // An airing's own `ratings` carry no country, and older programmes carry
-      // none either — filtering those away would lose them entirely.
+      // none either.
       const programme = built({}, { contentRating: [{ body: 'UK Content Provider', code: '12' }] });
 
       expect(programme.rating).toEqual([{ value: '12', system: 'UK Content Provider' }]);
     });
 
-    it('writes them all when there is nothing to choose by', () => {
-      const { broadcaster: _nowhere, ...unplaced } = STATION;
-      const nowhere = schedulesDirectStation(unplaced, '002')!.data!;
-      const normalised = schedulesDirectProgramme(AIRING, { ...PROGRAM, ...many }, nowhere)!;
+    it('writes how long the programme runs, which is not how long the slot is', () => {
+      // A 3000-second programme in a 3600-second slot: the padding is real and
+      // the DTD keeps the two apart.
+      const programme = built({ duration: 3600 }, { duration: 3000 });
 
-      // Noisy, but not a guess — and the station said nothing about where it is.
-      expect(normalised.ratings).toHaveLength(3);
+      expect(programme.length).toEqual({ units: 'seconds', value: 3000 });
+      expect(programme.stop).toEqual(new Date('2026-09-12T21:00:00Z'));
     });
 
-    it('writes none when asked for none', () => {
-      const normalised = schedulesDirectProgramme(AIRING, { ...PROGRAM, ...many }, station, {
-        ratingCountry: false,
-      })!;
+    it('takes a film`s runtime from where the service keeps it', () => {
+      expect(built({}, { movie: { year: '1957', duration: 5580 } }).length).toEqual({
+        units: 'seconds',
+        value: 5580,
+      });
+    });
 
-      expect(normalised.ratings).toEqual([]);
+    it('writes how it was made and what it is shown for as keywords', () => {
+      // Neither is a genre: one is the medium and the other is the occasion.
+      const programme = built({}, { animation: 'Animated', holiday: 'Halloween' });
+
+      expect(programme.keyword).toEqual([
+        { value: 'Animated', lang: 'en' },
+        { value: 'Halloween', lang: 'en' },
+      ]);
+    });
+
+    it('hangs an advisory off the board that gave it, and the rest on the programme', () => {
+      const programme = built(
+        {},
+        {
+          contentRating: [
+            { body: 'USA Parental Rating', code: 'TV-14', contentAdvisory: ['Dialog'] },
+          ],
+          contentAdvisory: ['Adult Language'],
+        },
+      );
+
+      expect(programme.rating).toEqual([
+        expect.objectContaining({ extra: [{ name: 'advisory', value: 'Dialog' }] }),
+      ]);
+      // No board is named for these, so there is no `<rating>` to hang them off.
+      expect(programme.extraAttributes).toMatchObject({ advisory: 'Adult Language' });
+    });
+
+    it('keeps the ids the service knows it and its series by', () => {
+      const programme = built(
+        { continued: true },
+        { programGUID: 'a-guid', parentGUID: 'series-guid', resourceID: '186614' },
+      );
+
+      expect(programme.extraAttributes).toMatchObject({
+        programGuid: 'a-guid',
+        seriesGuid: 'series-guid',
+        resourceId: '186614',
+        // It finishes on the next day's schedule, which a one-day guide cannot
+        // otherwise tell.
+        continued: 'true',
+      });
+    });
+
+    it('dates a film by the year it was made, since it has no first broadcast', () => {
+      // 235 films in a real three-day guide and not one `originalAirDate`
+      // between them: without this a film carries no date at all.
+      const { originalAirDate: _none, ...undated } = PROGRAM;
+      const film = buildProgramme(
+        'x',
+        schedulesDirectProgramme(AIRING, { ...undated, movie: { year: '1957' } }, station)!,
+      ).build();
+
+      expect(film.date).toEqual(new Date('1957-01-01T00:00:00Z'));
+    });
+
+    it('prefers the first broadcast to the year when it has both', () => {
+      expect(built({}, { movie: { year: '1957' } }).date).toEqual(new Date('2013-11-08T00:00:00Z'));
+    });
+
+    it('writes a season the service numbered without an episode', () => {
+      const { metadata: _none, ...unnumbered } = PROGRAM;
+      const programme = built({}, { ...unnumbered, metadata: [{ Gracenote: { season: 75 } }] });
+
+      // Zero-based, and the dimensions it does not know left empty — which is
+      // what `xmltv_ns` is shaped for.
+      expect(programme.episodeNum).toContainEqual({ system: 'xmltv_ns', value: '74..' });
     });
 
     it('writes a movie`s score on the scale it was given on', () => {

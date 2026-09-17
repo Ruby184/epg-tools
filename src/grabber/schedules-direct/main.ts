@@ -65,7 +65,7 @@ const MAPPING = 'mapping';
  * day already cached, because its md5 still matches and nothing would ever ask
  * for it again.
  */
-const MAPPING_VERSION = 1;
+const MAPPING_VERSION = 2;
 
 /** How many station entries one schedule call may carry — the service's own cap. */
 const STATIONS_PER_REQUEST = 5000;
@@ -133,7 +133,6 @@ function mappingFingerprint(options: SchedulesDirectSiteOptions): string {
     credits: options.credits ?? null,
     descriptions: options.descriptions ?? null,
     language: options.language ?? null,
-    ratingCountry: options.ratingCountry ?? null,
     // A function is its source: two different ones read differently, and the
     // same one across runs reads the same.
     channelId:
@@ -295,7 +294,6 @@ export function defineSchedulesDirectSite(
     descriptions,
     language,
     channelId,
-    ratingCountry,
     programmeExtras,
     channelExtras,
     ...site
@@ -314,7 +312,6 @@ export function defineSchedulesDirectSite(
     ...(descriptions === undefined ? {} : { descriptions }),
     ...(language === undefined ? {} : { language }),
     ...(channelId === undefined ? {} : { channelId }),
-    ...(ratingCountry === undefined ? {} : { ratingCountry }),
     ...(programmeExtras === undefined ? {} : { programmeExtras }),
     ...(channelExtras === undefined ? {} : { channelExtras }),
   };

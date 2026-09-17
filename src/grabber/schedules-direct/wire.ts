@@ -189,6 +189,10 @@ export interface WireAiring {
   signed?: boolean;
   ratings?: { body?: string; code?: string; country?: string }[];
   multipart?: { partNumber?: number; totalParts?: number };
+  /** It runs past midnight, and the rest of it is on the next day's schedule. */
+  continued?: boolean;
+  /** The same programme's stable identifier, beside the `programID`. */
+  programGUID?: string;
 }
 
 /** One station's answer to `POST /schedules`. */
@@ -248,7 +252,10 @@ export interface WireProgram extends WireResponse {
     body?: string;
     code?: string;
     country?: string;
+    /** Why the board rated it so — `Violence`, `Linguagem Imprópria`. */
     contentWarning?: string[];
+    /** The same in the board's own shorthand — `Dialog`, `Adult Situations`. */
+    contentAdvisory?: string[];
   }[];
   movie?: {
     year?: string;
@@ -264,8 +271,17 @@ export interface WireProgram extends WireResponse {
   };
   /** The programme's own page, where it has one. */
   officialURL?: string;
-  /** Advisories the rating boards attach — `Violence`, `Disturbing Content`. */
+  /** Advisories no board is named for — `Adult Language`, `Graphic Violence`. */
   contentAdvisory?: string[];
+  /** That it is animated, and how — `Animated`, `Anime`, `Live Action/Animated`. */
+  animation?: string;
+  /** The occasion it is shown for — `Halloween`, `Christmas`. */
+  holiday?: string;
+  /** This programme's stable identifier; `parentGUID` is its series'. */
+  programGUID?: string;
+  parentGUID?: string;
+  /** Gracenote's own id for the thing behind it, shared by every episode. */
+  resourceID?: string;
   hasImageArtwork?: boolean;
   md5?: string;
 }

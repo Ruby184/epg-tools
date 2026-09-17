@@ -14,9 +14,13 @@
  */
 
 import { ChannelBuilder, ProgrammeBuilder, type ProgrammeOptions } from '../../xmltv/builder.js';
-import { formatDdProgidEpisodeNum, parseDdProgidEpisodeNum } from '../../xmltv/episode-num.js';
+import {
+  formatDdProgidEpisodeNum,
+  formatXmltvNsEpisodeNum,
+  parseDdProgidEpisodeNum,
+} from '../../xmltv/episode-num.js';
 import type { GrabberChannel } from '../types.js';
-import type { WireAiring, WirePerson, WireProgram, WireStation } from './wire.js';
+import type { WireAiring, WireLogo, WirePerson, WireProgram, WireStation } from './wire.js';
 
 /**
  * What `tv_grab_zz_sdjson` builds a channel id from, and the two others it
@@ -46,15 +50,33 @@ export interface SchedulesDirectStation {
   broadcastLanguage?: string;
   /** What its descriptions arrive in, which need not be the same. */
   descriptionLanguage?: string;
-  logo?: { url: string; width?: number; height?: number };
+  /**
+   * Every logo the service holds, the one it calls primary first.
+   *
+   * All four of them — `gray`, `dark`, `light`, `white` — because which one
+   * looks right is a question about the thing displaying it, and `<icon>`
+   * repeats. A guide that wants one takes `keep: { 'channel/icon': 1 }`.
+   */
+  logos: SchedulesDirectLogo[];
   /** Its own site, where it gave one. */
   url?: string;
-  /** Where the broadcaster is, which is one way a content rating is chosen. */
+  /** Where the broadcaster is, as far down as it said. */
   country?: string;
+  city?: string;
+  state?: string;
   /** The lineup it came from — `GBR-1000014-DEFAULT`, and so a British guide. */
   lineup?: string;
   isRadioStation?: boolean;
   isCommercialFree?: boolean;
+}
+
+/** One of a station's logos. */
+export interface SchedulesDirectLogo {
+  url: string;
+  width?: number;
+  height?: number;
+  /** What it is drawn for — `gray`, `dark`, `light`, `white`. */
+  category?: string;
 }
 
 /** One person of a programme, normalised. */
@@ -80,8 +102,20 @@ export interface SchedulesDirectProgramme {
   episode?: number;
   /** Which part of a multi-part episode this airing is. */
   part?: { number: number; total: number };
+  /**
+   * How long the programme itself runs, in seconds.
+   *
+   * Not the slot: an airing is padded to the half hour and a film is not 120
+   * minutes because it was given two hours. `<length>` is the one and `start`
+   * to `stop` is the other, and the DTD keeps them apart for that reason.
+   */
+  length?: number;
+  /** It runs past midnight and finishes on the next day's schedule. */
+  continued?: boolean;
   /** First broadcast, as `YYYY-MM-DD`. */
   originalAirDate?: string;
+  /** A film's release year, which is the only date most films have. */
+  year?: string;
   genres: string[];
   showType?: string;
   entityType?: string;
@@ -95,7 +129,21 @@ export interface SchedulesDirectProgramme {
   subtitles: { type: string; language?: string }[];
   cast: SchedulesDirectPerson[];
   crew: SchedulesDirectPerson[];
-  ratings: { body?: string; code: string; country?: string; warnings?: string[] }[];
+  ratings: {
+    body?: string;
+    code: string;
+    country?: string;
+    warnings?: string[];
+    advisories?: string[];
+  }[];
+  /** What it was advised for where no board is named — `Adult Language`. */
+  advisories: string[];
+  /** `Halloween`, `Animated` — what it is about or how it was made. */
+  keywords: string[];
+  /** The service's own identifiers: this programme, its series, its resource. */
+  guid?: string;
+  seriesGuid?: string;
+  resourceId?: string;
   audioProperties: string[];
   videoProperties: string[];
   isNew: boolean;
@@ -125,15 +173,6 @@ export interface SchedulesDirectMapOptions {
   descriptions?: 'short' | 'long' | 'both';
   /** What to call the language of a text the service did not label. */
   language?: string;
-  /**
-   * Whose content ratings to write, as an ISO-3166 three-letter code.
-   *
-   * The service carries every board's opinion — two dozen countries on a
-   * well-known film, of which a British guide wants one. Unset, the station's
-   * own country decides, and failing that every rating is written, which is
-   * honest but noisy. `false` writes none.
-   */
-  ratingCountry?: string | false;
   /** See {@link SCHEDULES_DIRECT_CHANNEL_ID}. */
   channelId?: ChannelIdFormat;
   /** Replaces {@link schedulesDirectProgrammeExtras}; `false` writes no extensions. */
@@ -181,7 +220,28 @@ export function schedulesDirectStation(
     return undefined;
   }
 
-  const logo = wire.logo ?? wire.stationLogo?.[0];
+  // The primary first, then the variants that are not it — `logo` is one of
+  // `stationLogo` on nearly every station, and the same url twice is two
+  // `<icon>`s of the same picture.
+  const held: (WireLogo & { category?: string })[] = [
+    ...(wire.logo === undefined ? [] : [wire.logo]),
+    ...(wire.stationLogo ?? []),
+  ];
+  const logos = held.flatMap((one) =>
+    one.URL === undefined || one.URL === ''
+      ? []
+      : [
+          {
+            url: one.URL,
+            ...(one.width === undefined ? {} : { width: one.width }),
+            ...(one.height === undefined ? {} : { height: one.height }),
+            ...(one.category === undefined ? {} : { category: one.category }),
+          },
+        ],
+  );
+  const unique = logos.filter(
+    (one, at) => logos.findIndex((other) => other.url === one.url) === at,
+  );
   const station: SchedulesDirectStation = {
     stationID,
     name: wire.name ?? wire.callsign ?? stationID,
@@ -194,21 +254,15 @@ export function schedulesDirectStation(
     ...(wire.descriptionLanguage?.[0] === undefined
       ? {}
       : { descriptionLanguage: wire.descriptionLanguage[0] }),
-    ...(logo?.URL === undefined
-      ? {}
-      : {
-          logo: {
-            url: logo.URL,
-            ...(logo.width === undefined ? {} : { width: logo.width }),
-            ...(logo.height === undefined ? {} : { height: logo.height }),
-          },
-        }),
+    logos: unique,
     ...(wire.URL === undefined || wire.URL === ''
       ? {}
       : // Upper-cased as often as not on the wire: a host is not case-sensitive
         // but a url in a guide is read by people.
         { url: wire.URL.toLowerCase() }),
     ...(wire.broadcaster?.country === undefined ? {} : { country: wire.broadcaster.country }),
+    ...(wire.broadcaster?.city === undefined ? {} : { city: wire.broadcaster.city }),
+    ...(wire.broadcaster?.state === undefined ? {} : { state: wire.broadcaster.state }),
     ...(lineup === undefined ? {} : { lineup }),
     ...(wire.isRadioStation === undefined ? {} : { isRadioStation: wire.isRadioStation }),
     ...(wire.isCommercialFree === undefined ? {} : { isCommercialFree: wire.isCommercialFree }),
@@ -219,7 +273,7 @@ export function schedulesDirectStation(
     siteId: stationID,
     name: station.name,
     ...(station.broadcastLanguage === undefined ? {} : { lang: station.broadcastLanguage }),
-    ...(station.logo === undefined ? {} : { logo: station.logo.url }),
+    ...(station.logos[0] === undefined ? {} : { logo: station.logos[0].url }),
     // The number a box shows it at, which is what `preset` is.
     ...(channel === undefined ? {} : { preset: channel }),
     data: station,
@@ -237,11 +291,27 @@ export function schedulesDirectChannelExtras(
     element.url(station.url);
   }
 
+  for (const logo of station.logos.slice(1)) {
+    // The first is already written from `GrabberChannel.logo`; these are the
+    // variants beside it, DTD elements rather than extensions because `<icon>`
+    // repeats and this is what it repeats for.
+    element.icon(
+      logo.url,
+      {
+        ...(logo.width === undefined ? {} : { width: logo.width }),
+        ...(logo.height === undefined ? {} : { height: logo.height }),
+      },
+      logo.category === undefined ? undefined : { category: logo.category },
+    );
+  }
+
   element.extraAttributes({
     stationId: station.stationID,
     ...(station.callsign === undefined ? {} : { callsign: station.callsign }),
     ...(station.affiliate === undefined ? {} : { affiliate: station.affiliate }),
     ...(station.country === undefined ? {} : { country: station.country }),
+    ...(station.city === undefined ? {} : { city: station.city }),
+    ...(station.state === undefined ? {} : { state: station.state }),
     ...(station.isRadioStation === undefined ? {} : { radio: String(station.isRadioStation) }),
     ...(station.isCommercialFree === undefined
       ? {}
@@ -265,7 +335,17 @@ export function schedulesDirectProgrammeExtras(
       ? { letterbox: 'yes' }
       : {}),
     programId: programme.programID,
+    // What the service knows it by besides the `programID` — the series id in
+    // particular, which is how every episode of a run is known to be one run.
+    ...(programme.guid === undefined ? {} : { programGuid: programme.guid }),
+    ...(programme.seriesGuid === undefined ? {} : { seriesGuid: programme.seriesGuid }),
+    ...(programme.resourceId === undefined ? {} : { resourceId: programme.resourceId }),
     ...(programme.entityType === undefined ? {} : { entityType: programme.entityType }),
+    // It finishes on the next day's schedule, which is worth saying on a guide
+    // that shows one day at a time.
+    ...(programme.continued === undefined ? {} : { continued: String(programme.continued) }),
+    // Advisories no board is named for, so they cannot hang off a `<rating>`.
+    ...(programme.advisories.length === 0 ? {} : { advisory: programme.advisories.join(', ') }),
     ...(programme.liveTapeDelay === undefined ? {} : { live: programme.liveTapeDelay }),
     ...(programme.free === undefined ? {} : { free: String(programme.free) }),
     ...(programme.educational === undefined ? {} : { educational: String(programme.educational) }),
@@ -321,28 +401,6 @@ function people(
   );
 }
 
-/**
- * Whose content rating this station's viewers want.
- *
- * The **lineup** first: `GBR-1000014-DEFAULT` is a British lineup, and a British
- * lineup carrying CNN wants the British rating for it rather than the American
- * one — so where the broadcaster sits is the weaker answer, and only used when
- * the lineup does not say. With neither, nothing is chosen and every rating is
- * written, which is noisy but not a guess.
- */
-export function ratingCountryFor(
-  station: SchedulesDirectStation | undefined,
-  options: SchedulesDirectMapOptions = {},
-): string | undefined {
-  if (options.ratingCountry === false) {
-    return undefined;
-  }
-
-  return (
-    options.ratingCountry ?? /^([A-Z]{3})-/.exec(station?.lineup ?? '')?.[1] ?? station?.country
-  );
-}
-
 /** What an `audioProperties` entry has to say about subtitling. */
 const TELETEXT = new Set(['cc', 'subtitled']);
 
@@ -357,44 +415,43 @@ const TELETEXT = new Set(['cc', 'subtitled']);
 const UNDETERMINED = 'und';
 
 /**
- * The ratings worth writing, of every board's opinion the service holds.
+ * Every board's opinion, as it arrived.
  *
- * A well-known film carries two dozen, from Canada to Indonesia, and a guide
- * wants the one its viewers recognise. The country is the caller's if it named
- * one, else the station's own — and with neither to go on every rating is
- * written, which is noisy but not a guess.
+ * All of them, deliberately — two dozen countries on a well-known film. Which
+ * one a guide should show is a question about the consumer reading it, and this
+ * package answers those at serialize time, where an output profile can narrow
+ * them without a refetch:
+ *
+ * ```ts
+ * profile: { keep: { 'programme/rating': (all) =>
+ *   all.filter((one) => one.extraAttributes?.country === 'GBR') } }
+ * ```
+ *
+ * Choosing here would bake one consumer's answer into the cache, which is the
+ * thing the profile layer exists to prevent.
  */
 function ratingsOf(
-  ratings: { body?: string; code?: string; country?: string; contentWarning?: string[] }[],
-  options: SchedulesDirectMapOptions,
-  station: SchedulesDirectStation | undefined,
+  ratings: {
+    body?: string;
+    code?: string;
+    country?: string;
+    contentWarning?: string[];
+    contentAdvisory?: string[];
+  }[],
 ): SchedulesDirectProgramme['ratings'] {
-  if (options.ratingCountry === false) {
-    return [];
-  }
-
-  const wanted = ratingCountryFor(station, options);
-  const usable = ratings.filter((rating) => (rating.code ?? '') !== '');
-  const mine = wanted === undefined ? [] : usable.filter((rating) => rating.country === wanted);
-  // Nothing for this country: the ones that named no country at all, which is
-  // what an airing's own `ratings` are and what older data is throughout. A
-  // rating with no country is not somebody else's — it is just untagged, and
-  // dropping it would lose the only one some programmes have.
-  const kept =
-    wanted === undefined
-      ? usable
-      : mine.length > 0
-        ? mine
-        : usable.filter((rating) => rating.country === undefined);
-
-  return kept.map((rating) => ({
-    code: rating.code!,
-    ...(rating.body === undefined ? {} : { body: rating.body }),
-    ...(rating.country === undefined ? {} : { country: rating.country }),
-    ...(rating.contentWarning === undefined || rating.contentWarning.length === 0
-      ? {}
-      : { warnings: rating.contentWarning }),
-  }));
+  return ratings
+    .filter((rating) => (rating.code ?? '') !== '')
+    .map((rating) => ({
+      code: rating.code!,
+      ...(rating.body === undefined ? {} : { body: rating.body }),
+      ...(rating.country === undefined ? {} : { country: rating.country }),
+      ...(rating.contentWarning === undefined || rating.contentWarning.length === 0
+        ? {}
+        : { warnings: rating.contentWarning }),
+      ...(rating.contentAdvisory === undefined || rating.contentAdvisory.length === 0
+        ? {}
+        : { advisories: rating.contentAdvisory }),
+    }));
 }
 
 /**
@@ -483,6 +540,7 @@ export function schedulesDirectProgramme(
   const credits = options.credits === false ? false : (options.credits ?? DEFAULT_CREDITS);
   const part = airing.multipart;
   const scored = program?.movie?.qualityRating?.find((one) => (one.rating ?? '') !== '');
+  const runtime = program?.duration ?? program?.movie?.duration;
   // `3` out of `1` to `4` becomes `3/4`, which is what `<star-rating>` means by
   // a value: the scale is part of the number, not a separate field.
   const quality =
@@ -518,19 +576,21 @@ export function schedulesDirectProgramme(
     ...(part?.partNumber === undefined || part.totalParts === undefined
       ? {}
       : { part: { number: part.partNumber, total: part.totalParts } }),
+    // A film's own `duration` sits under `movie`, where the programme's is not.
+    ...(runtime === undefined || runtime <= 0 ? {} : { length: runtime }),
+    ...(airing.continued === undefined ? {} : { continued: airing.continued }),
     ...(program?.originalAirDate === undefined || program.originalAirDate === ''
       ? {}
       : { originalAirDate: program.originalAirDate }),
+    ...(program?.movie?.year === undefined || program.movie.year === ''
+      ? {}
+      : { year: program.movie.year }),
     genres: program?.genres?.filter((genre) => genre !== '') ?? [],
     ...(program?.showType === undefined ? {} : { showType: program.showType }),
     ...(program?.entityType === undefined ? {} : { entityType: program.entityType }),
     cast: credits === false ? [] : people(program?.cast, credits.cast),
     crew: credits === false ? [] : people(program?.crew, credits.crew),
-    ratings: ratingsOf(
-      [...(program?.contentRating ?? []), ...(airing.ratings ?? [])],
-      options,
-      station,
-    ),
+    ratings: ratingsOf([...(program?.contentRating ?? []), ...(airing.ratings ?? [])]),
     countries: program?.country?.filter((one) => one !== '') ?? [],
     urls: [
       ...(program?.officialURL === undefined || program.officialURL === ''
@@ -541,6 +601,13 @@ export function schedulesDirectProgramme(
       ...vocabularies.flatMap(([, one]) => (one.url === undefined ? [] : [one.url])),
     ],
     ...(quality === undefined ? {} : { starRating: quality }),
+    advisories: program?.contentAdvisory?.filter((one) => one !== '') ?? [],
+    keywords: [program?.animation, program?.holiday].flatMap((one) =>
+      one === undefined || one === '' ? [] : [one],
+    ),
+    ...(program?.programGUID === undefined ? {} : { guid: program.programGUID }),
+    ...(program?.parentGUID === undefined ? {} : { seriesGuid: program.parentGUID }),
+    ...(program?.resourceID === undefined ? {} : { resourceId: program.resourceID }),
     subtitles: subtitlesOf(airing),
     audioProperties: airing.audioProperties ?? [],
     videoProperties: airing.videoProperties ?? [],
@@ -664,6 +731,12 @@ export function buildProgramme(
     element.stop(programme.stop);
   }
 
+  if (programme.length !== undefined) {
+    // Seconds, as the service counts them: converting to minutes would round
+    // away the difference between a 90-minute film and a 94-minute one.
+    element.length(programme.length, 'seconds');
+  }
+
   if (programme.episodeTitle !== undefined) {
     element.subTitle(programme.episodeTitle);
   }
@@ -679,6 +752,15 @@ export function buildProgramme(
         ? {}
         : { part: programme.part.number, parts: programme.part.total }),
     });
+  } else if (programme.season !== undefined) {
+    // A season with no episode beside it — a long-running daytime series, where
+    // the service numbers the run but not the instalment. `xmltv_ns` has a slot
+    // for exactly this: the dimensions it does not know are left empty.
+    element.episodeNum(
+      'xmltv_ns',
+      // Zero-based, as `xmltv_ns` counts: season 75 is written `74 . . `.
+      formatXmltvNsEpisodeNum({ season: { index: programme.season - 1 }, episode: {}, part: {} }),
+    );
   }
 
   // The service's id *is* a `dd_progid`, which is where the convention came
@@ -696,6 +778,13 @@ export function buildProgramme(
 
   if (programme.showType !== undefined) {
     element.category(programme.showType, 'en');
+  }
+
+  for (const keyword of programme.keywords) {
+    // `Animated` and `Halloween`: neither is a genre — one is how it was made
+    // and the other is when it is shown — and `<keyword>` is where the DTD puts
+    // what a programme is about beside what it is.
+    element.keyword(keyword, 'en');
   }
 
   for (const person of programme.cast) {
@@ -731,17 +820,40 @@ export function buildProgramme(
 
   if (programme.originalAirDate !== undefined) {
     element.date(asXmltvDay(programme.originalAirDate));
+  } else if (programme.year !== undefined) {
+    // A film's year, and the only date it has: the service gives no
+    // `originalAirDate` for one — 235 films in a real three-day guide, not one
+    // of them dated — and `<date>` is year-precision by design.
+    element.date(programme.year);
   }
 
   for (const rating of programme.ratings) {
-    element.rating(rating.code, {
-      ...(rating.body === undefined ? {} : { system: rating.body }),
-      // What the board warned about, which the DTD has no field for and a
-      // parental control has every use for.
-      ...(rating.warnings === undefined
-        ? {}
-        : { extra: rating.warnings.map((value) => ({ name: 'warning', value })) }),
-    });
+    element.rating(
+      rating.code,
+      {
+        // The board, not the country. tvheadend matches this against the
+        // `authority` of its own rating labels —
+        // `ratinglabel_find_from_xmltv(authority, label)`, read from
+        // `src/ratinglabels.c` on 2026-09-17 — and its `country` field is for
+        // DVB, where a rating arrives over the air. A country here would match
+        // nothing.
+        ...(rating.body === undefined ? {} : { system: rating.body }),
+        // What the board warned about, which the DTD has no field for and a
+        // parental control has every use for.
+        ...(rating.warnings === undefined && rating.advisories === undefined
+          ? {}
+          : {
+              extra: [
+                ...(rating.warnings ?? []).map((value) => ({ name: 'warning', value })),
+                ...(rating.advisories ?? []).map((value) => ({ name: 'advisory', value })),
+              ],
+            }),
+      },
+      // Which country's board it is, as an extension: it is what a profile
+      // narrows two dozen ratings down by, and `--no-extensions` takes it away
+      // with everything else that is not in the DTD.
+      rating.country === undefined ? undefined : { country: rating.country },
+    );
   }
 
   if (programme.starRating !== undefined) {
