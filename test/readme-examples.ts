@@ -13,10 +13,12 @@ import {
   build,
   CacheDriverBase,
   defineConfig,
+  defineSchedulesDirectSite,
   defineSiteConfig,
   defineStreamSiteConfig,
   defineXmltvSite,
   guideStream,
+  schedulesDirectAccount,
   SiteStateHandle,
   textReporter,
 } from '../src/main.js';
@@ -25,6 +27,7 @@ import type {
   CacheDriverFactory,
   CacheStore,
   ChannelDayKey,
+  OutputProfile,
   XmltvProgramme,
   FoundEntry,
   FoundMeta,
@@ -288,6 +291,43 @@ export const fromPublishedGuide = defineConfig({
   sites: [defineXmltvSite({ site: 'published.example', url: 'https://example.test/guide.xml.gz' })],
   output: 'public/epg.xml',
 });
+
+// --- docs/site-config.md: From Schedules Direct -----------------------------
+export const fromSchedulesDirect = defineConfig({
+  sites: [
+    defineSchedulesDirectSite({
+      site: 'schedulesdirect',
+      username: process.env.SD_USERNAME!,
+      password: process.env.SD_PASSWORD!,
+      days: 14,
+    }),
+  ],
+  output: 'guide.xml',
+});
+
+// What one consumer wants of it, decided where it can be changed without a refetch.
+export const schedulesDirectProfile: OutputProfile = {
+  keep: {
+    'programme/rating': (all) => all.filter((one) => one.extraAttributes?.country === 'GBR'),
+    'programme/desc': 1,
+    'programme/credits/actor': 8,
+  },
+};
+
+// The questions that come before a config, on one token between them.
+export async function schedulesDirectDiscovery(): Promise<void> {
+  const account = schedulesDirectAccount({
+    username: process.env.SD_USERNAME!,
+    password: process.env.SD_PASSWORD!,
+  });
+
+  for (const one of await account.lineups()) {
+    console.log(one.lineup, one.name);
+  }
+
+  await account.headends({ country: 'GBR', postalCode: 'W1A' });
+  await account.stations('GBR-1000014-DEFAULT');
+}
 
 // --- docs/site-config.md: Asking only when it is worth it -------------------
 export const revalidating = defineSiteConfig({

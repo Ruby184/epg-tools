@@ -793,6 +793,118 @@ rest is held to the end and nothing is lost, with a line in the log saying so.
 `order: 'any'` starts held, for a source known to be ordered by time — no
 warning, no second write, and the whole document in memory while it parses.
 
+### From Schedules Direct
+
+The one paid, curated source in this ecosystem — the US, Canada and the UK — and
+the one whose model this package already had. It publishes an **md5 per
+station-day**, so a run can ask what moved before asking for anything else:
+
+```ts
+import { defineSchedulesDirectSite } from 'epg-tools/grabber';
+
+sites: [
+  defineSchedulesDirectSite({
+    site: 'schedulesdirect',
+    username: process.env.SD_USERNAME!,
+    password: process.env.SD_PASSWORD!,
+    days: 14,
+  }),
+],
+```
+
+**A warm run is one request for the whole site.** One `POST /schedules/md5`
+answers for every station-day owed — the service caps a request at 5,000
+entries, which is one call for any realistic lineup — and every day whose hash
+still matches is reported `unchanged` without being fetched. A real account of
+145 channels over three days: 435 channel-days grabbed cold, then `0 fetched,
+290 from cache, 145 unchanged` on the next run, the 145 from that one request
+and the other 290 never asked about at all, because
+[`staleness`](./configuration.md) only re-asks about today.
+
+**No `lineup` takes every lineup on the account**, which the service already
+lists, so the usual account with one needs nothing here. Name one — `lineup:
+'GBR-1000014-DEFAULT'` — or several, to take only those. A lineup the account
+does not have **fails the site** naming the ones it does; nothing here adds one,
+because six adds a day with no cheap way back is not a thing a grab should spend
+on your behalf. A lineup its headend has **deleted** is skipped with a warning:
+it keeps answering with what it last had, so a guide built from it thins out
+rather than failing.
+
+**Days are UTC, and there is deliberately no `dayZone`** as the other adapters
+have. The service keys its md5s by `(stationID, UTC date)`; filing a programme
+under any other day would store a hash against a day that never held it, and the
+guide would quietly stop updating around midnight.
+
+**It writes everything the service sends.** Every rating board's opinion, the
+whole call sheet in billing order, both descriptions, the programme's own
+`<length>` as distinct from its slot, countries, star ratings, keywords,
+subtitles and the service's own ids as [extensions](./xmltv.md). Narrowing is a
+[serialize-time job](./configuration.md), not a grab-time one — one cache serves
+every consumer, and a choice baked into it costs a refetch to undo:
+
+```ts
+profile: {
+  keep: {
+    // Two dozen boards rate a well-known film. Pick the one your viewers read.
+    'programme/rating': (all) => all.filter((one) => one.extraAttributes?.country === 'GBR'),
+    'programme/desc': 1,                 // the long one, which is written first
+    'programme/credits/actor': 8,        // billing order, so the top eight
+  },
+},
+```
+
+`<rating system>` carries the **board's name**, not a country: tvheadend matches
+that attribute against the `authority` of its own rating labels, so a country
+there would match nothing. The country rides alongside as an extension, which is
+what the rule above filters on.
+
+**No programme artwork.** The service has plenty and the client can fetch it, but
+its image host answers 403 without the account token — so an `<icon>` written
+from it would load for nobody the guide is passed to, and the token cannot go in
+the url: it expires in a day and a guide is a file people share. The reference
+grabbers reach the same end, calling that endpoint not at all. Station logos are
+unaffected and written as usual; those are public.
+
+**The token is kept in the cache between runs**, because the service rate-limits
+authentication and a token is good for a day — one login a day rather than one a
+run. It is a bearer credential in a directory on your disk, which is why
+`persistToken: false` exists. The password is hashed once at startup and the
+plaintext is never written anywhere; errors are scrubbed of both.
+
+**When the service says it is offline, the run stops** with the reason, rather
+than being refused call by call — its own instruction to clients, and it is
+given at HTTP 200 with a token in hand, so nothing but the code says anything is
+wrong.
+
+#### Before there is a config
+
+What lineup to name is a question about the account, so it is answered outside a
+grab. One object, because the service rate-limits authentication and three
+questions through one of these earn one token between them:
+
+```ts
+import { schedulesDirectAccount } from 'epg-tools/grabber';
+
+const account = schedulesDirectAccount({
+  username: process.env.SD_USERNAME!,
+  password: process.env.SD_PASSWORD!,
+});
+
+for (const one of await account.lineups()) {
+  console.log(one.lineup, one.name);       // GBR-1000014-DEFAULT Freeview
+}
+
+// What a region offers, which is a different question from what is on the account
+const offered = await account.headends({ country: 'GBR', postalCode: 'W1A' });
+
+// And what is in one, for writing a `channels` list by hand
+const stations = await account.stations('GBR-1000014-DEFAULT');
+```
+
+`addLineup` and `removeLineup` are here too, and only here: adding is deliberate,
+by name, and never something a grab does. The answer says how many of the day's
+six changes are left.
+
 ## Sites that answer in one pass
 
 Some sources publish the lot in one document — a `xmltv.xml.gz`, a dump behind
