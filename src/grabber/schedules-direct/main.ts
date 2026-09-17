@@ -576,68 +576,67 @@ export function defineSchedulesDirectSite(
         push(under(asked, pair.channel.siteId), pair.day, pair);
       }
 
-      // One md5 pass for the whole site, which is the point of the adapter: a
-      // run where nothing moved makes this request and no other.
-      const md5s: Awaited<ReturnType<SchedulesDirectClient['schedulesMd5']>> = {};
-
-      for (const batch of chunk([...asked], STATIONS_PER_REQUEST)) {
-        Object.assign(
-          md5s,
-          await client.schedulesMd5(
-            batch.map(([stationID, byDay]): StationDays => ({
-              stationID,
-              date: [...byDay.keys()],
-            })),
-          ),
-        );
-      }
-
       /** The station-days worth asking for, and the md5 each will be stored under. */
       const fetching = new Map<string, Map<string, string | undefined>>();
 
-      for (const [stationID, byDay] of asked) {
-        for (const [day, pairs] of byDay) {
-          const wire = md5s[stationID]?.[day];
-          const stored = storedMd5(state, stationID, day);
-          let wanted = false;
+      // One md5 pass for the whole site, which is the point of the adapter: a
+      // run where nothing moved makes this request and no other. Each batch is
+      // read as it lands rather than gathered first — the answers say nothing
+      // about each other, so holding them all would be memory spent to arrive
+      // at the same verdicts later, and a batch that fails after an earlier one
+      // succeeded leaves those channel-days already settled.
+      for (const batch of chunk([...asked], STATIONS_PER_REQUEST)) {
+        const md5s = await client.schedulesMd5(
+          batch.map(([stationID, byDay]): StationDays => ({
+            stationID,
+            date: [...byDay.keys()],
+          })),
+        );
 
-          for (const pair of pairs) {
-            // Per pair rather than per station-day: two lineups can carry one
-            // station, and what is cached for one of them says nothing about
-            // the other.
-            const decision = decideMd5(stored, wire, pair.cached);
-            // Dropping the md5s is not enough on its own to make a changed
-            // mapping take effect: with none stored, the decision falls back to
-            // comparing when the service last changed the day against when we
-            // grabbed it — and that says "keep", which is true about the content
-            // and beside the point when it is the *writing* that changed. Only
-            // `keep` is overridden: a day the service has nothing for is still a
-            // day there is nothing to fetch.
-            const verdict = remapped && decision.verdict === 'keep' ? 'fetch' : decision.verdict;
+        for (const [stationID, byDay] of batch) {
+          for (const [day, pairs] of byDay) {
+            const wire = md5s[stationID]?.[day];
+            const stored = storedMd5(state, stationID, day);
+            let wanted = false;
 
-            if (verdict === 'keep') {
-              yield { channel: pair.channel, day, unchanged: true };
-            } else if (verdict === 'empty') {
-              warn(`${stationID} on ${day}: ${decision.reason ?? 'nothing published'}`);
-              yield { channel: pair.channel, day, programmes: [] };
+            for (const pair of pairs) {
+              // Per pair rather than per station-day: two lineups can carry one
+              // station, and what is cached for one of them says nothing about
+              // the other.
+              const decision = decideMd5(stored, wire, pair.cached);
+              // Dropping the md5s is not enough on its own to make a changed
+              // mapping take effect: with none stored, the decision falls back to
+              // comparing when the service last changed the day against when we
+              // grabbed it — and that says "keep", which is true about the content
+              // and beside the point when it is the *writing* that changed. Only
+              // `keep` is overridden: a day the service has nothing for is still a
+              // day there is nothing to fetch.
+              const verdict = remapped && decision.verdict === 'keep' ? 'fetch' : decision.verdict;
 
-              if (decision.md5 !== undefined) {
-                rememberMd5(state, stationID, day, decision.md5);
+              if (verdict === 'keep') {
+                yield { channel: pair.channel, day, unchanged: true };
+              } else if (verdict === 'empty') {
+                warn(`${stationID} on ${day}: ${decision.reason ?? 'nothing published'}`);
+                yield { channel: pair.channel, day, programmes: [] };
+
+                if (decision.md5 !== undefined) {
+                  rememberMd5(state, stationID, day, decision.md5);
+                }
+              } else if (verdict === 'unknown') {
+                warn(`${stationID} on ${day}: ${decision.reason ?? 'no answer'}`);
+                // Kept rather than cached empty: the service did not say there is
+                // nothing on, it said it could not answer. One with nothing cached
+                // is reported as a failed channel-day by the run, which is the
+                // truth — and is what writing it empty would hide.
+                yield { channel: pair.channel, day, unchanged: true };
+              } else {
+                wanted = true;
               }
-            } else if (verdict === 'unknown') {
-              warn(`${stationID} on ${day}: ${decision.reason ?? 'no answer'}`);
-              // Kept rather than cached empty: the service did not say there is
-              // nothing on, it said it could not answer. One with nothing cached
-              // is reported as a failed channel-day by the run, which is the
-              // truth — and is what writing it empty would hide.
-              yield { channel: pair.channel, day, unchanged: true };
-            } else {
-              wanted = true;
             }
-          }
 
-          if (wanted) {
-            under(fetching, stationID).set(day, wire?.md5);
+            if (wanted) {
+              under(fetching, stationID).set(day, wire?.md5);
+            }
           }
         }
       }
