@@ -35,6 +35,7 @@
 
 import ky, { type KyInstance } from 'ky';
 import { createHash } from 'node:crypto';
+import { setTimeout as wait } from 'node:timers/promises';
 import { chunk } from '../../core/chunk.js';
 import { toDayString } from '../../core/days.js';
 import { GrabberError } from '../../core/error.js';
@@ -68,6 +69,7 @@ import {
   SD_DATE_OUT_OF_RANGE,
   SD_OK,
   SD_PROGRAM_INVALID,
+  SD_PROGRAM_QUEUED,
   type WireAccountLineup,
   type WireAiring,
   type WireLineupChange,
@@ -144,6 +146,17 @@ export interface SchedulesDirectSiteOptions
   stationDaysPerRequest?: number;
   /** How many programmes one detail request may ask about. Under the service's cap of 5000. */
   programmesPerRequest?: number;
+  /**
+   * How long to wait for a programme the service is still generating, and how
+   * often to ask again — `[10_000, 20_000, 30_000]` by default, which is what
+   * the reference grabber waits.
+   *
+   * A `6001` answer means the programme is queued rather than missing, so
+   * asking again immediately gets the same answer. `[]` never waits: the day is
+   * written without it and fetched again on the next run, which is what happens
+   * anyway when the waits run out.
+   */
+  queuedWaits?: readonly number[];
   /**
    * Keep the token in the cache between runs. On by default.
    *
@@ -271,6 +284,17 @@ function sayAboutAccount(
   }
 }
 
+/**
+ * How long to wait before asking again for a programme the service is writing.
+ *
+ * `6001` means queued for generation, so asking again straight away gets the
+ * same answer — which is why the reference grabber sleeps `min(30, 10 × try)`
+ * between attempts and gives up after three. These are those waits, and a
+ * config that would rather not hold a run up sets `queuedWaits: []` and lets
+ * the next run pick the programme up instead.
+ */
+const QUEUED_WAITS_MS: readonly number[] = [10_000, 20_000, 30_000];
+
 /** Append to the list under `key`, starting one where there is none. */
 function push<K, V>(into: Map<K, V[]>, key: K, value: V): void {
   const held = into.get(key);
@@ -376,6 +400,7 @@ export function defineSchedulesDirectSite(
     url,
     stationDaysPerRequest = 500,
     programmesPerRequest = 500,
+    queuedWaits = QUEUED_WAITS_MS,
     persistToken = true,
     // Everything the mapping reads, kept together so it can be handed on whole.
     language,
@@ -763,36 +788,71 @@ export function defineSchedulesDirectSite(
           }
         }
 
-        // The detail, once per programme however many airings carry it.
-        for (const ids of chunk([...missing], programmesPerRequest)) {
-          for (const program of await client.programs(ids)) {
-            if (program.programID === undefined) {
-              continue;
+        /** Programmes the service is still writing, to ask about again. */
+        const queued = new Set<string>();
+
+        /** The detail, once per programme however many airings carry it. */
+        const detail = async (ids: string[]): Promise<void> => {
+          for (const batch of chunk(ids, programmesPerRequest)) {
+            for (const program of await client.programs(batch)) {
+              if (program.programID === undefined) {
+                continue;
+              }
+
+              const code = program.code ?? SD_OK;
+
+              if (code === SD_PROGRAM_INVALID) {
+                // The service will never have this one — `6000`, in-band at
+                // HTTP 200. Written down as such, because the difference
+                // between "not yet" and "never" is the difference between
+                // asking again and asking for ever: a day is kept back until it
+                // is complete, and one waiting on a programme that does not
+                // exist would never be complete.
+                gone.add(program.programID);
+                queued.delete(program.programID);
+                continue;
+              }
+
+              if (code === SD_PROGRAM_QUEUED) {
+                // Being generated: worth asking again, after a wait.
+                queued.add(program.programID);
+                continue;
+              }
+
+              if (code !== SD_OK) {
+                // Something new. Not stored, so the airing has nothing to build
+                // from and its day is asked for again on the next run.
+                continue;
+              }
+
+              queued.delete(program.programID);
+              known.set(program.programID, program);
             }
-
-            const code = program.code ?? SD_OK;
-
-            if (code === SD_PROGRAM_INVALID) {
-              // The service will never have this one — `6000`, in-band at HTTP
-              // 200. Written down as such, because the difference between "not
-              // yet" and "never" is the difference between asking again next
-              // run and asking again for ever: the day is kept back until it is
-              // complete, and a day waiting on a programme that does not exist
-              // would never be complete.
-              gone.add(program.programID);
-              continue;
-            }
-
-            if (code !== SD_OK) {
-              // `6001` is a programme still being generated, and anything else
-              // is news. Neither is stored, so the airing has nothing to build
-              // from and its day is asked for again next run — which for a
-              // queued programme is exactly the retry it wants.
-              continue;
-            }
-
-            known.set(program.programID, program);
           }
+        };
+
+        await detail([...missing]);
+
+        for (const pause of queuedWaits) {
+          if (queued.size === 0) {
+            break;
+          }
+
+          context.log(
+            `${String(queued.size)} programme(s) still being generated: asking again in ${String(Math.round(pause / 1000))}s`,
+          );
+
+          await wait(pause, undefined, { ...(signal === undefined ? {} : { signal }) });
+          await detail([...queued]);
+        }
+
+        if (queued.size > 0) {
+          // Their days are written without them and marked unfinished, so the
+          // next run asks again — which is where this ends up anyway once the
+          // waits run out.
+          warn(
+            `${String(queued.size)} programme(s) are still being generated; their days will be asked for again`,
+          );
         }
 
         for (const [stationID, byDay] of airings) {

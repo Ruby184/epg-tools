@@ -384,9 +384,63 @@ describe('defineSchedulesDirectSite', () => {
     expect(source.countOf('schedules')).toBe(before);
   });
 
+  it('waits and asks again for a programme the service is still writing', async () => {
+    const source = await service();
+    const cache = store();
+    const report = collect();
+
+    // `6001` once, then the programme — which is what the service does while it
+    // generates one, and why asking again immediately is no use.
+    source.queueProgram('EP000000010001', 1);
+
+    const summary = await grab([site(source, { queuedWaits: [1] })], {
+      cache,
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    expect(summary.failed).toBe(0);
+    expect(source.countOf('programs')).toBe(2);
+
+    const guide = await collectGuide(cache, source);
+
+    // Written in this run rather than the next: the whole point of waiting.
+    expect(guide).toContain('The Six O`Clock Show');
+  });
+
+  it('gives up waiting rather than holding a run open', async () => {
+    const source = await service();
+    const cache = store();
+    const report = collect();
+
+    source.queueProgram('EP000000010001', 5);
+
+    await grab([site(source, { queuedWaits: [1, 1] })], {
+      cache,
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    // Two waits, then the day is written without it and marked unfinished.
+    expect(source.countOf('programs')).toBe(3);
+    expect(report.messages.some((line) => line.includes('still being generated'))).toBe(true);
+
+    const second = await grab([site(source, { queuedWaits: [] })], {
+      cache,
+      now: NOW,
+      staleness: { alwaysRefetchDays: 7 },
+    });
+
+    // And asked for again on the next run, which is where it ends up anyway.
+    expect(second.fetched).toBeGreaterThan(0);
+  });
+
   it('asks again for a day whose programme is only queued', async () => {
     const source = await service();
     const cache = store();
+    // No waiting here: this is about what the *next* run does with a day left
+    // unfinished, which is where a programme still queued ends up regardless.
+    const config = site(source, { queuedWaits: [] });
 
     // `6001`: being generated, so it is worth another run's asking.
     source.answer({
@@ -397,11 +451,11 @@ describe('defineSchedulesDirectSite', () => {
       ],
     });
 
-    await grab([site(source)], { cache, now: NOW });
+    await grab([config], { cache, now: NOW });
 
     const before = source.countOf('schedules');
 
-    await grab([site(source)], { cache, now: NOW, staleness: { alwaysRefetchDays: 7 } });
+    await grab([config], { cache, now: NOW, staleness: { alwaysRefetchDays: 7 } });
 
     expect(source.countOf('schedules')).toBeGreaterThan(before);
   });

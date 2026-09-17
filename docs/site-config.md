@@ -906,6 +906,13 @@ the url: it expires in a day and a guide is a file people share. The reference
 grabbers reach the same end, calling that endpoint not at all. Station logos are
 unaffected and written as usual; those are public.
 
+**A programme the service is still writing is waited for, briefly.** It answers
+`6001` for one it has queued for generation, so asking again immediately gets
+the same answer — the run waits 10s, then 20s, then 30s, and gives up. What is
+still queued is left out of the day, which is then marked unfinished and fetched
+again on the next run. `queuedWaits: []` skips the waiting and goes straight to
+that.
+
 **The token is kept in the cache between runs**, because the service rate-limits
 authentication and a token is good for a day — one login a day rather than one a
 run. It is a bearer credential in a directory on your disk, which is why

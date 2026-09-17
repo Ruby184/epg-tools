@@ -105,6 +105,11 @@ export interface SdServer {
   setProgram: (program: WireProgram) => void;
   /** The pictures one programme's artwork call answers with. */
   setArtwork: (programID: string, images: WireImage[]) => void;
+  /**
+   * Answer `6001` for this programme the first `times` it is asked for, as the
+   * service does while it is still generating one.
+   */
+  queueProgram: (programID: string, times: number) => void;
 }
 
 let running: Server | undefined;
@@ -150,6 +155,8 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
   const schedules = new Map<string, Map<string, WireAiring[]>>();
   const programs = new Map<string, WireProgram>();
   const artwork = new Map<string, WireImage[]>();
+  /** Programmes to answer `6001` for, and how many more times. */
+  const queuedPrograms = new Map<string, number>();
   const stationFailures = new Map<string, number>();
 
   let issued = 0;
@@ -344,6 +351,14 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
           response,
           200,
           asked.flatMap((id) => {
+            const left = queuedPrograms.get(id) ?? 0;
+
+            if (left > 0) {
+              queuedPrograms.set(id, left - 1);
+
+              return [{ programID: id, code: 6001, message: 'Program is queued for generation.' }];
+            }
+
             const held = programs.get(id);
 
             return held === undefined ? [] : [held];
@@ -406,5 +421,6 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
     failStation: (stationID, code) => void stationFailures.set(stationID, code),
     setProgram: (program) => void programs.set(program.programID ?? '', program),
     setArtwork: (programID, images) => void artwork.set(programID, images),
+    queueProgram: (programID, times) => void queuedPrograms.set(programID, times),
   };
 }
