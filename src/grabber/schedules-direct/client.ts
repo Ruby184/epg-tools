@@ -377,6 +377,10 @@ export function createSchedulesDirectClient(
     schedulesMd5: (stations) => request<WireMd5Response>('schedules/md5', stations),
     schedules: (stations) => requestList<WireSchedule>('schedules', stations),
     programs: (ids) => requestList<WireProgram>('programs', ids),
-    artwork: (ids) => requestList<WireArtwork>('metadata/programs', ids),
+    // The trailing slash is not decoration. Without it the service answers
+    // `1008 INCORRECT_REQUEST` to every body — its own documented example
+    // included, and with or without a token — and with it the same body is
+    // accepted. Verified against the live service on 2026-09-17.
+    artwork: (ids) => requestList<WireArtwork>('metadata/programs/', ids),
   };
 }

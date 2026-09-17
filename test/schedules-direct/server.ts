@@ -19,6 +19,7 @@ import type { AddressInfo } from 'node:net';
 import type {
   WireAiring,
   WireArtwork,
+  WireImage,
   WireLineup,
   WireMd5Response,
   WireProgram,
@@ -92,6 +93,8 @@ export interface SdServer {
   failStation: (stationID: string, code: number) => void;
   /** The programme detail to answer `/programs` with. */
   setProgram: (program: WireProgram) => void;
+  /** The pictures one programme's artwork call answers with. */
+  setArtwork: (programID: string, images: WireImage[]) => void;
 }
 
 let running: Server | undefined;
@@ -136,6 +139,7 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
   /** What each station has, by day — and what its md5 is therefore. */
   const schedules = new Map<string, Map<string, WireAiring[]>>();
   const programs = new Map<string, WireProgram>();
+  const artwork = new Map<string, WireImage[]>();
   const stationFailures = new Map<string, number>();
 
   let issued = 0;
@@ -297,7 +301,29 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
           }),
         );
       } else if (path === 'metadata/programs') {
-        send(response, 200, answers.artwork ?? []);
+        // Exactly as the live service behaves: without the trailing slash it
+        // refuses every body, its own documented example included. Answering
+        // here rather than 404ing is what makes a client that forgets the slash
+        // fail this suite instead of only failing in production.
+        send(response, 400, {
+          response: 'INCORRECT_REQUEST',
+          code: 1008,
+          message: 'The request is improperly formatted.',
+        });
+      } else if (path === 'metadata/programs/') {
+        if (answers.artwork !== undefined) {
+          send(response, 200, answers.artwork);
+
+          return;
+        }
+
+        const asked = (calls.at(-1)?.body ?? []) as string[];
+
+        send(
+          response,
+          200,
+          asked.map((id) => ({ programID: id, data: artwork.get(id) ?? [] })),
+        );
       } else {
         send(response, 404, { code: 404, message: `no such path: ${path}` });
       }
@@ -330,5 +356,6 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
     },
     failStation: (stationID, code) => void stationFailures.set(stationID, code),
     setProgram: (program) => void programs.set(program.programID ?? '', program),
+    setArtwork: (programID, images) => void artwork.set(programID, images),
   };
 }

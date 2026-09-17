@@ -14,6 +14,18 @@
  * here covers a whole grid, so it would almost never be true and the md5 would
  * be worth nothing.
  *
+ * **No programme artwork**, deliberately, though the service has plenty and the
+ * client can fetch it. Its image host answers 403 without the account token, so
+ * an `<icon>` written from it would load for nobody a guide is passed to — and
+ * the token cannot go in the url, since it expires in a day and a guide is a
+ * file people share. The reference grabbers reach the same end by a different
+ * road: neither `tv_grab_zz_sdjson` nor `tv_grab_zz_sdjson_sqlite` calls
+ * `/metadata/programs` at all, and the `episodeImage` both of them do write is
+ * gone from the API — absent from all 500 programmes of a real day, 499 of
+ * which claim artwork exists. Station logos are unaffected and written as
+ * usual: those are plain S3 and load for anyone. Reviving this needs something
+ * to serve the images through, not more mapping.
+ *
  * The window is reckoned in **UTC**, and there is deliberately no `dayZone`
  * option as the other two adapters have. The service keys its md5s by
  * `(stationID, UTC date)`; filing a programme under any other day would store an

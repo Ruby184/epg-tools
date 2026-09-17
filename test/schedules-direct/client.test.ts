@@ -179,6 +179,30 @@ describe('the Schedules Direct client', () => {
     expect(said).not.toContain(PASSWORD);
   });
 
+  it('asks for artwork at the path the service accepts, slash and all', async () => {
+    const source = await sdServer();
+
+    source.setArtwork('EP1', [{ uri: 'a.jpg', category: 'Iconic' }]);
+
+    // The fixture answers 1008 without the trailing slash, exactly as the live
+    // service does — so this passing is the whole assertion.
+    await expect(client(source).artwork(['EP1'])).resolves.toEqual([
+      { programID: 'EP1', data: [{ uri: 'a.jpg', category: 'Iconic' }] },
+    ]);
+  });
+
+  it('hands back an artwork refusal rather than reading it as pictures', async () => {
+    const source = await sdServer({
+      // Where the list would be, which is where the service puts it: 11 of 300
+      // real programmes that claimed artwork answered exactly like this.
+      artwork: [{ programID: 'EP1', data: { response: 'INVALID_PROGRAMID', code: 6000 } }],
+    });
+
+    await expect(client(source).artwork(['EP1'])).resolves.toEqual([
+      { programID: 'EP1', data: { response: 'INVALID_PROGRAMID', code: 6000 } },
+    ]);
+  });
+
   it('retries a POST, which ky on its own would not', async () => {
     const source = await sdServer({ programs: [{ programID: 'EP1' }] });
 

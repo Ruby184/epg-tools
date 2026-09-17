@@ -282,7 +282,15 @@ export interface WireProgram extends WireResponse {
   parentGUID?: string;
   /** Gracenote's own id for the thing behind it, shared by every episode. */
   resourceID?: string;
+  /**
+   * That artwork exists for it, which is what saves asking about the ones with
+   * none — on all 500 programmes of a real day, in the case of the first.
+   */
   hasImageArtwork?: boolean;
+  hasMovieArtwork?: boolean;
+  hasSeriesArtwork?: boolean;
+  hasSeasonArtwork?: boolean;
+  hasEpisodeArtwork?: boolean;
   md5?: string;
 }
 
@@ -292,19 +300,37 @@ export interface WireImage {
   uri?: string;
   width?: number | string;
   height?: number | string;
-  /** `Iconic`, `Poster Art`, `Banner-L1`, … */
+  /** `Iconic`, `Poster Art`, `Banner-L1`, … — see `IMAGE_TYPES` in `map.ts`. */
   category?: string;
-  /** `Series`, `Season`, `Episode`, … */
+  /**
+   * How specific it is: `Episode`, `Season`, `Series`.
+   *
+   * Absent on some — 702 of 15,927 in a census of 400 real programmes — which
+   * is why it does not decide whether an image is kept.
+   */
   tier?: string;
-  size?: string;
+  /** `2x3`, `16x9`, `1x1`. {@link ratio} is the same thing written `2:3`. */
   aspect?: string;
+  ratio?: string;
+  /** When the picture last changed, ISO. Not every answer carries one. */
+  lastUpdate?: string;
+  /** Documented, and absent from every image of a 15,927-image census. */
+  size?: string;
   primary?: string;
 }
 
-/** `POST /metadata/programs`, one entry per programme asked about. */
+/**
+ * `POST /metadata/programs/`, one entry per programme asked about.
+ *
+ * The refusal is **inside `data`**, not beside it: a programme whose artwork
+ * the service cannot find answers `{ programID, data: { code: 6000, … } }`,
+ * with no code on the entry itself. 11 of 300 real programmes that said they
+ * had artwork came back like this, so it is the ordinary case rather than the
+ * exceptional one — and reading `data` as a list without looking would throw.
+ */
 export interface WireArtwork extends WireResponse {
   programID?: string;
-  data?: WireImage[];
+  data?: WireImage[] | WireResponse;
 }
 
 /**
