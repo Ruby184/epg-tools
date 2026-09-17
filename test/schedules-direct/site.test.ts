@@ -71,6 +71,23 @@ async function service(): Promise<SdServer> {
 
 const store = (): CacheStore => new CacheManager({ driver: new MemoryCacheDriver() });
 
+/** The guide a cache holds, as XML. */
+async function collectGuide(cache: CacheStore, source: SdServer, days = 1): Promise<string> {
+  let xml = '';
+
+  for await (const part of generateGuide({
+    sites: [site(source, { days })],
+    cache,
+    days,
+    startDay: TODAY,
+    now: NOW,
+  })) {
+    xml += part;
+  }
+
+  return xml;
+}
+
 /** The site, with whatever a case wants to change. */
 function site(source: SdServer, options: Record<string, unknown> = {}) {
   return defineSchedulesDirectSite({
@@ -341,6 +358,47 @@ describe('defineSchedulesDirectSite', () => {
     await grab([config], { cache, now: later, staleness: { alwaysRefetchDays: 0 } });
 
     expect(source.countOf(`lineups/${LINEUP}`)).toBe(2);
+  });
+
+  it('caches a day past what the service publishes, rather than failing it', async () => {
+    const source = await service();
+    const cache = store();
+    const report = collect();
+
+    // Two days, of which the service holds only the first — which is what the
+    // end of every window looks like, since it publishes about a fortnight.
+    const summary = await grab([site(source, { days: 2 })], {
+      cache,
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    // The md5 call simply leaves those days out. Reading that as "unchanged"
+    // is what made a real 21-day grab report 435 failed channel-days, every
+    // run: unchanged with nothing cached is a failure.
+    expect(summary.failed).toBe(0);
+    expect(report.messages.some((line) => line.includes('past what it publishes'))).toBe(true);
+
+    // Cached empty, so the next run says nothing about them at all.
+    const second = await grab([site(source, { days: 2 })], { cache, now: NOW });
+
+    expect(second.failed).toBe(0);
+    expect(second.fetched).toBe(0);
+  });
+
+  it('empties only the day the service refused, not the station`s other days', async () => {
+    const source = await service();
+    const cache = store();
+
+    // One station with listings today and nothing tomorrow, asked about both in
+    // one request: the service answers with two entries, and taking the second
+    // for the station's verdict would cache today as empty.
+    await grab([site(source, { days: 2 })], { cache, now: NOW });
+
+    const guide = await collectGuide(cache, source, 2);
+
+    expect(guide).toContain('The Six O`Clock Show');
+    expect(guide).toContain('The Eight O`Clock Show');
   });
 
   it('stops when the service says it is offline, as the service asks', async () => {

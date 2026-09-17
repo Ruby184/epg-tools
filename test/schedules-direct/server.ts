@@ -299,19 +299,34 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
         send(
           response,
           200,
-          asked.map(({ stationID, date }): WireSchedule => {
+          asked.flatMap(({ stationID, date }): WireSchedule[] => {
             const failure = stationFailures.get(stationID);
 
             if (failure !== undefined) {
-              return { stationID, code: failure, minDate: '2026-09-01', maxDate: '2026-09-14' };
+              return [{ stationID, code: failure, minDate: '2026-09-01', maxDate: '2026-09-14' }];
             }
 
             const held = schedules.get(stationID);
+            const days = date ?? [...(held?.keys() ?? [])];
+            const has = days.filter((day) => held?.get(day) !== undefined);
+            const has_not = days.filter((day) => held?.get(day) === undefined);
 
-            return {
-              stationID,
-              programs: (date ?? [...(held?.keys() ?? [])]).flatMap((day) => held?.get(day) ?? []),
-            };
+            // As the live service answers it: the days it has in one entry, and
+            // **one entry per day it will not answer for**, each naming its own
+            // date. A station can therefore appear more than once.
+            return [
+              ...(has.length === 0 && has_not.length > 0
+                ? []
+                : [{ stationID, programs: has.flatMap((day) => held?.get(day) ?? []) }]),
+              ...has_not.map((day): WireSchedule => ({
+                stationID,
+                code: 7020,
+                response: 'SCHEDULE_RANGE_EXCEEDED',
+                requestedDate: day,
+                minDate: '2026-09-01',
+                maxDate: '2026-09-14',
+              })),
+            ];
           }),
         );
       } else if (path === 'headends') {

@@ -237,6 +237,16 @@ export interface WireSchedule extends WireResponse {
   stationID?: string;
   programs?: WireAiring[];
   metadata?: { modified?: string; md5?: string; startDate?: string; days?: number };
+  /**
+   * Which day a refusal is about, on the entries that carry a code.
+   *
+   * A station asked about two days, one of them outside its range, comes back
+   * as **two entries** — the good day with its programmes, and a second one
+   * with `7020` and this. Verified against the live service: reading the code
+   * as the station's rather than the day's would cache a day that has listings
+   * as empty.
+   */
+  requestedDate?: string;
 }
 
 /** One person of a programme's cast or crew. */

@@ -114,8 +114,17 @@ describe('decideMd5', () => {
       });
     });
 
-    it('calls a day it did not answer for unknown too', () => {
-      expect(decideMd5('abc', undefined, cached())).toMatchObject({ verdict: 'unknown' });
+    it('keeps a day it said nothing about, where there is something to keep', () => {
+      // The md5 call leaves out a day outside what a station has — no entry and
+      // no code — so "absent" is not "unchanged", it is "nothing to say".
+      expect(decideMd5('abc', undefined, cached())).toMatchObject({ verdict: 'keep' });
+    });
+
+    it('fetches a day it said nothing about when nothing is cached', () => {
+      // Which gets the `7020` from `/schedules` and caches the day empty. The
+      // alternative is what a real 21-day grab did: 435 channel-days reported
+      // unchanged with nothing behind them, failing every run.
+      expect(decideMd5(undefined, undefined, undefined)).toMatchObject({ verdict: 'fetch' });
     });
 
     it('fetches when it answered without an md5 at all', () => {

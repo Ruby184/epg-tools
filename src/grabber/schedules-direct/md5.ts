@@ -164,7 +164,21 @@ export function decideMd5(
   cached: CacheEntryMeta | undefined,
 ): Md5Decision {
   if (wire === undefined) {
-    return { verdict: 'unknown', reason: 'the service did not answer for this day' };
+    // **Not an answer of "unchanged".** The md5 call simply leaves out a day
+    // outside what a station has — no entry, no code, nothing — while
+    // `/schedules` answers `7020` for the very same day. Verified against the
+    // live service, and it is the ordinary case rather than a strange one: a
+    // window reaching past what the service publishes is every station's last
+    // few days, and some stations outside North America hold only a week.
+    //
+    // So it is decided on what we have. Nothing cached means fetching it, which
+    // gets the `7020` and caches the day empty — true, and settled from then
+    // on. Reading it as "unchanged" instead is what made a real 21-day grab
+    // report 435 failed channel-days, every run: the run is asked to keep an
+    // entry that was never there.
+    return cached === undefined
+      ? { verdict: 'fetch', reason: 'the service said nothing about this day' }
+      : { verdict: 'keep', reason: 'the service said nothing about this day' };
   }
 
   const code = wire.code ?? SD_OK;

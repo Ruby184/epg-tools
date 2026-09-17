@@ -641,6 +641,9 @@ export function defineSchedulesDirectSite(
         }
       }
 
+      /** How many stations had nothing for a day, by day — see the warning below. */
+      const beyond = new Map<string, number>();
+
       /** Programmes already in hand, across the chunks of this pass. */
       const known = new Map<string, WireProgram>();
 
@@ -662,8 +665,18 @@ export function defineSchedulesDirectSite(
           const code = schedule.code ?? SD_OK;
 
           if (code !== SD_OK) {
-            // In-band, at HTTP 200: one station's refusal is not the request's.
-            for (const day of fetching.get(stationID)?.keys() ?? []) {
+            // In-band, at HTTP 200: one station's refusal is not the request's
+            // — and, where it names a day, not the station's other days either.
+            // A station asked about two days with one outside its range answers
+            // with **two entries**: the good day's programmes, and this. Taking
+            // it for the station's verdict would cache a day that has listings
+            // as empty.
+            const refused =
+              schedule.requestedDate === undefined
+                ? [...(fetching.get(stationID)?.keys() ?? [])]
+                : [schedule.requestedDate];
+
+            for (const day of refused) {
               for (const pair of asked.get(stationID)?.get(day) ?? []) {
                 if (code === SD_DATE_OUT_OF_RANGE) {
                   yield { channel: pair.channel, day, programmes: [] };
@@ -671,14 +684,23 @@ export function defineSchedulesDirectSite(
                   yield { channel: pair.channel, day, unchanged: true };
                 }
               }
+
+              // Only the days this entry answered for: another entry in the
+              // same answer may still be carrying the rest of this station.
+              fetching.get(stationID)?.delete(day);
             }
 
-            warn(
-              code === SD_DATE_OUT_OF_RANGE
-                ? `${stationID}: asked for days outside the ones it has`
-                : `${stationID}: the service answered code ${String(code)}`,
-            );
-            fetching.delete(stationID);
+            if (code === SD_DATE_OUT_OF_RANGE) {
+              // Counted rather than said one by one: a window reaching a few
+              // days past what the service publishes is every station at once,
+              // which is one fact and several hundred lines.
+              for (const day of refused) {
+                beyond.set(day, (beyond.get(day) ?? 0) + 1);
+              }
+            } else {
+              warn(`${stationID}: the service answered code ${String(code)}`);
+            }
+
             continue;
           }
 
@@ -754,6 +776,18 @@ export function defineSchedulesDirectSite(
 
           known.delete(key);
         }
+      }
+
+      if (beyond.size > 0) {
+        // One line for the whole window rather than one per station-day: the
+        // days past what the service publishes are the same days for everyone,
+        // and they are cached empty, so the next run says nothing at all.
+        const days = [...beyond.keys()].sort();
+        const most = Math.max(...beyond.values());
+
+        warn(
+          `the service has no listings yet for ${days.length === 1 ? days[0]! : `${days[0]!} to ${days.at(-1)!}`} on up to ${String(most)} station(s): those days are past what it publishes`,
+        );
       }
     },
   });
