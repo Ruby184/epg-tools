@@ -19,6 +19,7 @@ import type { AddressInfo } from 'node:net';
 import type {
   WireAiring,
   WireArtwork,
+  WireHeadend,
   WireImage,
   WireLineup,
   WireMd5Response,
@@ -33,6 +34,8 @@ export interface SdCall {
   method: string;
   /** The `token` header, which is the whole of how a call authenticates. */
   token: string | undefined;
+  /** What came after the `?`, for the two calls that ask with one. */
+  query: string;
   body: unknown;
 }
 
@@ -46,6 +49,8 @@ export interface SdAnswers {
   schedules?: WireSchedule[];
   programs?: WireProgram[];
   artwork?: WireArtwork[];
+  /** What `GET /headends` answers with — a region's offering, not the account's. */
+  headends?: WireHeadend[];
 }
 
 export interface SdServer {
@@ -157,7 +162,8 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
 
   const server = createServer((request, response) => {
     void (async () => {
-      const path = new URL(request.url ?? '/', 'http://sd').pathname.replace('/20141201/', '');
+      const asked = new URL(request.url ?? '/', 'http://sd');
+      const path = asked.pathname.replace('/20141201/', '');
       const sent = request.headers['token'];
       // One value even where the header was repeated: a second `token:` is not
       // a second credential, and the service would read neither.
@@ -167,6 +173,7 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
         path,
         method: request.method ?? 'GET',
         token,
+        query: asked.search.replace('?', ''),
         body: await bodyOf(request),
       });
 
@@ -219,6 +226,17 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
 
       if (path === 'status') {
         send(response, 200, answers.status ?? { account: { messages: [] }, lineups: [] });
+      } else if (path.startsWith('lineups/') && request.method !== 'GET') {
+        // The service's own answers, `changesRemaining` included — a number for
+        // an add and a string for a delete, which is how its documentation
+        // shows them and so how a client has to read them.
+        send(
+          response,
+          200,
+          request.method === 'PUT'
+            ? { response: 'OK', code: 0, message: 'Added lineup.', changesRemaining: 5 }
+            : { response: 'OK', code: 0, message: 'Deleted lineup.', changesRemaining: '6' },
+        );
       } else if (path.startsWith('lineups/')) {
         send(response, 200, answers.lineup ?? { map: [], stations: [] });
       } else if (path === 'schedules/md5') {
@@ -282,6 +300,8 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
             };
           }),
         );
+      } else if (path === 'headends') {
+        send(response, 200, answers.headends ?? []);
       } else if (path === 'programs') {
         if (answers.programs !== undefined) {
           send(response, 200, answers.programs);

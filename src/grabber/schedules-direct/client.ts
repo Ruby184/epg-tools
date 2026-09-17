@@ -30,6 +30,7 @@ import {
   type WireArtwork,
   type WireHeadend,
   type WireLineup,
+  type WireLineupChange,
   type WireMd5Response,
   type WireProgram,
   type WireSchedule,
@@ -126,6 +127,16 @@ export interface SchedulesDirectClient {
   /** What a region has on offer, which needs no lineup on the account. */
   headends: (where: { country: string; postalCode: string }) => Promise<WireHeadend[]>;
   lineup: (id: string) => Promise<WireLineup>;
+  /**
+   * Put one on the account, or take it off.
+   *
+   * Never called during a grab — a run that changes a paid subscription is a
+   * surprise — and reached only through `schedulesDirectAccount`, where a
+   * person asked for it by name. Six adds in 24 hours, which is why the answer
+   * carries how many are left.
+   */
+  addLineup: (id: string) => Promise<WireLineupChange>;
+  removeLineup: (id: string) => Promise<WireLineupChange>;
   schedulesMd5: (stations: StationDays[]) => Promise<WireMd5Response>;
   schedules: (stations: StationDays[]) => Promise<WireSchedule[]>;
   programs: (ids: string[]) => Promise<WireProgram[]>;
@@ -348,6 +359,12 @@ export function createSchedulesDirectClient(
       }).json<T>(),
     );
 
+  /** A call that changes something, which is neither a `get` nor a `post`. */
+  const change = <T>(path: string, method: 'put' | 'delete'): Promise<T> =>
+    paced(({ signal }) =>
+      clientWithAuth(path, { method, ...(signal ? { signal } : {}) }).json<T>(),
+    );
+
   /**
    * A call whose answer is a list.
    *
@@ -374,6 +391,8 @@ export function createSchedulesDirectClient(
         undefined,
       ),
     lineup: (id) => request<WireLineup>(`lineups/${encodeURIComponent(id)}`),
+    addLineup: (id) => change<WireLineupChange>(`lineups/${encodeURIComponent(id)}`, 'put'),
+    removeLineup: (id) => change<WireLineupChange>(`lineups/${encodeURIComponent(id)}`, 'delete'),
     schedulesMd5: (stations) => request<WireMd5Response>('schedules/md5', stations),
     schedules: (stations) => requestList<WireSchedule>('schedules', stations),
     programs: (ids) => requestList<WireProgram>('programs', ids),

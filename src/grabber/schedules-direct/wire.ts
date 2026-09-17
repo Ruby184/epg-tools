@@ -147,6 +147,17 @@ export interface WireHeadend extends WireResponse {
   lineups?: { name?: string; lineup?: string; uri?: string }[];
 }
 
+/**
+ * `PUT` or `DELETE /lineups/{id}`: what changing the account answered.
+ *
+ * `changesRemaining` is a **number or a string** — the service's own
+ * documentation shows `254` for an add and `"254"` for a delete — so it is read
+ * as either rather than trusted to be one.
+ */
+export interface WireLineupChange extends WireResponse {
+  changesRemaining?: number | string;
+}
+
 /** One station-day of `POST /schedules/md5`. */
 export interface WireMd5 extends WireResponse {
   lastModified?: string;

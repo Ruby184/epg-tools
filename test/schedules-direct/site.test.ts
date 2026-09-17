@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../../src/cache/main.js';
 import type { CacheStore } from '../../src/cache/main.js';
 import { grab } from '../../src/grabber/main.js';
-import { defineSchedulesDirectSite } from '../../src/grabber/schedules-direct/main.js';
+import {
+  defineSchedulesDirectSite,
+  schedulesDirectAccount,
+} from '../../src/grabber/schedules-direct/main.js';
 import { SiteStateHandle } from '../../src/grabber/state.js';
 import { generateGuide } from '../../src/merge/main.js';
 import { collect } from '../reporting.js';
@@ -364,5 +367,140 @@ describe('defineSchedulesDirectSite', () => {
         lineup: LINEUP,
       } as never),
     ).toThrow(/password/);
+  });
+});
+
+describe('finding what an account has, before there is a config', () => {
+  const account = (source: SdServer) =>
+    schedulesDirectAccount({
+      username: 'someone@example.com',
+      password: 'hunter2',
+      url: source.url,
+    });
+
+  it('lists the lineups the account is subscribed to', async () => {
+    const source = await sdServer({
+      status: {
+        account: { messages: [] },
+        lineups: [
+          { lineup: LINEUP, name: 'Freeview', modified: '2026-09-01T00:00:00Z' },
+          { lineup: 'GBR-9999999-DEFAULT', name: 'Sky' },
+        ],
+      },
+    });
+
+    await expect(account(source).lineups()).resolves.toEqual([
+      { lineup: LINEUP, name: 'Freeview', modified: '2026-09-01T00:00:00Z' },
+      { lineup: 'GBR-9999999-DEFAULT', name: 'Sky' },
+    ]);
+  });
+
+  it('answers two questions on one token, which is the point of the object', async () => {
+    const source = await sdServer({
+      status: { account: { expires: '2026-12-01T00:00:00Z' }, lineups: [{ lineup: LINEUP }] },
+      headends: [{ headend: 'W1A', lineups: [{ lineup: 'GBR-OTA-W1A' }] }],
+    });
+    const sd = account(source);
+
+    await sd.lineups();
+    await sd.headends({ country: 'GBR', postalCode: 'W1A' });
+    await sd.status();
+
+    // The service rate-limits authentication, and a token is good for a day.
+    expect(source.countOf('token')).toBe(1);
+  });
+
+  it('says how the account stands, and what the service says about itself', async () => {
+    const source = await sdServer({
+      status: {
+        account: {
+          expires: '2026-12-01T00:00:00Z',
+          messages: [{ message: 'Your account renews soon.', date: '2026-09-01T00:00:00Z' }],
+        },
+        lineups: [{ lineup: LINEUP }],
+        systemStatus: [{ status: 'Online', message: 'All is well.' }],
+      },
+    });
+
+    await expect(account(source).status()).resolves.toEqual({
+      expires: '2026-12-01T00:00:00Z',
+      lineups: [{ lineup: LINEUP }],
+      messages: [{ message: 'Your account renews soon.', date: '2026-09-01T00:00:00Z' }],
+      system: [{ status: 'Online', message: 'All is well.' }],
+    });
+  });
+
+  it('lists what a region offers, in the spelling the service wants', async () => {
+    const source = await sdServer({
+      headends: [
+        {
+          headend: 'DTV-LONDON',
+          transport: 'Antenna',
+          location: 'London',
+          lineups: [{ name: 'Freeview', lineup: LINEUP, uri: `/20141201/lineups/${LINEUP}` }],
+        },
+      ],
+    });
+
+    await expect(account(source).headends({ country: 'GBR', postalCode: 'W1A' })).resolves.toEqual([
+      {
+        headend: 'DTV-LONDON',
+        transport: 'Antenna',
+        location: 'London',
+        lineups: [{ lineup: LINEUP, name: 'Freeview' }],
+      },
+    ]);
+
+    // Its own spelling: `postalcode`, all lower case, where the option is
+    // `postalCode` like every other option here.
+    expect(source.callsTo('headends')[0]?.query).toBe('country=GBR&postalcode=W1A');
+  });
+
+  it('lists what is in a lineup, for writing a channel list by hand', async () => {
+    const source = await service();
+
+    await expect(account(source).stations(LINEUP)).resolves.toMatchObject([
+      { xmltvId: idOf('101'), siteId: '101', name: 'BBC One', preset: '001' },
+      { xmltvId: idOf('202'), siteId: '202', name: 'ITV', preset: '002' },
+    ]);
+  });
+
+  it('adds and removes a lineup only when asked by name, and says what is left', async () => {
+    const source = await service();
+    const sd = account(source);
+
+    await expect(sd.addLineup('GBR-OTA-W1A')).resolves.toEqual({
+      message: 'Added lineup.',
+      // A string on the wire for a delete and a number for an add, which is the
+      // service's own documentation, not a guess.
+      changesRemaining: 5,
+    });
+    await expect(sd.removeLineup('GBR-OTA-W1A')).resolves.toEqual({
+      message: 'Deleted lineup.',
+      changesRemaining: 6,
+    });
+
+    expect(source.callsTo('lineups/GBR-OTA-W1A').map((call) => call.method)).toEqual([
+      'PUT',
+      'DELETE',
+    ]);
+  });
+
+  it('never changes the account during a grab', async () => {
+    const source = await service();
+
+    await grab([site(source)], { cache: store(), now: NOW });
+
+    // Six adds in 24 hours with no cheap way back: a run that subscribed on
+    // someone's behalf would be a bad surprise.
+    expect(source.calls.every((call) => call.method === 'GET' || call.method === 'POST')).toBe(
+      true,
+    );
+  });
+
+  it('says what it needs when it is given no way to authenticate', () => {
+    expect(() => schedulesDirectAccount({ username: 'someone@example.com' })).toThrow(
+      /password or passwordSha1/,
+    );
   });
 });

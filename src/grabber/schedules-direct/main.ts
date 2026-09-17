@@ -33,6 +33,7 @@
  * updating around midnight.
  */
 
+import ky, { type KyInstance } from 'ky';
 import { createHash } from 'node:crypto';
 import { chunk } from '../../core/chunk.js';
 import { toDayString } from '../../core/days.js';
@@ -63,7 +64,14 @@ import {
   type SchedulesDirectStation,
 } from './map.js';
 import { decideMd5, forgetMd5, pruneMd5, rememberMd5, storedMd5 } from './md5.js';
-import { SD_DATE_OUT_OF_RANGE, SD_OK, type WireAiring, type WireProgram } from './wire.js';
+import {
+  SD_DATE_OUT_OF_RANGE,
+  SD_OK,
+  type WireAccountLineup,
+  type WireAiring,
+  type WireLineupChange,
+  type WireProgram,
+} from './wire.js';
 
 /** Where the shape of the mapping is recorded, so a change to it can be noticed. */
 const MAPPING = 'mapping';
@@ -652,4 +660,203 @@ export function defineSchedulesDirectSite(
       }
     },
   });
+}
+
+/**
+ * What a call outside a grab needs to reach the account.
+ *
+ * {@link schedulesDirectAccount} is for a person working out what to put in a
+ * config, not for a run. Nothing it does is written down — no state bag, so no
+ * token is kept — because a one-off is not where a day-long credential should
+ * start living.
+ */
+export interface SchedulesDirectAccountOptions {
+  username: string;
+  /** Hashed here and not kept. Or hash it yourself — see {@link passwordHash}. */
+  password?: string;
+  passwordSha1?: string;
+  /** The service, for a mirror or a stand-in. */
+  url?: string;
+  /** A client of your own, for a proxy, a timeout or a signal. */
+  http?: KyInstance;
+}
+
+/** One lineup, as the account lists it. */
+export interface SchedulesDirectLineup {
+  /** What a site's `lineup` takes — `GBR-1000014-DEFAULT`. */
+  lineup: string;
+  /** What a person calls it — `Freeview`. */
+  name?: string;
+  /** When the lineup last changed, which is not when its schedules did. */
+  modified?: string;
+}
+
+/** One headend of a region, and the lineups it offers. */
+export interface SchedulesDirectHeadend {
+  headend: string;
+  /** `Antenna`, `Cable`, `Satellite`, `DVB-T`, `IPTV`. */
+  transport?: string;
+  location?: string;
+  lineups: { lineup: string; name?: string }[];
+}
+
+/** How the account stands, and what the service has to say. */
+export interface SchedulesDirectAccountStatus {
+  /** When the subscription runs out. */
+  expires?: string;
+  lineups: SchedulesDirectLineup[];
+  /** Notices meant for the person whose account it is. */
+  messages: { message: string; date?: string }[];
+  /** What the service says about itself: `Online`, or why not. */
+  system: { status?: string; message?: string; date?: string }[];
+}
+
+/** What changing the account answered — and how many changes are left today. */
+export interface SchedulesDirectLineupChange {
+  message?: string;
+  /** Of six in 24 hours. A string on the wire as often as a number. */
+  changesRemaining?: number;
+}
+
+/**
+ * The account itself: what is on it, what could be, and what is in a lineup.
+ *
+ * One object rather than a function each because the service **rate-limits
+ * authentication** and a token is good for a day: asking two questions through
+ * one of these authenticates once, where two standalone calls would each earn a
+ * token of their own. Nothing here is needed to grab — a site takes every
+ * lineup on the account unless told otherwise — so this is the shortest path
+ * from an account to a config that names one.
+ */
+export interface SchedulesDirectAccount {
+  status: () => Promise<SchedulesDirectAccountStatus>;
+  /** The lineups already on the account, which is what a site's `lineup` names. */
+  lineups: () => Promise<SchedulesDirectLineup[]>;
+  /**
+   * What a region *offers*, which is a different question from what is on the
+   * account.
+   *
+   * Not a lineup preview: `GET /lineups/preview/{id}` only answers for a lineup
+   * already subscribed to, so it cannot tell anyone what they would be getting.
+   */
+  headends: (where: { country: string; postalCode: string }) => Promise<SchedulesDirectHeadend[]>;
+  /** What is in one lineup, as channels — for writing a `channels` list by hand. */
+  stations: (lineup: string) => Promise<GrabberChannel<SchedulesDirectStation>[]>;
+  /**
+   * Put a lineup on the account, or take it off.
+   *
+   * Deliberate and by name, which is the whole reason these exist here and
+   * nowhere near a grab: **six adds in 24 hours** with no cheap way back, so a
+   * run that quietly subscribed on someone's behalf would be a bad surprise.
+   * The answer says how many changes are left.
+   */
+  addLineup: (lineup: string) => Promise<SchedulesDirectLineupChange>;
+  removeLineup: (lineup: string) => Promise<SchedulesDirectLineupChange>;
+}
+
+/** A lineup as the account lists it, or nothing where it has no id. */
+function accountLineup(wire: WireAccountLineup): SchedulesDirectLineup[] {
+  return wire.lineup === undefined || wire.lineup === ''
+    ? []
+    : [
+        {
+          lineup: wire.lineup,
+          ...(wire.name === undefined ? {} : { name: wire.name }),
+          ...(wire.modified === undefined ? {} : { modified: wire.modified }),
+        },
+      ];
+}
+
+/** What a change answered, with its count read however it was written. */
+function lineupChange(wire: WireLineupChange): SchedulesDirectLineupChange {
+  const left = Number(wire.changesRemaining);
+
+  return {
+    ...(wire.message === undefined ? {} : { message: wire.message }),
+    ...(Number.isFinite(left) && wire.changesRemaining !== undefined
+      ? { changesRemaining: left }
+      : {}),
+  };
+}
+
+/**
+ * Reach an account, for the questions that come before a config.
+ *
+ * ```ts
+ * const account = schedulesDirectAccount({ username, password });
+ *
+ * for (const one of await account.lineups()) {
+ *   console.log(one.lineup, one.name);
+ * }
+ * ```
+ */
+export function schedulesDirectAccount(
+  options: SchedulesDirectAccountOptions,
+): SchedulesDirectAccount {
+  if (options.password === undefined && options.passwordSha1 === undefined) {
+    throw new TypeError(
+      'schedulesDirectAccount must be given password or passwordSha1: Schedules Direct authenticates with an account',
+    );
+  }
+
+  const client = createSchedulesDirectClient({
+    // The caller's client, or a plain one — either way carrying the hooks that
+    // keep the password and the token out of any error it raises.
+    http: (options.http ?? ky).extend({ hooks: schedulesDirectHooks({}) }),
+    username: options.username,
+    passwordSha1: options.passwordSha1 ?? passwordHash(options.password!),
+    ...(options.url === undefined ? {} : { url: options.url }),
+  });
+
+  return {
+    status: async () => {
+      const wire = await client.status();
+
+      return {
+        ...(wire.account?.expires === undefined ? {} : { expires: wire.account.expires }),
+        lineups: (wire.lineups ?? []).flatMap(accountLineup),
+        messages: (wire.account?.messages ?? []).flatMap((one) =>
+          one.message === undefined
+            ? []
+            : [{ message: one.message, ...(one.date === undefined ? {} : { date: one.date }) }],
+        ),
+        system: wire.systemStatus ?? [],
+      };
+    },
+    lineups: async () => (await client.status()).lineups?.flatMap(accountLineup) ?? [],
+    headends: async (where) =>
+      (await client.headends(where)).flatMap((wire) =>
+        wire.headend === undefined || wire.headend === ''
+          ? []
+          : [
+              {
+                headend: wire.headend,
+                ...(wire.transport === undefined ? {} : { transport: wire.transport }),
+                ...(wire.location === undefined ? {} : { location: wire.location }),
+                lineups: (wire.lineups ?? []).flatMap((one) =>
+                  one.lineup === undefined || one.lineup === ''
+                    ? []
+                    : [
+                        {
+                          lineup: one.lineup,
+                          ...(one.name === undefined ? {} : { name: one.name }),
+                        },
+                      ],
+                ),
+              },
+            ],
+      ),
+    stations: async (lineup) => {
+      const answer = await client.lineup(lineup);
+      const numbers = new Map((answer.map ?? []).map((entry) => [entry.stationID, entry.channel]));
+
+      return (answer.stations ?? []).flatMap((wire) => {
+        const channel = schedulesDirectStation(wire, numbers.get(wire.stationID), {}, lineup);
+
+        return channel === undefined ? [] : [channel];
+      });
+    },
+    addLineup: async (lineup) => lineupChange(await client.addLineup(lineup)),
+    removeLineup: async (lineup) => lineupChange(await client.removeLineup(lineup)),
+  };
 }
