@@ -162,6 +162,49 @@ function mappingFingerprint(options: SchedulesDirectSiteOptions): string {
   return createHash('sha1').update(shape).digest('hex').slice(0, 16);
 }
 
+/** Where the lineups' own stamps are kept, beside the list they built. */
+const LINEUP_STAMPS = 'lineups';
+
+/**
+ * What the account says about the lineups a list would be built from.
+ *
+ * The service's steady-state advice is to download a lineup only when its
+ * `modified` is newer than your copy's — so this is that stamp per lineup, with
+ * two things beside it that would also make the stored list wrong: **which**
+ * lineups are being taken (a config naming a different one must not match), and
+ * the mapping fingerprint (a changed `channelId` builds different channels out
+ * of the same answer).
+ */
+function stampsOf(
+  lineups: string[],
+  onAccount: { lineup?: string | undefined; modified?: string }[],
+  fingerprint: string,
+): Record<string, string> {
+  const modified = new Map(onAccount.map((one) => [one.lineup, one.modified]));
+
+  return Object.fromEntries([
+    ['fingerprint', fingerprint],
+    ...lineups.map((id) => [id, modified.get(id) ?? '']),
+  ]);
+}
+
+/** Whether what a previous run stored says exactly what this one would. */
+function sameStamps(stored: unknown, stamps: Record<string, string>): boolean {
+  if (stored === null || typeof stored !== 'object') {
+    return false;
+  }
+
+  const was = stored as Record<string, unknown>;
+  const keys = Object.keys(stamps);
+
+  // A stamp that is missing on either side is a difference: an unknown
+  // `modified` must not read as "the same unknown".
+  return (
+    keys.length === Object.keys(was).length &&
+    keys.every((key) => stamps[key] !== '' && was[key] === stamps[key])
+  );
+}
+
 /**
  * Say what the account and the service have to say, and stop where asked to.
  *
@@ -348,6 +391,10 @@ export function defineSchedulesDirectSite(
     ...(channelExtras === undefined ? {} : { channelExtras }),
   };
 
+  // One stamp for the whole site: what this config would write, which both the
+  // channel list and the cached days are only valid for.
+  const fingerprint = mappingFingerprint(options);
+
   /** One client for one context, sharing the token through the site's own bag. */
   const clientFor = (context: {
     http: ChannelsContext['http'];
@@ -446,6 +493,21 @@ export function defineSchedulesDirectSite(
           context.log(`grabbing every lineup on the account: ${lineups.join(', ')}`);
         }
 
+        // What the account says about these lineups now, which is the whole of
+        // what the list is built from — so a list built from the same answer is
+        // still the same list.
+        const stamps = stampsOf(lineups, onAccount, fingerprint);
+
+        if (context.cached !== undefined && sameStamps(context.state.get(LINEUP_STAMPS), stamps)) {
+          // The service's own advice, and it costs nothing to take: `/status`
+          // carries each lineup's `modified`, so a lineup that has not moved
+          // need not be downloaded again — 223 KiB and a request, for one
+          // account with one lineup.
+          context.log('the lineups have not changed since the last run; keeping the channel list');
+
+          return context.cached.channels as GrabberChannel<SchedulesDirectStation>[];
+        }
+
         const channels: GrabberChannel<SchedulesDirectStation>[] = [];
         const seen = new Set<string>();
 
@@ -479,6 +541,10 @@ export function defineSchedulesDirectSite(
           );
         }
 
+        // Written only now: a list that failed to build is not one whose
+        // stamps should say "nothing to do" on the next run.
+        context.state.set(LINEUP_STAMPS, stamps);
+
         return channels;
       }),
 
@@ -487,7 +553,6 @@ export function defineSchedulesDirectSite(
     ): AsyncGenerator<StreamedChannelDay<SchedulesDirectStation>> {
       const { channelDays, days, state, warn, signal } = context;
       const client = clientFor(context);
-      const fingerprint = mappingFingerprint(options);
       const remapped = state.get(MAPPING) !== fingerprint;
 
       if (!remapped) {

@@ -167,6 +167,40 @@ run but the one that fetched it sees the round-tripped form. And `--refresh`
 fetches the list whatever is cached, because asking the source is what that flag
 means.
 
+**When the list is past its age, the site is handed the old one.** Plenty of
+sources can say cheaply that nothing has changed — a lineup with a `modified`
+stamp, a document that answers `304`, an account that publishes a version — and
+rebuilding an identical list is the expensive part, not finding out. So
+`channels` is given what the last run stored, to hand straight back:
+
+```ts
+async channels({ http, state, cached }) {
+  const { modified } = await http.get('lineup/status').json<{ modified: string }>();
+
+  // Nothing has moved, and the list that was built from it is still right.
+  if (cached !== undefined && modified === state.get('modified')) {
+    return [...cached.channels];
+  }
+
+  const channels = await fetchTheWholeList(http);
+
+  state.set('modified', modified);
+
+  return channels;
+}
+```
+
+What comes back is stored again either way, so handing the old list back renews
+its age exactly as fetching one would — the next run inside `maxAgeDays` is
+served from the cache without the site being asked at all. `cached.at` says when
+it was stored, for a source that would rather ask "changed since?".
+
+It is absent in the three cases that mean there is nothing to keep: no list
+stored yet, no cache to store one in, and `--refresh`, where handing a site its
+old list would be inviting it to hand the same one straight back. A site that
+ignores `cached` fetches every time, which is what every site did before this
+existed.
+
 ## Requests and parsing
 
 `request` fetches, `parseDay` interprets. They are separate because one
@@ -829,6 +863,13 @@ because six adds a day with no cheap way back is not a thing a grab should spend
 on your behalf. A lineup its headend has **deleted** is skipped with a warning:
 it keeps answering with what it last had, so a guide built from it thins out
 rather than failing.
+
+**A lineup is downloaded only when it has moved.** `/status` carries each
+lineup's `modified` stamp and the account check reads it anyway, so a run whose
+lineups are all unchanged keeps the channel list it already had — 223 KiB and a
+request saved for one lineup, and a second run measured at 221ms against 5,049.
+A changed stamp, a different `lineup`, or an option that would build different
+channels all fetch it again.
 
 **Days are UTC, and there is deliberately no `dayZone`** as the other adapters
 have. The service keys its md5s by `(stationID, UTC date)`; filing a programme

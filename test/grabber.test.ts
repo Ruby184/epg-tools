@@ -24,6 +24,7 @@ import type {
   ChannelsBatching,
   ChannelsDaysBatching,
   DaysBatching,
+  ChannelsContext,
   GrabberChannel,
   GrabSummary,
   SiteConfig,
@@ -628,6 +629,88 @@ describe('grab', () => {
       expect(cache.stateWrites.filter((key) => key.endsWith('|channels'))).toEqual([
         'example.com|channels',
       ]);
+    });
+
+    describe('and what the site is told about it', () => {
+      /** A site that is handed its own last list, and says what it saw. */
+      const seeing = (seen: (ChannelsContext['cached'] | undefined)[]) =>
+        makeConfig({
+          cacheChannels: { maxAgeDays: 1 },
+          channels: (context: ChannelsContext) => {
+            seen.push(context.cached);
+
+            return [channel('one')];
+          },
+        });
+
+      it('hands back the list it stored, once there is one to hand back', async () => {
+        const cache = new MemoryCache();
+        const seen: (ChannelsContext['cached'] | undefined)[] = [];
+        const config = seeing(seen);
+        const state = SiteStateHandle.open(cache, config.site);
+        const later = new Date(NOW.getTime() + 2 * 86_400_000);
+
+        await resolveChannels(config, { state, now: NOW });
+        await state.save();
+        // Two days on, so the stored list is past its age and the site is asked
+        // again — which is the only time being handed the old one is any use.
+        await resolveChannels(config, {
+          state: SiteStateHandle.open(cache, config.site),
+          now: later,
+        });
+
+        expect(seen[0]).toBeUndefined();
+        expect(seen[1]).toEqual({ channels: [{ xmltvId: 'one', siteId: 'site-one' }], at: NOW });
+      });
+
+      it('tells a site nothing when the run was told to refresh', async () => {
+        const cache = new MemoryCache();
+        const seen: (ChannelsContext['cached'] | undefined)[] = [];
+        const config = seeing(seen);
+        const state = SiteStateHandle.open(cache, config.site);
+
+        await resolveChannels(config, { state, now: NOW });
+        await state.save();
+        await resolveChannels(config, {
+          state: SiteStateHandle.open(cache, config.site),
+          now: NOW,
+          refresh: true,
+        });
+
+        // A run told to ask the source again means it: handing the site its old
+        // list would be inviting it to hand the same one straight back.
+        expect(seen).toEqual([undefined, undefined]);
+      });
+
+      it('keeps a list the site handed straight back, and renews its age', async () => {
+        const cache = new MemoryCache();
+        let asked = 0;
+        const config = makeConfig({
+          cacheChannels: { maxAgeDays: 1 },
+          channels: (context: ChannelsContext) => {
+            asked += 1;
+
+            // What a source that can tell nothing has changed does with it.
+            return context.cached === undefined
+              ? [channel('one')]
+              : [...(context.cached.channels as GrabberChannel[])];
+          },
+        });
+        const later = new Date(NOW.getTime() + 2 * 86_400_000);
+        const open = () => SiteStateHandle.open(cache, config.site);
+
+        const first = await resolveChannels(config, { state: open(), now: NOW });
+        const state = open();
+        const second = await resolveChannels(config, { state, now: later });
+
+        await state.save();
+
+        expect(second).toEqual(first);
+        expect(asked).toBe(2);
+        // Stored again at the later time, so the next run inside a day is
+        // served from the cache without the site being asked at all.
+        expect(cache.state.get('example.com|channels')?.meta?.writtenAt).toBe(later.toISOString());
+      });
     });
 
     // The two ways a selection can go wrong once a list is cached. Both were

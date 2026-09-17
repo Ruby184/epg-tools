@@ -250,6 +250,99 @@ describe('defineSchedulesDirectSite', () => {
     expect((report.of('site:failed')[0]!.error as Error).message).toMatch(/no lineup on it/);
   });
 
+  it('skips the lineup download when its `modified` has not moved', async () => {
+    const source = await service();
+    const cache = store();
+    const config = site(source);
+
+    source.answer({
+      status: {
+        account: { messages: [] },
+        lineups: [{ lineup: LINEUP, name: 'Freeview', modified: '2026-09-01T00:00:00Z' }],
+      },
+    });
+
+    await grab([config], { cache, now: NOW });
+
+    // Two days on, so the cached list is past its age and the site is asked for
+    // one again — where before it would have downloaded the lineup a second
+    // time to rebuild exactly what it already had.
+    const later = new Date(NOW.getTime() + 2 * 86_400_000);
+
+    await grab([config], { cache, now: later, staleness: { alwaysRefetchDays: 0 } });
+
+    expect(source.countOf(`lineups/${LINEUP}`)).toBe(1);
+    // It still asked the account, which is what told it there was nothing to do.
+    expect(source.countOf('status')).toBe(2);
+  });
+
+  it('downloads the lineup again once its `modified` moves', async () => {
+    const source = await service();
+    const cache = store();
+    const config = site(source);
+    const later = new Date(NOW.getTime() + 2 * 86_400_000);
+
+    source.answer({
+      status: {
+        account: { messages: [] },
+        lineups: [{ lineup: LINEUP, modified: '2026-09-01T00:00:00Z' }],
+      },
+    });
+
+    await grab([config], { cache, now: NOW });
+
+    source.answer({
+      status: {
+        account: { messages: [] },
+        lineups: [{ lineup: LINEUP, modified: '2026-09-15T12:00:00Z' }],
+      },
+    });
+
+    await grab([config], { cache, now: later, staleness: { alwaysRefetchDays: 0 } });
+
+    expect(source.countOf(`lineups/${LINEUP}`)).toBe(2);
+  });
+
+  it('downloads it again when the mapping would build different channels', async () => {
+    const source = await service();
+    const cache = store();
+    const later = new Date(NOW.getTime() + 2 * 86_400_000);
+
+    source.answer({
+      status: {
+        account: { messages: [] },
+        lineups: [{ lineup: LINEUP, modified: '2026-09-01T00:00:00Z' }],
+      },
+    });
+
+    await grab([site(source)], { cache, now: NOW });
+    // The same lineup, unmoved — but a `channelId` that makes different
+    // channels out of it, so what is stored is no longer what this site writes.
+    await grab([site(source, { channelId: '%s.sd.test' })], {
+      cache,
+      now: later,
+      staleness: { alwaysRefetchDays: 0 },
+    });
+
+    expect(source.countOf(`lineups/${LINEUP}`)).toBe(2);
+  });
+
+  it('downloads the lineup when the account says nothing about when it changed', async () => {
+    const source = await service();
+    const cache = store();
+    const config = site(source);
+    const later = new Date(NOW.getTime() + 2 * 86_400_000);
+
+    // No `modified` at all: an unknown stamp must not read as "the same
+    // unknown", or a lineup that never reports one would never be refetched.
+    source.answer({ status: { account: { messages: [] }, lineups: [{ lineup: LINEUP }] } });
+
+    await grab([config], { cache, now: NOW });
+    await grab([config], { cache, now: later, staleness: { alwaysRefetchDays: 0 } });
+
+    expect(source.countOf(`lineups/${LINEUP}`)).toBe(2);
+  });
+
   it('stops when the service says it is offline, as the service asks', async () => {
     const source = await service();
     const report = collect();

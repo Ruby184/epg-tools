@@ -181,6 +181,29 @@ export class ChannelsGroup implements StateGroup {
     return Number.isNaN(written) || age < 0 || age > maxAgeMs ? undefined : this.#list;
   }
 
+  /**
+   * The list as it stands and when it was written, however old it is.
+   *
+   * What {@link fresh} refuses to hand back once it is past its age — offered
+   * to the site itself, which may know cheaply that nothing has changed and
+   * that the list is therefore still right. Free: the group is already read by
+   * the time anyone asks, so this is the same array rather than another look at
+   * the store.
+   *
+   * Nothing where the stamp cannot be read or lies in the future, for the
+   * reason {@link fresh} distrusts the same: a site handed no list simply
+   * fetches one.
+   */
+  held(): { channels: GrabberChannel[]; at: Date } | undefined {
+    if (this.#list === undefined || this.#writtenAt === undefined) {
+      return undefined;
+    }
+
+    const written = Date.parse(this.#writtenAt);
+
+    return Number.isNaN(written) ? undefined : { channels: this.#list, at: new Date(written) };
+  }
+
   /** Remember this list, as fetched at `now`. */
   set(list: GrabberChannel[], now: Date): void {
     this.#list = list;

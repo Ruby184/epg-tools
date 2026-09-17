@@ -23,6 +23,7 @@ import {
   textReporter,
 } from '../src/main.js';
 import type {
+  GrabberChannel,
   CacheDriver,
   CacheDriverFactory,
   CacheStore,
@@ -271,6 +272,27 @@ export const channelsWithState = defineSiteConfig({
 });
 
 // --- docs/site-config.md: Keeping a fetched list ----------------------------
+export const keepingAListItAlreadyHas = defineSiteConfig({
+  site: 'example.tv',
+  cacheChannels: { maxAgeDays: 7 },
+  async channels({ http, state, cached }) {
+    const { modified } = await http.get('lineup/status').json<{ modified: string }>();
+
+    // Nothing has moved, and the list that was built from it is still right.
+    if (cached !== undefined && modified === state.get('modified')) {
+      return [...cached.channels];
+    }
+
+    const channels = await http.get('lineup').json<GrabberChannel[]>();
+
+    state.set('modified', modified);
+
+    return channels;
+  },
+  request: ({ channel, day, http }) => http.get(`epg/${channel.siteId}/${day}`).text(),
+  parseDay: () => [],
+});
+
 export const keptChannels = defineSiteConfig({
   site: 'example.tv',
   cacheChannels: true, // a day; { maxAgeDays: 7 } for longer

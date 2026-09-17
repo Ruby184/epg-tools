@@ -150,6 +150,31 @@ export interface ChannelsContext extends Says {
    * away afterwards, exactly as `NoCacheDriver` does for a request.
    */
   state: SiteState;
+  /**
+   * The list this site stored last time, however old it is.
+   *
+   * For a source that can tell cheaply that nothing has changed — a lineup
+   * whose `modified` stamp has not moved, a document that answers `304`, an
+   * account that publishes a version. **Return it as it is** and the work that
+   * would have rebuilt the same list is not done; what comes back is stored
+   * again, so its freshness is renewed as though it had been fetched.
+   *
+   * Absent in three cases, each meaning "there is nothing to keep": no list
+   * stored yet, no state to store one in, or a run told to `--refresh`, where
+   * the whole point is to ask the source again. A site that does not look at
+   * this simply fetches, which is what every site did before it existed.
+   *
+   * It is the site's own list, so its `data` is the site's own shape — but it
+   * was written by a *previous* run, possibly an older version of the config or
+   * of this package. A site that changes how it builds a channel should compare
+   * something of its own before handing it back.
+   */
+  cached?: {
+    /** The list, exactly as it was stored. */
+    channels: readonly GrabberChannel[];
+    /** When it was stored — for a source that asks "changed since?". */
+    at: Date;
+  };
 }
 
 /**
