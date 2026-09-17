@@ -658,6 +658,8 @@ export function defineSchedulesDirectSite(
 
       /** How many stations had nothing for a day, by day — see the warning below. */
       const beyond = new Map<string, number>();
+      /** The furthest day any of them said it does have. */
+      let furthest = '';
       /**
        * Programmes the service says it will never have.
        *
@@ -677,6 +679,16 @@ export function defineSchedulesDirectSite(
 
         const airings = new Map<string, Map<string, Airing[]>>();
         const missing = new Set<string>();
+        /**
+         * The md5 each answer carried, by station and day.
+         *
+         * The service answers **one entry per station-day**, each with the
+         * md5 of the very listings in it — which is not necessarily the one the
+         * md5 pass saw a moment earlier, since it refreshes several times a day
+         * and a large grab is not instant. Storing what came with the content
+         * is what stops the next run refetching a day it already has.
+         */
+        const written = new Map<string, string>();
 
         for (const schedule of await client.schedules(batch)) {
           const stationID = schedule.stationID;
@@ -720,11 +732,22 @@ export function defineSchedulesDirectSite(
               for (const day of refused) {
                 beyond.set(day, (beyond.get(day) ?? 0) + 1);
               }
+
+              if (schedule.maxDate !== undefined && schedule.maxDate > furthest) {
+                // Each refusal names the days that station does have, so the
+                // window that would have fitted is in the answer rather than
+                // something anyone has to work out.
+                furthest = schedule.maxDate;
+              }
             } else {
               warn(`${stationID}: the service answered code ${String(code)}`);
             }
 
             continue;
+          }
+
+          if (schedule.metadata?.startDate !== undefined && schedule.metadata.md5 !== undefined) {
+            written.set(`${stationID}|${schedule.metadata.startDate}`, schedule.metadata.md5);
           }
 
           const byDay = under(airings, stationID);
@@ -812,8 +835,12 @@ export function defineSchedulesDirectSite(
             }
 
             if (complete) {
-              if (md5 !== undefined) {
-                rememberMd5(state, stationID, day, md5);
+              // What the answer itself said, where it said anything — see
+              // `written` above — and what the md5 pass said otherwise.
+              const hash = written.get(`${stationID}|${day}`) ?? md5;
+
+              if (hash !== undefined) {
+                rememberMd5(state, stationID, day, hash);
               }
             } else {
               // Written down as unfinished rather than left unsaid: with
@@ -839,11 +866,26 @@ export function defineSchedulesDirectSite(
         // One line for the whole window rather than one per station-day: the
         // days past what the service publishes are the same days for everyone,
         // and they are cached empty, so the next run says nothing at all.
-        const days = [...beyond.keys()].sort();
+        const short = [...beyond.keys()].sort();
         const most = Math.max(...beyond.values());
+        const window = short.length === 1 ? short[0]! : `${short[0]!} to ${short.at(-1)!}`;
+        // What would have fitted, counted from **this window's own start** —
+        // `days[0]`, not the first day that came up short — so the answer to
+        // "then what should `days` be?" is in the line that raises the question.
+        const fits =
+          furthest === '' || days[0] === undefined
+            ? undefined
+            : Math.round(
+                (Date.parse(`${furthest}T00:00:00Z`) - Date.parse(`${days[0]}T00:00:00Z`)) /
+                  86_400_000,
+              ) + 1;
 
         warn(
-          `the service has no listings yet for ${days.length === 1 ? days[0]! : `${days[0]!} to ${days.at(-1)!}`} on up to ${String(most)} station(s): those days are past what it publishes`,
+          `the service has no listings yet for ${window} on up to ${String(most)} station(s): those days are past what it publishes${
+            fits === undefined || fits <= 0
+              ? ''
+              : ` — it goes as far as ${furthest}, which is days: ${String(fits)}`
+          }`,
         );
       }
     },

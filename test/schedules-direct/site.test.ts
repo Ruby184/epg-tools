@@ -458,6 +458,46 @@ describe('defineSchedulesDirectSite', () => {
     expect(second.fetched).toBe(0);
   });
 
+  it('says how far the service does go, so the window can be made to fit', async () => {
+    const source = await service();
+    const report = collect();
+
+    await grab([site(source, { days: 2 })], {
+      cache: store(),
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    // The refusal names the days that station has, so the answer to "then what
+    // should `days` be?" is in the line that raises the question.
+    expect(report.messages).toContainEqual(
+      expect.stringContaining('it goes as far as 2026-09-14, which is days: 3'),
+    );
+  });
+
+  it('stores the md5 that came with the listings, not the one asked for earlier', async () => {
+    const source = await service();
+    const cache = store();
+    const state = SiteStateHandle.open(cache, SITE);
+
+    // The service answers one entry per station-day, each carrying the md5 of
+    // the very listings in it — and it refreshes several times a day, so the
+    // md5 pass a moment earlier may already be behind.
+    source.answer({
+      schedules: [
+        {
+          stationID: '101',
+          metadata: { startDate: TODAY, md5: 'fresher-than-the-md5-pass' },
+          programs: [airing('EP000000010001', 18)],
+        },
+      ],
+    });
+
+    await grab([site(source)], { cache, now: NOW });
+
+    expect((await state.bag()).get(`md5:101:${TODAY}`)).toBe('fresher-than-the-md5-pass');
+  });
+
   it('empties only the day the service refused, not the station`s other days', async () => {
     const source = await service();
     const cache = store();
