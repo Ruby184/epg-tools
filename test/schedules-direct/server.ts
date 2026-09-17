@@ -99,8 +99,13 @@ export interface SdServer {
    * stub.
    */
   setSchedule: (stationID: string, day: string, airings: WireAiring[]) => void;
-  /** Answer for one station with a code instead of a schedule — `7020`, `7100`. */
-  failStation: (stationID: string, code: number) => void;
+  /**
+   * Answer for one station with a code instead of a schedule — `7020`, `7100`.
+   *
+   * `times` limits it to the first so many answers, as a `7100` really behaves:
+   * queued for generation now, generated a moment later.
+   */
+  failStation: (stationID: string, code: number, times?: number) => void;
   /** The programme detail to answer `/programs` with. */
   setProgram: (program: WireProgram) => void;
   /** The pictures one programme's artwork call answers with. */
@@ -157,7 +162,7 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
   const artwork = new Map<string, WireImage[]>();
   /** Programmes to answer `6001` for, and how many more times. */
   const queuedPrograms = new Map<string, number>();
-  const stationFailures = new Map<string, number>();
+  const stationFailures = new Map<string, { code: number; left: number }>();
 
   let issued = 0;
   let alwaysExpired = false;
@@ -170,6 +175,19 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
   const send = (response: ServerResponse, status: number, body: unknown): void => {
     response.writeHead(status, { 'content-type': 'application/json' });
     response.end(JSON.stringify(body));
+  };
+
+  /** The code this station is failing with, if it has any failures left. */
+  const spend = (stationID: string): number | undefined => {
+    const failure = stationFailures.get(stationID);
+
+    if (failure === undefined || failure.left <= 0) {
+      return undefined;
+    }
+
+    failure.left -= 1;
+
+    return failure.code;
   };
 
   const server = createServer((request, response) => {
@@ -272,7 +290,9 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
 
         for (const { stationID, date } of asked) {
           const held = schedules.get(stationID);
-          const failure = stationFailures.get(stationID);
+          // Counted down per station rather than per day: one answer is one
+          // chance to have finished generating.
+          const failure = spend(stationID);
           const forStation: Record<string, { code?: number; md5?: string; lastModified?: string }> =
             {};
 
@@ -307,7 +327,7 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
           response,
           200,
           asked.flatMap(({ stationID, date }): WireSchedule[] => {
-            const failure = stationFailures.get(stationID);
+            const failure = spend(stationID);
 
             if (failure !== undefined) {
               return [{ stationID, code: failure, minDate: '2026-09-01', maxDate: '2026-09-14' }];
@@ -418,7 +438,8 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
       held.set(day, airings);
       schedules.set(stationID, held);
     },
-    failStation: (stationID, code) => void stationFailures.set(stationID, code),
+    failStation: (stationID, code, times) =>
+      void stationFailures.set(stationID, { code, left: times ?? Number.POSITIVE_INFINITY }),
     setProgram: (program) => void programs.set(program.programID ?? '', program),
     setArtwork: (programID, images) => void artwork.set(programID, images),
     queueProgram: (programID, times) => void queuedPrograms.set(programID, times),

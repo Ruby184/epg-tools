@@ -670,7 +670,9 @@ describe('defineSchedulesDirectSite', () => {
   it('keeps a cached day the service could not answer for, rather than emptying it', async () => {
     const source = await service();
     const cache = store();
-    const sites = [site(source)];
+    // The waits are what `7100` means; this case is about what happens once
+    // they are spent, so it spends none.
+    const sites = [site(source, { queuedWaits: [] })];
 
     await grab(sites, { cache, now: NOW });
 
@@ -683,6 +685,27 @@ describe('defineSchedulesDirectSite', () => {
     expect(summary.empty).toBe(0);
     // What was already cached is still there, rather than written empty.
     expect(await cache.read({ site: SITE, channelId: idOf('202'), day: TODAY })).toHaveLength(1);
+  });
+
+  it('waits for a schedule the service is still generating, then takes it', async () => {
+    const source = await service();
+    const cache = store();
+    const report = collect();
+
+    // `7100` on the first md5 pass, and the real answer once it has been
+    // generated — which is what the wait is for. Without it this station-day
+    // would be reported unchanged with nothing cached, which is a failure.
+    source.failStation('202', 7100, 1);
+
+    const summary = await grab([site(source, { queuedWaits: [1] })], {
+      cache,
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    expect(summary.failed).toBe(0);
+    expect(summary.fetched).toBe(2);
+    expect(report.messages.some((line) => line.includes('still being generated'))).toBe(true);
   });
 
   it('asks for each programme once however many airings carry it', async () => {
