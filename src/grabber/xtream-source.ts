@@ -37,7 +37,7 @@ import { xmltvDate } from '../xmltv/date.js';
 import { xmltvZoneOffset } from '../xmltv/zone.js';
 import type { XmltvDate } from '../xmltv/date.js';
 import type { ChannelBuilder, ProgrammeBuilder } from '../xmltv/builder.js';
-import { dayOf, type XmltvDayZone } from './xmltv-source.js';
+import { dayOf, type XmltvDayZone } from './xmltv-document.js';
 import { defineSiteConfig } from './types.js';
 import type { ChannelElement, GrabberChannel, SiteConfig } from './types.js';
 

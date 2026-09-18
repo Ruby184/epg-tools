@@ -54,5 +54,7 @@ export type {
   SchedulesDirectProgramme,
   SchedulesDirectStation,
 } from './schedules-direct/map.js';
-export type { XmltvDayZone, XmltvSiteOptions, XmltvUrlSource } from './xmltv-source.js';
+export { splitXmltvDocument, streamBytes, documentBytes, dayOf } from './xmltv-document.js';
+export type { SplitXmltvOptions, XmltvDayZone } from './xmltv-document.js';
+export type { XmltvSiteOptions, XmltvUrlSource } from './xmltv-source.js';
 export type * from './types.js';
