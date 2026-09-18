@@ -15,10 +15,16 @@
  * - `--noise`        write some lines to stderr before the document
  * - `--hang`         write nothing and never exit
  * - `--echo-argv`    write the argv as a `<channel>` per argument, so a test can
- *                    assert what it was called with
+ *                    assert what it was called with. Note this *replaces* the
+ *                    channel list, so it cannot be combined with a test about
+ *                    which channels are stale
  * - `--capabilities` print what `FAKE_CAPABILITIES` says, one per line, as
  *                    XMLTV's own do — `baseline\napiconfig` by default — and
  *                    count the asking in `FAKE_TALLY`, where one is named
+ * - `--description`  one line from `FAKE_DESCRIPTION`, exiting
+ *                    `FAKE_DESCRIPTION_EXIT` — a grabber that will not say
+ *                    what it covers still grabs
+ * - `--preferredmethod` one word from `FAKE_METHOD`, `allatonce` by default
  * - `--list-channels` a document of channels and no programmes
  * - `--gzip`         the same document, gzipped, as a program may well write
  * - `--trap`         record the signal it is stopped with in `FAKE_TALLY`
@@ -32,6 +38,15 @@ import { gzipSync } from 'node:zlib';
 import { argv, env, exit, stderr, stdout } from 'node:process';
 
 const args = argv.slice(2);
+
+if (env.FAKE_TALLY !== undefined) {
+  // Every invocation, whatever it was for: a test counting runs must not have
+  // to change what the program *writes* in order to see how often it ran —
+  // `--echo-argv` turns the document into the argument list, which is a
+  // different question and a different channel list.
+  appendFileSync(env.FAKE_TALLY, `${args.join(' ')}\n`);
+}
+
 const has = (name) => args.includes(name);
 const value = (name) => {
   const at = args.indexOf(name);
@@ -66,18 +81,24 @@ const programme = (id, dayOffset, hour, title) =>
   `  <programme start="${at(dayOffset, hour)}" stop="${at(dayOffset, hour + 1)}" channel="${id}">\n` +
   `    <title>${title}</title>\n  </programme>\n`;
 
+if (has('--description')) {
+  stdout.write(`${env.FAKE_DESCRIPTION ?? 'Somewhere on television'}\n`);
+  exit(Number(env.FAKE_DESCRIPTION_EXIT ?? 0));
+}
+
+if (has('--preferredmethod')) {
+  // One word, as its documentation has it. `allatonce` is the only one XMLTV
+  // defines; anything else is to be read as though the capability were absent.
+  stdout.write(`${env.FAKE_METHOD ?? 'allatonce'}\n`);
+  exit(0);
+}
+
 if (has('--capabilities')) {
   if (env.FAKE_CAPABILITIES === 'fail') {
     // A program that cannot even say what it supports, which is the first
     // thing asked of it.
     stderr.write('cannot read my own configuration\n');
     exit(3);
-  }
-
-  if (env.FAKE_TALLY !== undefined) {
-    // A line per asking, so a test can hold this layer to "once": nothing else
-    // can see how many times a program was run.
-    appendFileSync(env.FAKE_TALLY, 'asked\n');
   }
 
   // What a grabber advertises, one per line. `baseline` is the one that says

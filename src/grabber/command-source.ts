@@ -53,12 +53,26 @@ const GRACE_MS = 2000;
 
 /** What the window looks like to a program that has to be told about it. */
 export interface CommandWindow {
-  /** The days wanted, `YYYY-MM-DD`, in order. */
+  /**
+   * The days wanted, `YYYY-MM-DD`, in order — and **not necessarily
+   * contiguous**: a day already fresh in the cache is left out, so a run can
+   * want the 1st and the 5th and nothing between them.
+   */
   days: readonly string[];
   /** The first of them, which is what an offset is counted from. */
   startDay: string;
   /** How many days from today `startDay` is: 0 today, negative for the past. */
   offset: number;
+  /**
+   * How many days `startDay` has to be extended by to reach the last one
+   * wanted, counting both ends.
+   *
+   * **This, not `days.length`, is what a `--days`-style option means.** Such an
+   * option says how long a stretch to fetch, and a run wanting the 1st and the
+   * 5th needs five of them; asking for two would quietly come back without the
+   * 5th, and a day nothing is said about is cached as "nothing on".
+   */
+  span: number;
 }
 
 /** What an argument list is worked out from: the window, and what the site knows. */
@@ -75,6 +89,8 @@ export interface CommandArgsContext extends CommandWindow {
   signal?: AbortSignal;
   /** Where a note about working the arguments out goes. */
   warn: Says['warn'];
+  /** And where what was learnt on the way goes — which grabber this turned out to be. */
+  log: Says['log'];
 }
 
 /**
@@ -113,6 +129,20 @@ export interface CommandSiteOptions<TData = XmltvChannel> extends Omit<
    * the same `cacheChannels` default so it happens once a day.
    */
   channelsArgs?: CommandArgs;
+  /**
+   * How to cut the window into invocations. One covering all of it by default.
+   *
+   * For a program whose cost goes with the days asked for: a run wanting the
+   * 1st and the 5th can ask twice for a day each instead of once for five,
+   * which is what XMLTV's own advice is for a grabber that does **not**
+   * advertise `preferredmethod` — see {@link defineTvGrabCommandSite}, which
+   * asks it and decides. Each window is run and read in turn, and a day nothing
+   * is written about is still a day cached as "nothing on", so between them
+   * they have to cover what was asked for.
+   */
+  runs?: (
+    context: CommandArgsContext,
+  ) => readonly CommandWindow[] | Promise<readonly CommandWindow[]>;
   /** Where to run it. Defaults to the process's own directory. */
   cwd?: string;
   /** Added to this process's environment, not instead of it — `PATH` matters. */
@@ -327,6 +357,24 @@ function complaint(tail: readonly string[]): string {
   return tail.length === 0 ? '' : `. It said: ${tail.join(' / ')}`;
 }
 
+/**
+ * The window a set of days makes: where it starts, and how far it reaches.
+ *
+ * `span` counts both ends, because that is what a `--days`-style option means —
+ * see {@link CommandWindow.span}.
+ */
+export function commandWindow(days: readonly string[], today: Date): CommandWindow {
+  const startDay = days[0] ?? toDayString(today);
+  const last = days.at(-1) ?? startDay;
+
+  return {
+    days,
+    startDay,
+    offset: offsetOf(startDay, today),
+    span: Math.max(1, offsetOf(last, today) - offsetOf(startDay, today) + 1),
+  };
+}
+
 /** How many whole days `day` is from `from`. */
 function offsetOf(day: string, from: Date): number {
   const wanted = Date.parse(`${day}T00:00:00Z`);
@@ -343,6 +391,7 @@ export function defineCommandSite<TData = XmltvChannel>(
     command,
     args = [],
     channelsArgs,
+    runs = (context) => [context],
     cwd,
     env,
     shell,
@@ -385,18 +434,19 @@ export function defineCommandSite<TData = XmltvChannel>(
 
     channels:
       channels ??
-      (async ({ state, warn, signal }): Promise<GrabberChannel<TData>[]> => {
+      (async ({ state, warn, log, signal }): Promise<GrabberChannel<TData>[]> => {
         // The DTD puts every `<channel>` before the first `<programme>`, so the
         // head of the document is the whole channel list — and a program given
         // `--list-channels` writes nothing else at all. Either way this stops
         // reading there and stops the program with it.
-        const today = toDayString(new Date());
+        const now = new Date();
         const run = await running(channelsArgs ?? args, {
-          days: [today],
-          startDay: today,
-          offset: 0,
+          // Today, one day of it: the list is what is being asked for, and a
+          // program with no cheaper way of answering runs a grab to give it.
+          ...commandWindow([toDayString(now)], now),
           state,
           warn,
+          log,
           ...(signal ? { signal } : {}),
         });
         const found: GrabberChannel<XmltvChannel>[] = [];
@@ -452,58 +502,71 @@ export function defineCommandSite<TData = XmltvChannel>(
       // window that starts today gets 0, `--offset -1` gets -1, and a source
       // that files days differently has `dayZone` for it.
       const today = new Date();
-      const startDay = days[0] ?? toDayString(today);
-      const window: CommandWindow = { days, startDay, offset: offsetOf(startDay, today) };
+      const said = {
+        state,
+        warn,
+        log: ctx.log,
+        ...(signal ? { signal } : {}),
+      };
 
-      // Through the queue, and only the spawn: the output arrives while the
-      // document is read, so a slot held for all of that would be a slot held
-      // for the whole pass — which is the deadlock `paced` was shaped around.
-      const run = await ctx.paced(({ signal: taskSignal }) =>
-        running(args, {
-          ...window,
-          state,
-          warn,
-          ...((taskSignal ?? signal) ? { signal: taskSignal ?? signal } : {}),
-        }),
-      );
-
-      // Said out loud, because nothing else can say it: `epg try` and a verbose
-      // run instrument the site's HTTP client, and a program makes no request
-      // to instrument. The whole command line, since for a site like this the
-      // arguments *are* the question asked — which does mean a secret in an
-      // argument turns up in a verbose log, the same bargain `epg try` already
-      // makes with a url.
-      ctx.log(`running ${run.said}`);
-
-      /** Whether the document was read to the end, which decides two things. */
-      let whole = false;
-
-      try {
-        yield* splitXmltvDocument<TData>(document(run), {
-          channelDays,
-          warn,
-          ...(signal ? { signal } : {}),
-          dayZone,
-          ...(order === undefined ? {} : { order }),
-          ...(parse === undefined ? {} : { parse }),
-        });
-        whole = true;
-      } finally {
-        if (!whole) {
-          // A `finally` rather than a `catch`, because a generator can be let
-          // go of as well as thrown out of: a consumer that stops reading part
-          // way leaves this suspended at a `yield`, and a program still writing
-          // into a pipe nobody reads would block there for ever.
-          run.stop('the document was not read to the end');
-        }
+      // Asked with the same context an argument list is worked out from, and
+      // before any of them: a site that decides this by asking the program
+      // something needs the answer first, and needs it once.
+      for (const window of await runs({ ...commandWindow(days, today), ...said })) {
+        yield* once(window);
       }
 
-      // **After** the document, never before: a program whose output nobody is
-      // reading blocks on a full pipe. And before this generator ends, because
-      // ending quietly is what caches every unreached channel-day as "nothing
-      // on" — which for a program that died half way through its document is
-      // exactly wrong.
-      await run.finished();
+      /** One invocation: run it, read what it writes, and hold it to its exit. */
+      async function* once(window: CommandWindow): AsyncGenerator<StreamedChannelDay<TData>> {
+        // Through the queue, and only the spawn: the output arrives while the
+        // document is read, so a slot held for all of that would be a slot held
+        // for the whole pass — which is the deadlock `paced` was shaped around.
+        const run = await ctx.paced(({ signal: taskSignal }) =>
+          running(args, {
+            ...window,
+            ...said,
+            ...((taskSignal ?? signal) ? { signal: taskSignal ?? signal } : {}),
+          }),
+        );
+
+        // Said out loud, because nothing else can say it: `epg try` and a verbose
+        // run instrument the site's HTTP client, and a program makes no request
+        // to instrument. The whole command line, since for a site like this the
+        // arguments *are* the question asked — which does mean a secret in an
+        // argument turns up in a verbose log, the same bargain `epg try` already
+        // makes with a url.
+        ctx.log(`running ${run.said}`);
+
+        /** Whether the document was read to the end, which decides two things. */
+        let whole = false;
+
+        try {
+          yield* splitXmltvDocument<TData>(document(run), {
+            channelDays,
+            warn,
+            ...(signal ? { signal } : {}),
+            dayZone,
+            ...(order === undefined ? {} : { order }),
+            ...(parse === undefined ? {} : { parse }),
+          });
+          whole = true;
+        } finally {
+          if (!whole) {
+            // A `finally` rather than a `catch`, because a generator can be let
+            // go of as well as thrown out of: a consumer that stops reading part
+            // way leaves this suspended at a `yield`, and a program still writing
+            // into a pipe nobody reads would block there for ever.
+            run.stop('the document was not read to the end');
+          }
+        }
+
+        // **After** the document, never before: a program whose output nobody
+        // is reading blocks on a full pipe. And before this generator ends,
+        // because ending quietly is what caches every unreached channel-day as
+        // "nothing on" — which for a program that died half way through its
+        // document is exactly wrong.
+        await run.finished();
+      }
     },
   });
 }

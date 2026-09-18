@@ -19,8 +19,35 @@ const GRABBER = fileURLToPath(new URL('./fixtures/fake-grabber.mjs', import.meta
 
 const TODAY = new Date().toISOString().slice(0, 10);
 const NOW = new Date(`${TODAY}T09:00:00.000Z`);
+/** The day after, which a gappy window is made of by holding it fresh. */
+const TOMORROW = new Date(Date.parse(`${TODAY}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
 
 const store = (): CacheStore => new CacheManager({ driver: new MemoryCacheDriver() });
+
+/**
+ * Make one day fresh for every channel, so the window around it is gappy.
+ *
+ * With programmes in it, deliberately: an entry holding none ages by
+ * `emptyMaxAgeDays` instead — a day that came back empty being as likely to be
+ * a source having a bad morning as a day with nothing on — so an empty one is
+ * stale again at once and the gap never opens.
+ */
+async function hold(cache: CacheStore, day: string): Promise<void> {
+  for (const channelId of ['one.example', 'two.example']) {
+    await cache.write(
+      { site: 'fake.tv_grab', channelId, day },
+      [
+        {
+          channel: channelId,
+          start: new Date(`${day}T18:00:00.000Z`),
+          stop: new Date(`${day}T19:00:00.000Z`),
+          title: [{ value: 'Held' }],
+        },
+      ],
+      { grabbedAt: NOW.toISOString() },
+    );
+  }
+}
 
 function site(options: Record<string, unknown> = {}) {
   return defineTvGrabCommandSite({ site: 'fake.tv_grab', command: GRABBER, ...options });
@@ -143,9 +170,14 @@ describe('defineTvGrabCommandSite', () => {
     // only thing that could be skipped is the capability probe.
     await resolveChannels(config, { state, refresh: true });
 
-    // One spawn, counted by the program itself: nothing else can see how many
+    // One asking, counted by the program itself: nothing else can see how many
     // times it was run.
-    expect((await readFile(tally, 'utf8')).trim().split('\n')).toHaveLength(1);
+    const asked = (await readFile(tally, 'utf8'))
+      .trim()
+      .split('\n')
+      .filter((line) => line === '--capabilities');
+
+    expect(asked).toHaveLength(1);
   });
 
   it('asks again once the command changes', async () => {
@@ -168,6 +200,88 @@ describe('defineTvGrabCommandSite', () => {
     const second = (await state.bag()).get('capabilities') as { of: string };
 
     expect(second.of).not.toBe(first.of);
+  });
+
+  it('asks once for the whole stretch where the grabber downloads the lot anyway', async () => {
+    const cache = store();
+    const tally = join(await mkdtemp(join(tmpdir(), 'epg-tv-grab-')), 'runs');
+    // `allatonce`: "the grabber downloads data in a single chunk and filters
+    // out the requested days", so asking it twice costs twice for nothing. Only
+    // where the capability is advertised, which is what advertising it means.
+    const config = site({
+      env: {
+        FAKE_TALLY: tally,
+        FAKE_CAPABILITIES: 'baseline\napiconfig\npreferredmethod',
+        FAKE_METHOD: 'allatonce',
+      },
+    });
+
+    // Today and the day after tomorrow are stale, the day between them fresh.
+    await hold(cache, TOMORROW);
+    await grab([config], { cache, now: NOW, startDay: TODAY, days: 3 });
+
+    const runs = (await readFile(tally, 'utf8'))
+      .trim()
+      .split('\n')
+      .filter((line) => line.includes('--days'));
+
+    // One run, and **`--days 3`**: the option says how long a stretch to fetch,
+    // so the two days wanted three days apart need three. Asking for two — the
+    // number of days wanted — would come back without the last, and a day the
+    // document says nothing about is cached as "nothing on".
+    expect(runs).toEqual(['--days 3 --offset 0 --quiet']);
+  });
+
+  it('asks per stretch where the grabber pays by the day', async () => {
+    const cache = store();
+    const tally = join(await mkdtemp(join(tmpdir(), 'epg-tv-grab-')), 'runs');
+    // No `preferredmethod`, so bandwidth is to be assumed proportional to the
+    // days asked for — and a gap in the middle is worth two calls.
+    const config = site({
+      env: { FAKE_TALLY: tally, FAKE_CAPABILITIES: 'baseline\napiconfig' },
+    });
+
+    await hold(cache, TOMORROW);
+    await grab([config], { cache, now: NOW, startDay: TODAY, days: 3 });
+
+    const runs = (await readFile(tally, 'utf8'))
+      .trim()
+      .split('\n')
+      .filter((line) => line.includes('--days'));
+
+    // One for today and one for the day after tomorrow, a day each — and
+    // between them they cover everything asked for, which they must: a day no
+    // run wrote about is cached empty.
+    expect(runs).toEqual(['--days 1 --offset 0 --quiet', '--days 1 --offset 2 --quiet']);
+  });
+
+  it('says which grabber it turned out to be', async () => {
+    const report = collect();
+
+    await grab([site({ env: { FAKE_DESCRIPTION: 'Television listings for Somewhere' } })], {
+      cache: store(),
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+      reporter: report.reporter,
+    });
+
+    // `--description` is one line about what it covers, and knowing which
+    // program answered is worth a line of a verbose log.
+    expect(report.messages.join(' ')).toMatch(/Television listings for Somewhere/);
+  });
+
+  it('grabs on with a grabber that will not say what it covers', async () => {
+    const cache = store();
+    const summary = await grab([site({ env: { FAKE_DESCRIPTION_EXIT: '1' } })], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+    });
+
+    // Only `--capabilities` decides anything, so only it may fail the site.
+    expect(summary.failed).toBe(0);
   });
 
   it('says when it cannot pass on the config file it was given', async () => {
