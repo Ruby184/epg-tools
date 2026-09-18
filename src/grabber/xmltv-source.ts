@@ -25,7 +25,13 @@
 import type { CompressionFormat } from '../core/output.js';
 import { parseXmltvStream } from '../xmltv/main.js';
 import type { XmltvChannel, XmltvParseOptions } from '../xmltv/types.js';
-import { documentBytes, splitXmltvDocument, type XmltvDayZone } from './xmltv-document.js';
+import {
+  asGrabberChannel,
+  documentBytes,
+  splitXmltvDocument,
+  xmltvChannelInfo,
+  type XmltvDayZone,
+} from './xmltv-document.js';
 import type {
   ChannelsSource,
   GrabberChannel,
@@ -92,20 +98,6 @@ export interface XmltvSiteOptions<TData = XmltvChannel> extends Omit<
    * second write, and the whole document in memory while it parses.
    */
   order?: 'grouped' | 'any';
-}
-
-/** One `<channel>` as a channel to grab, keeping the element for the output. */
-function asGrabberChannel(channel: XmltvChannel): GrabberChannel<XmltvChannel> {
-  const name = channel.displayName[0]?.value;
-  const logo = channel.icon?.[0]?.src;
-
-  return {
-    xmltvId: channel.id,
-    siteId: channel.id,
-    ...(name === undefined ? {} : { name }),
-    ...(logo === undefined ? {} : { logo }),
-    data: channel,
-  };
 }
 
 /**
@@ -209,18 +201,7 @@ export function defineXmltvSite<TData = XmltvChannel>(
 
         return found as GrabberChannel<TData>[];
       }),
-    channelInfo:
-      site.channelInfo ??
-      ((channel, element) => {
-        const source = channel.data as XmltvChannel | undefined;
-
-        // What the document said about it, under the id the output uses — every
-        // display name, icon and url it carried, rather than the three fields a
-        // default element can hold.
-        return source !== undefined && typeof source.id === 'string'
-          ? { ...source, id: channel.xmltvId }
-          : element();
-      }),
+    channelInfo: site.channelInfo ?? xmltvChannelInfo,
     async *stream(ctx): AsyncGenerator<StreamedChannelDay<TData>> {
       const { channelDays, http, signal, warn } = ctx;
 

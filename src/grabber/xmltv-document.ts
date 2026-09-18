@@ -19,9 +19,10 @@ import { PassThrough, pipeline } from 'node:stream';
 import { toDayString } from '../core/days.js';
 import { compressionFromName, decompressor, type CompressionFormat } from '../core/output.js';
 import { getXmltvOffset, parseXmltvStream, xmltvZoneOffset } from '../xmltv/main.js';
-import type { XmltvParseOptions, XmltvProgramme } from '../xmltv/types.js';
+import type { ChannelBuilder } from '../xmltv/builder.js';
+import type { XmltvChannel, XmltvParseOptions, XmltvProgramme } from '../xmltv/types.js';
 import type { Says } from '../core/events.js';
-import type { ChannelDay, GrabberChannel, StreamedChannelDay } from './types.js';
+import type { ChannelDay, ChannelElement, GrabberChannel, StreamedChannelDay } from './types.js';
 
 /**
  * Which day a programme belongs to.
@@ -291,6 +292,39 @@ export function dayOf(start: XmltvProgramme['start'], zone: XmltvDayZone): strin
   const offset = zone === 'source' ? getXmltvOffset(start) : xmltvZoneOffset(zone, start);
 
   return toDayString(new Date(start.getTime() + offset * 60_000));
+}
+
+/** One `<channel>` as a channel to grab, keeping the element for the output. */
+export function asGrabberChannel(channel: XmltvChannel): GrabberChannel<XmltvChannel> {
+  const name = channel.displayName[0]?.value;
+  const logo = channel.icon?.[0]?.src;
+
+  return {
+    xmltvId: channel.id,
+    siteId: channel.id,
+    ...(name === undefined ? {} : { name }),
+    ...(logo === undefined ? {} : { logo }),
+    data: channel,
+  };
+}
+
+/**
+ * A channel written back out as the document declared it.
+ *
+ * What the document said about it, under the id the output uses — every display
+ * name, icon and url it carried, rather than the three fields a default element
+ * can hold. Shared because a document is a document: it reads the same whether
+ * it arrived over HTTP or on a program's stdout.
+ */
+export function xmltvChannelInfo(
+  channel: GrabberChannel<unknown>,
+  element: ChannelElement,
+): XmltvChannel | ChannelBuilder {
+  const source = channel.data as XmltvChannel | undefined;
+
+  return source !== undefined && typeof source.id === 'string'
+    ? { ...source, id: channel.xmltvId }
+    : element();
 }
 
 /** What {@link splitXmltvDocument} needs beyond the document itself. */

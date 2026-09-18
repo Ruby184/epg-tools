@@ -54,7 +54,22 @@ export type {
   SchedulesDirectProgramme,
   SchedulesDirectStation,
 } from './schedules-direct/map.js';
-export { splitXmltvDocument, streamBytes, documentBytes, dayOf } from './xmltv-document.js';
+export { defineCommandSite, runCommand } from './command-source.js';
+export type {
+  CommandArgs,
+  CommandSiteOptions,
+  CommandWindow,
+  RunCommandOptions,
+  RunningCommand,
+} from './command-source.js';
+export {
+  asGrabberChannel,
+  dayOf,
+  documentBytes,
+  splitXmltvDocument,
+  streamBytes,
+  xmltvChannelInfo,
+} from './xmltv-document.js';
 export type { SplitXmltvOptions, XmltvDayZone } from './xmltv-document.js';
 export type { XmltvSiteOptions, XmltvUrlSource } from './xmltv-source.js';
 export type * from './types.js';
