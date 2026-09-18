@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/main.js';
 import { grab } from '../src/grabber/main.js';
-import { defineCommandSite } from '../src/grabber/command-source.js';
+import { defineCommandSite, runCommand } from '../src/grabber/command-source.js';
 import { resolveChannels } from '../src/grabber/channels.js';
 import { cutShort, documentFor, startControl, type Control } from './fixtures/control.js';
 import { collect } from './reporting.js';
@@ -139,6 +139,62 @@ describe('defineCommandSite', () => {
     expect(report.failures.map((one) => (one.error as Error).message).join(' ')).toMatch(
       /exited 3 .*It said: .*something looks odd on day 3/s,
     );
+  });
+
+  it('keeps a talkative program from drowning the run', async () => {
+    const report = collect();
+    const control = await startControl();
+
+    control.answer((invocation) => ({
+      write: documentFor(invocation),
+      // A grabber not told to be quiet writes a line per channel, and a lineup
+      // is hundreds of them.
+      stderr: Array.from({ length: 120 }, (_, at) => `doing channel ${String(at)}`).join('\n'),
+    }));
+
+    await grab([answered(control)], {
+      cache: store(),
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+      reporter: report.reporter,
+    });
+    await control.close();
+
+    const lines = report.messages.filter((line) => line.includes('doing channel'));
+
+    // The first fifty of each run say what is happening; past that the point has
+    // been made. Two runs here — the channel list, and then the grab.
+    expect(control.invocations).toHaveLength(2);
+    expect(lines).toHaveLength(50 * control.invocations.length);
+    expect(report.messages.some((line) => line.includes('more to say on stderr'))).toBe(true);
+  });
+
+  it('says a command is not there, rather than that its output is not a document', async () => {
+    const report = collect();
+
+    await grab([site({ command: join(tmpdir(), 'no-such-grabber-here'), args: [] })], {
+      cache: store(),
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+      reporter: report.reporter,
+    });
+
+    // The likeliest thing to go wrong with a site like this, and a program that
+    // was never there writes nothing — so without this the failure reported is
+    // whatever the reader makes of no bytes at all.
+    // It falls over on the channel list, before there is a channel-day to fail.
+    expect(report.of('site:failed')).toHaveLength(1);
+    expect(report.messages.join(' ')).toMatch(
+      /could not be run: spawn .*no-such-grabber-here ENOENT/,
+    );
+  });
+
+  it('refuses a site with no command to run', () => {
+    // `spawn('')` throws from inside Node, which would reach a run as something
+    // other than this site's failure.
+    expect(() => runCommand({ command: '', args: [] })).toThrow(/needs a command to run/);
   });
 
   it('accepts an exit code the config says is fine', async () => {

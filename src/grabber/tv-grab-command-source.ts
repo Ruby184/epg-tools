@@ -208,7 +208,9 @@ export function defineTvGrabCommandSite<TData = XmltvChannel>(
     configFile,
     cache,
     quiet = true,
-    capabilities,
+    // Renamed on the way in so the *answer* can be called what it is below:
+    // this is the config's claim about the program, not the program's own.
+    capabilities: declared,
     extraArgs = [],
     cwd,
     env,
@@ -226,9 +228,7 @@ export function defineTvGrabCommandSite<TData = XmltvChannel>(
 
   /** What it says about itself — asked once, or said in the config. */
   const about = async (context: CommandArgsContext): Promise<Remembered> =>
-    capabilities === undefined
-      ? askAbout(command, context, how)
-      : { of: 'said', names: [...capabilities] };
+    declared === undefined ? askAbout(command, context, how) : { of: 'said', names: [...declared] };
 
   /** The days, cut where they stop being consecutive. */
   const stretches = (window: CommandWindow): string[][] => {
@@ -268,8 +268,8 @@ export function defineTvGrabCommandSite<TData = XmltvChannel>(
   };
 
   /** The options `baseline` promises, which are the window and the config file. */
-  const baseline = (has: Set<string>, context: CommandArgsContext): string[] => {
-    if (!has.has('baseline')) {
+  const baseline = (capabilities: Set<string>, context: CommandArgsContext): string[] => {
+    if (!capabilities.has('baseline')) {
       if (configFile !== undefined) {
         // Said, because the alternative is a grab that quietly reads somebody
         // else's listings: without `baseline` there is no `--config-file` to
@@ -328,28 +328,28 @@ export function defineTvGrabCommandSite<TData = XmltvChannel>(
 
     args: async (context) => {
       const known = await about(context);
-      const has = new Set(known.names);
+      const capabilities = new Set(known.names);
 
       introduce(known, context.log);
 
       return [
-        ...baseline(has, context),
-        ...(cache === undefined || !has.has('cache') ? [] : ['--cache', cache]),
+        ...baseline(capabilities, context),
+        ...(cache === undefined || !capabilities.has('cache') ? [] : ['--cache', cache]),
         ...extraArgs,
       ];
     },
 
     channelsArgs: async (context) => {
-      const has = new Set((await about(context)).names);
+      const capabilities = new Set((await about(context)).names);
 
-      if (!has.has('apiconfig')) {
+      if (!capabilities.has('apiconfig')) {
         // No cheap answer to ask for, so the list comes out of the head of a
         // normal run — which is what the generic layer does with no
         // `channelsArgs` at all, and what the published-guide adapter does with
         // a document. `cacheChannels` keeps it to once a day either way.
         return [
-          ...baseline(has, context),
-          ...(cache === undefined || !has.has('cache') ? [] : ['--cache', cache]),
+          ...baseline(capabilities, context),
+          ...(cache === undefined || !capabilities.has('cache') ? [] : ['--cache', cache]),
           ...extraArgs,
         ];
       }
@@ -360,9 +360,11 @@ export function defineTvGrabCommandSite<TData = XmltvChannel>(
         // sits in `capabilities/apiconfig.ts`. It writes a document of
         // channels and no programmes, so it costs one fast run rather than a
         // whole grab.
-        ...(configFile === undefined || !has.has('baseline') ? [] : ['--config-file', configFile]),
+        ...(configFile === undefined || !capabilities.has('baseline')
+          ? []
+          : ['--config-file', configFile]),
         '--list-channels',
-        ...(quiet && has.has('baseline') ? ['--quiet'] : []),
+        ...(quiet && capabilities.has('baseline') ? ['--quiet'] : []),
         ...extraArgs,
       ];
     },

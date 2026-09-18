@@ -48,6 +48,17 @@ import {
 /** How many lines of stderr are kept for the message a failure carries. */
 const STDERR_TAIL = 20;
 
+/**
+ * How many of them are passed on as they arrive.
+ *
+ * A grabber not told to be quiet — or one that ignores being told — writes a
+ * line per channel, and a nine-hundred channel lineup would put nine hundred
+ * warnings through the reporter for one run. The first fifty say what is
+ * happening; past that the point has been made, and the tail above is still
+ * kept for the failure.
+ */
+const STDERR_SAID = 50;
+
 /** How long a killed program has to go quietly before it is killed properly. */
 const GRACE_MS = 2000;
 
@@ -199,6 +210,18 @@ export interface RunningCommand {
   /** The command line, for a message. */
   said: string;
   /**
+   * What it failed to *start* with, where it never started at all.
+   *
+   * A typo in a command name is the likeliest thing to go wrong with a site
+   * like this, and a program that was never there writes nothing — so what a
+   * reader of its output meets first is a document that is not XML. This is how
+   * that reader can say the truer thing instead of the nearer one.
+   */
+  // Not optional but possibly undefined: `exactOptionalPropertyTypes` reads the
+  // two differently, and this is always there to be asked.
+  readonly neverStarted: GrabberError | undefined;
+
+  /**
    * Wait for it to finish, and throw unless it finished well.
    *
    * Call it **after** stdout has been read to the end: a program whose output
@@ -219,7 +242,14 @@ export interface RunningCommand {
  */
 export function runCommand(options: RunCommandOptions): RunningCommand {
   const { command, args, okExitCodes = [], warn, signal } = options;
-  const said = [command, ...args].join(' ');
+  const line = [command, ...args].join(' ');
+
+  if (command === '') {
+    // `spawn('')` throws a `TypeError` from inside Node, which would reach a
+    // run as something other than this site's failure.
+    throw new GrabberError('a command site needs a command to run');
+  }
+
   const child = spawn(command, [...args], {
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     // Added to this process's environment rather than replacing it: a program
@@ -233,6 +263,8 @@ export function runCommand(options: RunCommandOptions): RunningCommand {
 
   /** The last lines it complained with, which is what a failure is worth reading. */
   const tail: string[] = [];
+  /** How many lines of stderr have been passed on — see {@link STDERR_SAID}. */
+  let said = 0;
   /** Why it was stopped, where it was — which beats "killed by SIGTERM". */
   let stopped: string | undefined;
   let killer: NodeJS.Timeout | undefined;
@@ -259,7 +291,13 @@ export function runCommand(options: RunCommandOptions): RunningCommand {
       return;
     }
 
-    warn?.(line);
+    if (said < STDERR_SAID) {
+      warn?.(line);
+    } else if (said === STDERR_SAID) {
+      warn?.(`${command} has more to say on stderr; the rest is kept for a failure`);
+    }
+
+    said += 1;
     tail.push(line);
 
     if (tail.length > STDERR_TAIL) {
@@ -274,6 +312,13 @@ export function runCommand(options: RunCommandOptions): RunningCommand {
    * end by the time this settles — and `error` too, since a program that is not
    * there never exits at all.
    */
+  /** Set before anything can read the (empty) output — see `neverStarted`. */
+  let neverStarted: GrabberError | undefined;
+
+  child.on('error', (error: Error) => {
+    neverStarted = new GrabberError(`${line} could not be run: ${error.message}`);
+  });
+
   const ended = Promise.race([
     once(child, 'close').then(([code, killedBy]) => ({
       code: code as number | null,
@@ -324,27 +369,33 @@ export function runCommand(options: RunCommandOptions): RunningCommand {
     // Web, because that is what the document reader takes — and what a `fetch`
     // body already is, so both sources arrive the same way.
     bytes: Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
-    said,
+    said: line,
+    get neverStarted(): GrabberError | undefined {
+      return neverStarted;
+    },
     finished: async () => {
       const { code, killedBy } = await ended.catch((error: unknown) => {
-        throw new GrabberError(
-          `${said} could not be run: ${error instanceof Error ? error.message : String(error)}`,
+        throw (
+          neverStarted ??
+          new GrabberError(
+            `${line} could not be run: ${error instanceof Error ? error.message : String(error)}`,
+          )
         );
       });
 
       if (stopped !== undefined) {
-        throw new GrabberError(`${said} was stopped: ${stopped}${complaint(tail)}`);
+        throw new GrabberError(`${line} was stopped: ${stopped}${complaint(tail)}`);
       }
 
       if (killedBy !== null) {
-        throw new GrabberError(`${said} was killed by ${killedBy}${complaint(tail)}`);
+        throw new GrabberError(`${line} was killed by ${killedBy}${complaint(tail)}`);
       }
 
       if (code !== 0 && !okExitCodes.includes(code ?? -1)) {
         // The whole reason this is read. A document that stops half way through
         // an element looks exactly like one that had nothing more to say.
         throw new GrabberError(
-          `${said} exited ${String(code)} — its output cannot be trusted to be a whole document${complaint(tail)}`,
+          `${line} exited ${String(code)} — its output cannot be trusted to be a whole document${complaint(tail)}`,
         );
       }
     },
@@ -471,7 +522,10 @@ export function defineCommandSite<TData = XmltvChannel>(
           // ever, so it goes before the parse failure is raised.
           run.stop('the channel list could not be read');
 
-          throw error;
+          // And where there was no program, that is the thing worth saying: a
+          // command that is not there writes nothing, and "this is not a
+          // document" is a poor way to hear about a typo.
+          throw run.neverStarted ?? error;
         }
 
         if (enough) {
@@ -513,11 +567,16 @@ export function defineCommandSite<TData = XmltvChannel>(
       // before any of them: a site that decides this by asking the program
       // something needs the answer first, and needs it once.
       for (const window of await runs({ ...commandWindow(days, today), ...said })) {
-        yield* once(window);
+        yield* oneRun(window);
       }
 
-      /** One invocation: run it, read what it writes, and hold it to its exit. */
-      async function* once(window: CommandWindow): AsyncGenerator<StreamedChannelDay<TData>> {
+      /**
+       * One invocation: run it, read what it writes, and hold it to its exit.
+       *
+       * Not `once`, which is `node:events`' and imported above — a name this
+       * would have shadowed for everything inside `stream`.
+       */
+      async function* oneRun(window: CommandWindow): AsyncGenerator<StreamedChannelDay<TData>> {
         // Through the queue, and only the spawn: the output arrives while the
         // document is read, so a slot held for all of that would be a slot held
         // for the whole pass — which is the deadlock `paced` was shaped around.
@@ -550,6 +609,10 @@ export function defineCommandSite<TData = XmltvChannel>(
             ...(parse === undefined ? {} : { parse }),
           });
           whole = true;
+        } catch (error) {
+          // As in the channel list above: a command that is not there is what
+          // went wrong, not the empty output it left behind.
+          throw run.neverStarted ?? error;
         } finally {
           if (!whole) {
             // A `finally` rather than a `catch`, because a generator can be let
