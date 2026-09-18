@@ -15,8 +15,7 @@
  * quadratic in a channel's busiest day.
  */
 
-import { once } from 'node:events';
-import { PassThrough, pipeline, Readable } from 'node:stream';
+import { PassThrough, pipeline } from 'node:stream';
 import { toDayString } from '../core/days.js';
 import { compressionFromName, decompressor, type CompressionFormat } from '../core/output.js';
 import { getXmltvOffset, parseXmltvStream, xmltvZoneOffset } from '../xmltv/main.js';
@@ -41,87 +40,71 @@ export type XmltvDayZone = 'source' | 'utc' | (string & {});
 const MAGIC_BYTES = 4;
 
 /**
- * Wait for a stream to have more to say, or to have finished saying it.
- *
- * Both, because either can be next and only one of them will come. An empty
- * body emits `readable` first — with nothing to read — and `end` only on the
- * turn after, so waiting on `readable` alone hangs on a document that turned out
- * to be nothing at all.
- *
- * The controller is what takes the loser's listener away; without it a stream
- * that dribbles collects one per chunk. An `error` rejects both, which is how a
- * dying connection reaches the caller rather than stalling it.
- */
-async function readableOrEnd(source: Readable): Promise<void> {
-  const settled = new AbortController();
-  const more = once(source, 'readable', { signal: settled.signal });
-  const ended = once(source, 'end', { signal: settled.signal });
-
-  // The loser rejects when the controller fires below; saying so here is what
-  // keeps that from being an unhandled rejection.
-  more.catch(() => {});
-  ended.catch(() => {});
-
-  try {
-    await Promise.race([more, ended]);
-  } finally {
-    settled.abort();
-  }
-}
-
-/**
  * The first bytes of a stream, put back where they came from.
  *
  * Enough of them to decide on, rather than one chunk of whatever length: a body
  * arrives as the socket gave it, and a dribbling origin or a proxy flushing
  * small frames hands over **one byte** first — measured, not supposed. A magic
  * number read out of that is a gzipped guide reported as "neither text nor a
- * compression this can undo", which is a whole site failed over a chunk boundary.
+ * compression this can undo", which is a whole site failed over a chunk
+ * boundary. A document that ends inside the window is simply a short head.
  *
- * Whatever is there is taken and held, rather than asking for `want` bytes and
- * waiting: `read(want)` on a stream holding fewer returns nothing *and* asks to
- * be told about the same bytes again, so a dribbling body spins — one byte
- * buffered, one byte reported, forever. Consuming empties the buffer, which
- * makes the next `readable` mean what it says.
- *
- * `unshift` then puts the head back and the stream carries on as though nobody
- * had looked, so everything after this is one stream that `pipeline` owns —
- * except for a document that ended inside the window, which is a document held
- * whole and worth handing over as one.
+ * Over a **web stream**, which is what makes this twenty lines rather than the
+ * seventy-five it was: `read()` returning `null`, racing `readable` against
+ * `end`, `unshift` and `readableEnded` are all Node-stream problems that a
+ * reader does not have. It is also what a `fetch` body already is, so the
+ * commonest source is not converted to be looked at — and a child's stdout
+ * becomes one with `Readable.toWeb`.
  */
-async function peek(source: Readable, want: number): Promise<{ head: Buffer; body: Readable }> {
-  const chunks: Buffer[] = [];
+async function peek(
+  source: ReadableStream<Uint8Array>,
+  want: number,
+): Promise<{ head: Buffer; body: ReadableStream<Uint8Array> }> {
+  const reader = source.getReader();
+  const held: Uint8Array[] = [];
   let size = 0;
 
   while (size < want) {
-    const chunk = source.read() as Buffer | null;
+    const next = await reader.read();
 
-    if (chunk === null) {
-      if (source.readableEnded) {
-        break;
-      }
-
-      await readableOrEnd(source);
-      continue;
+    if (next.done) {
+      break;
     }
 
-    chunks.push(chunk);
-    size += chunk.length;
+    held.push(next.value);
+    size += next.value.length;
   }
 
-  const head = Buffer.concat(chunks);
+  return {
+    head: Buffer.concat(held),
+    // What was taken, in front of whatever is left, so everything downstream
+    // sees one stream that nobody looked at. `cancel` is why this is a stream
+    // of its own rather than a generator: a consumer that stops early — the
+    // channel pass, which stops at the first `<programme>` — reaches the reader
+    // underneath through it, and without that a body would be left holding a
+    // socket and a child would be left running.
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of held) {
+          controller.enqueue(chunk);
+        }
+      },
+      async pull(controller) {
+        const next = await reader.read();
 
-  if (source.readableEnded) {
-    // Everything there was, and a stream that has said `end` refuses to take it
-    // back. What is held is the whole document, so it is one to hand over.
-    return { head, body: Readable.from(head.length > 0 ? [head] : []) };
-  }
+        if (next.done) {
+          controller.close();
 
-  if (head.length > 0) {
-    source.unshift(head);
-  }
+          return;
+        }
 
-  return { head, body: source };
+        controller.enqueue(next.value);
+      },
+      cancel(reason) {
+        return reader.cancel(reason);
+      },
+    }),
+  };
 }
 
 const MAGIC: Array<{ format: CompressionFormat; bytes: number[] }> = [
@@ -199,19 +182,18 @@ function sniff(
  * going to read it.
  */
 async function sniffed(
-  source: Readable,
+  source: ReadableStream<Uint8Array>,
   options: {
     name: string;
     compression: CompressionFormat | false | undefined;
     contentType?: string | null;
     contentEncoding?: string | null;
   },
-): Promise<{ body: Readable; format: CompressionFormat | undefined }> {
+): Promise<{ body: ReadableStream<Uint8Array>; format: CompressionFormat | undefined }> {
   const { name, compression } = options;
+  const { head, body } = await peek(source, MAGIC_BYTES);
 
   try {
-    const { head, body } = await peek(source, MAGIC_BYTES);
-
     return {
       body,
       format:
@@ -226,7 +208,13 @@ async function sniffed(
             : compression,
     };
   } catch (error) {
-    source.destroy();
+    // Nothing has been piped yet, so nothing else would let go of the source: a
+    // response would sit holding a socket until undici noticed that nobody was
+    // ever going to read it. Through `body` rather than the source, which
+    // `peek`'s reader holds locked — cancelling a locked stream throws, and the
+    // thrown lock error would be what reached the caller instead of the reason
+    // the document was refused.
+    await body.cancel();
 
     throw error;
   }
@@ -241,7 +229,7 @@ async function sniffed(
  * about itself and a pipe does not.
  */
 export async function* streamBytes(
-  source: Readable,
+  source: ReadableStream<Uint8Array>,
   options: {
     /** What to call it in an error — a url, a command line. */
     name: string;
@@ -279,7 +267,7 @@ export function documentBytes(
   // A response with no body at all — a `204`, a `HEAD` — is a document of no
   // bytes rather than a special case: it peeks as empty, sniffs as nothing in
   // particular, and pipes through to no programmes.
-  return streamBytes(response.body === null ? Readable.from([]) : Readable.fromWeb(response.body), {
+  return streamBytes(response.body ?? ReadableStream.from([]), {
     name: url,
     compression,
     contentType: response.headers.get('content-type'),
