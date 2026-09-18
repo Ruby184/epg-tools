@@ -170,6 +170,39 @@ describe('defineTvGrabCommandSite', () => {
     expect(second.of).not.toBe(first.of);
   });
 
+  it('says when it cannot pass on the config file it was given', async () => {
+    const said: string[] = [];
+
+    // Without `baseline` there is no `--config-file` to pass, so the grabber
+    // reads `~/.xmltv/<name>.conf` instead — somebody else's listings,
+    // quietly, unless this is said.
+    await resolveChannels(
+      site({ configFile: 'fake.conf', env: { FAKE_CAPABILITIES: 'manualconfig' } }),
+      { says: { log: () => undefined, warn: (message) => void said.push(message) } },
+    );
+
+    expect(said.join(' ')).toMatch(/cannot be told to use fake\.conf/);
+  });
+
+  it('fails the site when the grabber cannot say what it supports', async () => {
+    const report = collect();
+
+    // `--capabilities` is the first thing asked of it, and a program that
+    // cannot answer that is one nothing else about is worth guessing at — so
+    // the failure is the probe's, before any window is asked for.
+    await grab([site({ env: { FAKE_CAPABILITIES: 'fail' } })], {
+      cache: store(),
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+      reporter: report.reporter,
+    });
+
+    expect(report.messages.join(' ')).toMatch(
+      /--capabilities exited 3.*cannot read my own configuration/s,
+    );
+  });
+
   it('fails the channel-days a dying grabber never reached, as the layer below does', async () => {
     const cache = store();
     const report = collect();

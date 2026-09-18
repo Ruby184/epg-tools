@@ -455,13 +455,6 @@ export function defineCommandSite<TData = XmltvChannel>(
       const startDay = days[0] ?? toDayString(today);
       const window: CommandWindow = { days, startDay, offset: offsetOf(startDay, today) };
 
-      // Said out loud, because nothing else can say it: `epg try` and a
-      // verbose run instrument the site's HTTP client, and a program makes no
-      // request to instrument. A command line that carries a secret in an
-      // argument will therefore appear in a verbose log — which is worth
-      // knowing, and is the same bargain `epg try` makes with a url.
-      ctx.log(`running ${command}`);
-
       // Through the queue, and only the spawn: the output arrives while the
       // document is read, so a slot held for all of that would be a slot held
       // for the whole pass — which is the deadlock `paced` was shaped around.
@@ -474,6 +467,17 @@ export function defineCommandSite<TData = XmltvChannel>(
         }),
       );
 
+      // Said out loud, because nothing else can say it: `epg try` and a verbose
+      // run instrument the site's HTTP client, and a program makes no request
+      // to instrument. The whole command line, since for a site like this the
+      // arguments *are* the question asked — which does mean a secret in an
+      // argument turns up in a verbose log, the same bargain `epg try` already
+      // makes with a url.
+      ctx.log(`running ${run.said}`);
+
+      /** Whether the document was read to the end, which decides two things. */
+      let whole = false;
+
       try {
         yield* splitXmltvDocument<TData>(document(run), {
           channelDays,
@@ -483,10 +487,15 @@ export function defineCommandSite<TData = XmltvChannel>(
           ...(order === undefined ? {} : { order }),
           ...(parse === undefined ? {} : { parse }),
         });
-      } catch (error) {
-        run.stop('the document could not be read');
-
-        throw error;
+        whole = true;
+      } finally {
+        if (!whole) {
+          // A `finally` rather than a `catch`, because a generator can be let
+          // go of as well as thrown out of: a consumer that stops reading part
+          // way leaves this suspended at a `yield`, and a program still writing
+          // into a pipe nobody reads would block there for ever.
+          run.stop('the document was not read to the end');
+        }
       }
 
       // **After** the document, never before: a program whose output nobody is

@@ -20,11 +20,15 @@
  *                    XMLTV's own do — `baseline\napiconfig` by default — and
  *                    count the asking in `FAKE_TALLY`, where one is named
  * - `--list-channels` a document of channels and no programmes
+ * - `--gzip`         the same document, gzipped, as a program may well write
+ * - `--trap`         record the signal it is stopped with in `FAKE_TALLY`
+ * - `--dribble`      write two channels' worth and then stay up, stdout open
  * - `--days N`, `--offset N`, `--config-file F`, `--quiet` — read only so that
  *                    `--echo-argv` can report them
  */
 
 import { appendFileSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
 import { argv, env, exit, stderr, stdout } from 'node:process';
 
 const args = argv.slice(2);
@@ -63,6 +67,13 @@ const programme = (id, dayOffset, hour, title) =>
   `    <title>${title}</title>\n  </programme>\n`;
 
 if (has('--capabilities')) {
+  if (env.FAKE_CAPABILITIES === 'fail') {
+    // A program that cannot even say what it supports, which is the first
+    // thing asked of it.
+    stderr.write('cannot read my own configuration\n');
+    exit(3);
+  }
+
   if (env.FAKE_TALLY !== undefined) {
     // A line per asking, so a test can hold this layer to "once": nothing else
     // can see how many times a program was run.
@@ -77,6 +88,20 @@ if (has('--capabilities')) {
   exit(0);
 }
 
+if (has('--trap')) {
+  // Says so when it is asked to stop, which is the only way a test can see
+  // that an abandoned pass took the program down with it.
+  for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => {
+      if (env.FAKE_TALLY !== undefined) {
+        appendFileSync(env.FAKE_TALLY, `${signal}\n`);
+      }
+
+      exit(143);
+    });
+  }
+}
+
 if (has('--hang')) {
   // Nothing on stdout and no exit: the timeout and the abort both end here.
   setInterval(() => {}, 1000);
@@ -85,32 +110,55 @@ if (has('--hang')) {
     stderr.write('fetching listings\nsomething looks odd on day 3\n');
   }
 
-  stdout.write('<?xml version="1.0" encoding="UTF-8"?>\n<tv>\n');
+  const out = [];
+  const write = has('--gzip') ? (text) => out.push(text) : (text) => stdout.write(text);
+
+  write('<?xml version="1.0" encoding="UTF-8"?>\n<tv>\n');
 
   if (has('--echo-argv')) {
     for (const [index, one] of args.entries()) {
-      stdout.write(channel(`argv.${String(index)}`, one));
+      write(channel(`argv.${String(index)}`, one));
     }
   } else {
-    stdout.write(channel('one.example', 'One'));
-    stdout.write(channel('two.example', 'Two'));
+    write(channel('one.example', 'One'));
+    write(channel('two.example', 'Two'));
   }
 
   if (!has('--list-channels')) {
-    stdout.write(programme('one.example', 0, 10, 'First'));
-    stdout.write(programme('two.example', 0, 11, 'Second'));
+    write(programme('one.example', 0, 10, 'First'));
+    write(programme('two.example', 0, 11, 'Second'));
 
     if (has('--truncate')) {
       // Half an element and then death, which is the normal failure mode: a
       // child's stdout ends *cleanly* when the process dies, so nothing but the
       // exit code says this document is not finished.
-      stdout.write('  <programme start="');
+      stdout.write(out.join('') + '  <programme start="');
       exit(255);
     }
 
-    stdout.write(programme('one.example', 1, 10, 'Tomorrow'));
+    write(programme('one.example', 1, 10, 'Tomorrow'));
   }
 
-  stdout.write('</tv>\n');
-  exit(Number(value('--exit') ?? 0));
+  if (has('--dribble')) {
+    // Two channels' worth written and then nothing, without closing stdout: a
+    // pass reading this has a channel-day to hand over and a program still
+    // running, which is what being let go of part way looks like.
+    setInterval(() => {}, 1000);
+  }
+
+  if (has('--dribble')) {
+    // Deliberately unclosed: the document is what it is until it is killed.
+  } else {
+    write('</tv>\n');
+  }
+
+  if (has('--gzip')) {
+    // A program may write a compressed document as readily as a server serves
+    // one; the reader sniffs either.
+    stdout.write(gzipSync(Buffer.from(out.join(''), 'utf8')));
+  }
+
+  if (!has('--dribble')) {
+    exit(Number(value('--exit') ?? 0));
+  }
 }

@@ -177,21 +177,34 @@ export function defineTvGrabCommandSite<TData = XmltvChannel>(
       : new Set<string>(capabilities);
 
   /** The options `baseline` promises, which are the window and the config file. */
-  const baseline = (has: Set<string>, context: CommandArgsContext): string[] =>
-    has.has('baseline')
-      ? [
-          ...(configFile === undefined ? [] : ['--config-file', configFile]),
-          // `--days` is a count and `--offset` is where it starts, both in the
-          // grabber's own idea of today. See `CommandWindow.offset`: the two
-          // "today"s are its timezone's and this machine's, and nothing here
-          // can make them agree.
-          '--days',
-          String(context.days.length),
-          '--offset',
-          String(context.offset),
-          ...(quiet ? ['--quiet'] : []),
-        ]
-      : [];
+  const baseline = (has: Set<string>, context: CommandArgsContext): string[] => {
+    if (!has.has('baseline')) {
+      if (configFile !== undefined) {
+        // Said, because the alternative is a grab that quietly reads somebody
+        // else's listings: without `baseline` there is no `--config-file` to
+        // pass, so the grabber falls back to `~/.xmltv/<name>.conf` and the
+        // file named here is simply ignored.
+        context.warn(
+          `this grabber does not advertise baseline, so it cannot be told to use ${configFile} — it will read its own default configuration`,
+        );
+      }
+
+      return [];
+    }
+
+    return [
+      ...(configFile === undefined ? [] : ['--config-file', configFile]),
+      // `--days` is a count and `--offset` is where it starts, both in the
+      // grabber's own idea of today. See `CommandWindow.offset`: the two
+      // "today"s are its timezone's and this machine's, and nothing here
+      // can make them agree.
+      '--days',
+      String(context.days.length),
+      '--offset',
+      String(context.offset),
+      ...(quiet ? ['--quiet'] : []),
+    ];
+  };
 
   return defineCommandSite<TData>({
     command,

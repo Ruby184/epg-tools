@@ -1,3 +1,6 @@
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
@@ -172,6 +175,76 @@ describe('defineCommandSite', () => {
     // Kept whole, so what the document said about a channel is what the guide
     // says — the same as a published guide read over HTTP.
     expect(channels[0]?.data).toMatchObject({ id: 'one.example' });
+  });
+
+  it('reads a document the program wrote compressed', async () => {
+    const cache = store();
+
+    // The reader sniffs a pipe as it sniffs a response body, which is what the
+    // document module being about documents rather than about HTTP bought.
+    const summary = await grab([site({ args: [GRABBER, '--gzip'] })], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+    });
+
+    expect(summary.failed).toBe(0);
+    expect(await cached(cache, 'one.example')).toHaveLength(1);
+  });
+
+  it('says the whole command line, since that is the question it asked', async () => {
+    const report = collect();
+
+    await grab([site({ args: [GRABBER, '--exit', '0'] })], {
+      cache: store(),
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+      reporter: report.reporter,
+    });
+
+    // `epg try` and a verbose run instrument the site's HTTP client, and a
+    // program makes no request to instrument — so this is the only place the
+    // arguments appear.
+    expect(report.messages.some((line) => line.includes(`running ${process.execPath}`))).toBe(true);
+    expect(report.messages.some((line) => line.includes('--exit 0'))).toBe(true);
+  });
+
+  it('stops the program when the pass is let go of part way', async () => {
+    const tally = join(await mkdtemp(join(tmpdir(), 'epg-command-')), 'signals');
+    const config = site({
+      args: [GRABBER, '--trap', '--dribble'],
+      env: { FAKE_TALLY: tally },
+    });
+    const pass = config.stream({
+      // Both channels, because a channel-day is handed over when a *wanted*
+      // channel's programme follows it: an unwanted one deliberately takes no
+      // part in deciding whether the document is grouped, so wanting only the
+      // first would wait for the end of a document this program never ends.
+      channelDays: [
+        { channel: { xmltvId: 'one.example', siteId: 'one.example' }, day: TODAY },
+        { channel: { xmltvId: 'two.example', siteId: 'two.example' }, day: TODAY },
+      ],
+      days: [TODAY],
+      state: new Map(),
+      log: () => undefined,
+      warn: () => undefined,
+      // No queue, since this is the only thing happening — the same shape
+      // `epg try` hands a pass.
+      paced: (task: (options: { signal?: AbortSignal }) => unknown) => task({}),
+    } as never) as AsyncGenerator<unknown>;
+
+    // One channel-day, then let go of it — which is what a consumer that stops
+    // reading does, and leaves this suspended at a `yield` rather than thrown
+    // out of.
+    await pass.next();
+    await pass.return(undefined);
+
+    // A `catch` would not have covered that, and the program would have been
+    // left writing into a pipe nobody reads.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(await readFile(tally, 'utf8')).toContain('SIGTERM');
   });
 
   it('gives up on a program that never finishes', async () => {
