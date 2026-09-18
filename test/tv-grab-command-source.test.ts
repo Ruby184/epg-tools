@@ -1,6 +1,3 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
@@ -9,6 +6,14 @@ import { resolveChannels } from '../src/grabber/channels.js';
 import { grab } from '../src/grabber/main.js';
 import { SiteStateHandle } from '../src/grabber/state.js';
 import { defineTvGrabCommandSite } from '../src/grabber/tv-grab-command-source.js';
+import {
+  byDefault,
+  capabilities,
+  channelsOnly,
+  cutShort,
+  documentFor,
+  startControl,
+} from './fixtures/control.js';
 import { collect } from './reporting.js';
 
 /**
@@ -53,11 +58,36 @@ function site(options: Record<string, unknown> = {}) {
   return defineTvGrabCommandSite({ site: 'fake.tv_grab', command: GRABBER, ...options });
 }
 
-/** The argv a run passed, read back out of the channels the fixture echoes. */
-async function argvOf(options: Record<string, unknown>): Promise<string[]> {
-  const channels = await resolveChannels(site({ extraArgs: ['--echo-argv'], ...options }), {});
+/**
+ * The argument lists a channel pass used, as the program reported them.
+ *
+ * Only the grabbing ones: what it was asked *about itself* is a different
+ * question, and every test here is about the other. Recorded over the control
+ * socket rather than echoed back as a document, because echoing turns the
+ * document into the argument list and takes the channel list with it.
+ */
+async function argvOf(
+  options: Record<string, unknown> = {},
+  supports?: readonly string[],
+): Promise<string[][]> {
+  const control = await startControl();
 
-  return channels.flatMap((channel) => (channel.name === undefined ? [] : [channel.name]));
+  if (supports !== undefined) {
+    control.answer((invocation) =>
+      invocation.argv.includes('--capabilities')
+        ? capabilities(supports)
+        : { write: channelsOnly() },
+    );
+  }
+
+  await resolveChannels(site({ env: { FAKE_CONTROL: control.path }, ...options }), {});
+  await control.close();
+
+  const about = new Set(['--capabilities', '--description', '--preferredmethod']);
+
+  return control.invocations
+    .filter((one) => !one.argv.some((arg) => about.has(arg)))
+    .map((one) => one.argv);
 }
 
 describe('defineTvGrabCommandSite', () => {
@@ -85,14 +115,7 @@ describe('defineTvGrabCommandSite', () => {
     const argv = await argvOf({ configFile: 'fake.conf', capabilities: ['baseline'] });
 
     expect(argv).toEqual([
-      '--config-file',
-      'fake.conf',
-      '--days',
-      '1',
-      '--offset',
-      '0',
-      '--quiet',
-      '--echo-argv',
+      ['--config-file', 'fake.conf', '--days', '1', '--offset', '0', '--quiet'],
     ]);
   });
 
@@ -100,16 +123,13 @@ describe('defineTvGrabCommandSite', () => {
     // `baseline` is what says `--days`, `--offset`, `--config-file` and
     // `--quiet` exist at all. Passing one to a grabber without it is an
     // "unknown option" and a failed site.
-    const argv = await argvOf({
-      configFile: 'fake.conf',
-      env: { FAKE_CAPABILITIES: 'manualconfig' },
-    });
+    const argv = await argvOf({ configFile: 'fake.conf' }, ['manualconfig']);
 
-    expect(argv).toEqual(['--echo-argv']);
+    expect(argv).toEqual([[]]);
   });
 
   it('asks for the channel list with --list-channels, which is apiconfig`s', async () => {
-    const argv = await argvOf({ configFile: 'fake.conf' });
+    const [argv] = await argvOf({ configFile: 'fake.conf' });
 
     // Not `--days`: this is the cheap answer, so the window is beside the point.
     expect(argv).toContain('--list-channels');
@@ -117,10 +137,7 @@ describe('defineTvGrabCommandSite', () => {
   });
 
   it('reads the list out of a normal run when the grabber has no cheap answer', async () => {
-    const argv = await argvOf({
-      configFile: 'fake.conf',
-      env: { FAKE_CAPABILITIES: 'baseline' },
-    });
+    const [argv] = await argvOf({ configFile: 'fake.conf' }, ['baseline']);
 
     // No `apiconfig`, so no `--list-channels` to ask for: the list comes out of
     // the head of a normal run, as a published guide's does out of a document.
@@ -129,25 +146,26 @@ describe('defineTvGrabCommandSite', () => {
   });
 
   it('passes --cache only to a grabber that keeps one', async () => {
-    expect(await argvOf({ cache: 'fake.cache', capabilities: ['baseline', 'cache'] })).toContain(
-      '--cache',
-    );
-    expect(await argvOf({ cache: 'fake.cache', capabilities: ['baseline'] })).not.toContain(
-      '--cache',
-    );
+    const [keeping] = await argvOf({ cache: 'fake.cache', capabilities: ['baseline', 'cache'] });
+    const [without] = await argvOf({ cache: 'fake.cache', capabilities: ['baseline'] });
     // And never to `--list-channels`, which takes `config-file`, `output` and
     // `quiet` and nothing else — this package's own implementation of that
     // capability is the authority on it.
-    expect(
-      await argvOf({ cache: 'fake.cache', capabilities: ['baseline', 'apiconfig', 'cache'] }),
-    ).not.toContain('--cache');
+    const [listing] = await argvOf({
+      cache: 'fake.cache',
+      capabilities: ['baseline', 'apiconfig', 'cache'],
+    });
+
+    expect(keeping).toContain('--cache');
+    expect(without).not.toContain('--cache');
+    expect(listing).not.toContain('--cache');
   });
 
   it('takes what the config says it supports, and asks nothing', async () => {
     const cache = store();
     const state = SiteStateHandle.open(cache, 'fake.tv_grab');
 
-    await resolveChannels(site({ capabilities: [], extraArgs: ['--echo-argv'] }), { state });
+    await resolveChannels(site({ capabilities: [] }), { state });
 
     // Nothing asked, so nothing remembered: `capabilities: []` is the way out
     // for a grabber whose own answer cannot be believed.
@@ -156,28 +174,22 @@ describe('defineTvGrabCommandSite', () => {
 
   it('asks what it supports once, and remembers it', async () => {
     const cache = store();
-    const tally = join(await mkdtemp(join(tmpdir(), 'epg-tv-grab-')), 'asked');
-    const config = site({ configFile: 'fake.conf', env: { FAKE_TALLY: tally } });
+    const control = await startControl();
+    const config = site({ configFile: 'fake.conf', env: { FAKE_CONTROL: control.path } });
     const state = SiteStateHandle.open(cache, 'fake.tv_grab');
 
     await resolveChannels(config, { state });
 
     expect((await state.bag()).get('capabilities')).toMatchObject({
-      names: ['baseline', 'apiconfig'],
+      names: ['baseline', 'manualconfig', 'apiconfig', 'preferredmethod'],
     });
 
     // Again over the same state, and again asking for the list itself, so the
-    // only thing that could be skipped is the capability probe.
+    // only thing that could be skipped is the asking about the program.
     await resolveChannels(config, { state, refresh: true });
+    await control.close();
 
-    // One asking, counted by the program itself: nothing else can see how many
-    // times it was run.
-    const asked = (await readFile(tally, 'utf8'))
-      .trim()
-      .split('\n')
-      .filter((line) => line === '--capabilities');
-
-    expect(asked).toHaveLength(1);
+    expect(control.said.filter((one) => one === '--capabilities')).toHaveLength(1);
   });
 
   it('asks again once the command changes', async () => {
@@ -192,10 +204,7 @@ describe('defineTvGrabCommandSite', () => {
     // concerned: what it supports was asked of the one it was asked of.
     // `refresh` because the channel list itself is cached — this is about the
     // capabilities beside it, not about the list.
-    await resolveChannels(site({ env: { FAKE_CAPABILITIES: 'baseline' } }), {
-      state,
-      refresh: true,
-    });
+    await resolveChannels(site({ env: { FAKE_SOMETHING: 'else' } }), { state, refresh: true });
 
     const second = (await state.bag()).get('capabilities') as { of: string };
 
@@ -204,61 +213,113 @@ describe('defineTvGrabCommandSite', () => {
 
   it('asks once for the whole stretch where the grabber downloads the lot anyway', async () => {
     const cache = store();
-    const tally = join(await mkdtemp(join(tmpdir(), 'epg-tv-grab-')), 'runs');
+    const control = await startControl();
+
     // `allatonce`: "the grabber downloads data in a single chunk and filters
-    // out the requested days", so asking it twice costs twice for nothing. Only
-    // where the capability is advertised, which is what advertising it means.
-    const config = site({
-      env: {
-        FAKE_TALLY: tally,
-        FAKE_CAPABILITIES: 'baseline\napiconfig\npreferredmethod',
-        FAKE_METHOD: 'allatonce',
-      },
-    });
-
-    // Today and the day after tomorrow are stale, the day between them fresh.
+    // out the requested days", so asking it twice costs twice for nothing. Its
+    // default answers say so, capability and all.
     await hold(cache, TOMORROW);
-    await grab([config], { cache, now: NOW, startDay: TODAY, days: 3 });
-
-    const runs = (await readFile(tally, 'utf8'))
-      .trim()
-      .split('\n')
-      .filter((line) => line.includes('--days'));
+    await grab([site({ env: { FAKE_CONTROL: control.path } })], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 3,
+    });
+    await control.close();
 
     // One run, and **`--days 3`**: the option says how long a stretch to fetch,
-    // so the two days wanted three days apart need three. Asking for two — the
-    // number of days wanted — would come back without the last, and a day the
-    // document says nothing about is cached as "nothing on".
-    expect(runs).toEqual(['--days 3 --offset 0 --quiet']);
+    // so two days three apart need three of them. Asking for two — the number
+    // of days wanted — would come back without the last, and a day the document
+    // says nothing about is cached as "nothing on".
+    expect(control.said.filter((one) => one.includes('--days'))).toEqual([
+      '--days 3 --offset 0 --quiet',
+    ]);
   });
 
   it('asks per stretch where the grabber pays by the day', async () => {
     const cache = store();
-    const tally = join(await mkdtemp(join(tmpdir(), 'epg-tv-grab-')), 'runs');
+    const control = await startControl();
+
     // No `preferredmethod`, so bandwidth is to be assumed proportional to the
     // days asked for — and a gap in the middle is worth two calls.
-    const config = site({
-      env: { FAKE_TALLY: tally, FAKE_CAPABILITIES: 'baseline\napiconfig' },
-    });
+    control.answer((invocation) =>
+      invocation.argv.includes('--capabilities')
+        ? capabilities(['baseline', 'apiconfig'])
+        : { write: documentFor(invocation) },
+    );
 
     await hold(cache, TOMORROW);
-    await grab([config], { cache, now: NOW, startDay: TODAY, days: 3 });
-
-    const runs = (await readFile(tally, 'utf8'))
-      .trim()
-      .split('\n')
-      .filter((line) => line.includes('--days'));
+    await grab([site({ env: { FAKE_CONTROL: control.path } })], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 3,
+    });
+    await control.close();
 
     // One for today and one for the day after tomorrow, a day each — and
     // between them they cover everything asked for, which they must: a day no
     // run wrote about is cached empty.
-    expect(runs).toEqual(['--days 1 --offset 0 --quiet', '--days 1 --offset 2 --quiet']);
+    expect(control.said.filter((one) => one.includes('--days'))).toEqual([
+      '--days 1 --offset 0 --quiet',
+      '--days 1 --offset 2 --quiet',
+    ]);
+  });
+
+  it('keeps the stretch that worked when a later one fails', async () => {
+    const cache = store();
+    const report = collect();
+    const control = await startControl();
+
+    // Two stretches, and the second of them refuses — which is a sentence here
+    // rather than a flag the program has to interpret, because the test is
+    // answering each invocation as it comes.
+    control.answer((invocation) => {
+      if (invocation.argv.includes('--capabilities')) {
+        return capabilities(['baseline', 'apiconfig']);
+      }
+
+      return invocation.said.includes('--offset 2')
+        ? { stderr: 'refusing the second', exit: 7 }
+        : { write: documentFor(invocation) };
+    });
+
+    await hold(cache, TOMORROW);
+
+    const summary = await grab([site({ env: { FAKE_CONTROL: control.path } })], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 3,
+      reporter: report.reporter,
+    });
+
+    await control.close();
+
+    // Today was written by the first run and stays written; the day after
+    // tomorrow fails rather than being cached as "nothing on", which is the
+    // whole reason the exit code is read at all.
+    expect(
+      await cache.read({ site: 'fake.tv_grab', channelId: 'one.example', day: TODAY }),
+    ).toHaveLength(1);
+    expect(summary.failed).toBeGreaterThan(0);
+    expect(report.failures.map((one) => (one.error as Error).message).join(' ')).toMatch(
+      /exited 7.*refusing the second/s,
+    );
   });
 
   it('says which grabber it turned out to be', async () => {
     const report = collect();
 
-    await grab([site({ env: { FAKE_DESCRIPTION: 'Television listings for Somewhere' } })], {
+    const control = await startControl();
+
+    control.answer((invocation) =>
+      invocation.argv.includes('--description')
+        ? { write: 'Television listings for Somewhere\n' }
+        : byDefault(invocation),
+    );
+
+    await grab([site({ env: { FAKE_CONTROL: control.path } })], {
       cache: store(),
       now: NOW,
       startDay: TODAY,
@@ -273,12 +334,21 @@ describe('defineTvGrabCommandSite', () => {
 
   it('grabs on with a grabber that will not say what it covers', async () => {
     const cache = store();
-    const summary = await grab([site({ env: { FAKE_DESCRIPTION_EXIT: '1' } })], {
+    const control = await startControl();
+
+    // It will not say what it covers, and will not say why either.
+    control.answer((invocation) =>
+      invocation.argv.includes('--description') ? { exit: 1 } : byDefault(invocation),
+    );
+
+    const summary = await grab([site({ env: { FAKE_CONTROL: control.path } })], {
       cache,
       now: NOW,
       startDay: TODAY,
       days: 1,
     });
+
+    await control.close();
 
     // Only `--capabilities` decides anything, so only it may fail the site.
     expect(summary.failed).toBe(0);
@@ -290,10 +360,18 @@ describe('defineTvGrabCommandSite', () => {
     // Without `baseline` there is no `--config-file` to pass, so the grabber
     // reads `~/.xmltv/<name>.conf` instead — somebody else's listings,
     // quietly, unless this is said.
-    await resolveChannels(
-      site({ configFile: 'fake.conf', env: { FAKE_CAPABILITIES: 'manualconfig' } }),
-      { says: { log: () => undefined, warn: (message) => void said.push(message) } },
+    const control = await startControl();
+
+    control.answer((invocation) =>
+      invocation.argv.includes('--capabilities')
+        ? capabilities(['manualconfig'])
+        : { write: channelsOnly() },
     );
+
+    await resolveChannels(site({ configFile: 'fake.conf', env: { FAKE_CONTROL: control.path } }), {
+      says: { log: () => undefined, warn: (message) => void said.push(message) },
+    });
+    await control.close();
 
     expect(said.join(' ')).toMatch(/cannot be told to use fake\.conf/);
   });
@@ -304,7 +382,15 @@ describe('defineTvGrabCommandSite', () => {
     // `--capabilities` is the first thing asked of it, and a program that
     // cannot answer that is one nothing else about is worth guessing at — so
     // the failure is the probe's, before any window is asked for.
-    await grab([site({ env: { FAKE_CAPABILITIES: 'fail' } })], {
+    const control = await startControl();
+
+    control.answer((invocation) =>
+      invocation.argv.includes('--capabilities')
+        ? { stderr: 'cannot read my own configuration', exit: 3 }
+        : byDefault(invocation),
+    );
+
+    await grab([site({ env: { FAKE_CONTROL: control.path } })], {
       cache: store(),
       now: NOW,
       startDay: TODAY,
@@ -321,7 +407,19 @@ describe('defineTvGrabCommandSite', () => {
     const cache = store();
     const report = collect();
 
-    const summary = await grab([site({ extraArgs: ['--truncate'] })], {
+    const control = await startControl();
+
+    // The grab dies part way; everything it is asked *about itself* is answered
+    // as usual, since a program that cannot say what it supports fails before
+    // there is a channel-day to fail. Cut after the first day's programmes, so
+    // the days beyond it are never written and are owed when it exits badly.
+    control.answer((invocation) =>
+      invocation.argv.includes('--days')
+        ? { write: cutShort(documentFor(invocation), 2), exit: 255 }
+        : byDefault(invocation),
+    );
+
+    const summary = await grab([site({ env: { FAKE_CONTROL: control.path } })], {
       cache,
       now: NOW,
       startDay: TODAY,

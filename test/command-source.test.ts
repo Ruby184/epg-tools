@@ -8,6 +8,7 @@ import type { CacheStore } from '../src/cache/main.js';
 import { grab } from '../src/grabber/main.js';
 import { defineCommandSite } from '../src/grabber/command-source.js';
 import { resolveChannels } from '../src/grabber/channels.js';
+import { cutShort, documentFor, startControl, type Control } from './fixtures/control.js';
 import { collect } from './reporting.js';
 
 /** The stand-in grabber: a document on stdout, and a flag for every way it can go wrong. */
@@ -33,6 +34,11 @@ function site(options: Record<string, unknown> = {}) {
   });
 }
 
+/** The same, with a test answering each invocation over the control socket. */
+function answered(control: Control, options: Record<string, unknown> = {}) {
+  return site({ env: { FAKE_CONTROL: control.path }, ...options });
+}
+
 /** What one channel-day of the cache holds. */
 const cached = (cache: CacheStore, channelId: string, day = TODAY) =>
   cache.read({ site: 'fake.grabber', channelId, day });
@@ -40,7 +46,15 @@ const cached = (cache: CacheStore, channelId: string, day = TODAY) =>
 describe('defineCommandSite', () => {
   it('grabs what a program wrote to stdout', async () => {
     const cache = store();
-    const summary = await grab([site()], { cache, now: NOW, startDay: TODAY, days: 2 });
+    const control = await startControl();
+    const summary = await grab([answered(control)], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 2,
+    });
+
+    await control.close();
 
     expect(summary.failed).toBe(0);
     expect(await cached(cache, 'one.example')).toHaveLength(1);
@@ -52,9 +66,13 @@ describe('defineCommandSite', () => {
   it('fails the channel-days a dying program never reached', async () => {
     const cache = store();
     const report = collect();
-    const sites = [site({ args: [GRABBER, '--truncate'] })];
+    const control = await startControl();
 
-    const summary = await grab(sites, {
+    // Two channel-days written, then half an element, then a bad exit — which
+    // is what a Perl grabber dying part way through leaves behind.
+    control.answer((invocation) => ({ write: cutShort(documentFor(invocation)), exit: 255 }));
+
+    const summary = await grab([answered(control)], {
       cache,
       now: NOW,
       startDay: TODAY,
@@ -79,8 +97,11 @@ describe('defineCommandSite', () => {
 
   it('notices the truncation in the document too, which is worth saying', async () => {
     const report = collect();
+    const control = await startControl();
 
-    await grab([site({ args: [GRABBER, '--truncate'] })], {
+    control.answer((invocation) => ({ write: cutShort(documentFor(invocation)), exit: 255 }));
+
+    await grab([answered(control)], {
       cache: store(),
       now: NOW,
       startDay: TODAY,
@@ -96,8 +117,15 @@ describe('defineCommandSite', () => {
   it('says what the program complained about, as it complains and afterwards', async () => {
     const cache = store();
     const report = collect();
+    const control = await startControl();
 
-    await grab([site({ args: [GRABBER, '--noise', '--exit', '3'] })], {
+    control.answer((invocation) => ({
+      write: documentFor(invocation),
+      stderr: 'fetching listings\nsomething looks odd on day 3',
+      exit: 3,
+    }));
+
+    await grab([answered(control)], {
       cache,
       now: NOW,
       startDay: TODAY,
@@ -115,7 +143,11 @@ describe('defineCommandSite', () => {
 
   it('accepts an exit code the config says is fine', async () => {
     const cache = store();
-    const summary = await grab([site({ args: [GRABBER, '--exit', '1'], okExitCodes: [1] })], {
+    const control = await startControl();
+
+    control.answer((invocation) => ({ write: documentFor(invocation), exit: 1 }));
+
+    const summary = await grab([answered(control, { okExitCodes: [1] })], {
       cache,
       now: NOW,
       startDay: TODAY,
@@ -143,26 +175,31 @@ describe('defineCommandSite', () => {
   });
 
   it('tells the program about the window, in the program`s own words', async () => {
-    const cache = store();
-    const asked = (window: { days: readonly string[]; startDay: string; offset: number }) => [
+    const control = await startControl();
+    const asked = (window: {
+      days: readonly string[];
+      startDay: string;
+      span: number;
+      offset: number;
+    }) => [
       GRABBER,
-      '--echo-argv',
       '--days',
-      String(window.days.length),
+      String(window.span),
       '--offset',
       String(window.offset),
       '--from',
       window.startDay,
     ];
-    // Today and tomorrow, so the offset a real run computes is 0 — from this
-    // machine's clock, which is what a program means by today.
+    // Today, so the offset a real run computes is 0 — from this machine's
+    // clock, which is what a program means by today.
     const today = new Date().toISOString().slice(0, 10);
-    const channels = await resolveChannels(site({ args: asked }), {});
 
-    expect(channels.map((channel) => channel.name)).toEqual(
-      expect.arrayContaining(['--days', '1', '--offset', '0', '--from', today]),
-    );
-    expect(cache).toBeDefined();
+    await resolveChannels(site({ args: asked, env: { FAKE_CONTROL: control.path } }), {});
+    await control.close();
+
+    // The program's own arguments, which is what it reports: the path to it is
+    // node's business rather than the grabber's.
+    expect(control.invocations[0]?.argv).toEqual(['--days', '1', '--offset', '0', '--from', today]);
   });
 
   it('asks for the channel list on its own, where the program has a cheaper way', async () => {
@@ -196,7 +233,7 @@ describe('defineCommandSite', () => {
   it('says the whole command line, since that is the question it asked', async () => {
     const report = collect();
 
-    await grab([site({ args: [GRABBER, '--exit', '0'] })], {
+    await grab([site({ args: [GRABBER, '--quiet'] })], {
       cache: store(),
       now: NOW,
       startDay: TODAY,
@@ -208,7 +245,7 @@ describe('defineCommandSite', () => {
     // program makes no request to instrument — so this is the only place the
     // arguments appear.
     expect(report.messages.some((line) => line.includes(`running ${process.execPath}`))).toBe(true);
-    expect(report.messages.some((line) => line.includes('--exit 0'))).toBe(true);
+    expect(report.messages.some((line) => line.includes('--quiet'))).toBe(true);
   });
 
   it('stops the program when the pass is let go of part way', async () => {
@@ -249,8 +286,11 @@ describe('defineCommandSite', () => {
 
   it('gives up on a program that never finishes', async () => {
     const report = collect();
+    const control = await startControl();
 
-    await grab([site({ args: [GRABBER, '--hang'], timeoutMs: 150 })], {
+    control.answer(() => ({ hang: true }));
+
+    await grab([answered(control, { timeoutMs: 150 })], {
       cache: store(),
       now: NOW,
       startDay: TODAY,
@@ -266,7 +306,11 @@ describe('defineCommandSite', () => {
   it('stops the program when the run is called off, rather than hanging on it', async () => {
     const stop = new AbortController();
     const report = collect();
-    const running = grab([site({ args: [GRABBER, '--hang'] })], {
+    const control = await startControl();
+
+    control.answer(() => ({ hang: true }));
+
+    const running = grab([answered(control)], {
       cache: store(),
       now: NOW,
       startDay: TODAY,
