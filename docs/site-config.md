@@ -954,6 +954,94 @@ const stations = await account.stations('GBR-1000014-DEFAULT');
 by name, and never something a grab does. The answer says how many of the day's
 six changes are left.
 
+### From a program that writes XMLTV
+
+Anything that writes an XMLTV document to stdout is a source: a Python scraper
+you already have, a WebGrab+Plus run, a `curl` through something odd, `cat
+yesterday.xml`, or one of XMLTV's own `tv_grab_*` grabbers.
+
+```ts
+import { defineCommandSite } from 'epg-tools/grabber';
+
+sites: [
+  defineCommandSite({
+    site: 'mine',
+    command: 'python3',
+    // The window, spelled the way this program wants to hear it.
+    args: ({ days, span, startDay }) => ['scrape.py', '--from', startDay, '--for', String(span)],
+    // One cheap run for the channel list, where a program offers one. Without
+    // it the list comes out of the head of a normal run.
+    channelsArgs: ['scrape.py', '--channels'],
+  }),
+],
+```
+
+It is [`defineXmltvSite`](#a-published-guide-as-a-source)'s document reading over
+a child's stdout, so everything that adapter does with a document this does too —
+streaming, splitting by channel-day, `dayZone`, `order`, and sniffing a
+compressed one, which means a program writing a `.xml.gz` works for the same
+reason a server serving one does.
+
+**Nothing is passed for you.** `--days` and `--offset` are a convention that half
+the programs anyone points this at spell differently, and guessing would be a
+silently wrong window. `args` may be a function, and is given `days` (the days
+wanted, **not necessarily contiguous** — a day fresh in the cache is left out),
+`span` (how long a stretch reaches from the first to the last, which is what a
+`--days`-style option means), `startDay`, and `offset` from today.
+
+**The exit code decides whether the document finished.** A child's stdout ends
+*cleanly* when the process dies, and a Perl grabber that fails a fetch part way
+`die`s — XMLTV's own `Get_nice.pm` does — so `end()` never runs and stdout holds
+a truncated, unclosed document that nothing in the bytes marks as such. A
+non-zero exit therefore **fails the channel-days the program never reached**,
+rather than letting them be cached as "nothing on". `okExitCodes: [1]` is for a
+program that reports partial success that way.
+
+Everything it writes to stderr is reported as it arrives, and its last lines
+ride on the failure — so a run without `--quiet` on a chatty program is a noisy
+log. It runs **without a shell**; `shell: true` exists and is worth leaving off,
+since a command line built from anything the config did not write is an
+injection with extra steps. `timeoutMs` and the run's own signal both end it
+with `SIGTERM`, then `SIGKILL`.
+
+#### An XMLTV grabber
+
+`tv_grab_fi`, `tv_grab_uk_freeview` and the handful of others still working
+answer an interface this package also implements — `epg init-grabber` writes a
+`tv_grab_*` for a config of your own — so the arguments can be filled in:
+
+```ts
+import { defineTvGrabCommandSite } from 'epg-tools/grabber';
+
+sites: [
+  defineTvGrabCommandSite({
+    site: 'fi.tv_grab',
+    command: 'tv_grab_fi',
+    configFile: 'fi.conf',
+  }),
+],
+```
+
+That is the whole of it. **It asks the program what it supports** — once, kept in
+the site's own state beside a fingerprint of the command — because the answer
+decides what may be passed: `--days`, `--offset`, `--config-file` and `--quiet`
+are `baseline`, `--cache` is `cache`, and **`--list-channels` is `apiconfig`**. A
+grabber without `apiconfig` has its channel list read out of the head of a normal
+run instead. `capabilities: [...]` says it yourself and skips the asking;
+`extraArgs` adds anything else it takes.
+
+**`preferredmethod` decides how often it runs.** A grabber answering `allatonce`
+"downloads data in a single chunk and filters out the requested days", so it is
+asked once for the whole stretch; one that does not advertise the capability is
+assumed to cost what it fetches, so a window with a fresh day in the middle is
+two runs of a day each rather than one of three. `--description` is asked too,
+and said once a run — which grabber answered is worth a line of a verbose log.
+
+What it does **not** do is configure anything. The `.conf` file is yours to
+write, or the grabber's own `--configure` to write: there are three dialects of
+it among six working grabbers, and nobody has automated that walk in twenty
+years.
+
 ## Sites that answer in one pass
 
 Some sources publish the lot in one document — a `xmltv.xml.gz`, a dump behind
