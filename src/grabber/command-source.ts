@@ -40,6 +40,7 @@ import {
   defineStreamSiteConfig,
   type ChannelsSource,
   type GrabberChannel,
+  type SiteState,
   type StreamedChannelDay,
   type StreamSiteConfig,
 } from './types.js';
@@ -60,8 +61,31 @@ export interface CommandWindow {
   offset: number;
 }
 
-/** The argument list, or how to work it out from the window. */
-export type CommandArgs = readonly string[] | ((window: CommandWindow) => readonly string[]);
+/** What an argument list is worked out from: the window, and what the site knows. */
+export interface CommandArgsContext extends CommandWindow {
+  /**
+   * The site's own state — see {@link SiteState}.
+   *
+   * For an argument that has to be found out rather than written down, and is
+   * worth finding out once: what a program says it supports, a token, a path it
+   * reported. {@link defineTvGrabCommandSite} keeps a grabber's capabilities
+   * here for exactly that reason.
+   */
+  state: SiteState;
+  signal?: AbortSignal;
+  /** Where a note about working the arguments out goes. */
+  warn: Says['warn'];
+}
+
+/**
+ * The argument list, or how to work it out.
+ *
+ * The function form may be `async`, which is what lets it ask the program
+ * something first — `--capabilities`, say — and remember the answer in `state`.
+ */
+export type CommandArgs =
+  | readonly string[]
+  | ((context: CommandArgsContext) => readonly string[] | Promise<readonly string[]>);
 
 export interface CommandSiteOptions<TData = XmltvChannel> extends Omit<
   StreamSiteConfig<TData>,
@@ -332,25 +356,21 @@ export function defineCommandSite<TData = XmltvChannel>(
     ...site
   } = options;
 
-  /** What to pass, for a window. */
-  const argv = (which: CommandArgs, window: CommandWindow): readonly string[] =>
-    typeof which === 'function' ? which(window) : which;
-
   /** One run of it, with everything this site was configured with. */
-  const running = (
+  const running = async (
     which: CommandArgs,
-    window: CommandWindow,
-    says: { warn?: Says['warn']; signal?: AbortSignal },
-  ): RunningCommand =>
+    context: CommandArgsContext,
+  ): Promise<RunningCommand> =>
     runCommand({
       command,
-      args: argv(which, window),
+      args: typeof which === 'function' ? await which(context) : which,
       ...(cwd === undefined ? {} : { cwd }),
       ...(env === undefined ? {} : { env }),
       ...(shell === undefined ? {} : { shell }),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
       ...(okExitCodes === undefined ? {} : { okExitCodes }),
-      ...says,
+      warn: context.warn,
+      ...(context.signal ? { signal: context.signal } : {}),
     });
 
   /** The document a run is writing, decompressed if it is compressed. */
@@ -365,21 +385,20 @@ export function defineCommandSite<TData = XmltvChannel>(
 
     channels:
       channels ??
-      (async ({ warn, signal }): Promise<GrabberChannel<TData>[]> => {
+      (async ({ state, warn, signal }): Promise<GrabberChannel<TData>[]> => {
         // The DTD puts every `<channel>` before the first `<programme>`, so the
         // head of the document is the whole channel list — and a program given
         // `--list-channels` writes nothing else at all. Either way this stops
         // reading there and stops the program with it.
-        const now = new Date();
-        const today = toDayString(now);
-        const run = running(
-          channelsArgs ?? args,
-          { days: [today], startDay: today, offset: 0 },
-          {
-            warn,
-            ...(signal ? { signal } : {}),
-          },
-        );
+        const today = toDayString(new Date());
+        const run = await running(channelsArgs ?? args, {
+          days: [today],
+          startDay: today,
+          offset: 0,
+          state,
+          warn,
+          ...(signal ? { signal } : {}),
+        });
         const found: GrabberChannel<XmltvChannel>[] = [];
         let enough = false;
 
@@ -426,7 +445,7 @@ export function defineCommandSite<TData = XmltvChannel>(
     channelInfo: site.channelInfo ?? xmltvChannelInfo,
 
     async *stream(ctx): AsyncGenerator<StreamedChannelDay<TData>> {
-      const { channelDays, days, signal, warn } = ctx;
+      const { channelDays, days, state, signal, warn } = ctx;
       // Counted from this machine's today, because that is what a program means
       // by it: a grabber's `--offset 0` is its own idea of today, in its own
       // timezone, and no amount of arithmetic here makes the two agree. A
@@ -436,16 +455,23 @@ export function defineCommandSite<TData = XmltvChannel>(
       const startDay = days[0] ?? toDayString(today);
       const window: CommandWindow = { days, startDay, offset: offsetOf(startDay, today) };
 
+      // Said out loud, because nothing else can say it: `epg try` and a
+      // verbose run instrument the site's HTTP client, and a program makes no
+      // request to instrument. A command line that carries a secret in an
+      // argument will therefore appear in a verbose log — which is worth
+      // knowing, and is the same bargain `epg try` makes with a url.
+      ctx.log(`running ${command}`);
+
       // Through the queue, and only the spawn: the output arrives while the
       // document is read, so a slot held for all of that would be a slot held
       // for the whole pass — which is the deadlock `paced` was shaped around.
       const run = await ctx.paced(({ signal: taskSignal }) =>
-        Promise.resolve(
-          running(args, window, {
-            warn,
-            ...((taskSignal ?? signal) ? { signal: taskSignal ?? signal } : {}),
-          }),
-        ),
+        running(args, {
+          ...window,
+          state,
+          warn,
+          ...((taskSignal ?? signal) ? { signal: taskSignal ?? signal } : {}),
+        }),
       );
 
       try {

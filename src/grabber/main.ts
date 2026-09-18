@@ -55,8 +55,11 @@ export type {
   SchedulesDirectStation,
 } from './schedules-direct/map.js';
 export { defineCommandSite, runCommand } from './command-source.js';
+export { defineTvGrabCommandSite } from './tv-grab-command-source.js';
+export type { TvGrabCapability, TvGrabCommandSiteOptions } from './tv-grab-command-source.js';
 export type {
   CommandArgs,
+  CommandArgsContext,
   CommandSiteOptions,
   CommandWindow,
   RunCommandOptions,

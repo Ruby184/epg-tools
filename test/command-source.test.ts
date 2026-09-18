@@ -10,9 +10,14 @@ import { collect } from './reporting.js';
 /** The stand-in grabber: a document on stdout, and a flag for every way it can go wrong. */
 const GRABBER = fileURLToPath(new URL('./fixtures/fake-grabber.mjs', import.meta.url));
 
-/** The day the fixture's programmes fall on, and the day after. */
-const TODAY = '2026-09-20';
-const NOW = new Date('2026-09-20T09:00:00.000Z');
+/**
+ * Today, because that is what the program writes about — `--offset 0` is its own
+ * today, so a window written into the test would stop matching tomorrow.
+ */
+const TODAY = new Date().toISOString().slice(0, 10);
+const NOW = new Date(`${TODAY}T09:00:00.000Z`);
+/** The day after, which the fixture also covers. */
+const TOMORROW = new Date(Date.parse(`${TODAY}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
 
 const store = (): CacheStore => new CacheManager({ driver: new MemoryCacheDriver() });
 
@@ -38,7 +43,7 @@ describe('defineCommandSite', () => {
     expect(await cached(cache, 'one.example')).toHaveLength(1);
     expect(await cached(cache, 'two.example')).toHaveLength(1);
     // The day after, from the same run: one program, the whole window.
-    expect(await cached(cache, 'one.example', '2026-09-21')).toHaveLength(1);
+    expect(await cached(cache, 'one.example', TOMORROW)).toHaveLength(1);
   });
 
   it('fails the channel-days a dying program never reached', async () => {
@@ -66,7 +71,7 @@ describe('defineCommandSite', () => {
     // What it did write is kept: those two channel-days are as true as they
     // would have been had the program gone on to finish.
     expect(await cached(cache, 'one.example')).toHaveLength(1);
-    expect(await cached(cache, 'one.example', '2026-09-21')).toBeUndefined();
+    expect(await cached(cache, 'one.example', TOMORROW)).toBeUndefined();
   });
 
   it('notices the truncation in the document too, which is worth saying', async () => {

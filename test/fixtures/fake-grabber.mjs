@@ -16,13 +16,16 @@
  * - `--hang`         write nothing and never exit
  * - `--echo-argv`    write the argv as a `<channel>` per argument, so a test can
  *                    assert what it was called with
- * - `--capabilities` print capabilities, one per line, as XMLTV's own do
+ * - `--capabilities` print what `FAKE_CAPABILITIES` says, one per line, as
+ *                    XMLTV's own do — `baseline\napiconfig` by default — and
+ *                    count the asking in `FAKE_TALLY`, where one is named
  * - `--list-channels` a document of channels and no programmes
  * - `--days N`, `--offset N`, `--config-file F`, `--quiet` — read only so that
  *                    `--echo-argv` can report them
  */
 
-import { argv, exit, stderr, stdout } from 'node:process';
+import { appendFileSync } from 'node:fs';
+import { argv, env, exit, stderr, stdout } from 'node:process';
 
 const args = argv.slice(2);
 const has = (name) => args.includes(name);
@@ -32,9 +35,20 @@ const value = (name) => {
   return at === -1 ? undefined : args[at + 1];
 };
 
-/** `YYYYMMDD000000 +0000`, the day `--offset` and `--days` are counted in. */
+/**
+ * `YYYYMMDD000000 +0000`, counted from **today** — or from `--from` where one
+ * is given, which is how a test pins it.
+ *
+ * Relative rather than fixed, because that is what a grabber does: `--offset 0`
+ * is its own today, and a fixture with a date written into it would stop
+ * matching the window the day after it was written.
+ */
 const at = (dayOffset, hour) => {
-  const day = new Date(Date.UTC(2026, 8, 20 + dayOffset, hour));
+  const from = value('--from');
+  const [year, month, date] = (from ?? new Date().toISOString().slice(0, 10))
+    .split('-')
+    .map((part) => Number(part));
+  const day = new Date(Date.UTC(year, month - 1, date + dayOffset, hour));
   const pad = (number, width) => String(number).padStart(width, '0');
 
   return (
@@ -49,9 +63,17 @@ const programme = (id, dayOffset, hour, title) =>
   `    <title>${title}</title>\n  </programme>\n`;
 
 if (has('--capabilities')) {
+  if (env.FAKE_TALLY !== undefined) {
+    // A line per asking, so a test can hold this layer to "once": nothing else
+    // can see how many times a program was run.
+    appendFileSync(env.FAKE_TALLY, 'asked\n');
+  }
+
   // What a grabber advertises, one per line. `baseline` is the one that says
-  // --days/--offset/--config-file exist.
-  stdout.write(`${(value('--capabilities') ?? 'baseline\nmanualconfig').replaceAll('\\n', '\n')}\n`);
+  // --days/--offset/--config-file exist; `apiconfig` is the one that says
+  // --list-channels does. Taken from the environment because a real grabber
+  // takes no argument here, and `env` is what a site can set.
+  stdout.write(`${(env.FAKE_CAPABILITIES ?? 'baseline\napiconfig').replaceAll('\\n', '\n')}\n`);
   exit(0);
 }
 
