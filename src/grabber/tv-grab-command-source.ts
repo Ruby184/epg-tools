@@ -55,7 +55,11 @@ export type TvGrabCapability =
 
 export interface TvGrabCommandSiteOptions<TData = XmltvChannel> extends Omit<
   CommandSiteOptions<TData>,
-  'args' | 'channelsArgs'
+  // All three are what this layer is: the interface decides the arguments, and
+  // `preferredmethod` decides how many times the program is run. Left in, they
+  // would type-check and then be overridden by the spread below, which is a
+  // config that quietly does something other than what it says.
+  'args' | 'channelsArgs' | 'runs'
 > {
   /**
    * Its configuration file, passed as `--config-file`.
@@ -137,9 +141,22 @@ async function askAbout(
   command: string,
   context: CommandArgsContext,
   options: { cwd?: string; env?: Record<string, string>; shell?: boolean; timeoutMs?: number },
+  /** Said in the config, where it was: then only the method is worth asking. */
+  said?: string[],
 ): Promise<Remembered> {
   const of = createHash('sha1')
-    .update(JSON.stringify([command, options.cwd ?? '', options.env ?? {}, options.shell ?? false]))
+    .update(
+      // The declared names among them: a config that changes what it says the
+      // program supports is asking a different question, and would otherwise
+      // read back the answer to the old one.
+      JSON.stringify([
+        command,
+        options.cwd ?? '',
+        options.env ?? {},
+        options.shell ?? false,
+        said ?? null,
+      ]),
+    )
     .digest('hex')
     .slice(0, 16);
   const held = read(context.state, of);
@@ -158,8 +175,11 @@ async function askAbout(
     });
 
   // One capability per line, as its own documentation has it.
-  const names = await saidBy(ask('--capabilities'));
-  const description = (await saidBy(ask('--description'), true))[0];
+  const names = said ?? (await saidBy(ask('--capabilities')));
+  // Not asked of a program the config has spoken for: saying what it supports
+  // is how somebody stops this from interrogating it at all.
+  const description =
+    said === undefined ? (await saidBy(ask('--description'), true))[0] : undefined;
   // Asked only where it is advertised, since that is what advertising it means
   // — and one spawn is one spawn.
   const method = names.includes('preferredmethod')
@@ -172,7 +192,13 @@ async function askAbout(
     ...(method === undefined ? {} : { method }),
   };
 
-  context.state.set(CAPABILITIES, remembered);
+  if (said === undefined || said.includes('preferredmethod')) {
+    // Remembered because something was asked. A config that says what the
+    // program supports, and does not advertise `preferredmethod` among it,
+    // asks nothing at all — and writing down what it already says would be a
+    // cache of the config.
+    context.state.set(CAPABILITIES, remembered);
+  }
 
   return remembered;
 }
@@ -226,9 +252,19 @@ export function defineTvGrabCommandSite<TData = XmltvChannel>(
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
   };
 
-  /** What it says about itself — asked once, or said in the config. */
+  /**
+   * What it says about itself — asked once, or said in the config.
+   *
+   * Even said, `preferredmethod` is still asked: the capability is the name of
+   * a *question*, not an answer, and only the program can say whether it
+   * downloads everything at once. A config that declares the capability and is
+   * then run once per stretch would be two whole downloads where saying so was
+   * meant to save one.
+   */
   const about = async (context: CommandArgsContext): Promise<Remembered> =>
-    declared === undefined ? askAbout(command, context, how) : { of: 'said', names: [...declared] };
+    declared === undefined
+      ? askAbout(command, context, how)
+      : askAbout(command, context, how, [...declared]);
 
   /** The days, cut where they stop being consecutive. */
   const stretches = (window: CommandWindow): string[][] => {
@@ -319,11 +355,21 @@ export function defineTvGrabCommandSite<TData = XmltvChannel>(
      * absent, which its documentation asks for in as many words.
      */
     runs: async (context) => {
-      const { method } = await about(context);
+      const known = await about(context);
 
-      return method === 'allatonce' || context.days.length === 0
-        ? [context]
-        : stretches(context).map((days) => commandWindow(days, todayOf(context)));
+      if (known.method === 'allatonce' || context.days.length === 0) {
+        return [context];
+      }
+
+      if (!new Set(known.names).has('baseline')) {
+        // Nothing to say a stretch *with*: `--days` and `--offset` belong to
+        // `baseline`, so without it every run is the same run — the same
+        // argument list, the same document, as many times as the window has
+        // gaps in it.
+        return [context];
+      }
+
+      return stretches(context).map((days) => commandWindow(days, todayOf(context)));
     },
 
     args: async (context) => {

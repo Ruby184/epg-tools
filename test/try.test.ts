@@ -145,12 +145,11 @@ describe('epg try', () => {
 
     const { out } = await run(config, 'example.tv', 'one.example.tv');
 
-    // `beforeRequest` runs once a *call*, so a retry is only its own line
-    // because `beforeRetry` starts one — and this is the command somebody runs
-    // to find out why a site is slow or flaky, where three attempts is the
-    // answer rather than a detail.
-    expect(out).toContain('→ 503');
-    expect(out).toContain('→ 200');
+    // One heading, both answers under it: a retry is the same call to the same
+    // url, and this is the command somebody runs to find out why a site is
+    // slow or flaky — where "503 then 200" is the answer rather than a detail.
+    expect(out).toMatch(/GET http:\/\/127\.0\.0\.1:\d+\/\n {4}→ 503, \d+ms.*\n {4}→ 200, \d+ms/);
+    expect(out.match(/GET http/g)).toHaveLength(1);
     expect(asked).toBe(2);
   });
 

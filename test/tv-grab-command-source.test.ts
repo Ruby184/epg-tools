@@ -11,6 +11,7 @@ import {
   capabilities,
   channelsOnly,
   cutShort,
+  document,
   documentFor,
   startControl,
 } from './fixtures/control.js';
@@ -264,6 +265,100 @@ describe('defineTvGrabCommandSite', () => {
       '--days 1 --offset 0 --quiet',
       '--days 1 --offset 2 --quiet',
     ]);
+  });
+
+  it('runs a grabber without baseline once, since there is no stretch to name', async () => {
+    const cache = store();
+    const control = await startControl();
+
+    // No `preferredmethod`, so a gappy window would be worth a run per stretch
+    // — and no `baseline`, so there is no `--days` or `--offset` to tell one
+    // stretch from another. Twice would be the same argument list twice, and
+    // the same document twice.
+    control.answer((invocation) =>
+      invocation.argv.includes('--capabilities')
+        ? capabilities(['manualconfig'])
+        : { write: documentFor(invocation) },
+    );
+
+    await hold(cache, TOMORROW);
+    await grab([site({ env: { FAKE_CONTROL: control.path } })], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 3,
+    });
+    await control.close();
+
+    // Two runs in all: the channel list, read out of the head of one since
+    // there is no `apiconfig` either, and the grab. Per stretch it would be
+    // three, the last two being the same argument list and the same document.
+    expect(
+      control.said.filter((one) => one !== '--capabilities' && one !== '--description'),
+    ).toEqual(['', '']);
+  });
+
+  it('asks a grabber its method even where the config says what it supports', async () => {
+    const cache = store();
+    const control = await startControl();
+
+    // Saying what a grabber supports is how somebody stops this interrogating
+    // it. `preferredmethod` is the exception, because the capability is the
+    // name of a *question*: only the program can say whether it downloads
+    // everything at once, and a config that declared it and was then run once
+    // per stretch would be two whole downloads where saying so was meant to
+    // save one.
+    await hold(cache, TOMORROW);
+    await grab(
+      [
+        site({
+          env: { FAKE_CONTROL: control.path },
+          // With `apiconfig`, so the channel list is its own cheap run and the
+          // only `--days` here is the grab's.
+          capabilities: ['baseline', 'apiconfig', 'preferredmethod'],
+        }),
+      ],
+      { cache, now: NOW, startDay: TODAY, days: 3 },
+    );
+    await control.close();
+
+    expect(control.said).toContain('--preferredmethod');
+    // Never `--capabilities`: that one the config answered.
+    expect(control.said).not.toContain('--capabilities');
+    expect(control.said.filter((one) => one.includes('--days'))).toEqual([
+      '--days 3 --offset 0 --quiet',
+    ]);
+  });
+
+  it('takes from each stretch only the days that stretch is for', async () => {
+    const cache = store();
+    const report = collect();
+    const control = await startControl();
+
+    // A grabber that writes the same three days whatever it is asked for —
+    // one that ignores `--offset`, or answers out of a file it already has,
+    // which is half of what people point this at.
+    control.answer((invocation) =>
+      invocation.argv.includes('--capabilities')
+        ? capabilities(['baseline', 'apiconfig'])
+        : { write: document({ days: [0, 1, 2] }) },
+    );
+
+    await hold(cache, TOMORROW);
+    await grab([site({ env: { FAKE_CONTROL: control.path } })], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 3,
+      reporter: report.reporter,
+    });
+    await control.close();
+
+    // Two stretches, and each day written once. Handed the whole window, both
+    // runs would answer for both days and the second would append to what the
+    // first wrote — the same programmes twice in the guide.
+    expect(report.of('entry:appended')).toHaveLength(0);
+    expect(report.of('entry:fetched')).toHaveLength(4);
   });
 
   it('keeps the stretch that worked when a later one fails', async () => {

@@ -38,6 +38,7 @@ import {
 } from './xmltv-document.js';
 import {
   defineStreamSiteConfig,
+  type ChannelDay,
   type ChannelsSource,
   type GrabberChannel,
   type SiteState,
@@ -566,8 +567,26 @@ export function defineCommandSite<TData = XmltvChannel>(
       // Asked with the same context an argument list is worked out from, and
       // before any of them: a site that decides this by asking the program
       // something needs the answer first, and needs it once.
-      for (const window of await runs({ ...commandWindow(days, today), ...said })) {
-        yield* oneRun(window);
+      const windows = await runs({ ...commandWindow(days, today), ...said });
+      /** Days some window has taken responsibility for. */
+      const claimed = new Set(windows.flatMap((window) => [...window.days]));
+
+      for (const window of windows) {
+        const mine = new Set(window.days);
+
+        yield* oneRun(
+          window,
+          // Its own days, so that a program which writes more than it was asked
+          // for — one that ignores `--offset`, or answers from a file it
+          // already has — does not have the same day taken from two runs and
+          // written twice. A day no window claimed is nobody's in particular,
+          // so every run may still answer for it: `runs` is the site's to
+          // write, and one that covers the window in some other way should not
+          // find its days quietly dropped.
+          windows.length === 1
+            ? channelDays
+            : channelDays.filter((pair) => mine.has(pair.day) || !claimed.has(pair.day)),
+        );
       }
 
       /**
@@ -576,7 +595,10 @@ export function defineCommandSite<TData = XmltvChannel>(
        * Not `once`, which is `node:events`' and imported above — a name this
        * would have shadowed for everything inside `stream`.
        */
-      async function* oneRun(window: CommandWindow): AsyncGenerator<StreamedChannelDay<TData>> {
+      async function* oneRun(
+        window: CommandWindow,
+        mine: readonly ChannelDay<TData>[],
+      ): AsyncGenerator<StreamedChannelDay<TData>> {
         // Through the queue, and only the spawn: the output arrives while the
         // document is read, so a slot held for all of that would be a slot held
         // for the whole pass — which is the deadlock `paced` was shaped around.
@@ -601,7 +623,7 @@ export function defineCommandSite<TData = XmltvChannel>(
 
         try {
           yield* splitXmltvDocument<TData>(document(run), {
-            channelDays,
+            channelDays: mine,
             warn,
             ...(signal ? { signal } : {}),
             dayZone,
