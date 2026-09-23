@@ -53,6 +53,17 @@ export interface TryOptions {
   signal?: AbortSignal;
 }
 
+/**
+ * Where a request's own record is kept while it is in the air.
+ *
+ * On `ky`'s `context`, which is the one thing a call carries through every hook
+ * of its own and shares with nobody: the hook that records a request and the
+ * hook that times its answer are handed the same object, whatever the site's
+ * own hooks do in between. A symbol so that a site keeping its own context —
+ * which is what `context` is there for — cannot collide with this.
+ */
+const ATTEMPT = Symbol('epg.try.attempt');
+
 /** One request as it happened, which only the client can say. */
 interface Attempt {
   method: string;
@@ -166,30 +177,32 @@ function recordingHooks(
   return {
     ...hooks,
     beforeRequest: [
-      async ({ request }) => {
-        into.push({
-          method: request.method,
-          url: request.url,
-          at: Date.now(),
-          ms: 0,
-          ...(await sent(request)),
-        });
+      async ({ request, options }) => {
+        mark(options, into, request, await sent(request));
       },
       ...(hooks?.beforeRequest ?? []),
     ],
+    beforeRetry: [
+      ...(hooks?.beforeRetry ?? []),
+      // Once a call, `beforeRequest` — a retry is the same call, so without
+      // this a retried request is one line covering every attempt of it, timed
+      // from the first. `epg try` is where somebody is looking to find out why
+      // a site is slow or flaky, and three attempts is the answer.
+      async ({ request, options }) => {
+        mark(options, into, request, await sent(request));
+      },
+    ],
     afterResponse: [
       ...(hooks?.afterResponse ?? []),
-      async ({ request, response }) => {
-        // Matched on the record rather than on the request object: `ky` does
-        // not hand this hook the one `beforeRequest` saw — not for a site with
-        // hooks of its own, and not for a plain client either — so a `WeakMap`
-        // keyed on it missed every time and timed every request at 0ms. The
-        // one still waiting for an answer is this one; a retry of the same url
-        // pushed a record of its own.
-        const attempt =
-          into.findLast(
-            (candidate) => candidate.url === request.url && candidate.status === undefined,
-          ) ?? into.findLast((candidate) => candidate.url === request.url);
+      async ({ options, response }) => {
+        // The record this very attempt put there, rather than the last one
+        // whose url looks right: `ky` hands this hook a different `Request`
+        // object from the one `beforeRequest` saw, so a `WeakMap` keyed on it
+        // timed every request at 0ms — and matching on the url instead times
+        // the wrong one as soon as a site asks for the same url twice at once.
+        const attempt = (options.context as Record<PropertyKey, unknown>)[ATTEMPT] as
+          | Attempt
+          | undefined;
 
         if (attempt !== undefined) {
           attempt.ms = Date.now() - attempt.at;
@@ -214,6 +227,25 @@ function recordingHooks(
       },
     ],
   };
+}
+
+/** Start a record for an attempt, and leave it where its answer will find it. */
+function mark(
+  options: { context: Record<string, unknown> },
+  into: Attempt[],
+  request: Request,
+  said: { body?: string },
+): void {
+  const attempt: Attempt = {
+    method: request.method,
+    url: request.url,
+    at: Date.now(),
+    ms: 0,
+    ...said,
+  };
+
+  into.push(attempt);
+  (options.context as Record<PropertyKey, unknown>)[ATTEMPT] = attempt;
 }
 
 function bytes(value: number | undefined): string {

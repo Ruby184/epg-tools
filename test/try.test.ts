@@ -114,6 +114,46 @@ describe('epg try', () => {
     expect(Number(ms)).toBeGreaterThanOrEqual(50);
   });
 
+  it('shows each attempt of a retried request, timed on its own', async () => {
+    let asked = 0;
+    const server = createServer((_request, response) => {
+      asked += 1;
+
+      if (asked === 1) {
+        response.writeHead(503, { 'content-type': 'application/json' });
+        response.end('{}');
+
+        return;
+      }
+
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('[]');
+    });
+
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const config = configWith(
+      defineSiteConfig({
+        site: 'example.tv',
+        channels: [{ xmltvId: 'one.example.tv', siteId: 'one' }],
+        request: ({ http }) => http.get(url).json(),
+        parseDay: ({ day, programme }) => [programme(new Date(`${day}T10:00:00Z`), 'A')],
+      }),
+    );
+
+    const { out } = await run(config, 'example.tv', 'one.example.tv');
+
+    // `beforeRequest` runs once a *call*, so a retry is only its own line
+    // because `beforeRetry` starts one — and this is the command somebody runs
+    // to find out why a site is slow or flaky, where three attempts is the
+    // answer rather than a detail.
+    expect(out).toContain('→ 503');
+    expect(out).toContain('→ 200');
+    expect(asked).toBe(2);
+  });
+
   it('shows what a request sent, with anything secret taken out of it', async () => {
     const url = await source([]);
     const config = configWith(
