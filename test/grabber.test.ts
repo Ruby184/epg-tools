@@ -663,6 +663,28 @@ describe('grab', () => {
         expect(seen[1]).toEqual({ channels: [{ xmltvId: 'one', siteId: 'site-one' }], at: NOW });
       });
 
+      it('tells a site nothing when the stored list is stamped in the future', async () => {
+        const cache = new MemoryCache();
+        const seen: (ChannelsContext['cached'] | undefined)[] = [];
+        const config = seeing(seen);
+        const state = SiteStateHandle.open(cache, config.site);
+        // A clock that moved, or a cache copied from a machine ahead of this
+        // one — the same list `fresh` already refuses to hand back.
+        const ahead = new Date(NOW.getTime() + 2 * 86_400_000);
+
+        await resolveChannels(config, { state, now: ahead });
+        await state.save();
+        await resolveChannels(config, {
+          state: SiteStateHandle.open(cache, config.site),
+          now: NOW,
+        });
+
+        // Handed it, a site that can tell nothing has changed hands it straight
+        // back — and it is stored again as fetched now, which is how a stale
+        // list outlives the guard that was meant to drop it.
+        expect(seen).toEqual([undefined, undefined]);
+      });
+
       it('tells a site nothing when the run was told to refresh', async () => {
         const cache = new MemoryCache();
         const seen: (ChannelsContext['cached'] | undefined)[] = [];

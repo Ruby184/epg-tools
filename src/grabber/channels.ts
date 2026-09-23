@@ -173,7 +173,7 @@ export async function resolveChannels(
   // a site that can tell cheaply that nothing has changed hands it straight
   // back rather than rebuilding it. `--refresh` withholds it, because a run
   // told to ask the source again means it.
-  const channels = await fromSource(options.refresh === true ? undefined : group.held());
+  const channels = await fromSource(options.refresh === true ? undefined : group.held(now));
 
   // Stored before the selection, never after: what the cache holds is what the
   // site offers, so the next run — selecting something else, or nothing — reads

@@ -209,6 +209,118 @@ describe('defineSchedulesDirectSite', () => {
     expect(await (await SiteStateHandle.open(cache, SITE).bag()).get('token')).toBe('token-1');
   });
 
+  it('writes only the days a batch asked about, when a station is split across batches', async () => {
+    const source = await service();
+    const cache = store();
+    const tomorrow = '2026-09-13';
+
+    for (const [stationID, programID] of [
+      ['101', 'EP000000010009'],
+      ['202', 'EP000000020009'],
+    ] as const) {
+      source.setSchedule(stationID, tomorrow, [
+        { ...airing(programID, 18), airDateTime: `${tomorrow}T18:00:00Z` },
+      ]);
+      source.setProgram(program(programID, `Tomorrow on ${stationID}`));
+    }
+
+    const report = collect();
+    // One station-day a request: each station is split across two batches, and
+    // the days of the second must not be settled while the first is in hand.
+    const summary = await grab([site(source, { days: 2, stationDaysPerRequest: 1 })], {
+      cache,
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    expect(summary.fetched).toBe(4);
+    expect(summary.failed).toBe(0);
+    // Four station-days, each written **once**. A batch that answered for the
+    // whole station would write the days of the batches after it empty first —
+    // appending to them when their own answer arrived, and storing the md5 of
+    // listings nobody had fetched beside them in the meantime. A run that stops
+    // between the two leaves that day empty with a matching md5, which is empty
+    // for as long as the service does not change it.
+    expect(report.of('entry:appended')).toHaveLength(0);
+    expect(
+      report.of('entry:fetched').every((one) => (one as { programmes: number }).programmes > 0),
+    ).toBe(true);
+
+    const xml = await collectGuide(cache, source, 2);
+
+    expect(xml).toContain('Tomorrow on 101');
+    expect(xml).toContain('Tomorrow on 202');
+  });
+
+  it('grabs a configured lineup the headend has deleted, rather than calling it missing', async () => {
+    const source = await service();
+    const report = collect();
+
+    source.answer({
+      status: { account: { messages: [] }, lineups: [{ lineup: LINEUP, isDeleted: true }] },
+    });
+
+    const summary = await grab([site(source)], {
+      cache: store(),
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    // It is on the account and still answers with what it last had, so the
+    // guide thins out rather than stopping — and saying "the account has no
+    // lineup GBR-1000014-DEFAULT" would be telling its owner to add one they
+    // can see on their account.
+    expect(report.of('site:failed')).toHaveLength(0);
+    expect(summary.fetched).toBe(2);
+    expect(report.messages.some((line) => line.includes('deleted at the headend'))).toBe(true);
+  });
+
+  it('refetches when programmeExtras changes, since it is written into the cache', async () => {
+    const source = await service();
+    const cache = store();
+
+    await grab([site(source)], { cache, now: NOW });
+
+    const before = source.countOf('schedules');
+    const summary = await grab([site(source, { programmeExtras: false })], {
+      cache,
+      now: NOW,
+      staleness: { alwaysRefetchDays: 7 },
+    });
+
+    // Without it in the stamp every md5 still matches, and turning the
+    // extensions off is a no-op for as long as the window is.
+    expect(summary.fetched).toBe(2);
+    expect(source.countOf('schedules')).toBe(before + 1);
+    // `programId` is what the default extras put on every programme.
+    expect(await collectGuide(cache, source)).not.toContain('programId=');
+  });
+
+  it('keeps what it has when the state is lost but the cache is not', async () => {
+    const source = await service();
+    const cache = store();
+    const sites = [site(source)];
+
+    await grab(sites, { cache, now: NOW });
+
+    // The cache directory copied without the state file, or a state file lost:
+    // no md5s, and no stamp of what the mapping was.
+    const state = SiteStateHandle.open(cache, SITE);
+    const bag = await state.bag();
+
+    bag.clear();
+    await state.save();
+
+    const summary = await grab(sites, { cache, now: NOW, staleness: { alwaysRefetchDays: 7 } });
+
+    // Nothing says the mapping changed — there is nothing stored to say it —
+    // so the days are validated against what the service last changed them,
+    // which is what having no md5s falls back to. Refetching the fortnight is
+    // what treating a missing stamp as a changed one would cost.
+    expect(summary.fetched).toBe(0);
+    expect(summary.unchanged).toBe(2);
+  });
+
   it('fails the site, naming what the account does have, when the lineup is not on it', async () => {
     const source = await service();
     const report = collect();

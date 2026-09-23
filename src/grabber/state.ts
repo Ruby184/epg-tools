@@ -194,14 +194,20 @@ export class ChannelsGroup implements StateGroup {
    * reason {@link fresh} distrusts the same: a site handed no list simply
    * fetches one.
    */
-  held(): { channels: GrabberChannel[]; at: Date } | undefined {
+  held(now: Date): { channels: GrabberChannel[]; at: Date } | undefined {
     if (this.#list === undefined || this.#writtenAt === undefined) {
       return undefined;
     }
 
     const written = Date.parse(this.#writtenAt);
 
-    return Number.isNaN(written) ? undefined : { channels: this.#list, at: new Date(written) };
+    // A stamp in the future is the one this must not hand over: a site asked
+    // "anything new since then?" would answer no, and the list would be stored
+    // again as fetched now — which is how a clock that moved, or a cache copied
+    // from another machine, keeps a stale list alive for ever.
+    return Number.isNaN(written) || now.getTime() - written < 0
+      ? undefined
+      : { channels: this.#list, at: new Date(written) };
   }
 
   /** Remember this list, as fetched at `now`. */

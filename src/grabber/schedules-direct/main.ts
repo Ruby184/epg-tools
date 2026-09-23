@@ -138,6 +138,13 @@ function mappingFingerprint(options: SchedulesDirectSiteOptions): string {
       typeof options.channelId === 'function'
         ? String(options.channelId)
         : (options.channelId ?? null),
+    // Baked into the cached day, unlike `channelExtras`, which is written onto
+    // the channel at output time and so needs nothing invalidated. Without it
+    // here, turning the extensions off is a no-op for a fortnight.
+    programmeExtras:
+      typeof options.programmeExtras === 'function'
+        ? String(options.programmeExtras)
+        : (options.programmeExtras ?? null),
   });
 
   return createHash('sha1').update(shape).digest('hex').slice(0, 16);
@@ -375,7 +382,12 @@ export function defineSchedulesDirectSite(
         // would be grabbing a list that is on its way to empty.
         const live = onAccount.filter((one) => one.isDeleted !== true);
         const held = live.map((one) => one.lineup!);
-        const missing = configured?.filter((one) => !held.includes(one)) ?? [];
+        // Against everything on the account, deleted or not: one named in the
+        // config is *there*, and still answers with what it last had. Telling
+        // its owner to add a lineup they can see on their account — and
+        // stopping the guide to say it — is the wrong end of the warning above.
+        const missing =
+          configured?.filter((one) => !onAccount.some((two) => two.lineup === one)) ?? [];
 
         if (missing.length > 0) {
           // Nothing here adds one, so this is where a run stops — and the
