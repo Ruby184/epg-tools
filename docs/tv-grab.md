@@ -426,8 +426,19 @@ tv_grab_sk_example --get-lineup       # the one that was configured
 
 `lineupsFromSites` builds one `List` lineup per site, which fits a grabber whose
 sites genuinely *are* separate platforms; it fills each entry's `<preset>` from
-the optional `preset` on a `GrabberChannel`. Anything else is written out by
-hand as `LineupConfig[]`, since a lineup is normally fed by several sites:
+the optional `preset` on a `GrabberChannel`.
+
+**A site that knows better says so itself.** A source carrying real platforms
+answers `lineups(channels)` with them, and `lineupsFromSites` takes those instead
+of inventing one — a [Schedules Direct](./site-config.md#schedules-direct) site
+offers the lineups on the account, so two lineups there are two to choose
+between, named as the account names them. It is a function of the resolved
+channel list and nothing else, so it costs no request of its own: a station that
+sits on two of the account's lineups is one channel in the guide and one entry in
+each lineup, at the number it sits at on each.
+
+Anything else is written out by hand as `LineupConfig[]`, since a lineup is
+normally fed by several sites:
 
 ```js
 lineupsCapability([{

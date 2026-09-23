@@ -36,6 +36,7 @@
 import ky, { type KyInstance } from 'ky';
 import { createHash } from 'node:crypto';
 import { GrabberError } from '../../core/error.js';
+import type { LineupConfig, LineupEntry } from '../../tv-grab/lineups.js';
 import {
   defineStreamSiteConfig,
   type ChannelElement,
@@ -148,6 +149,19 @@ function mappingFingerprint(options: SchedulesDirectSiteOptions): string {
   });
 
   return createHash('sha1').update(shape).digest('hex').slice(0, 16);
+}
+
+/** One placement of a station: a lineup, and the number it sits at on it. */
+function placementOf(
+  lineup: string | undefined,
+  channel: string | undefined,
+): { lineup: string; channel?: string } {
+  return {
+    // Never undefined in practice — the list is built lineup by lineup — and
+    // a station with no lineup behind it is one no platform can offer.
+    lineup: lineup ?? '',
+    ...(channel === undefined ? {} : { channel }),
+  };
 }
 
 /** Where the lineups' own stamps are kept, beside the list they built. */
@@ -313,6 +327,16 @@ export function defineSchedulesDirectSite(
   // channel list and the cached days are only valid for.
   const fingerprint = mappingFingerprint(options);
 
+  /**
+   * What the account calls each of its lineups, as `/status` last said.
+   *
+   * Filled whenever the channel list is built, and read by `lineups` below —
+   * which runs in the same command, right after it. Not stored with the
+   * channels: it is one name per lineup, and putting it on every channel would
+   * be the same string a few thousand times in the cache.
+   */
+  const names = new Map<string, string>();
+
   /** One client for one context, sharing the token through the site's own bag. */
   const clientFor = (context: {
     http: ChannelsContext['http'];
@@ -357,6 +381,71 @@ export function defineSchedulesDirectSite(
       return site.channelInfo ? site.channelInfo(channel, withExtras) : withExtras();
     },
 
+    /**
+     * The account's own lineups, as platforms a `tv_grab_*` can offer.
+     *
+     * One per lineup on the account rather than one for the site, which is what
+     * they are: somebody subscribed to each of them, and choosing between them
+     * is the choice a consumer wants to make. Built from the channel list alone
+     * — every placement is already on the channels — so `--list-lineups` costs
+     * what the channel list costs and nothing more.
+     *
+     * `List` is the type, because what the service says about a lineup is its
+     * name and when it changed, not how it is received. Saying `DTV` of a cable
+     * package would be a guess written into a document consumers read.
+     */
+    lineups(channels): LineupConfig[] {
+      const byLineup = new Map<string, LineupEntry[]>();
+
+      for (const channel of channels) {
+        const data = channel.data;
+
+        if (data === undefined) {
+          continue;
+        }
+
+        for (const placement of data.on ?? [placementOf(data.lineup, data.channel)]) {
+          if (placement.lineup === '') {
+            // A `channels` list of somebody's own, which says nothing about
+            // platforms — then there are no lineups here to offer.
+            continue;
+          }
+
+          const held = byLineup.get(placement.lineup) ?? [];
+
+          held.push({
+            ...(placement.channel === undefined ? {} : { preset: placement.channel }),
+            station: {
+              xmltvId: channel.xmltvId,
+              name: data.name,
+              ...(data.callsign === undefined ? {} : { shortName: data.callsign }),
+              ...(data.broadcastLanguage === undefined ? {} : { lang: data.broadcastLanguage }),
+              ...(data.logos.length === 0
+                ? {}
+                : { logo: data.logos.map((one) => ({ url: one.url })) }),
+              type: data.isRadioStation === true ? 'Radio' : 'TV',
+              ...(data.isCommercialFree === undefined
+                ? {}
+                : { commercialFree: data.isCommercialFree }),
+            },
+          });
+          byLineup.set(placement.lineup, held);
+        }
+      }
+
+      return [...byLineup].map(([id, entries]) => ({
+        id,
+        type: 'List',
+        // What the account calls it, where this run has asked the account —
+        // `Freeview` rather than `GBR-1000014-DEFAULT`. A list read back from
+        // the cache was built by a run that did ask, but the name is not on the
+        // channels, so the id stands in: it is what the account's own page
+        // shows beside the name.
+        displayName: [{ value: names.get(id) ?? id }],
+        entries,
+      }));
+    },
+
     channels:
       options.channels ??
       (async (context: ChannelsContext): Promise<GrabberChannel<SchedulesDirectStation>[]> => {
@@ -368,6 +457,12 @@ export function defineSchedulesDirectSite(
         const onAccount = (status.lineups ?? [])
           .map((one) => ({ ...one, lineup: lineupIdOf(one) }))
           .filter((one) => one.lineup !== undefined);
+
+        for (const one of onAccount) {
+          if (one.name !== undefined) {
+            names.set(one.lineup!, one.name);
+          }
+        }
 
         for (const dead of onAccount.filter((one) => one.isDeleted === true)) {
           // It still answers, with nothing new in it, so the guide thins out
@@ -432,7 +527,7 @@ export function defineSchedulesDirectSite(
         }
 
         const channels: GrabberChannel<SchedulesDirectStation>[] = [];
-        const seen = new Set<string>();
+        const seen = new Map<string, GrabberChannel<SchedulesDirectStation>>();
 
         for (const id of lineups) {
           const answer = await client.lineup(id);
@@ -446,14 +541,25 @@ export function defineSchedulesDirectSite(
             // through `cacheChannels` rather than needing to be learnt again.
             const channel = schedulesDirectStation(wire, numbers.get(wire.stationID), mapping, id);
 
-            // A station in two lineups is one channel: the cache is keyed by
-            // `(site, channel, day)`, so a second one would append to the first
-            // and every programme would appear twice.
-            if (channel === undefined || seen.has(channel.xmltvId)) {
+            if (channel === undefined) {
               continue;
             }
 
-            seen.add(channel.xmltvId);
+            const already = seen.get(channel.xmltvId);
+
+            if (already?.data !== undefined) {
+              // A station in two lineups is one channel: the cache is keyed by
+              // `(site, channel, day)`, so a second one would append to the
+              // first and every programme would appear twice. Where it sits on
+              // each is kept, since that is a fact about the platforms rather
+              // than about the channel — see `SchedulesDirectStation.on`.
+              already.data.on ??= [placementOf(already.data.lineup, already.data.channel)];
+              already.data.on.push(placementOf(id, channel.data?.channel));
+
+              continue;
+            }
+
+            seen.set(channel.xmltvId, channel);
             channels.push(channel);
           }
         }

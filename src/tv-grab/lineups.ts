@@ -376,6 +376,13 @@ function stationOf(channel: GrabberChannel, lang: string | undefined): LineupSta
  *
  * `List` by default, since a site says nothing about how its channels are
  * received, and a `List` lineup is the schema's way of saying just that.
+ *
+ * **Unless the site says otherwise.** A source that knows how its channels
+ * divide answers `lineups` with the platforms it actually carries, and those
+ * are taken as they come: a Schedules Direct account with two lineups on it is
+ * two here, and choosing one is choosing what that account is subscribed to
+ * rather than a name this made up. The options below are then beside the point
+ * — they describe a site whose shape had to be guessed at.
  */
 export async function lineupsFromSites(
   config: EpgConfig,
@@ -385,6 +392,13 @@ export async function lineupsFromSites(
 
   for (const site of config.sites) {
     const channels = await resolveChannels(site);
+    const own = site.lineups?.(channels);
+
+    if (own !== undefined && own.length > 0) {
+      lineups.push(...own);
+
+      continue;
+    }
 
     lineups.push({
       id: site.site,

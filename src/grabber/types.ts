@@ -1,6 +1,7 @@
 import type { KyInstance, Options as KyOptions } from 'ky';
 import type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from '../xmltv/builder.js';
 import type { DateInput } from '../xmltv/date.js';
+import type { LineupConfig } from '../tv-grab/lineups.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheEntryMeta, CacheStore, StalenessPolicy } from '../cache/types.js';
 import type { GrabCounts, Reporter, Says } from '../core/events.js';
@@ -608,6 +609,21 @@ export interface BaseSiteConfig<TData = unknown> {
     channel: GrabberChannel<TData>,
     element: ChannelElement,
   ): XmltvChannel | ChannelBuilder;
+  /**
+   * How this site's channels divide into reception platforms, where they do.
+   *
+   * Only a `tv_grab_*`'s `lineups` capability asks — see `lineupsFromSites` —
+   * and without this a site is one `List` lineup of everything it carries,
+   * which is right for a site that *is* one platform. A source that knows
+   * better says so here: a Schedules Direct account holds lineups, and each of
+   * them is a platform somebody chose to receive.
+   *
+   * Given the resolved channel list and nothing else, because whatever divides
+   * them is already on the channels — {@link GrabberChannel.preset} is the
+   * number one sits at, `data` is whatever the site kept — so this costs no
+   * request of its own and answers the same from a cached list as a fetched one.
+   */
+  lineups?(channels: GrabberChannel<TData>[]): LineupConfig[];
 }
 
 /**

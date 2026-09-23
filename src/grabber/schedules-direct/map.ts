@@ -66,6 +66,19 @@ export interface SchedulesDirectStation {
   state?: string;
   /** The lineup it came from — `GBR-1000014-DEFAULT`, and so a British guide. */
   lineup?: string;
+  /**
+   * Every lineup it sits on, and the number it sits at on each — where that is
+   * more than one.
+   *
+   * A station carried by two of an account's lineups is **one channel**: the
+   * cache is keyed by `(site, channel, day)`, so a second would append to the
+   * first and every programme would appear twice. But it really is on both
+   * platforms, at a number of its own on each — the local network on cable 8
+   * and on air 8.1 — and that is what a lineup document has to say. Absent for
+   * a station on one lineup, which is the whole of the usual account: then
+   * {@link lineup} and {@link channel} are the placement.
+   */
+  on?: { lineup: string; channel?: string }[];
   isRadioStation?: boolean;
   isCommercialFree?: boolean;
 }

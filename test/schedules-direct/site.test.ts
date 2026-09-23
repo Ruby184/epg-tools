@@ -8,6 +8,7 @@ import {
 } from '../../src/grabber/schedules-direct/main.js';
 import { SiteStateHandle } from '../../src/grabber/state.js';
 import { generateGuide } from '../../src/merge/main.js';
+import { lineupsFromSites } from '../../src/tv-grab/lineups.js';
 import { collect } from '../reporting.js';
 import { sdServer, stopSdServer, type SdServer } from './server.js';
 
@@ -319,6 +320,73 @@ describe('defineSchedulesDirectSite', () => {
     // what treating a missing stamp as a changed one would cost.
     expect(summary.fetched).toBe(0);
     expect(summary.unchanged).toBe(2);
+  });
+
+  it('offers each lineup on the account as a platform of its own', async () => {
+    const shared = {
+      stationID: '101',
+      name: 'BBC One',
+      callsign: 'BBC1',
+      broadcastLanguage: ['en'],
+    };
+    const source = await sdServer({
+      status: {
+        account: { messages: [] },
+        lineups: [
+          { lineup: 'GBR-AERIAL', name: 'Freeview' },
+          { lineup: 'GBR-DISH', name: 'Sky' },
+        ],
+      },
+      lineups: {
+        'GBR-AERIAL': {
+          map: [
+            { stationID: '101', channel: '001' },
+            { stationID: '202', channel: '003' },
+          ],
+          stations: [shared, { stationID: '202', name: 'ITV', callsign: 'ITV' }],
+        },
+        'GBR-DISH': {
+          map: [
+            { stationID: '101', channel: '101' },
+            { stationID: '303', channel: '110' },
+          ],
+          stations: [shared, { stationID: '303', name: 'Sky One', isRadioStation: false }],
+        },
+      },
+    });
+
+    const lineups = await lineupsFromSites({
+      sites: [site(source, { lineup: undefined })],
+      days: 1,
+      output: 'guide.xml',
+    });
+
+    // One per lineup on the account, not one for the site: somebody subscribed
+    // to each of them, and which to grab is the choice a consumer wants.
+    expect(lineups.map((one) => one.id)).toEqual(['GBR-AERIAL', 'GBR-DISH']);
+    // What the account calls them, as `/status` says.
+    expect(lineups.map((one) => one.displayName[0]?.value)).toEqual(['Freeview', 'Sky']);
+
+    const presetOf = (at: number, stationID: string) =>
+      lineups[at]?.entries.find((entry) => entry.station.xmltvId === idOf(stationID))?.preset;
+
+    // The station both carry is one channel in the cache and one entry in each
+    // lineup — at the number it sits at *there*, which is the fact a lineup
+    // document exists to carry.
+    expect(presetOf(0, '101')).toBe('001');
+    expect(presetOf(1, '101')).toBe('101');
+    expect(lineups[0]?.entries.map((one) => one.station.xmltvId)).toEqual([
+      idOf('101'),
+      idOf('202'),
+    ]);
+    expect(lineups[1]?.entries.map((one) => one.station.xmltvId)).toEqual([
+      idOf('101'),
+      idOf('303'),
+    ]);
+    // `List`, because what the service says about a lineup is its name and when
+    // it changed — not how it is received.
+    expect(lineups[0]?.type).toBe('List');
+    expect(lineups[0]?.entries[0]?.station.shortName).toBe('BBC1');
   });
 
   it('fails the site, naming what the account does have, when the lineup is not on it', async () => {

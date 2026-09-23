@@ -46,6 +46,8 @@ export interface SdCall {
 export interface SdAnswers {
   status?: WireStatus;
   lineup?: WireLineup;
+  /** One answer per lineup id, for an account holding more than one. */
+  lineups?: Record<string, WireLineup>;
   /** Answered instead of the md5s computed from {@link SdServer.setSchedule}. */
   md5?: WireMd5Response;
   /** Answered instead of the schedules a test set up. */
@@ -277,7 +279,12 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
             : { response: 'OK', code: 0, message: 'Deleted lineup.', changesRemaining: '6' },
         );
       } else if (path.startsWith('lineups/')) {
-        send(response, 200, answers.lineup ?? { map: [], stations: [] });
+        send(
+          response,
+          200,
+          answers.lineups?.[path.slice('lineups/'.length)] ??
+            answers.lineup ?? { map: [], stations: [] },
+        );
       } else if (path === 'schedules/md5') {
         if (answers.md5 !== undefined) {
           send(response, 200, answers.md5);

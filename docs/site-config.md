@@ -864,6 +864,13 @@ on your behalf. A lineup its headend has **deleted** is skipped with a warning:
 it keeps answering with what it last had, so a guide built from it thins out
 rather than failing.
 
+**The account's lineups are offered as lineups.** A `tv_grab_*` with the
+[`lineups` capability](./tv-grab.md#channel-lineups) lists them one by one —
+`Freeview`, `Sky`, as the account names them — so a consumer picks the platform
+it receives rather than "the Schedules Direct site". It is built from the channel
+list, so it costs nothing extra, and a station on two of them keeps its own
+number on each.
+
 **A lineup is downloaded only when it has moved.** `/status` carries each
 lineup's `modified` stamp and the account check reads it anyway, so a run whose
 lineups are all unchanged keeps the channel list it already had — 223 KiB and a
