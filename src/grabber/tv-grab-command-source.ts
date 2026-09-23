@@ -79,6 +79,10 @@ export interface TvGrabCommandSiteOptions<TData = XmltvChannel> extends Omit<
    * Saves one spawn a day and is the way out if a grabber's `--capabilities`
    * answer cannot be believed. `[]` means "none of them", which passes nothing
    * but the arguments below.
+   *
+   * Naming `preferredmethod` here still has the program asked which method it
+   * prefers: the capability is the name of a question, and only the program can
+   * answer it.
    */
   capabilities?: readonly TvGrabCapability[];
   /** Anything else it takes, added after the arguments worked out here. */

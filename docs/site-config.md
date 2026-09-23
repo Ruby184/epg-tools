@@ -1027,14 +1027,19 @@ the site's own state beside a fingerprint of the command — because the answer
 decides what may be passed: `--days`, `--offset`, `--config-file` and `--quiet`
 are `baseline`, `--cache` is `cache`, and **`--list-channels` is `apiconfig`**. A
 grabber without `apiconfig` has its channel list read out of the head of a normal
-run instead. `capabilities: [...]` says it yourself and skips the asking;
-`extraArgs` adds anything else it takes.
+run instead. `capabilities: [...]` says it yourself and skips the asking — save
+for `preferredmethod`, which is a question only the program can answer and so is
+still asked where you name it; `extraArgs` adds anything else it takes.
 
 **`preferredmethod` decides how often it runs.** A grabber answering `allatonce`
 "downloads data in a single chunk and filters out the requested days", so it is
 asked once for the whole stretch; one that does not advertise the capability is
 assumed to cost what it fetches, so a window with a fresh day in the middle is
-two runs of a day each rather than one of three. `--description` is asked too,
+two runs of a day each rather than one of three — unless it has no `baseline`
+either, since without `--days` and `--offset` there is no way to ask for one
+stretch rather than another. Each run is then read for its own days alone, so a
+grabber that writes the whole fortnight whatever it was asked for does not have
+the same day written twice. `--description` is asked too,
 and said once a run — which grabber answered is worth a line of a verbose log.
 
 What it does **not** do is configure anything. The `.conf` file is yours to
