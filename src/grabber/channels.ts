@@ -126,14 +126,18 @@ export async function resolveChannels(
     return kept(source);
   }
 
+  /** What the site said about the list it just built — see `ChannelsAnswer`. */
+  let metadata: unknown;
+
   const fromSource = async (
     /** Last run's list, for a site that can tell it is still right. */
     held?: {
       channels: GrabberChannel[];
       at: Date;
+      metadata?: unknown;
     },
-  ): Promise<GrabberChannel[]> =>
-    source({
+  ): Promise<GrabberChannel[]> => {
+    const answer = await source({
       http: options.http ?? siteHttp(config, options.signal),
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.says ?? SILENT),
@@ -147,6 +151,17 @@ export async function resolveChannels(
       state: (await options.state?.bag()) ?? new Map(),
       ...(held === undefined ? {} : { cached: held }),
     });
+
+    if (Array.isArray(answer)) {
+      return answer;
+    }
+
+    // It said something about the list as well — kept in the same cache entry,
+    // so what describes the list cannot outlive or predecease it.
+    metadata = answer.metadata;
+
+    return answer.channels;
+  };
 
   const maxAgeMs = channelsMaxAgeMs(config);
   const { state } = options;
@@ -178,7 +193,10 @@ export async function resolveChannels(
   // Stored before the selection, never after: what the cache holds is what the
   // site offers, so the next run — selecting something else, or nothing — reads
   // back a list that is still true.
-  group.set(channels, now);
+  // With what the site said about it — or what it said last time, where it said
+  // nothing this time: a list handed straight back is described by the same
+  // thing that described it before.
+  group.set(channels, now, metadata ?? group.metadata());
 
   return kept(channels);
 }

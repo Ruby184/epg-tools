@@ -155,12 +155,62 @@ interface StateGroup {
 export class ChannelsGroup implements StateGroup {
   readonly key = StateKey.CHANNELS;
   #list: GrabberChannel[] | undefined;
+  #metadata: unknown;
   #writtenAt: string | undefined;
   #dirty = false;
 
-  constructor(list: GrabberChannel[] | undefined, writtenAt: string | undefined) {
+  constructor(
+    list: GrabberChannel[] | undefined,
+    writtenAt: string | undefined,
+    metadata?: unknown,
+  ) {
     this.#list = list;
+    this.#metadata = metadata;
     this.#writtenAt = writtenAt;
+  }
+
+  /**
+   * One as a store hands it back, taken at its word until checked.
+   *
+   * Here rather than beside the handle that asks for it: {@link data} below
+   * writes the stored shape, so reading it is the other half of the same
+   * decision, and nothing outside this class has business with either.
+   */
+  static from(found: StateEntry | undefined): ChannelsGroup {
+    return new ChannelsGroup(
+      ChannelsGroup.#listIn(found?.data),
+      found?.meta.writtenAt,
+      ChannelsGroup.#metadataIn(found?.data),
+    );
+  }
+
+  /** The list an entry holds, or nothing where what it holds is not one. */
+  static #listIn(data: unknown): GrabberChannel[] | undefined {
+    // One shape: the envelope, whose first key is the list itself.
+    const list =
+      data === null || typeof data !== 'object'
+        ? undefined
+        : (data as { channels?: unknown }).channels;
+
+    // All or nothing, unlike a bag's entries: half a channel list would mean
+    // grabbing half a site, which is worse than fetching the list again.
+    return Array.isArray(list) &&
+      list.every(
+        (channel: unknown) =>
+          typeof channel === 'object' &&
+          channel !== null &&
+          typeof (channel as GrabberChannel).xmltvId === 'string' &&
+          typeof (channel as GrabberChannel).siteId === 'string',
+      )
+      ? (list as GrabberChannel[])
+      : undefined;
+  }
+
+  /** What the site said about the list it stored, where it said anything. */
+  static #metadataIn(data: unknown): unknown {
+    return data === null || typeof data !== 'object'
+      ? undefined
+      : (data as { metadata?: unknown }).metadata;
   }
 
   get dirty(): boolean {
@@ -210,15 +260,27 @@ export class ChannelsGroup implements StateGroup {
       : { channels: this.#list, at: new Date(written) };
   }
 
-  /** Remember this list, as fetched at `now`. */
-  set(list: GrabberChannel[], now: Date): void {
+  /** What the site said about the list — see `ChannelsAnswer`. */
+  metadata(): unknown {
+    return this.#metadata;
+  }
+
+  /** Remember this list, as fetched at `now`, with what the site said about it. */
+  set(list: GrabberChannel[], now: Date, metadata?: unknown): void {
     this.#list = list;
+    this.#metadata = metadata;
     this.#writtenAt = now.toISOString();
     this.#dirty = true;
   }
 
   data(): unknown {
-    return this.#list;
+    // Two keys, always: the list, and what the site said about the list. A list
+    // stored as a bare array by an older version does not read back — which
+    // costs one fetch, once, and keeps this to one shape rather than two.
+    return {
+      channels: this.#list,
+      ...(this.#metadata === undefined ? {} : { metadata: this.#metadata }),
+    };
   }
 
   writtenAt(): string | undefined {
@@ -240,6 +302,24 @@ export class ChannelsGroup implements StateGroup {
  */
 class BagGroup<V> implements StateGroup {
   readonly map: TrackedMap<V>;
+
+  /**
+   * One as a store hands it back — the pairs, in the order they were written.
+   *
+   * A pair that is not one is dropped rather than costing the rest: forgetting
+   * one unreadable value is better than forgetting the token beside it.
+   */
+  static from<V>(key: string, found: StateEntry | undefined): BagGroup<V> {
+    return new BagGroup<V>(
+      key,
+      Array.isArray(found?.data)
+        ? found.data.filter(
+            (entry: unknown): entry is [string, V] =>
+              Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string',
+          )
+        : [],
+    );
+  }
 
   constructor(
     readonly key: string,
@@ -265,37 +345,6 @@ class BagGroup<V> implements StateGroup {
   settle(): void {
     this.map.changed.clear();
   }
-}
-
-/** A channel list as it comes back out of a store: at its word, until checked. */
-function asChannels(data: unknown): GrabberChannel[] | undefined {
-  // All or nothing, unlike a bag's entries below: half a channel list would mean
-  // grabbing half a site, which is worse than fetching the list again.
-  return Array.isArray(data) &&
-    data.every(
-      (channel: unknown) =>
-        typeof channel === 'object' &&
-        channel !== null &&
-        typeof (channel as GrabberChannel).xmltvId === 'string' &&
-        typeof (channel as GrabberChannel).siteId === 'string',
-    )
-    ? (data as GrabberChannel[])
-    : undefined;
-}
-
-/**
- * The entries a bag was stored as, in the order they were written.
- *
- * A pair that is not one is dropped rather than costing the rest: forgetting one
- * unreadable value is better than forgetting the token beside it.
- */
-function asEntries<V>(data: unknown): Array<[string, V]> {
-  return Array.isArray(data)
-    ? data.filter(
-        (entry: unknown): entry is [string, V] =>
-          Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string',
-      )
-    : [];
 }
 
 /**
@@ -333,7 +382,11 @@ export class SiteStateHandle {
   async channels(): Promise<ChannelsGroup> {
     return this.#use(
       StateKey.CHANNELS,
-      (found) => new ChannelsGroup(asChannels(found?.data), found?.meta.writtenAt),
+      // In one entry with the list rather than in the site's own bag, which is
+      // a separate one: either can be lost, copied or pruned without the other,
+      // and something that describes *this* list has to travel with it or be
+      // worse than not kept at all.
+      (found) => ChannelsGroup.from(found),
     );
   }
 
@@ -347,7 +400,7 @@ export class SiteStateHandle {
    * it. Whatever goes in must survive `JSON.stringify`, this being a cache file.
    */
   async bag<V = unknown>(key: string = StateKey.SITE): Promise<TrackedMap<V>> {
-    const group = await this.#use(key, (found) => new BagGroup<V>(key, asEntries<V>(found?.data)));
+    const group = await this.#use(key, (found) => BagGroup.from<V>(key, found));
 
     return group.map;
   }
