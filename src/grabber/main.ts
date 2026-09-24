@@ -34,5 +34,25 @@ export { defineSiteConfig, defineStreamSiteConfig } from './types.js';
 export { defineXmltvSite } from './xmltv-source.js';
 export { defineXtreamSite, xtreamChannelExtras, xtreamProgrammeExtras } from './xtream-source.js';
 export type { XtreamChannel, XtreamProgramme, XtreamSiteOptions } from './xtream-source.js';
+export { defineSchedulesDirectSite, schedulesDirectAccount } from './schedules-direct/main.js';
+export type {
+  SchedulesDirectAccount,
+  SchedulesDirectAccountOptions,
+  SchedulesDirectAccountStatus,
+  SchedulesDirectHeadend,
+  SchedulesDirectLineup,
+  SchedulesDirectLineupChange,
+  SchedulesDirectSiteOptions,
+} from './schedules-direct/main.js';
+export {
+  schedulesDirectChannelExtras,
+  schedulesDirectProgrammeExtras,
+  SCHEDULES_DIRECT_CHANNEL_ID,
+} from './schedules-direct/map.js';
+export type {
+  SchedulesDirectPerson,
+  SchedulesDirectProgramme,
+  SchedulesDirectStation,
+} from './schedules-direct/map.js';
 export type { XmltvDayZone, XmltvSiteOptions, XmltvUrlSource } from './xmltv-source.js';
 export type * from './types.js';

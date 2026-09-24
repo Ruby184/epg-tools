@@ -167,6 +167,40 @@ run but the one that fetched it sees the round-tripped form. And `--refresh`
 fetches the list whatever is cached, because asking the source is what that flag
 means.
 
+**When the list is past its age, the site is handed the old one.** Plenty of
+sources can say cheaply that nothing has changed — a lineup with a `modified`
+stamp, a document that answers `304`, an account that publishes a version — and
+rebuilding an identical list is the expensive part, not finding out. So
+`channels` is given what the last run stored, to hand straight back:
+
+```ts
+async channels({ http, state, cached }) {
+  const { modified } = await http.get('lineup/status').json<{ modified: string }>();
+
+  // Nothing has moved, and the list that was built from it is still right.
+  if (cached !== undefined && modified === state.get('modified')) {
+    return [...cached.channels];
+  }
+
+  const channels = await fetchTheWholeList(http);
+
+  state.set('modified', modified);
+
+  return channels;
+}
+```
+
+What comes back is stored again either way, so handing the old list back renews
+its age exactly as fetching one would — the next run inside `maxAgeDays` is
+served from the cache without the site being asked at all. `cached.at` says when
+it was stored, for a source that would rather ask "changed since?".
+
+It is absent in the three cases that mean there is nothing to keep: no list
+stored yet, no cache to store one in, and `--refresh`, where handing a site its
+old list would be inviting it to hand the same one straight back. A site that
+ignores `cached` fetches every time, which is what every site did before this
+existed.
+
 ## Requests and parsing
 
 `request` fetches, `parseDay` interprets. They are separate because one
@@ -793,6 +827,133 @@ rest is held to the end and nothing is lost, with a line in the log saying so.
 `order: 'any'` starts held, for a source known to be ordered by time — no
 warning, no second write, and the whole document in memory while it parses.
 
+### From Schedules Direct
+
+The one paid, curated source in this ecosystem — the US, Canada and the UK — and
+the one whose model this package already had. It publishes an **md5 per
+station-day**, so a run can ask what moved before asking for anything else:
+
+```ts
+import { defineSchedulesDirectSite } from 'epg-tools/grabber';
+
+sites: [
+  defineSchedulesDirectSite({
+    site: 'schedulesdirect',
+    username: process.env.SD_USERNAME!,
+    password: process.env.SD_PASSWORD!,
+    days: 14,
+  }),
+],
+```
+
+**A warm run is one request for the whole site.** One `POST /schedules/md5`
+answers for every station-day owed — the service caps a request at 5,000
+entries, which is one call for any realistic lineup — and every day whose hash
+still matches is reported `unchanged` without being fetched. A real account of
+145 channels over three days: 435 channel-days grabbed cold, then `0 fetched,
+290 from cache, 145 unchanged` on the next run, the 145 from that one request
+and the other 290 never asked about at all, because
+[`staleness`](./configuration.md) only re-asks about today.
+
+**No `lineup` takes every lineup on the account**, which the service already
+lists, so the usual account with one needs nothing here. Name one — `lineup:
+'GBR-1000014-DEFAULT'` — or several, to take only those. A lineup the account
+does not have **fails the site** naming the ones it does; nothing here adds one,
+because six adds a day with no cheap way back is not a thing a grab should spend
+on your behalf. A lineup its headend has **deleted** is skipped with a warning:
+it keeps answering with what it last had, so a guide built from it thins out
+rather than failing.
+
+**A lineup is downloaded only when it has moved.** `/status` carries each
+lineup's `modified` stamp and the account check reads it anyway, so a run whose
+lineups are all unchanged keeps the channel list it already had — 223 KiB and a
+request saved for one lineup, and a second run measured at 221ms against 5,049.
+A changed stamp, a different `lineup`, or an option that would build different
+channels all fetch it again.
+
+**Days are UTC, and there is deliberately no `dayZone`** as the other adapters
+have. The service keys its md5s by `(stationID, UTC date)`; filing a programme
+under any other day would store a hash against a day that never held it, and the
+guide would quietly stop updating around midnight.
+
+**It writes everything the service sends.** Every rating board's opinion, the
+whole call sheet in billing order, both descriptions, the programme's own
+`<length>` as distinct from its slot, countries, star ratings, keywords,
+subtitles and the service's own ids as [extensions](./xmltv.md). Narrowing is a
+[serialize-time job](./configuration.md), not a grab-time one — one cache serves
+every consumer, and a choice baked into it costs a refetch to undo:
+
+```ts
+profile: {
+  keep: {
+    // Two dozen boards rate a well-known film. Pick the one your viewers read.
+    'programme/rating': (all) => all.filter((one) => one.extraAttributes?.country === 'GBR'),
+    'programme/desc': 1,                 // the long one, which is written first
+    'programme/credits/actor': 8,        // billing order, so the top eight
+  },
+},
+```
+
+`<rating system>` carries the **board's name**, not a country: tvheadend matches
+that attribute against the `authority` of its own rating labels, so a country
+there would match nothing. The country rides alongside as an extension, which is
+what the rule above filters on.
+
+**No programme artwork.** The service has plenty and the client can fetch it, but
+its image host answers 403 without the account token — so an `<icon>` written
+from it would load for nobody the guide is passed to, and the token cannot go in
+the url: it expires in a day and a guide is a file people share. The reference
+grabbers reach the same end, calling that endpoint not at all. Station logos are
+unaffected and written as usual; those are public.
+
+**What the service is still writing is waited for, briefly.** It answers `7100`
+for a schedule it has queued for generation and `6001` for a programme, and
+asking again immediately gets the same answer — so the run waits 10s, then 20s,
+then 30s, and gives up. A schedule still queued after that is left to the next
+run; a programme still queued is left out of its day, which is marked unfinished
+and fetched again next run. `queuedWaits: []` skips the waiting and goes
+straight to that.
+
+**The token is kept in the cache between runs**, because the service rate-limits
+authentication and a token is good for a day — one login a day rather than one a
+run. It is a bearer credential in a directory on your disk, which is why
+`persistToken: false` exists. The password is hashed once at startup and the
+plaintext is never written anywhere; errors are scrubbed of both.
+
+**When the service says it is offline, the run stops** with the reason, rather
+than being refused call by call — its own instruction to clients, and it is
+given at HTTP 200 with a token in hand, so nothing but the code says anything is
+wrong.
+
+#### Before there is a config
+
+What lineup to name is a question about the account, so it is answered outside a
+grab. One object, because the service rate-limits authentication and three
+questions through one of these earn one token between them:
+
+```ts
+import { schedulesDirectAccount } from 'epg-tools/grabber';
+
+const account = schedulesDirectAccount({
+  username: process.env.SD_USERNAME!,
+  password: process.env.SD_PASSWORD!,
+});
+
+for (const one of await account.lineups()) {
+  console.log(one.lineup, one.name);       // GBR-1000014-DEFAULT Freeview
+}
+
+// What a region offers, which is a different question from what is on the account
+const offered = await account.headends({ country: 'GBR', postalCode: 'W1A' });
+
+// And what is in one, for writing a `channels` list by hand
+const stations = await account.stations('GBR-1000014-DEFAULT');
+```
+
+`addLineup` and `removeLineup` are here too, and only here: adding is deliberate,
+by name, and never something a grab does. The answer says how many of the day's
+six changes are left.
+
 ## Sites that answer in one pass
 
 Some sources publish the lot in one document — a `xmltv.xml.gz`, a dump behind
@@ -847,6 +1008,34 @@ off half way would cache "nothing on" for every channel-day it never reached.
 Throwing fails exactly those and writes nothing — which, for anything built on
 Node streams, means being careful that a broken pipe surfaces as a rejection
 rather than as an end of iteration.
+
+### A pass paces its own requests
+
+`concurrency`, `rateLimit` and `backoff` pace **requests**, and a pass is one
+task of the run rather than one request — so a fetch it makes is paced only if it
+goes through `paced`, the same helper [a parse
+has](#a-parse-that-needs-another-request):
+
+```ts
+async *stream({ channelDays, http, paced }) {
+  for (const batch of batches(channelDays)) {
+    const airings = await paced(({ signal }) =>
+      http.post('schedules', { json: batch, signal }).json<Airing[]>());
+
+    yield* mapped(airings);
+  }
+}
+```
+
+A source that answers in one document has one fetch and little to gain from it;
+one that pages, or asks per batch, has everything — this is the difference
+between a `rateLimit` the source actually sees and one it does not.
+`defineXmltvSite` sends its document fetch through it, so that request is spaced
+against the channel list fetched before it.
+
+Only the fetch belongs inside `paced`, not the work its answer feeds: a slot is
+one request to the source, and holding one for the length of a pass would be
+holding it for the length of the run.
 
 Everything else about a site is the same: `channels`, `cacheChannels`,
 `concurrency`, `rateLimit`, `backoff`, `ky`, `staleness`, `transform`,

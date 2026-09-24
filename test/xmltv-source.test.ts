@@ -129,6 +129,41 @@ describe('defineXmltvSite', () => {
     expect(await entries(cache, 'b', TOMORROW)).toHaveLength(1);
   });
 
+  // A pass takes no queue slot of its own, so its fetch has to ask for one — or
+  // the site's `rateLimit` would apply to the channel list and to nothing else.
+  it('sends its document fetch through the site`s queue', async () => {
+    const at: number[] = [];
+    const body = gzipSync(GROUPED);
+    const source = await serve((_request, response) => {
+      at.push(Date.now());
+      response.writeHead(200, { 'content-type': 'application/gzip' });
+      response.end(body);
+    });
+
+    const summary = await grab(
+      [
+        defineXmltvSite({
+          site: 'published.example',
+          url: source.url,
+          rateLimit: { requests: 1, perMs: 300 },
+        }),
+      ],
+      { cache: store(), now: NOW, days: 2 },
+    );
+
+    expect(summary.fetched).toBe(4);
+    // Two fetches: the channel list out of the head of the document, then the
+    // document itself.
+    expect(at).toHaveLength(2);
+    // The gap between them, not the length of the run: a rate-limited queue
+    // holds its window open to the end whether or not a second task ever needed
+    // it, so the run takes a window either way and only the gap says whether the
+    // document fetch waited its turn. The window is wide enough that the answer
+    // is not a judgement call — queued it is ~300ms, unqueued it is the few
+    // milliseconds it takes to parse a channel list.
+    expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(150);
+  });
+
   it('takes its channels from the head of the document, and stops there', async () => {
     // A guide whose channels are followed by a great many programmes: reading it
     // out to find the channel list would be the whole download.

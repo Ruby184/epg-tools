@@ -28,10 +28,12 @@ afterEach(async () => {
 });
 
 /** A source that answers whatever `body` says. */
-async function source(body: unknown): Promise<string> {
+async function source(body: unknown, delayMs = 0): Promise<string> {
   const server = createServer((_request, response) => {
-    response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify(body));
+    setTimeout(() => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(body));
+    }, delayMs);
   });
 
   servers.push(server);
@@ -90,6 +92,51 @@ describe('epg try', () => {
     expect(out).toContain('1 programme in');
     expect(out).toContain('<programme start="20260903060000 +0000" channel="one.example.tv">');
     expect(out).toContain('<title lang="en">Breakfast</title>');
+  });
+
+  it('times each request, rather than calling every one of them instant', async () => {
+    const url = await source([], 60);
+    const config = configWith(
+      defineSiteConfig({
+        site: 'example.tv',
+        channels: [{ xmltvId: 'one.example.tv', siteId: 'one' }],
+        request: ({ http }) => http.get(url).json(),
+        parseDay: ({ day, programme }) => [programme(new Date(`${day}T10:00:00Z`), 'A')],
+      }),
+    );
+
+    const { out } = await run(config, 'example.tv', 'one.example.tv');
+    const [, ms] = /→ 200, (\d+)ms/.exec(out) ?? [];
+
+    // `ky` hands `afterResponse` a different Request object than
+    // `beforeRequest` saw, so timing kept against the object missed every time
+    // and reported 0ms for everything — including a 200 KB download.
+    expect(Number(ms)).toBeGreaterThanOrEqual(50);
+  });
+
+  it('shows what a request sent, with anything secret taken out of it', async () => {
+    const url = await source([]);
+    const config = configWith(
+      defineSiteConfig({
+        site: 'example.tv',
+        channels: [{ xmltvId: 'one.example.tv', siteId: 'one' }],
+        request: ({ http }) =>
+          http
+            .post(url, { json: { ask: ['one', 'two'], password: 'hunter2', hash: 'a'.repeat(40) } })
+            .json(),
+        parseDay: ({ day, programme }) => [programme(new Date(`${day}T10:00:00Z`), 'A')],
+      }),
+    );
+
+    const { out } = await run(config, 'example.tv', 'one.example.tv');
+
+    // The question a POST site asked is the request, and showing the url alone
+    // said nothing about it.
+    expect(out).toContain('"ask":["one","two"]');
+    // Both rules the adapters use on their own errors: a named field, and a
+    // long run of hex wherever it turns up.
+    expect(out).not.toContain('hunter2');
+    expect(out).not.toContain('a'.repeat(40));
   });
 
   it('takes the channel by either of its ids', async () => {

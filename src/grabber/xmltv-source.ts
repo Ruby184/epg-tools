@@ -520,7 +520,13 @@ export function defineXmltvSite<TData = XmltvChannel>(
         }
       }
 
-      const { response, at } = await fetchDocument(http, signal);
+      // Through the queue, so the site's `rateLimit` spaces this against
+      // whatever else it is doing and a slow-down holds it — and only the fetch,
+      // since the body goes on arriving while the document is parsed and a slot
+      // held for all of that would be a slot held for the whole run.
+      const { response, at } = await ctx.paced(({ signal: taskSignal }) =>
+        fetchDocument(http, taskSignal ?? signal),
+      );
 
       for await (const event of parseXmltvStream(documentBytes(response, at, compression), {
         ...parse,

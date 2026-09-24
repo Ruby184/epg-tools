@@ -8,7 +8,8 @@
  * fit together is the thing to know first:
  *
  * - **`requests`** (per site, from `sitePacing`) paces the source. A task in it
- *   is one request and nothing else, which is what lets a parse ask for one.
+ *   is one request and nothing else, which is what lets a parse — or a pass —
+ *   ask for one of its own through `paced`.
  * - **`pipelines`** (per site) bounds how many responses this site has in hand
  *   at once: fetched, and not yet written.
  * - **`localWork`** (per run) bounds what never leaves the machine — the
@@ -832,62 +833,69 @@ export class SiteRun {
     };
 
     try {
-      // The store goes inside the task rather than around `enqueue`, for the
-      // reason the request pipeline gives: a task that waited for a slot starts
-      // in a context this one never reached.
-      await enqueue(this.#requests, async ({ signal: taskSignal }) => {
-        emit({ type: 'request:started', site: this.#site, ...SiteRun.#span(request) });
+      // A pass takes no queue slot of its own, unlike a request. It runs for as
+      // long as its document does, and a slot held for that would deadlock the
+      // `paced` below against itself — that call wants the very slot the pass is
+      // sitting in, and at the default concurrency of 1 there is no second one.
+      // So a pass is paced the way a `parseDay` is, by sending its own fetches
+      // through the queue one at a time, and a slot keeps meaning what it always
+      // meant: one request to the source.
+      emit({ type: 'request:started', site: this.#site, ...SiteRun.#span(request) });
 
-        const began = Date.now();
+      const began = Date.now();
 
-        await revalidation.run(asking, async () => {
-          for await (const emission of config.stream(
-            streamContext(request, this.#deps(taskSignal)),
-          )) {
-            // Between emissions, which is as often as this has anything to say: a
-            // cancelled run stops here rather than writing the rest of a document
-            // nobody is waiting for.
-            signal?.throwIfAborted();
+      await revalidation.run(asking, async () => {
+        for await (const emission of config.stream(
+          streamContext(request, {
+            ...this.#deps(signal),
+            // As a parse's is, and ahead of the planned ones for the same
+            // reason: a pass already under way is finished rather than joined.
+            paced: (task) => enqueue(this.#requests, task, { priority: 1 }),
+          }),
+        )) {
+          // Between emissions, which is as often as this has anything to say: a
+          // cancelled run stops here rather than writing the rest of a document
+          // nobody is waiting for.
+          signal?.throwIfAborted();
 
-            const { channel, day } = emission;
-            const id = `${channel?.xmltvId}|${day}`;
-            const pair = owed.get(id);
+          const { channel, day } = emission;
+          const id = `${channel?.xmltvId}|${day}`;
+          const pair = owed.get(id);
 
-            if (pair === undefined) {
-              if (this.#written.has(id) && emission.unchanged !== true) {
-                // Said again: added to what the earlier emission wrote, rather
-                // than put in its place. A document not grouped by channel.
-                write({ channel, day }, emission.programmes);
-              } else {
-                // A channel-day nobody asked about — one already fresh in the
-                // cache, a channel outside the list, or an emission that makes no
-                // sense. Counted, and reported once at the end.
-                ignored++;
-              }
-            } else if (emission.unchanged === true) {
-              // Nothing to write: the pass says what is cached still stands. Held
-              // until the stream ends, since a pass that then fails has not
-              // vouched for anything.
-              owed.delete(id);
-              keeping.push(pair);
+          if (pair === undefined) {
+            if (this.#written.has(id) && emission.unchanged !== true) {
+              // Said again: added to what the earlier emission wrote, rather
+              // than put in its place. A document not grouped by channel.
+              write({ channel, day }, emission.programmes);
             } else {
-              owed.delete(id);
-              write(pair, emission.programmes);
+              // A channel-day nobody asked about — one already fresh in the
+              // cache, a channel outside the list, or an emission that makes no
+              // sense. Counted, and reported once at the end.
+              ignored++;
             }
-
-            // Backpressure, and the only thing holding the parser back: writing is
-            // queued rather than awaited, so the split runs on while entries land,
-            // but no further ahead than `localConcurrency` of them.
-            await localWork.onSizeLessThan(localWork.concurrency);
+          } else if (emission.unchanged === true) {
+            // Nothing to write: the pass says what is cached still stands. Held
+            // until the stream ends, since a pass that then fails has not
+            // vouched for anything.
+            owed.delete(id);
+            keeping.push(pair);
+          } else {
+            owed.delete(id);
+            write(pair, emission.programmes);
           }
-        });
 
-        emit({
-          type: 'request:done',
-          site: this.#site,
-          ...SiteRun.#span(request),
-          ms: Date.now() - began,
-        });
+          // Backpressure, and the only thing holding the parser back: writing is
+          // queued rather than awaited, so the split runs on while entries land,
+          // but no further ahead than `localConcurrency` of them.
+          await localWork.onSizeLessThan(localWork.concurrency);
+        }
+      });
+
+      emit({
+        type: 'request:done',
+        site: this.#site,
+        ...SiteRun.#span(request),
+        ms: Date.now() - began,
       });
     } catch (error) {
       failure = error;

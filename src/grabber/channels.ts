@@ -126,7 +126,13 @@ export async function resolveChannels(
     return kept(source);
   }
 
-  const fromSource = async (): Promise<GrabberChannel[]> =>
+  const fromSource = async (
+    /** Last run's list, for a site that can tell it is still right. */
+    held?: {
+      channels: GrabberChannel[];
+      at: Date;
+    },
+  ): Promise<GrabberChannel[]> =>
     source({
       http: options.http ?? siteHttp(config, options.signal),
       ...(options.signal ? { signal: options.signal } : {}),
@@ -139,6 +145,7 @@ export async function resolveChannels(
       // an empty bag of its own, dropped afterwards, as a run over
       // `NoCacheDriver` hands a request.
       state: (await options.state?.bag()) ?? new Map(),
+      ...(held === undefined ? {} : { cached: held }),
     });
 
   const maxAgeMs = channelsMaxAgeMs(config);
@@ -161,7 +168,12 @@ export async function resolveChannels(
     }
   }
 
-  const channels = await fromSource();
+  // Whatever its age, and only where asking again is not the point: the group
+  // is already read, so handing the site its own last list costs nothing — and
+  // a site that can tell cheaply that nothing has changed hands it straight
+  // back rather than rebuilding it. `--refresh` withholds it, because a run
+  // told to ask the source again means it.
+  const channels = await fromSource(options.refresh === true ? undefined : group.held());
 
   // Stored before the selection, never after: what the cache holds is what the
   // site offers, so the next run — selecting something else, or nothing — reads

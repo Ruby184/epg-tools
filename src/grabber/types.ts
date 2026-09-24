@@ -150,6 +150,31 @@ export interface ChannelsContext extends Says {
    * away afterwards, exactly as `NoCacheDriver` does for a request.
    */
   state: SiteState;
+  /**
+   * The list this site stored last time, however old it is.
+   *
+   * For a source that can tell cheaply that nothing has changed — a lineup
+   * whose `modified` stamp has not moved, a document that answers `304`, an
+   * account that publishes a version. **Return it as it is** and the work that
+   * would have rebuilt the same list is not done; what comes back is stored
+   * again, so its freshness is renewed as though it had been fetched.
+   *
+   * Absent in three cases, each meaning "there is nothing to keep": no list
+   * stored yet, no state to store one in, or a run told to `--refresh`, where
+   * the whole point is to ask the source again. A site that does not look at
+   * this simply fetches, which is what every site did before it existed.
+   *
+   * It is the site's own list, so its `data` is the site's own shape — but it
+   * was written by a *previous* run, possibly an older version of the config or
+   * of this package. A site that changes how it builds a channel should compare
+   * something of its own before handing it back.
+   */
+  cached?: {
+    /** The list, exactly as it was stored. */
+    channels: readonly GrabberChannel[];
+    /** When it was stored — for a source that asks "changed since?". */
+    at: Date;
+  };
 }
 
 /**
@@ -653,17 +678,31 @@ export type StreamedChannelDay<TData = unknown> =
     };
 
 /**
- * What a stream is given: the same context a `both`-batched request gets —
- * every channel and day it is being asked about at once.
- *
- * Which now includes {@link BaseRequestContext.log} and
- * {@link BaseRequestContext.warn}, so it is an alias rather than a shape of its
- * own: a whole-document source is the one place a parse has plenty to report —
- * a warning from the parser, a channel the list did not mention, a document not
- * sorted the way it usually is — but it stopped being the only place that has
- * anything.
+ * What a stream is given: everything a `both`-batched request gets — every
+ * channel and day it is being asked about at once, and somewhere to say what it
+ * noticed on the way through — plus {@link StreamContext.paced}.
  */
-export type StreamContext<TData = unknown> = ChannelsDaysRequestContext<TData>;
+export interface StreamContext<TData = unknown> extends ChannelsDaysRequestContext<TData> {
+  /**
+   * Make a request through the site's queue, so a pass is as polite as the grab
+   * around it: the site's `concurrency` counts it, its `rateLimit` spaces it,
+   * and a `429` anywhere holds it with everything else.
+   *
+   * A pass is one task of the run, not one request, so — unlike a
+   * {@link SiteConfig.request}, whose single fetch *is* the task — nothing here
+   * is paced unless it is sent through this. A source answered in one document
+   * has one fetch and little to gain; one that pages, or asks per batch, has
+   * everything:
+   *
+   * ```ts
+   * const page = await paced(({ signal }) => http.get('schedules', { signal }).json());
+   * ```
+   *
+   * Called with a signal of the queued task's own, following the run's, for
+   * anything inside that does not go through {@link BaseRequestContext.http}.
+   */
+  paced: PacedRequest;
+}
 
 /**
  * A site that answers its whole window in one pass: it streams, and says what it

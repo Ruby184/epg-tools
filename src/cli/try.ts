@@ -11,6 +11,9 @@
  * Which is why the client is what gets instrumented. Hooks on the site's own ky
  * instance are the only place a url exists, and they are composed the way
  * `revalidationHooks` composes: ours around the site's, never instead of them.
+ * What a `POST` sent is shown too — for a site that asks its questions in a
+ * body rather than a path, that *is* the request — scrubbed of anything that
+ * looks like a password or a token on the way out.
  *
  * Nothing is written, and the only store opened keeps nothing: a site's state
  * is held over `NoCacheDriver`, so its channel list and the request after it
@@ -55,9 +58,13 @@ interface Attempt {
   method: string;
   url: string;
   status?: number;
+  /** When it went out, so the answer can be timed against it. */
+  at: number;
   ms: number;
   bytes?: number;
   type?: string;
+  /** What was sent, where anything was — scrubbed, and cut short. */
+  body?: string;
 }
 
 /** The site named, or a message naming the ones there are. */
@@ -107,28 +114,85 @@ function channelNamed(channels: GrabberChannel[], name: string): GrabberChannel 
  * it — the same ordering `revalidationHooks` keeps, and for the same reason:
  * what is reported should be what the site actually sent and received.
  */
+/** How much of a request body is worth showing. */
+const BODY_SHOWN = 300;
+
+/**
+ * What a request carried, where it carried anything.
+ *
+ * A `POST` site's body *is* the question it asked — which station-days, which
+ * programme ids — and a command whose purpose is "the request that went out"
+ * was showing the url and nothing else. Read from a clone, so the body the
+ * site sends is untouched.
+ *
+ * Scrubbed on the way through, by the two rules the adapters use on their own
+ * errors: a long run of hex is a password hash or a token, and a JSON field
+ * called one of those is the same thing spelled out. This command prints a url
+ * with credentials in it on purpose — that is what trying a site means — but
+ * there is no reason to add a second copy in the body.
+ */
+async function sent(request: KyRequest): Promise<{ body?: string }> {
+  if (request.body === null || request.method === 'GET' || request.method === 'HEAD') {
+    return {};
+  }
+
+  try {
+    const text = await request.clone().text();
+
+    if (text === '') {
+      return {};
+    }
+
+    const clean = text
+      .replaceAll(/\b[0-9a-f]{32,}\b/gi, '…')
+      .replaceAll(/("(?:password|token|secret)"\s*:\s*)"[^"]*"/gi, '$1"…"');
+
+    return {
+      body:
+        clean.length > BODY_SHOWN
+          ? `${clean.slice(0, BODY_SHOWN)}… (${String(clean.length)} chars)`
+          : clean,
+    };
+  } catch {
+    // A body that cannot be read twice is not worth failing a command over.
+    return {};
+  }
+}
+
 function recordingHooks(
   hooks: KyOptions['hooks'],
   into: Attempt[],
 ): NonNullable<KyOptions['hooks']> {
-  const started = new WeakMap<KyRequest, number>();
-
   return {
     ...hooks,
     beforeRequest: [
-      ({ request }) => {
-        started.set(request, Date.now());
-        into.push({ method: request.method, url: request.url, ms: 0 });
+      async ({ request }) => {
+        into.push({
+          method: request.method,
+          url: request.url,
+          at: Date.now(),
+          ms: 0,
+          ...(await sent(request)),
+        });
       },
       ...(hooks?.beforeRequest ?? []),
     ],
     afterResponse: [
       ...(hooks?.afterResponse ?? []),
       async ({ request, response }) => {
-        const attempt = into.findLast((candidate) => candidate.url === request.url);
+        // Matched on the record rather than on the request object: `ky` does
+        // not hand this hook the one `beforeRequest` saw — not for a site with
+        // hooks of its own, and not for a plain client either — so a `WeakMap`
+        // keyed on it missed every time and timed every request at 0ms. The
+        // one still waiting for an answer is this one; a retry of the same url
+        // pushed a record of its own.
+        const attempt =
+          into.findLast(
+            (candidate) => candidate.url === request.url && candidate.status === undefined,
+          ) ?? into.findLast((candidate) => candidate.url === request.url);
 
         if (attempt !== undefined) {
-          attempt.ms = Date.now() - (started.get(request) ?? Date.now());
+          attempt.ms = Date.now() - attempt.at;
           attempt.status = response.status;
 
           const type = response.headers.get('content-type');
@@ -254,6 +318,10 @@ export async function tryChannelDay(
     state: await state.bag(),
     says,
     ...(options.signal ? { signal: options.signal } : {}),
+    // A request a pass or a parse makes of its own simply runs: there is no
+    // queue to pace it against, since this is the only thing happening.
+    paced: <T>(task: (o: { signal?: AbortSignal | undefined }) => Promise<T>): Promise<T> =>
+      task({ ...(options.signal ? { signal: options.signal } : {}) }),
   };
 
   const began = Date.now();
@@ -282,11 +350,7 @@ export async function tryChannelDay(
     payload = `(a stream site: ${wanted.length} programmes came out of the pass)`;
   } else {
     payload = await resolved.config.request(requestContext(request, resolved.batching, deps));
-    parsed = await resolved.config.parseDay(
-      // A request made from inside a parse simply runs: there is no queue to
-      // pace it against, since this is the only thing happening.
-      parseContext(channel, day, payload, { ...deps, paced: (task) => task({}) }),
-    );
+    parsed = await resolved.config.parseDay(parseContext(channel, day, payload, deps));
   }
 
   const programmes = built(parsed);
@@ -302,7 +366,13 @@ export async function tryChannelDay(
       .filter((part) => part !== undefined && part !== '')
       .join(', ');
 
-    out.push(`  ${attempt.method} ${attempt.url}`, `    → ${said}`);
+    out.push(`  ${attempt.method} ${attempt.url}`);
+
+    if (attempt.body !== undefined) {
+      out.push(`    ↑ ${attempt.body}`);
+    }
+
+    out.push(`    → ${said}`);
   }
 
   if (attempts.length === 0) {
