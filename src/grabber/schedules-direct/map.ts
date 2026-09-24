@@ -138,6 +138,15 @@ export interface SchedulesDirectProgramme {
   genres: string[];
   showType?: string;
   entityType?: string;
+  /**
+   * What kind of thing it is, in the one word a consumer looks for.
+   *
+   * `movie`, `series`, `sports`, `radio` or `tvshow`, written as a category
+   * beside the genres — which is what the reference grabber does, with the
+   * comment that MythTV specifically looks for those words. Worked out from
+   * `entityType` and, for a station that carries sound only, from the station.
+   */
+  kind?: 'movie' | 'series' | 'sports' | 'radio' | 'tvshow';
   /** Where it was made, as ISO-3166 three-letter codes. */
   countries: string[];
   /** Its own page, and the episode page of whichever vocabulary gave one. */
@@ -510,6 +519,28 @@ function subtitlesOf(airing: WireAiring): SchedulesDirectProgramme['subtitles'] 
  * programme the service refused to describe (a `6000`) takes its airing with it
  * rather than becoming a titleless entry.
  */
+/** See {@link SchedulesDirectProgramme.kind} — the reference grabber's own rule. */
+function kindOf(
+  entityType: string | undefined,
+  station: SchedulesDirectStation | undefined,
+): NonNullable<SchedulesDirectProgramme['kind']> {
+  const said = entityType?.toLowerCase() ?? '';
+
+  if (said.includes('movie')) {
+    return 'movie';
+  }
+
+  if (said.includes('episode')) {
+    return 'series';
+  }
+
+  if (said.includes('sports')) {
+    return 'sports';
+  }
+
+  return station?.isRadioStation === true ? 'radio' : 'tvshow';
+}
+
 export function schedulesDirectProgramme(
   airing: WireAiring,
   program: WireProgram | undefined,
@@ -599,6 +630,7 @@ export function schedulesDirectProgramme(
     genres: program?.genres?.filter((genre) => genre !== '') ?? [],
     ...(program?.showType === undefined ? {} : { showType: program.showType }),
     ...(program?.entityType === undefined ? {} : { entityType: program.entityType }),
+    kind: kindOf(program?.entityType, station),
     cast: people(program?.cast),
     crew: people(program?.crew),
     ratings: ratingsOf([...(program?.contentRating ?? []), ...(airing.ratings ?? [])]),
@@ -783,12 +815,28 @@ export function buildProgramme(
     element.episodeNum('dd_progid', formatDdProgidEpisodeNum(ddProgid));
   }
 
+  // Once each: a genre and a `showType` are often the same word — `Miniseries`
+  // on both — and the same category twice is the same category twice.
+  const written = new Set<string>();
+  const category = (value: string) => {
+    if (value !== '' && !written.has(value)) {
+      written.add(value);
+      element.category(value, 'en');
+    }
+  };
+
   for (const genre of programme.genres) {
-    element.category(genre, 'en');
+    category(genre);
   }
 
   if (programme.showType !== undefined) {
-    element.category(programme.showType, 'en');
+    category(programme.showType);
+  }
+
+  if (programme.kind !== undefined) {
+    // What it *is*, in the word the reference grabber writes for it — which is
+    // what a consumer that sorts films from series reads, MythTV by name.
+    category(programme.kind);
   }
 
   for (const keyword of programme.keywords) {

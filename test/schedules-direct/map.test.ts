@@ -224,7 +224,39 @@ describe('a programme', () => {
       expect(built().category).toEqual([
         { value: 'Crime drama', lang: 'en' },
         { value: 'Series', lang: 'en' },
+        // What it *is*, in the word the reference grabber writes for it: a
+        // consumer sorting films from series reads this one, MythTV by name.
+        { value: 'series', lang: 'en' },
       ]);
+    });
+
+    it('writes a repeated term once', () => {
+      // `Miniseries` arrives as a genre and as the `showType`, on 69 of one
+      // real day's 2,173 airings — and the same category twice is the same
+      // category twice.
+      const programme = built({}, { genres: ['Miniseries'], showType: 'Miniseries' });
+
+      expect(programme.category).toEqual([
+        { value: 'Miniseries', lang: 'en' },
+        { value: 'series', lang: 'en' },
+      ]);
+    });
+
+    it('calls a film a movie and a radio programme radio', () => {
+      const film = built({}, { entityType: 'Movie', genres: [], showType: undefined });
+
+      expect(film.category).toEqual([{ value: 'movie', lang: 'en' }]);
+
+      const radio = buildProgramme(
+        'I20454.json.schedulesdirect.org',
+        schedulesDirectProgramme(
+          AIRING,
+          { ...PROGRAM, genres: [], showType: undefined, entityType: 'Show' },
+          schedulesDirectStation({ ...STATION, isRadioStation: true }, '002')!.data!,
+        )!,
+      ).build();
+
+      expect(radio.category).toEqual([{ value: 'radio', lang: 'en' }]);
     });
 
     it('calls them English even on a station that is not', () => {
@@ -247,6 +279,7 @@ describe('a programme', () => {
       expect(programme.category).toEqual([
         { value: 'Crime drama', lang: 'en' },
         { value: 'Series', lang: 'en' },
+        { value: 'series', lang: 'en' },
       ]);
     });
   });
