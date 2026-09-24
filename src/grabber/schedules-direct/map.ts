@@ -823,6 +823,40 @@ const QUALITY: Record<string, string> = {
   '3d': '3D',
 };
 
+/**
+ * Which element a crew role belongs on, by name and then by shape.
+ *
+ * The service names dozens of roles and keeps inventing them — a real fortnight
+ * turned up `Writer (Screenplay)`, `Writer (Comic Book)`, `Line Producer`,
+ * `Co-Executive Producer` and `Second Assistant Director`, none of them in the
+ * table above and every one of them plainly a writer, a producer or a director.
+ * So a role that is not named there is read for its shape.
+ *
+ * Narrowly, and by suffix, because the obvious rule is wrong: the reference
+ * grabber matches `/director/i` and so files an `Art Director`, a `Casting
+ * Director` and a `Director of Photography` as the *director* of the
+ * programme — three different crafts and none of them that one. Those stay
+ * `<credit role="…">`, which loses nobody.
+ */
+function crewElement(role: string | undefined): CreditElement | undefined {
+  const said = role?.toLowerCase() ?? '';
+  const named = CREW[said];
+
+  if (named !== undefined) {
+    return named;
+  }
+
+  if (said.startsWith('writer (')) {
+    return 'writer';
+  }
+
+  if (said.endsWith(' producer')) {
+    return 'producer';
+  }
+
+  return said.endsWith('assistant director') ? 'director' : undefined;
+}
+
 /** What an `audioProperties` entry means for `<audio><stereo>`. */
 const STEREO: Record<string, string> = {
   mono: 'mono',
@@ -946,7 +980,7 @@ export function buildProgramme(
   }
 
   for (const person of programme.crew) {
-    const method = CREW[person.role?.toLowerCase() ?? ''];
+    const method = crewElement(person.role);
 
     if (method === undefined) {
       // A role the DTD has no element for — the service names dozens — kept as

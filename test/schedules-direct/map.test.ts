@@ -328,6 +328,50 @@ describe('a programme', () => {
   });
 
   describe('and its people', () => {
+    it('reads a role the table does not name by its shape', () => {
+      // All five turned up in one real fortnight, and the service keeps
+      // inventing more.
+      const programme = built(
+        {},
+        {
+          crew: [
+            { personId: '1', name: 'A Writer', role: 'Writer (Screenplay)' },
+            { personId: '2', name: 'B Writer', role: 'Writer (Comic Book)' },
+            { personId: '3', name: 'C Producer', role: 'Line Producer' },
+            { personId: '4', name: 'D Producer', role: 'Co-Executive Producer' },
+            { personId: '5', name: 'E Director', role: 'Second Assistant Director' },
+          ],
+        },
+      );
+
+      expect(programme.credits?.writer).toEqual(['A Writer', 'B Writer']);
+      expect(programme.credits?.producer).toEqual(['C Producer', 'D Producer']);
+      expect(programme.credits?.director).toEqual(['E Director']);
+    });
+
+    it('does not make a director of an art director', () => {
+      // What the reference grabber's `/director/i` does: three different crafts
+      // filed as the one who directed the programme. They keep their own names
+      // instead, which loses nobody.
+      const programme = built(
+        {},
+        {
+          crew: [
+            { personId: '1', name: 'A Designer', role: 'Art Director' },
+            { personId: '2', name: 'B Caster', role: 'Casting Director' },
+            { personId: '3', name: 'C Shooter', role: 'Director of Photography' },
+          ],
+        },
+      );
+
+      expect(programme.credits?.director).toBeUndefined();
+      expect(programme.credits?.extra?.map((one) => one.attributes?.role)).toEqual([
+        'Art Director',
+        'Casting Director',
+        'Director of Photography',
+      ]);
+    });
+
     it('puts each on the element its role belongs to', () => {
       const programme = built();
 
