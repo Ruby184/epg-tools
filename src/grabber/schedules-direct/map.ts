@@ -519,6 +519,19 @@ function subtitlesOf(airing: WireAiring): SchedulesDirectProgramme['subtitles'] 
  * programme the service refused to describe (a `6000`) takes its airing with it
  * rather than becoming a titleless entry.
  */
+/** A duration in seconds, as the biggest unit it divides into exactly. */
+function largestUnit(seconds: number): [number, 'seconds' | 'minutes' | 'hours'] {
+  if (seconds % 3600 === 0) {
+    return [seconds / 3600, 'hours'];
+  }
+
+  if (seconds % 60 === 0) {
+    return [seconds / 60, 'minutes'];
+  }
+
+  return [seconds, 'seconds'];
+}
+
 /** See {@link SchedulesDirectProgramme.kind} — the reference grabber's own rule. */
 function kindOf(
   entityType: string | undefined,
@@ -775,9 +788,12 @@ export function buildProgramme(
   }
 
   if (programme.length !== undefined) {
-    // Seconds, as the service counts them: converting to minutes would round
-    // away the difference between a 90-minute film and a 94-minute one.
-    element.length(programme.length, 'seconds');
+    // The largest unit it divides into exactly, which is what every XMLTV
+    // grabber writes: the rule is `XMLTV.pm`'s own writer, hours for a whole
+    // number of hours, then minutes, then the seconds the service counts in.
+    // Nothing is rounded — a 94-minute film is 94 minutes, and one of 94 and a
+    // half stays 5,670 seconds.
+    element.length(...largestUnit(programme.length));
   }
 
   if (programme.episodeTitle !== undefined) {

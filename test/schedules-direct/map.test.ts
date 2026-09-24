@@ -5,6 +5,7 @@ import {
   schedulesDirectChannelExtras,
   schedulesDirectProgramme,
   schedulesDirectStation,
+  type SchedulesDirectStation,
 } from '../../src/grabber/schedules-direct/map.js';
 import type {
   WireAiring,
@@ -243,20 +244,26 @@ describe('a programme', () => {
     });
 
     it('calls a film a movie and a radio programme radio', () => {
-      const film = built({}, { entityType: 'Movie', genres: [], showType: undefined });
+      // Neither a genre nor a `showType` on these, so the only category left is
+      // the one that says what kind of thing it is.
+      const bare = (entityType: string): WireProgram => {
+        const program = { ...PROGRAM, genres: [], entityType };
 
-      expect(film.category).toEqual([{ value: 'movie', lang: 'en' }]);
+        delete program.showType;
 
-      const radio = buildProgramme(
-        'I20454.json.schedulesdirect.org',
-        schedulesDirectProgramme(
-          AIRING,
-          { ...PROGRAM, genres: [], showType: undefined, entityType: 'Show' },
-          schedulesDirectStation({ ...STATION, isRadioStation: true }, '002')!.data!,
-        )!,
-      ).build();
+        return program;
+      };
+      const of = (program: WireProgram, station: SchedulesDirectStation) =>
+        buildProgramme(
+          'I20454.json.schedulesdirect.org',
+          schedulesDirectProgramme(AIRING, program, station)!,
+        ).build();
 
-      expect(radio.category).toEqual([{ value: 'radio', lang: 'en' }]);
+      expect(of(bare('Movie'), station).category).toEqual([{ value: 'movie', lang: 'en' }]);
+      expect(
+        of(bare('Show'), schedulesDirectStation({ ...STATION, isRadioStation: true }, '002')!.data!)
+          .category,
+      ).toEqual([{ value: 'radio', lang: 'en' }]);
     });
 
     it('calls them English even on a station that is not', () => {
@@ -443,15 +450,28 @@ describe('a programme', () => {
       // the DTD keeps the two apart.
       const programme = built({ duration: 3600 }, { duration: 3000 });
 
-      expect(programme.length).toEqual({ units: 'seconds', value: 3000 });
+      // In minutes: 3,000 seconds is 50 of them exactly, and `XMLTV.pm`'s own
+      // writer — which every Perl grabber's output goes through — writes the
+      // largest unit a duration divides into.
+      expect(programme.length).toEqual({ units: 'minutes', value: 50 });
       expect(programme.stop).toEqual(new Date('2026-09-12T21:00:00Z'));
     });
 
     it('takes a film`s runtime from where the service keeps it', () => {
       expect(built({}, { movie: { year: '1957', duration: 5580 } }).length).toEqual({
-        units: 'seconds',
-        value: 5580,
+        units: 'minutes',
+        value: 93,
       });
+    });
+
+    it('writes a whole number of hours as hours, as the same rule has it', () => {
+      expect(built({}, { duration: 7200 }).length).toEqual({ units: 'hours', value: 2 });
+    });
+
+    it('stays in seconds where the minutes would not be whole', () => {
+      // 94 minutes and 30 seconds. Rounding is how a 94-minute film becomes a
+      // 90-minute one, so a runtime that does not divide is left as it came.
+      expect(built({}, { duration: 5670 }).length).toEqual({ units: 'seconds', value: 5670 });
     });
 
     it('writes how it was made and what it is shown for as keywords', () => {
