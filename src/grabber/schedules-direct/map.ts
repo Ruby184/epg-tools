@@ -360,11 +360,24 @@ export function schedulesDirectChannelExtras(
   // Written even where it says the same as the name, since what is read here is
   // the *position*: skipped, the number would be read as the callsign.
   if (station.callsign !== undefined) {
-    element.displayName(station.callsign);
+    // `''` rather than nothing, which would fall back to the station's own
+    // language: a callsign is not a word in it, and neither is `8.1`.
+    element.displayName(station.callsign, '');
   }
 
   if (station.channel !== undefined) {
-    element.displayName(station.channel);
+    element.displayName(station.channel, '');
+    // And once more as `<lcn>`, which says *this* is the number rather than
+    // leaving it to be picked out of the display names. The DTD has no element
+    // for a channel number, so it is an extension — the one this package's own
+    // documentation points at, and the spelling other guides use.
+    //
+    // The display name above is what the consumers checked actually read:
+    // tvheadend takes the number off a numeric `<display-name>` (its
+    // `dn_chnum` setting), and neither Kodi's IPTV Simple nor Jellyfin knows
+    // `lcn` at all. So this is the unambiguous version for whatever does, not
+    // a replacement for saying it where they look.
+    element.extra({ name: 'lcn', value: station.channel });
   }
 
   if (station.url !== undefined) {
@@ -813,6 +826,9 @@ const CAST: Record<string, CreditElement> = {
   host: 'presenter',
   narrator: 'commentator',
   guest: 'guest',
+  // Somebody taking part rather than playing a part — the reference grabber
+  // reads it the same way, and `<actor>` would say they acted.
+  contestant: 'guest',
 };
 
 /** The quality a `videoProperties` entry names, in the DTD's spelling. */
@@ -838,6 +854,10 @@ const QUALITY: Record<string, string> = {
  * programme — three different crafts and none of them that one. Those stay
  * `<credit role="…">`, which loses nobody.
  */
+function named(role: string | undefined): boolean {
+  return CREW[role?.toLowerCase() ?? ''] !== undefined;
+}
+
 function crewElement(role: string | undefined): CreditElement | undefined {
   const said = role?.toLowerCase() ?? '';
   const named = CREW[said];
@@ -855,6 +875,26 @@ function crewElement(role: string | undefined): CreditElement | undefined {
   }
 
   return said.endsWith('assistant director') ? 'director' : undefined;
+}
+
+/**
+ * What the service called this credit, where that says more than the element.
+ *
+ * `Writer (Screenplay)` on a `<writer>`, `Guest Star` and `Voice` and `Judge` on
+ * an `<actor>`, `Contestant` on a `<guest>`: the DTD has one element for a
+ * dozen of the service's roles, and the specific one is worth keeping for a
+ * consumer that cares — an animation credit that says `Voice`, a panel show
+ * whose people are judges rather than actors. `credit`, not `role`, because
+ * `<actor role="…">` is already the part they play.
+ *
+ * Nothing where the table above already names the role, which is most of them:
+ * it says a `Host` is a `<presenter>` and a `Narrator` a `<commentator>`, so
+ * repeating the word on every one of a day's 4,000 presenters is noise. What is
+ * left is what the table did not name — a role read by its shape, or a cast
+ * role that fell through to `<actor>`.
+ */
+function saidRole(role: string | undefined, named: boolean): Record<string, string> | undefined {
+  return named || role === undefined || role === '' ? undefined : { credit: role };
 }
 
 /** What an `audioProperties` entry means for `<audio><stereo>`. */
@@ -966,16 +1006,22 @@ export function buildProgramme(
   }
 
   for (const person of programme.cast) {
-    const method = CAST[person.role?.toLowerCase() ?? ''];
+    const said = person.role?.toLowerCase() ?? '';
+    const method = CAST[said];
 
     if (method === undefined) {
-      element.actor(person.name, {
-        ...(person.characterName === undefined ? {} : { role: person.characterName }),
-        // A guest star is an actor who is also a guest, and the DTD can say both.
-        ...(person.role?.toLowerCase().includes('guest') === true ? { guest: true } : {}),
-      });
+      element.actor(
+        person.name,
+        {
+          ...(person.characterName === undefined ? {} : { role: person.characterName }),
+          // A guest star is an actor who is also a guest, and the DTD can say both.
+          ...(person.role?.toLowerCase().includes('guest') === true ? { guest: true } : {}),
+        },
+        // `Actor` on an `<actor>` says nothing; `Voice`, `Self` and `Judge` do.
+        saidRole(person.role, said === 'actor'),
+      );
     } else {
-      element[method](person.name);
+      element[method](person.name, {}, saidRole(person.role, true));
     }
   }
 
@@ -992,7 +1038,9 @@ export function buildProgramme(
         value: person.name,
       });
     } else {
-      element[method](person.name);
+      // Named in the table, or read by its shape: `Writer (Screenplay)` is
+      // worth keeping beside the `<writer>` it became, `Writer` is not.
+      element[method](person.name, {}, saidRole(person.role, named(person.role)));
     }
   }
 

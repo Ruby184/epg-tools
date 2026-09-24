@@ -110,6 +110,16 @@ describe('a station', () => {
     ]);
   });
 
+  it('writes the number as an lcn as well, for a consumer that wants a number', () => {
+    const element = ChannelBuilder.of('I20454.json.schedulesdirect.org', 'WBBMDT (WBBM-DT)');
+
+    schedulesDirectChannelExtras(element, schedulesDirectStation(STATION, '002')!.data!);
+
+    // Where tvheadend and Kodi look, instead of guessing which display name is
+    // the number.
+    expect(element.build().extra).toEqual(expect.arrayContaining([{ name: 'lcn', value: '002' }]));
+  });
+
   it('takes the number from whichever field its lineup says it in', () => {
     // The reference grabber's precedence, and the reason it has one: a cable
     // map says `channel`, an ATSC one says `8.1` in two halves, and a lineup
@@ -344,9 +354,20 @@ describe('a programme', () => {
         },
       );
 
-      expect(programme.credits?.writer).toEqual(['A Writer', 'B Writer']);
-      expect(programme.credits?.producer).toEqual(['C Producer', 'D Producer']);
-      expect(programme.credits?.director).toEqual(['E Director']);
+      // On the element the DTD has for them, each carrying what the service
+      // actually called it — the specific role is worth keeping for a consumer
+      // that cares which kind of writer wrote it.
+      expect(programme.credits?.writer).toEqual([
+        { value: 'A Writer', extraAttributes: { credit: 'Writer (Screenplay)' } },
+        { value: 'B Writer', extraAttributes: { credit: 'Writer (Comic Book)' } },
+      ]);
+      expect(programme.credits?.producer).toEqual([
+        { value: 'C Producer', extraAttributes: { credit: 'Line Producer' } },
+        { value: 'D Producer', extraAttributes: { credit: 'Co-Executive Producer' } },
+      ]);
+      expect(programme.credits?.director).toEqual([
+        { value: 'E Director', extraAttributes: { credit: 'Second Assistant Director' } },
+      ]);
     });
 
     it('does not make a director of an art director', () => {
@@ -372,12 +393,44 @@ describe('a programme', () => {
       ]);
     });
 
+    it('calls somebody taking part a guest rather than an actor', () => {
+      // The reference grabber reads `contestant` the same way, and `<actor>`
+      // would say they acted.
+      const programme = built(
+        {},
+        { cast: [{ personId: '9', name: 'A Player', role: 'Contestant' }] },
+      );
+
+      // Named in the table, so the element says it: no `credit` beside it.
+      expect(programme.credits?.guest).toEqual(['A Player']);
+      expect(programme.credits?.actor).toBeUndefined();
+    });
+
+    it('keeps a cast role the DTD cannot say, beside the name it can', () => {
+      // `Judge`, `Correspondent` and `Voice` all turn up in a day's listings
+      // and all become actors; what kind of credit it was is worth keeping.
+      const programme = built(
+        {},
+        {
+          cast: [
+            { personId: '1', name: 'A Voice', role: 'Voice', characterName: 'Narrator' },
+            { personId: '2', name: 'B Judge', role: 'Judge' },
+          ],
+        },
+      );
+
+      expect(programme.credits?.actor).toEqual([
+        { value: 'A Voice', role: 'Narrator', extraAttributes: { credit: 'Voice' } },
+        { value: 'B Judge', extraAttributes: { credit: 'Judge' } },
+      ]);
+    });
+
     it('puts each on the element its role belongs to', () => {
       const programme = built();
 
       expect(programme.credits?.actor).toEqual([{ value: 'Tom Selleck', role: 'Frank Reagan' }]);
       // `Executive Producer` is a producer as far as the DTD is concerned — and
-      // a credit with nothing to say but a name is written as one.
+      // the table says so, so the name is written on its own.
       expect(programme.credits?.producer).toEqual(['Leonard Goldberg']);
     });
 
