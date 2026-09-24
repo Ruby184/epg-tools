@@ -16,8 +16,11 @@
  * enforced here rather than left to whoever validates the output.
  */
 
+import { createCacheStore } from '../build.js';
+import type { CacheStore } from '../cache/main.js';
 import type { EpgConfig } from '../config.js';
 import { resolveChannels } from '../grabber/channels.js';
+import { SiteStateHandle } from '../grabber/state.js';
 import type { GrabberChannel } from '../grabber/types.js';
 import { escapeXml } from '../xmltv/escape.js';
 
@@ -354,6 +357,14 @@ export interface LineupsFromSitesOptions {
   type?: LineupType;
   /** Language of the generated names. */
   lang?: string;
+  /**
+   * Where channel lists are kept. The config's own cache unless given.
+   *
+   * What makes `--list-lineups` cost nothing twice running — and what hands a
+   * site back what it said about the list when it fetched it, which is how a
+   * platform keeps its name and its type on a run that fetched nothing.
+   */
+  cache?: CacheStore;
 }
 
 function stationOf(channel: GrabberChannel, lang: string | undefined): LineupStation {
@@ -389,10 +400,17 @@ export async function lineupsFromSites(
   options: LineupsFromSitesOptions = {},
 ): Promise<LineupConfig[]> {
   const lineups: LineupConfig[] = [];
+  // The same cache a grab uses: a list fetched an hour ago is not fetched again
+  // to answer this, and what the site said about it is read back with it.
+  const cache = options.cache ?? (await createCacheStore(config));
 
   for (const site of config.sites) {
-    const channels = await resolveChannels(site);
-    const own = site.lineups?.(channels);
+    const state = SiteStateHandle.open(cache, site.site);
+    const channels = await resolveChannels(site, { state });
+
+    await state.save();
+
+    const own = site.lineups?.(channels, (await state.channels()).metadata());
 
     if (own !== undefined && own.length > 0) {
       lineups.push(...own);

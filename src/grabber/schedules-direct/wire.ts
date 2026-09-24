@@ -41,6 +41,8 @@ export const SD_OK = 0;
  * why the token call reads one.
  */
 export const SD_SERVICE_OFFLINE = 3000;
+/** `GET /lineups` on an account with none, at HTTP 400 — a fact, not a failure. */
+export const SD_NO_LINEUPS = 4102;
 
 export const SD_ACCOUNT_EXPIRED = 4001;
 /** Wrong username or password. Fatal, and said in the service's own words. */
@@ -104,6 +106,28 @@ export interface WireAccountLineup {
   uri?: string;
 }
 
+/**
+ * `GET /lineups`: the account's lineups, with what they are.
+ *
+ * Not the same answer as `/status`, which carries a name and a `modified` stamp
+ * and nothing else: this is the one call that says how each lineup is received
+ * and where it is for — which is what tells two lineups both called `Local
+ * Broadcast Listings` apart. `4102 NO_LINEUPS` where the account has none,
+ * in-band and at HTTP 400, which is a fact rather than a failure.
+ */
+export interface WireLineups extends WireResponse {
+  lineups?: {
+    lineup?: string;
+    name?: string;
+    /** `Antenna`, `Cable`, `Satellite`, `IPTV`, `DVB-T`, `DVB-C`, `DVB-S`, `QAM`. */
+    transport?: string;
+    /** Where it is for: a city, a postcode, or `National`. */
+    location?: string;
+    uri?: string;
+    isDeleted?: true;
+  }[];
+}
+
 /** `GET /status`: the account, and what it is subscribed to. */
 export interface WireStatus extends WireResponse {
   account?: {
@@ -157,6 +181,14 @@ export interface WireLineup extends WireResponse {
   /** The channel numbers, as a separate list keyed by station. */
   map?: { stationID?: string; channel?: string }[];
   stations?: WireStation[];
+  /**
+   * What the lineup is, which `/status` does not say.
+   *
+   * `transport` is `Antenna`, `Cable`, `Satellite`, `IPTV` or `Virtual` — how it
+   * is received, and the one place the service says so about a lineup that is
+   * already on the account.
+   */
+  metadata?: { lineup?: string; modified?: string; transport?: string };
 }
 
 /**

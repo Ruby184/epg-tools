@@ -337,6 +337,12 @@ describe('defineSchedulesDirectSite', () => {
           { lineup: 'GBR-DISH', name: 'Sky' },
         ],
       },
+      // What `GET /lineups` carries and `/status` does not: how each one is
+      // received, and where it is for.
+      onAccount: [
+        { lineup: 'GBR-AERIAL', name: 'Freeview', transport: 'Antenna', location: 'London' },
+        { lineup: 'GBR-DISH', name: 'Sky', transport: 'Satellite', location: 'National' },
+      ],
       lineups: {
         'GBR-AERIAL': {
           map: [
@@ -355,17 +361,24 @@ describe('defineSchedulesDirectSite', () => {
       },
     });
 
-    const lineups = await lineupsFromSites({
-      sites: [site(source, { lineup: undefined })],
-      days: 1,
-      output: 'guide.xml',
-    });
+    // With a cache of its own: without one it makes the config's, which for a
+    // config that names no directory is `.epg-cache` in the working directory —
+    // a test reading and writing whatever the last one left there.
+    const lineups = await lineupsFromSites(
+      { sites: [site(source, { lineup: undefined })], days: 1, output: 'guide.xml' },
+      { cache: store() },
+    );
 
     // One per lineup on the account, not one for the site: somebody subscribed
     // to each of them, and which to grab is the choice a consumer wants.
     expect(lineups.map((one) => one.id)).toEqual(['GBR-AERIAL', 'GBR-DISH']);
-    // What the account calls them, as `/status` says.
-    expect(lineups.map((one) => one.displayName[0]?.value)).toEqual(['Freeview', 'Sky']);
+    // What a person recognises, in the reference grabber's own format: an
+    // account can hold two lineups both called `Local Broadcast Listings`, and
+    // where each is for is the only thing that tells them apart.
+    expect(lineups.map((one) => one.displayName[0]?.value)).toEqual([
+      'Freeview (Antenna London)',
+      'Sky (Satellite National)',
+    ]);
 
     const presetOf = (at: number, stationID: string) =>
       lineups[at]?.entries.find((entry) => entry.station.xmltvId === idOf(stationID))?.preset;
@@ -383,10 +396,42 @@ describe('defineSchedulesDirectSite', () => {
       idOf('101'),
       idOf('303'),
     ]);
-    // `List`, because what the service says about a lineup is its name and when
-    // it changed — not how it is received.
-    expect(lineups[0]?.type).toBe('List');
+    // The mapping the reference grabber makes: an aerial is a raw multiplex,
+    // and a satellite package is the box most people watch it through.
+    expect(lineups[0]?.type).toBe('DTV');
+    expect(lineups[1]?.type).toBe('STB');
+    // Which is also what decides whether the number is written twice: as the
+    // `preset` a guide shows, and as what a box is tuned by.
+    expect(lineups[0]?.entries[0]?.stb).toBeUndefined();
+    expect(lineups[1]?.entries[0]?.stb).toEqual([{ preset: '101' }]);
     expect(lineups[0]?.entries[0]?.station.shortName).toBe('BBC1');
+  });
+
+  it('still names and types its lineups on a run that fetched nothing', async () => {
+    const source = await sdServer({
+      status: { account: { messages: [] }, lineups: [{ lineup: LINEUP, name: 'Freeview' }] },
+      onAccount: [{ lineup: LINEUP, name: 'Freeview', transport: 'Antenna', location: 'London' }],
+      lineup: {
+        map: [{ stationID: '101', channel: '001' }],
+        stations: [{ stationID: '101', name: 'BBC One', callsign: 'BBC1' }],
+      },
+    });
+    const cache = store();
+    const config = { sites: [site(source)], days: 1, output: 'guide.xml' };
+
+    await lineupsFromSites(config, { cache });
+
+    const before = source.calls.length;
+    const lineups = await lineupsFromSites(config, { cache });
+
+    // Read back out of the cache, with what the account said about the lineup
+    // still beside it: the name and the transport are facts about the platform,
+    // not about any channel, so nothing on the channels could carry them and a
+    // second entry could be lost without this one.
+    expect(source.calls.length).toBe(before);
+    expect(lineups[0]?.displayName[0]?.value).toBe('Freeview (Antenna London)');
+    expect(lineups[0]?.type).toBe('DTV');
+    expect(lineups[0]?.entries[0]?.preset).toBe('001');
   });
 
   it('fails the site, naming what the account does have, when the lineup is not on it', async () => {

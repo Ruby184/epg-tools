@@ -421,8 +421,14 @@ process.exitCode = await runXmltvGrabber(config, {
 
 ```sh
 tv_grab_sk_example --list-lineups     # what is on offer — needs no config file
-tv_grab_sk_example --get-lineup       # the one that was configured
+tv_grab_sk_example --get-lineup       # the one that was configured, with its channels
 ```
+
+`--list-lineups` writes what each lineup *is* — its id, type and name — and not
+what is in it: a caller uses it to choose, and `--get-lineup` answers with the
+channels of the one it chose. That is the reference grabber's division, and for
+an account with a couple of lineups it is the difference between a few lines and
+five thousand stations.
 
 `lineupsFromSites` builds one `List` lineup per site, which fits a grabber whose
 sites genuinely *are* separate platforms; it fills each entry's `<preset>` from

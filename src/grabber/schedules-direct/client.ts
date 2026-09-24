@@ -27,11 +27,13 @@ import type { PacedRequest } from '../types.js';
 import {
   codeOf,
   SCHEDULES_DIRECT_URL,
+  SD_NO_LINEUPS,
   SD_SERVICE_OFFLINE,
   wireMessage,
   type WireArtwork,
   type WireHeadend,
   type WireLineup,
+  type WireLineups,
   type WireLineupChange,
   type WireMd5Response,
   type WireProgram,
@@ -131,6 +133,14 @@ export interface SchedulesDirectClient {
   status: () => Promise<WireStatus>;
   /** What a region has on offer, which needs no lineup on the account. */
   headends: (where: { country: string; postalCode: string }) => Promise<WireHeadend[]>;
+  /**
+   * What is on the account, and what each of them is.
+   *
+   * `/status` says the name and when it moved; this is the one call that says
+   * how a lineup is received and where it is for. An account with none answers
+   * `4102 NO_LINEUPS` at HTTP 400, which is read as the empty list it means.
+   */
+  lineups: () => Promise<WireLineups>;
   lineup: (id: string) => Promise<WireLineup>;
   /**
    * Put one on the account, or take it off.
@@ -211,6 +221,10 @@ export function schedulesDirectHooks(hooks: KyOptions['hooks']): NonNullable<KyO
  * reading it again answers nothing — which is how "HTTP 400" ends up in an error
  * that could have said "Invalid username or password."
  */
+function refusalCode(error: unknown): number | undefined {
+  return error instanceof HTTPError && error.data !== undefined ? codeOf(error.data) : undefined;
+}
+
 function refusal(error: unknown): string | undefined {
   if (!(error instanceof HTTPError)) {
     return undefined;
@@ -470,6 +484,16 @@ export function createSchedulesDirectClient(
         `headends?${new URLSearchParams({ country: where.country, postalcode: where.postalCode }).toString()}`,
         undefined,
       ),
+    lineups: async () => {
+      try {
+        return await request<WireLineups>('lineups');
+      } catch (error) {
+        // An account with no lineups is not a failed request — the service's
+        // own client does the same, and everything above here is already
+        // written for an account that has none.
+        return refusalCode(error) === SD_NO_LINEUPS ? {} : Promise.reject(error);
+      }
+    },
     lineup: (id) => request<WireLineup>(`lineups/${encodeURIComponent(id)}`),
     addLineup: (id) => change<WireLineupChange>(`lineups/${encodeURIComponent(id)}`, 'put'),
     removeLineup: (id) => change<WireLineupChange>(`lineups/${encodeURIComponent(id)}`, 'delete'),

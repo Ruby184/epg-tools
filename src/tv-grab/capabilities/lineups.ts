@@ -63,6 +63,14 @@ async function chosenLineup(
   return lineup;
 }
 
+/** A lineup as a chooser needs it: what it is and what it is called. */
+function offered(lineup: LineupConfig): LineupConfig {
+  return {
+    ...lineup,
+    entries: [],
+  };
+}
+
 /** The question to ask while configuring, built from the lineups on offer. */
 function lineupStage(lineups: readonly LineupConfig[]): ConfigStage {
   const [only] = lineups;
@@ -140,7 +148,12 @@ export function lineupsCapability(source: LineupSource, meta?: LineupsMeta) {
           throw new GrabberError('This grabber offers no lineups to choose from');
         }
 
-        await ctx.emit(serializeLineups(lineups, meta));
+        // What is on offer, not what is in each: a caller uses this to choose,
+        // and `--get-lineup` answers with the channels of the one it chose.
+        // Which is what the reference grabber writes — and the difference
+        // between a few lines and every station of every lineup, five thousand
+        // of them for an account with a couple.
+        await ctx.emit(serializeLineups(lineups.map(offered), meta));
         return 0;
       }
 

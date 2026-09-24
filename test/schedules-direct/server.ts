@@ -22,6 +22,7 @@ import type {
   WireHeadend,
   WireImage,
   WireLineup,
+  WireLineups,
   WireMd5Response,
   WireProgram,
   WireSchedule,
@@ -48,6 +49,13 @@ export interface SdAnswers {
   lineup?: WireLineup;
   /** One answer per lineup id, for an account holding more than one. */
   lineups?: Record<string, WireLineup>;
+  /**
+   * What `GET /lineups` answers: the account's lineups, with what each one is.
+   *
+   * The names in {@link status} by default, which is what that call carries —
+   * a test that cares about the transport or the location says so here.
+   */
+  onAccount?: WireLineups['lineups'];
   /** Answered instead of the md5s computed from {@link SdServer.setSchedule}. */
   md5?: WireMd5Response;
   /** Answered instead of the schedules a test set up. */
@@ -267,6 +275,16 @@ export async function sdServer(initial: SdAnswers = {}): Promise<SdServer> {
 
       if (path === 'status') {
         send(response, 200, answers.status ?? { account: { messages: [] }, lineups: [] });
+      } else if (path === 'lineups') {
+        send(response, 200, {
+          code: 0,
+          lineups:
+            answers.onAccount ??
+            (answers.status?.lineups ?? []).map((one) => ({
+              lineup: one.lineup,
+              ...(one.name === undefined ? {} : { name: one.name }),
+            })),
+        });
       } else if (path.startsWith('lineups/') && request.method !== 'GET') {
         // The service's own answers, `changesRemaining` included — a number for
         // an add and a string for a delete, which is how its documentation

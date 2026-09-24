@@ -865,11 +865,20 @@ it keeps answering with what it last had, so a guide built from it thins out
 rather than failing.
 
 **The account's lineups are offered as lineups.** A `tv_grab_*` with the
-[`lineups` capability](./tv-grab.md#channel-lineups) lists them one by one —
-`Freeview`, `Sky`, as the account names them — so a consumer picks the platform
-it receives rather than "the Schedules Direct site". It is built from the channel
-list, so it costs nothing extra, and a station on two of them keeps its own
-number on each.
+[`lineups` capability](./tv-grab.md#channel-lineups) lists them one by one, named
+as the reference grabber names them — `Astra FTA (Satellite National)`, `Local
+Broadcast Listings (Antenna 10115)` — so a consumer picks the platform it
+receives rather than "the Schedules Direct site", and two lineups both called
+`Local Broadcast Listings` are told apart by where each is for. The type is the
+reference's mapping too: `Antenna`, `DVB-T`, `DVB-C`, `DVB-S` and `QAM` are
+`DTV`, `Cable` and `Satellite` are the `STB` most people watch them through,
+`IPTV` is `IPTV`, and a transport nobody knows is a plain `List`. A station on
+two lineups — which every account with an aerial and a dish has dozens of — keeps
+the number it sits at on each.
+
+It costs one call for the list of lineups, beside the ones the channel list
+already makes, and nothing at all on a run that keeps its channel list: what the
+account said is stored with the list it describes.
 
 **A lineup is downloaded only when it has moved.** `/status` carries each
 lineup's `modified` stamp and the account check reads it anyway, so a run whose
