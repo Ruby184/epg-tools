@@ -11,6 +11,54 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.5.0](https://github.com/Ruby184/epg-tools/compare/v0.4.0...v0.5.0) (2026-09-24)
+
+
+### Features
+
+* a server that grabs on its own, and a way to see a run before making it ([933b366](https://github.com/Ruby184/epg-tools/commit/933b366b43c957b9bc7a3c149bb8792a661bbb8c))
+* **cli:** say what a run would fetch, with --dry-run ([55361d7](https://github.com/Ruby184/epg-tools/commit/55361d7a97f30bc62555e46a6d31eb5782fd5fea))
+* **grabber:** a Schedules Direct client that keeps its token and not its secrets ([0c66a38](https://github.com/Ruby184/epg-tools/commit/0c66a38eab8e3ff61aca7de6d27e6a23c86351bf))
+* **grabber:** defineSchedulesDirectSite, Schedules Direct as a source ([958f047](https://github.com/Ruby184/epg-tools/commit/958f04729be8955803a7b33a936d8a38bd7991b2))
+* **grabber:** do what Schedules Direct asks of a client ([2e45e57](https://github.com/Ruby184/epg-tools/commit/2e45e5754b832540cf8939e7f6c3a05ac0cdbf67))
+* **grabber:** hand a fetched channel list the site's own state ([8cfa662](https://github.com/Ruby184/epg-tools/commit/8cfa6625d05a055bdf2fdb424e5016c8343df2b1))
+* **grabber:** hand a site the channel list it stored last time ([2b46627](https://github.com/Ruby184/epg-tools/commit/2b46627bea2cfbd28fbdb02fcbe689847eebfae6))
+* **grabber:** keep the md5 the listings came with, and say how far the service goes ([80a033b](https://github.com/Ruby184/epg-tools/commit/80a033bb018757482085017ce27370b8c40eee4d))
+* **grabber:** let a pass pace its own requests ([9df62a2](https://github.com/Ruby184/epg-tools/commit/9df62a24ed599a0363254d040262aa1658ee256f))
+* **grabber:** map a Schedules Direct programme onto the DTD ([0b9fd1c](https://github.com/Ruby184/epg-tools/commit/0b9fd1caf67487759ee3a526172c4b3bbf9d0225))
+* **grabber:** remember a Schedules Direct station-day by its md5 ([3b5f3b5](https://github.com/Ruby184/epg-tools/commit/3b5f3b5acd42b80d12009fd1e548608a21450e0a))
+* **grabber:** Schedules Direct as a source ([35db494](https://github.com/Ruby184/epg-tools/commit/35db49446b6221a1983b2e426955530b30125161))
+* **grabber:** schedulesDirectAccount, for the questions that come before a config ([cfb3f1f](https://github.com/Ruby184/epg-tools/commit/cfb3f1f324605a267380968e0fddb5f562b2ba37))
+* **grabber:** wait for a Schedules Direct programme it is still writing ([c5e4d08](https://github.com/Ruby184/epg-tools/commit/c5e4d08305c75e0877738dc3a0c0de46f8803347))
+* **grabber:** wait for a Schedules Direct schedule it is still generating ([3a9919f](https://github.com/Ruby184/epg-tools/commit/3a9919fe95d0091069b0187c0b47f14516986e4f))
+* **grabber:** write everything Schedules Direct sends, and let a profile choose ([9ddd16e](https://github.com/Ruby184/epg-tools/commit/9ddd16e1003b71c0711de1be4410fa90825fae55))
+* **serve:** grab on a schedule, instead of leaving it to cron ([230f18c](https://github.com/Ruby184/epg-tools/commit/230f18c2e35a91613c1a8ba739b092b2353a63e3))
+* **serve:** say whether the guide is any good, at /health ([b93712b](https://github.com/Ruby184/epg-tools/commit/b93712bcec8b4f22bd453f00321a5ef174d98ae5))
+
+
+### Bug Fixes
+
+* **cli:** make --dry-run describe the run it claims to ([ec510bb](https://github.com/Ruby184/epg-tools/commit/ec510bb73e74ee74f09c87f2a0716bc78a836b57))
+* **cli:** time each request in epg try, and show what a POST asked ([d67583b](https://github.com/Ruby184/epg-tools/commit/d67583b78a28379b13ed48d21f9286280ba677e2))
+* **grabber:** cache a Schedules Direct day past its horizon, rather than failing it ([01691a6](https://github.com/Ruby184/epg-tools/commit/01691a6195892c1e7254cf617687ac8b2339f6fd))
+* **grabber:** read the subtitle language the wire sends, not the one it documents ([d10dfda](https://github.com/Ruby184/epg-tools/commit/d10dfdab6b34a91286f2b830f5b0af2fd71b7458))
+* **grabber:** send the trailing slash Schedules Direct artwork needs ([68a9831](https://github.com/Ruby184/epg-tools/commit/68a983131d68e20c3c79dfeed17f3a7ae83ecf4c))
+* **grabber:** tell a Schedules Direct programme that will never come from one that has not yet ([b224b1a](https://github.com/Ruby184/epg-tools/commit/b224b1a3ee63161187e6fcf31b7f1c22287bfd4b))
+* **serve:** abort a scheduled grab that is still starting up ([19f628c](https://github.com/Ruby184/epg-tools/commit/19f628ce62743a7ba4592c8ab6d80e4e349d326e))
+* **serve:** settle the validator only when the window has ([82b4f92](https://github.com/Ruby184/epg-tools/commit/82b4f920f78cce5050187a5b972d62b1d00ed13b))
+
+
+### Refactoring
+
+* **grabber:** read each md5 batch as it lands ([7d7d353](https://github.com/Ruby184/epg-tools/commit/7d7d35326c4994547c1278c86d04d91a2d8b94c3))
+* **grabber:** stop choosing a Schedules Direct consumer's credits and descriptions ([671805a](https://github.com/Ruby184/epg-tools/commit/671805a6a9baaa0e57dddc39a59c674553361c98))
+* **grabber:** write down the md5 of a day kept by its clock ([3b1e102](https://github.com/Ruby184/epg-tools/commit/3b1e102f412c92fe36b007b5628ebd878a564969))
+
+
+### Documentation
+
+* how to grab from Schedules Direct ([208556a](https://github.com/Ruby184/epg-tools/commit/208556aabd6cbdd1ba9dbfdd31b25429b87fea06))
+
 ## [0.4.0](https://github.com/Ruby184/epg-tools/compare/v0.3.0...v0.4.0) (2026-09-10)
 
 
