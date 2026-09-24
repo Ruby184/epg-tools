@@ -178,8 +178,27 @@ export interface WireStation {
 
 /** `GET /lineups/{id}`: which station sits on which channel, and what each one is. */
 export interface WireLineup extends WireResponse {
-  /** The channel numbers, as a separate list keyed by station. */
-  map?: { stationID?: string; channel?: string }[];
+  /**
+   * Where each station sits, as a separate list keyed by station.
+   *
+   * Which of these says the number depends on the lineup — see
+   * `channelNumberOf`: a cable map gives `channel`, an ATSC one gives the
+   * major and minor of a virtual channel, and some give the number a box shows
+   * outright.
+   */
+  map?: {
+    stationID?: string;
+    channel?: string;
+    /** The number as shown, where the lineup says it in one piece. */
+    virtualChannel?: string;
+    /** ATSC: `8` and `1` are the `8.1` a US aerial viewer tunes to. */
+    atscMajor?: number;
+    atscMinor?: number;
+    /** The broadcast channel an aerial lineup is received on, where it says. */
+    uhfVhf?: number;
+    /** A lineup with nothing else to call a station by. */
+    frequencyHz?: number;
+  }[];
   stations?: WireStation[];
   /**
    * What the lineup is, which `/status` does not say.

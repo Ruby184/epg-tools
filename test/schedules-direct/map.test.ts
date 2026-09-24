@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildProgramme,
   channelIdOf,
+  channelNumberOf,
   schedulesDirectChannelExtras,
   schedulesDirectProgramme,
   schedulesDirectStation,
@@ -92,6 +93,41 @@ describe('a station', () => {
 
   it('is not a channel at all without an id to ask about it by', () => {
     expect(schedulesDirectStation({ name: 'Nameless' }, '001')).toBeUndefined();
+  });
+
+  it('says its callsign and its number as display names, in that order', () => {
+    const element = ChannelBuilder.of('I20454.json.schedulesdirect.org', 'WBBMDT (WBBM-DT)');
+
+    schedulesDirectChannelExtras(element, schedulesDirectStation(STATION, '002')!.data!);
+
+    // The name, the callsign, the number: the order the reference grabber
+    // writes, with the comment that MythTV assumes exactly those three — and
+    // what tvheadend matches a guide to a tuner by.
+    expect(element.build().displayName).toEqual([
+      { value: 'WBBMDT (WBBM-DT)' },
+      { value: 'WBBMDT' },
+      { value: '002' },
+    ]);
+  });
+
+  it('takes the number from whichever field its lineup says it in', () => {
+    // The reference grabber's precedence, and the reason it has one: a cable
+    // map says `channel`, an ATSC one says `8.1` in two halves, and a lineup
+    // with neither has only the frequency to call a station by.
+    expect(
+      channelNumberOf({ virtualChannel: '8.1', channel: '3', atscMajor: 9, atscMinor: 2 }),
+    ).toBe('8.1');
+    // An American aerial lineup says `2.1` in `channel` as well as in halves —
+    // checked against a real one — so the halves are the fallback, not the rule.
+    expect(channelNumberOf({ channel: '2.1', atscMajor: 2, atscMinor: 1, uhfVhf: 31 })).toBe('2.1');
+    expect(channelNumberOf({ atscMajor: 9, atscMinor: 2, uhfVhf: 31 })).toBe('9.2');
+    expect(channelNumberOf({ uhfVhf: 31 })).toBe('31');
+    // As the service wrote it: the two reference grabbers disagree about
+    // whether to make a number of it, and this is what the lineup says.
+    expect(channelNumberOf({ channel: '003' })).toBe('003');
+    expect(channelNumberOf({ frequencyHz: 578000000 })).toBe('578000000');
+    expect(channelNumberOf({})).toBeUndefined();
+    expect(channelNumberOf(undefined)).toBeUndefined();
   });
 
   it('writes every logo the service holds, for a consumer to choose between', () => {

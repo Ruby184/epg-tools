@@ -53,6 +53,7 @@ import {
   type SchedulesDirectClient,
 } from './client.js';
 import {
+  channelNumberOf,
   schedulesDirectChannelExtras,
   schedulesDirectStation,
   type SchedulesDirectMapOptions,
@@ -633,7 +634,7 @@ export function defineSchedulesDirectSite(
           };
 
           const numbers = new Map(
-            (answer.map ?? []).map((entry) => [entry.stationID, entry.channel]),
+            (answer.map ?? []).map((entry) => [entry.stationID, channelNumberOf(entry)]),
           );
 
           for (const wire of answer.stations ?? []) {
@@ -897,7 +898,9 @@ export function schedulesDirectAccount(
       ),
     stations: async (lineup) => {
       const answer = await client.lineup(lineup);
-      const numbers = new Map((answer.map ?? []).map((entry) => [entry.stationID, entry.channel]));
+      const numbers = new Map(
+        (answer.map ?? []).map((entry) => [entry.stationID, channelNumberOf(entry)]),
+      );
 
       return (answer.stations ?? []).flatMap((wire) => {
         const channel = schedulesDirectStation(wire, numbers.get(wire.stationID), {}, lineup);

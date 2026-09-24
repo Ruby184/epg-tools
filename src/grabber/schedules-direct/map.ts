@@ -20,7 +20,17 @@ import {
   parseDdProgidEpisodeNum,
 } from '../../xmltv/episode-num.js';
 import type { GrabberChannel } from '../types.js';
-import type { WireAiring, WireLogo, WirePerson, WireProgram, WireStation } from './wire.js';
+import type {
+  WireAiring,
+  WireLineup,
+  WireLogo,
+  WirePerson,
+  WireProgram,
+  WireStation,
+} from './wire.js';
+
+/** One entry of a lineup's map — where a station sits on it. */
+type WireLineupEntry = NonNullable<WireLineup['map']>[number];
 
 /**
  * What `tv_grab_zz_sdjson` builds a channel id from, and the two others it
@@ -220,6 +230,46 @@ export function channelIdOf(
 }
 
 /** A station and its channel number, as the grabber holds one. */
+/**
+ * The number a viewer sees, out of whichever field this lineup says it in.
+ *
+ * What the lineup calls it first — `virtualChannel` where it gives one whole,
+ * then `channel`, which on an American aerial lineup is already the `2.1` a
+ * viewer tunes to (checked against one) — and then the pieces, for a lineup
+ * that gives no number of its own: the ATSC major and minor, the broadcast
+ * channel, the frequency.
+ *
+ * Kept as the service wrote it, leading zeros and all: the maintained reference
+ * grabber turns `003` into `3` and the older one does not, so there is no one
+ * thing to agree with, and what the lineup says is the answer this package has
+ * to the same question everywhere else.
+ */
+export function channelNumberOf(entry: WireLineupEntry | undefined): string | undefined {
+  if (entry === undefined) {
+    return undefined;
+  }
+
+  if (entry.virtualChannel !== undefined && entry.virtualChannel !== '') {
+    return entry.virtualChannel;
+  }
+
+  if (entry.channel !== undefined && entry.channel !== '') {
+    return entry.channel;
+  }
+
+  if (entry.atscMajor !== undefined && entry.atscMinor !== undefined) {
+    // A dot, which is what the maintained grabber writes and what the service
+    // itself puts in `channel`. The older one writes `2_1`.
+    return `${String(entry.atscMajor)}.${String(entry.atscMinor)}`;
+  }
+
+  if (entry.uhfVhf !== undefined) {
+    return String(entry.uhfVhf);
+  }
+
+  return entry.frequencyHz === undefined ? undefined : String(entry.frequencyHz);
+}
+
 export function schedulesDirectStation(
   wire: WireStation,
   channel: string | undefined,
@@ -298,6 +348,25 @@ export function schedulesDirectChannelExtras(
   element: ChannelBuilder,
   station: SchedulesDirectStation,
 ): void {
+  // The callsign and the number, after the name the default element wrote.
+  //
+  // In that order because that is the order the reference grabber writes them
+  // in, with the comment that MythTV assumes the first three display names are
+  // the name, the callsign and the channel number — and because a consumer
+  // matching a guide to its tuner matches on these: tvheadend looks for the
+  // number and the callsign as well as the name. No language on either: a
+  // callsign is not a word, and neither is `8.1`.
+  //
+  // Written even where it says the same as the name, since what is read here is
+  // the *position*: skipped, the number would be read as the callsign.
+  if (station.callsign !== undefined) {
+    element.displayName(station.callsign);
+  }
+
+  if (station.channel !== undefined) {
+    element.displayName(station.channel);
+  }
+
   if (station.url !== undefined) {
     // A DTD element rather than an extension: `<channel>` has had `<url>` all
     // along, and a fifth of stations give one.
