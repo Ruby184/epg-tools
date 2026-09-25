@@ -65,6 +65,8 @@ export type {
 
 export {
   escapeXml,
+  escapeXmlAttribute,
+  escapeXmlText,
   formatXmltvDate,
   getXmltvOffset,
   getXmltvPrecision,

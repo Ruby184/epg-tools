@@ -9,7 +9,7 @@
  * unreviewable patch.
  */
 
-import { escapeXml } from '../xmltv/escape.js';
+import { escapeXmlAttribute, escapeXmlText } from '../xmltv/escape.js';
 import type { ChannelList, ChannelListEntry } from './types.js';
 
 export interface WriteChannelsXmlOptions {
@@ -40,24 +40,24 @@ export function serializeChannelsXmlEntry(
   // `update` first, where WebGrab+Plus puts it; then the four iptv-org writes,
   // in its order. A file read and written back is a no-op diff either way.
   if (entry.update !== undefined) {
-    out += ` update="${escapeXml(entry.update)}"`;
+    out += ` update="${escapeXmlAttribute(entry.update)}"`;
   }
 
   // Left off when the root already says it, and written when it differs — a
   // list may name one source and still carry a channel from another.
   if (entry.site !== undefined && entry.site !== options?.site) {
-    out += ` site="${escapeXml(entry.site)}"`;
+    out += ` site="${escapeXmlAttribute(entry.site)}"`;
   }
 
-  out += ` site_id="${escapeXml(entry.siteId)}"`;
+  out += ` site_id="${escapeXmlAttribute(entry.siteId)}"`;
 
   if (entry.lang !== undefined) {
-    out += ` lang="${escapeXml(entry.lang)}"`;
+    out += ` lang="${escapeXmlAttribute(entry.lang)}"`;
   }
 
   // Written even when empty, because that is what an unmapped channel *is* in
   // these files, and the tooling that reads them expects the attribute.
-  out += ` xmltv_id="${escapeXml(entry.xmltvId)}"`;
+  out += ` xmltv_id="${escapeXmlAttribute(entry.xmltvId)}"`;
 
   for (const [attribute, value] of [
     ['logo', entry.logo],
@@ -65,11 +65,11 @@ export function serializeChannelsXmlEntry(
     ['lcn', entry.lcn],
   ] as const) {
     if (value !== undefined) {
-      out += ` ${attribute}="${escapeXml(value)}"`;
+      out += ` ${attribute}="${escapeXmlAttribute(value)}"`;
     }
   }
 
-  return `${out}>${escapeXml(entry.name)}</channel>${options?.eol ?? '\n'}`;
+  return `${out}>${escapeXmlText(entry.name)}</channel>${options?.eol ?? '\n'}`;
 }
 
 /**
@@ -91,7 +91,7 @@ export function serializeChannelsXml(
   const entries = given ? (list as readonly ChannelListEntry[]) : (list as ChannelList).entries;
   const root = options?.site ?? (given ? undefined : (list as ChannelList).site);
   const eol = options?.eol ?? '\n';
-  const site = root === undefined ? '' : ` site="${escapeXml(root)}"`;
+  const site = root === undefined ? '' : ` site="${escapeXmlAttribute(root)}"`;
   let out = `<?xml version="1.0" encoding="UTF-8"?>${eol}<channels${site}>${eol}`;
 
   for (const entry of entries) {

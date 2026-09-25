@@ -8,7 +8,7 @@
  * terminal one in `configure.ts`.
  */
 
-import { escapeXml } from '../xmltv/escape.js';
+import { escapeXmlAttribute, escapeXmlText } from '../xmltv/escape.js';
 
 export interface FieldBase {
   id: string;
@@ -97,12 +97,12 @@ export function appendStage(stages: readonly ConfigStage[], stage: ConfigStage):
 const LANG = 'en';
 
 function attr(name: string, value: string | undefined): string {
-  return value === undefined ? '' : ` ${name}="${escapeXml(value)}"`;
+  return value === undefined ? '' : ` ${name}="${escapeXmlAttribute(value)}"`;
 }
 
 /** `<title lang="en">…</title>` — the form every label takes. */
 function langTag(tag: string, text: string, indent: string): string {
-  return `${indent}<${tag} lang="${LANG}">${escapeXml(text)}</${tag}>\n`;
+  return `${indent}<${tag} lang="${LANG}">${escapeXmlText(text)}</${tag}>\n`;
 }
 
 function renderField(field: ConfigField): string {
@@ -121,7 +121,7 @@ function renderField(field: ConfigField): string {
   if (field.type === 'selectone' || field.type === 'selectmany') {
     for (const option of field.options) {
       // Note the label element is <text>, not <title> as on the field itself.
-      out += `    <option value="${escapeXml(option.value)}">\n`;
+      out += `    <option value="${escapeXmlAttribute(option.value)}">\n`;
       out += langTag('text', option.text, '      ');
       out += `    </option>\n`;
     }
@@ -138,13 +138,13 @@ function renderField(field: ConfigField): string {
 export function renderStageXml(stage: ConfigStage, grabberName: string): string {
   let out = `<?xml version="1.0" encoding="UTF-8"?>\n`;
 
-  out += `<xmltvconfiguration grabber="${escapeXml(grabberName)}">\n`;
+  out += `<xmltvconfiguration grabber="${escapeXmlAttribute(grabberName)}">\n`;
 
   for (const field of stage.fields) {
     out += renderField(field);
   }
 
-  out += `  <nextstage stage="${escapeXml(stage.next)}" />\n`;
+  out += `  <nextstage stage="${escapeXmlAttribute(stage.next)}" />\n`;
   out += `</xmltvconfiguration>\n`;
 
   return out;

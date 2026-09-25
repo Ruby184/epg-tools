@@ -22,7 +22,7 @@ import type { EpgConfig } from '../config.js';
 import { resolveChannels } from '../grabber/channels.js';
 import { SiteStateHandle } from '../grabber/state.js';
 import type { GrabberChannel } from '../grabber/types.js';
-import { escapeXml } from '../xmltv/escape.js';
+import { escapeXmlAttribute, escapeXmlText } from '../xmltv/escape.js';
 
 /** How the lineup is received. Required on every lineup. */
 export type LineupType = 'DTV' | 'STB' | 'IPTV' | 'Analog' | 'List';
@@ -155,7 +155,7 @@ export interface LineupsMeta {
 type AttrValue = string | number | boolean | undefined;
 
 function attr(name: string, value: AttrValue): string {
-  return value === undefined ? '' : ` ${name}="${escapeXml(String(value))}"`;
+  return value === undefined ? '' : ` ${name}="${escapeXmlAttribute(String(value))}"`;
 }
 
 function attrs(pairs: [string, AttrValue][]): string {
@@ -182,7 +182,7 @@ function metaAttrs(meta: LineupsMeta | undefined): string {
 function el(indent: string, name: string, value: AttrValue, tagAttrs = ''): string {
   return value === undefined
     ? ''
-    : `${indent}<${name}${tagAttrs}>${escapeXml(String(value))}</${name}>\n`;
+    : `${indent}<${name}${tagAttrs}>${escapeXmlText(String(value))}</${name}>\n`;
 }
 
 function logos(indent: string, all: LineupLogo[] | undefined): string {

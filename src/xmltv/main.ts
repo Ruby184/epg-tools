@@ -1,4 +1,4 @@
-export { escapeXml } from './escape.js';
+export { escapeXml, escapeXmlAttribute, escapeXmlText, type XmlQuotes } from './escape.js';
 export {
   formatXmltvDate,
   getXmltvOffset,
