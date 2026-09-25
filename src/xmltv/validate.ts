@@ -56,8 +56,27 @@ export interface ValidationFinding {
   message: string;
   /** How many times it occurred, however many are named in {@link examples}. */
   count: number;
-  /** A few of them, named — a channel id, an extension, a parser's own line. */
-  examples: string[];
+  /**
+   * A few of them, named — a channel id, an extension, a parser's own line —
+   * with how often each happened, the most frequent first.
+   *
+   * Which is what makes the list worth reading: the first five *encountered*
+   * are the first five in the document, and a guide whose channels each carry
+   * an extension would name those and never mention the one on every programme.
+   */
+  examples: ValidationExample[];
+  /**
+   * How many distinct examples there were, of which {@link examples} names a
+   * few — `at least` this many where more were seen than are remembered.
+   */
+  kinds: number;
+  /** More kinds than were remembered, so {@link kinds} is a floor. */
+  more?: true;
+}
+
+export interface ValidationExample {
+  value: string;
+  count: number;
 }
 
 export interface ValidationReport {
@@ -85,6 +104,17 @@ export interface ValidateOptions extends ParseStreamOptions {
 }
 
 const DEFAULT_MAX_EXAMPLES = 5;
+
+/**
+ * How many distinct examples of one rule are counted separately.
+ *
+ * The report stays flat in the size of the guide, which is the whole point of
+ * counting rather than listing — so a rule whose examples are unbounded (one
+ * per programme, say) stops making new entries here and counts the rest as
+ * occurrences. Generous, because the rules whose kinds are worth ranking —
+ * extensions, undeclared channels — have tens of them, not hundreds.
+ */
+const MAX_KINDS = 200;
 
 /**
  * How many distinct undeclared channel ids are remembered while reading.
@@ -145,7 +175,10 @@ const RULES: Record<FindingCode, { severity: FindingSeverity; message: string }>
 
 /** One entry per rule, counting and keeping a few examples of each. */
 class Findings {
-  readonly #byCode = new Map<FindingCode, { count: number; examples: string[] }>();
+  readonly #byCode = new Map<
+    FindingCode,
+    { count: number; kinds: Map<string, number>; more: boolean }
+  >();
 
   constructor(private readonly maxExamples: number) {}
 
@@ -153,7 +186,7 @@ class Findings {
     let entry = this.#byCode.get(code);
 
     if (entry === undefined) {
-      entry = { count: 0, examples: [] };
+      entry = { count: 0, kinds: new Map(), more: false };
       this.#byCode.set(code, entry);
     }
 
@@ -163,17 +196,35 @@ class Findings {
     // saying `1` where it means a thousand.
     entry.count += occurrences;
 
-    // Kept only while there is room, and only when it is something not already
-    // named: a thousand programmes missing a title are one finding, and naming
-    // the same extension five times says less than naming five.
-    if (entry.examples.length < this.maxExamples && !entry.examples.includes(example)) {
-      entry.examples.push(example);
+    const seen = entry.kinds.get(example);
+
+    if (seen !== undefined) {
+      entry.kinds.set(example, seen + occurrences);
+    } else if (entry.kinds.size < MAX_KINDS) {
+      entry.kinds.set(example, occurrences);
+    } else {
+      // Past the cap the occurrence is still counted above; what is lost is
+      // which kind it was, which for a rule with this many kinds is a list
+      // nobody was going to read anyway.
+      entry.more = true;
     }
   }
 
   list(): ValidationFinding[] {
     return [...this.#byCode]
-      .map(([code, { count, examples }]) => ({ code, ...RULES[code], count, examples }))
+      .map(([code, { count, kinds, more }]) => ({
+        code,
+        ...RULES[code],
+        count,
+        // The most frequent first, and first-seen order between equals, which
+        // `sort` keeps because a `Map` yields what was put in it in that order.
+        examples: [...kinds]
+          .map(([value, times]) => ({ value, count: times }))
+          .sort((a, b) => b.count - a.count)
+          .slice(0, this.maxExamples),
+        kinds: kinds.size,
+        ...(more ? { more: true as const } : {}),
+      }))
       .sort(
         (a, b) =>
           Number(b.severity === 'error') - Number(a.severity === 'error') || b.count - a.count,

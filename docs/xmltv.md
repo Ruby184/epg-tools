@@ -388,9 +388,14 @@ it starts, and [provider extensions](#provider-extensions), found by walking the
 model rather than by a list of the places they can hide.
 
 Findings are grouped **by rule, not by occurrence**, and each keeps a few
-deduplicated `examples` (`maxExamples`, five by default). That is what keeps a
-report flat in the size of the guide: a document where every programme trips the
-same rule is one finding with a large `count`. Measured, on guides whose every
+`examples` (`maxExamples`, five by default) — the *commonest* kinds it tripped
+on, each with its own `count`, plus `kinds` for how many there were in all. That
+is what keeps a report flat in the size of the guide: a document where every
+programme trips the same rule is one finding with a large `count`. Counting the
+kinds is also what makes the list worth reading, since the first five
+encountered are simply the first five in the document: a guide whose channels
+each carry an extension would name those and never mention the one on every
+programme. Measured, on guides whose every
 programme carries two extensions and half of which name a channel that does not
 exist: 84,000 programmes and 336,000 programmes both validate in an **8 MiB
 heap**, the second in 2.8s against the first's 0.8s.

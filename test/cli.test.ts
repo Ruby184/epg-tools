@@ -1121,6 +1121,32 @@ describe('epg', () => {
       expect(stdout).toContain('1 error, 1 warning');
     });
 
+    it('names the kinds a rule tripped on, the commonest first', async () => {
+      const dir = await tempDir();
+      // One extension on every programme, and a handful of others: the report
+      // has to say which of them the thousands are, not which came first.
+      const many =
+        `<?xml version="1.0" encoding="UTF-8"?><tv>` +
+        `<channel id="one" a="1" b="2" c="3" d="4" e="5" f="6"><display-name>One</display-name></channel>` +
+        Array.from(
+          { length: 20 },
+          (_, at) =>
+            `<programme start="2026090${String((at % 9) + 1)}060000 +0000" channel="one" seriesId="s">` +
+            `<title>T</title></programme>`,
+        ).join('') +
+        `</tv>`;
+      const config = await withGuide(dir, many);
+
+      const { stdout } = await run(['validate', '--config', config]);
+
+      expect(stdout).toContain('warning extensions (26)');
+      // The one on every programme, with its count, above the six that are not.
+      expect(stdout).toContain('attribute seriesId on <programme> (20)');
+      expect(stdout.indexOf('seriesId')).toBeLessThan(stdout.indexOf('attribute a on <channel>'));
+      // And what is not shown is said as kinds, since the occurrences are above.
+      expect(stdout).toContain('… and 2 more kinds');
+    });
+
     it('validates a file named on the command line instead', async () => {
       const dir = await tempDir();
       const config = await withGuide(dir);
