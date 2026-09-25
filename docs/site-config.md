@@ -201,6 +201,31 @@ old list would be inviting it to hand the same one straight back. A site that
 ignores `cached` fetches every time, which is what every site did before this
 existed.
 
+**A list can carry what describes it.** Answer with `{ channels, metadata }`
+instead of the array, and the metadata is stored in the same cache entry and
+handed back as `cached.metadata` — for what is true of the *list* rather than of
+any one channel, and would otherwise cost a request to learn again:
+
+```ts
+async channels({ http, cached }) {
+  const account = await http.get('account').json<Account>();
+
+  return {
+    channels: account.lineups.flatMap(toChannels),
+    // One name and one transport per lineup, where a channel carries only the
+    // id of the lineup it came from.
+    metadata: { lineups: account.lineups.map(({ id, name, transport }) => …) },
+  };
+}
+```
+
+It travels with the list rather than in the site's own `state`, which is a
+separate cache entry: either can be lost, copied or pruned without the other,
+and something that describes *this* list has to travel with it. A
+[`tv_grab_*`'s lineups](./tv-grab.md#channel-lineups) is what reads it — that is
+how a Schedules Direct lineup keeps its name and its type on a run that fetched
+nothing.
+
 ## Requests and parsing
 
 `request` fetches, `parseDay` interprets. They are separate because one
@@ -879,6 +904,20 @@ the number it sits at on each.
 It costs one call for the list of lineups, beside the ones the channel list
 already makes, and nothing at all on a run that keeps its channel list: what the
 account said is stored with the list it describes.
+
+**A channel says its name, its callsign and its number**, in that order, as the
+reference grabber writes them and as MythTV and tvheadend read them — the number
+again as `<lcn>`, which says outright which of the three it is. The number is
+whichever field the lineup gives: the one it shows, the `2.1` an American aerial
+lineup already spells out, or the ATSC halves, the broadcast channel, the
+frequency.
+
+**A credit keeps the word the service used for it** where the DTD has none:
+`Guest Star`, `Voice`, `Self` and `Judge` all have to be an `<actor>`, and
+`Writer (Screenplay)` a `<writer>`, so each carries `credit="…"` beside the name
+— `credit` and not `role`, since `<actor role="…">` is already the part they
+play. Only where it says something the element does not: a `Host` is simply a
+`<presenter>`.
 
 **A lineup is downloaded only when it has moved.** `/status` carries each
 lineup's `modified` stamp and the account check reads it anyway, so a run whose
