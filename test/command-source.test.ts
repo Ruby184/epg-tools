@@ -1,0 +1,389 @@
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
+import type { CacheStore } from '../src/cache/main.js';
+import { grab } from '../src/grabber/main.js';
+import { defineCommandSite, runCommand } from '../src/grabber/command-source.js';
+import { resolveChannels } from '../src/grabber/channels.js';
+import { cutShort, documentFor, startControl, type Control } from './fixtures/control.js';
+import { collect } from './reporting.js';
+
+/** The stand-in grabber: a document on stdout, and a flag for every way it can go wrong. */
+const GRABBER = fileURLToPath(new URL('./fixtures/fake-grabber.mjs', import.meta.url));
+
+/**
+ * Today, because that is what the program writes about — `--offset 0` is its own
+ * today, so a window written into the test would stop matching tomorrow.
+ */
+const TODAY = new Date().toISOString().slice(0, 10);
+const NOW = new Date(`${TODAY}T09:00:00.000Z`);
+/** The day after, which the fixture also covers. */
+const TOMORROW = new Date(Date.parse(`${TODAY}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+
+const store = (): CacheStore => new CacheManager({ driver: new MemoryCacheDriver() });
+
+function site(options: Record<string, unknown> = {}) {
+  return defineCommandSite({
+    site: 'fake.grabber',
+    command: process.execPath,
+    args: [GRABBER],
+    ...options,
+  });
+}
+
+/** The same, with a test answering each invocation over the control socket. */
+function answered(control: Control, options: Record<string, unknown> = {}) {
+  return site({ env: { FAKE_CONTROL: control.path }, ...options });
+}
+
+/** What one channel-day of the cache holds. */
+const cached = (cache: CacheStore, channelId: string, day = TODAY) =>
+  cache.read({ site: 'fake.grabber', channelId, day });
+
+describe('defineCommandSite', () => {
+  it('grabs what a program wrote to stdout', async () => {
+    const cache = store();
+    const control = await startControl();
+    const summary = await grab([answered(control)], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 2,
+    });
+
+    await control.close();
+
+    expect(summary.failed).toBe(0);
+    expect(await cached(cache, 'one.example')).toHaveLength(1);
+    expect(await cached(cache, 'two.example')).toHaveLength(1);
+    // The day after, from the same run: one program, the whole window.
+    expect(await cached(cache, 'one.example', TOMORROW)).toHaveLength(1);
+  });
+
+  it('fails the channel-days a dying program never reached', async () => {
+    const cache = store();
+    const report = collect();
+    const control = await startControl();
+
+    // Two channel-days written, then half an element, then a bad exit — which
+    // is what a Perl grabber dying part way through leaves behind.
+    control.answer((invocation) => ({ write: cutShort(documentFor(invocation)), exit: 255 }));
+
+    const summary = await grab([answered(control)], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 2,
+      reporter: report.reporter,
+    });
+
+    // The whole point of reading the exit code. A child's stdout ends *cleanly*
+    // when the process dies, so nothing in the bytes says the document stopped
+    // half way — and a pass that ended quietly would have every channel-day it
+    // never reached cached as "nothing on" instead of failed.
+    expect(summary.failed).toBe(2);
+    expect(report.failures.map((one) => (one.error as Error).message).join(' ')).toMatch(
+      /exited 255 — its output cannot be trusted/,
+    );
+    expect(report.of('stream:gaps')).toHaveLength(0);
+    // What it did write is kept: those two channel-days are as true as they
+    // would have been had the program gone on to finish.
+    expect(await cached(cache, 'one.example')).toHaveLength(1);
+    expect(await cached(cache, 'one.example', TOMORROW)).toBeUndefined();
+  });
+
+  it('notices the truncation in the document too, which is worth saying', async () => {
+    const report = collect();
+    const control = await startControl();
+
+    control.answer((invocation) => ({ write: cutShort(documentFor(invocation)), exit: 255 }));
+
+    await grab([answered(control)], {
+      cache: store(),
+      now: NOW,
+      startDay: TODAY,
+      days: 2,
+      reporter: report.reporter,
+    });
+
+    // The parser says what it saw; the exit code says what it means. Neither is
+    // enough on its own — a document can be short without being cut off.
+    expect(report.messages.some((line) => line.includes('truncated-input'))).toBe(true);
+  });
+
+  it('says what the program complained about, as it complains and afterwards', async () => {
+    const cache = store();
+    const report = collect();
+    const control = await startControl();
+
+    control.answer((invocation) => ({
+      write: documentFor(invocation),
+      stderr: 'fetching listings\nsomething looks odd on day 3',
+      exit: 3,
+    }));
+
+    await grab([answered(control)], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+      reporter: report.reporter,
+    });
+
+    // Every line as it arrives, which is the only progress a grabber gives.
+    expect(report.messages.some((line) => line.includes('fetching listings'))).toBe(true);
+    // And the tail of it on the failure, which is what makes the exit readable.
+    expect(report.failures.map((one) => (one.error as Error).message).join(' ')).toMatch(
+      /exited 3 .*It said: .*something looks odd on day 3/s,
+    );
+  });
+
+  it('keeps a talkative program from drowning the run', async () => {
+    const report = collect();
+    const control = await startControl();
+
+    control.answer((invocation) => ({
+      write: documentFor(invocation),
+      // A grabber not told to be quiet writes a line per channel, and a lineup
+      // is hundreds of them.
+      stderr: Array.from({ length: 120 }, (_, at) => `doing channel ${String(at)}`).join('\n'),
+    }));
+
+    await grab([answered(control)], {
+      cache: store(),
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+      reporter: report.reporter,
+    });
+    await control.close();
+
+    const lines = report.messages.filter((line) => line.includes('doing channel'));
+
+    // The first fifty of each run say what is happening; past that the point has
+    // been made. Two runs here — the channel list, and then the grab.
+    expect(control.invocations).toHaveLength(2);
+    expect(lines).toHaveLength(50 * control.invocations.length);
+    expect(report.messages.some((line) => line.includes('more to say on stderr'))).toBe(true);
+  });
+
+  it('says a command is not there, rather than that its output is not a document', async () => {
+    const report = collect();
+
+    await grab([site({ command: join(tmpdir(), 'no-such-grabber-here'), args: [] })], {
+      cache: store(),
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+      reporter: report.reporter,
+    });
+
+    // The likeliest thing to go wrong with a site like this, and a program that
+    // was never there writes nothing — so without this the failure reported is
+    // whatever the reader makes of no bytes at all.
+    // It falls over on the channel list, before there is a channel-day to fail.
+    expect(report.of('site:failed')).toHaveLength(1);
+    expect(report.messages.join(' ')).toMatch(
+      /could not be run: spawn .*no-such-grabber-here ENOENT/,
+    );
+  });
+
+  it('refuses a site with no command to run', () => {
+    // `spawn('')` throws from inside Node, which would reach a run as something
+    // other than this site's failure.
+    expect(() => runCommand({ command: '', args: [] })).toThrow(/needs a command to run/);
+  });
+
+  it('accepts an exit code the config says is fine', async () => {
+    const cache = store();
+    const control = await startControl();
+
+    control.answer((invocation) => ({ write: documentFor(invocation), exit: 1 }));
+
+    const summary = await grab([answered(control, { okExitCodes: [1] })], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+    });
+
+    expect(summary.failed).toBe(0);
+    expect(await cached(cache, 'one.example')).toHaveLength(1);
+  });
+
+  it('says so when there is no such program, rather than failing obscurely', async () => {
+    const report = collect();
+
+    await grab([site({ command: 'definitely-not-a-program-3f9a', args: [] })], {
+      cache: store(),
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+      reporter: report.reporter,
+    });
+
+    expect(report.failures.map((one) => (one.error as Error).message).join(' ')).toMatch(
+      /could not be run/,
+    );
+  });
+
+  it('tells the program about the window, in the program`s own words', async () => {
+    const control = await startControl();
+    const asked = (window: {
+      days: readonly string[];
+      startDay: string;
+      span: number;
+      offset: number;
+    }) => [
+      GRABBER,
+      '--days',
+      String(window.span),
+      '--offset',
+      String(window.offset),
+      '--from',
+      window.startDay,
+    ];
+    // Today, so the offset a real run computes is 0 — from this machine's
+    // clock, which is what a program means by today.
+    const today = new Date().toISOString().slice(0, 10);
+
+    await resolveChannels(site({ args: asked, env: { FAKE_CONTROL: control.path } }), {});
+    await control.close();
+
+    // The program's own arguments, which is what it reports: the path to it is
+    // node's business rather than the grabber's.
+    expect(control.invocations[0]?.argv).toEqual(['--days', '1', '--offset', '0', '--from', today]);
+  });
+
+  it('asks for the channel list on its own, where the program has a cheaper way', async () => {
+    const channels = await resolveChannels(
+      site({ channelsArgs: [GRABBER, '--list-channels'] }),
+      {},
+    );
+
+    expect(channels.map((channel) => channel.xmltvId)).toEqual(['one.example', 'two.example']);
+    // Kept whole, so what the document said about a channel is what the guide
+    // says — the same as a published guide read over HTTP.
+    expect(channels[0]?.data).toMatchObject({ id: 'one.example' });
+  });
+
+  it('reads a document the program wrote compressed', async () => {
+    const cache = store();
+
+    // The reader sniffs a pipe as it sniffs a response body, which is what the
+    // document module being about documents rather than about HTTP bought.
+    const summary = await grab([site({ args: [GRABBER, '--gzip'] })], {
+      cache,
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+    });
+
+    expect(summary.failed).toBe(0);
+    expect(await cached(cache, 'one.example')).toHaveLength(1);
+  });
+
+  it('says the whole command line, since that is the question it asked', async () => {
+    const report = collect();
+
+    await grab([site({ args: [GRABBER, '--quiet'] })], {
+      cache: store(),
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+      reporter: report.reporter,
+    });
+
+    // `epg try` and a verbose run instrument the site's HTTP client, and a
+    // program makes no request to instrument — so this is the only place the
+    // arguments appear.
+    expect(report.messages.some((line) => line.includes(`running ${process.execPath}`))).toBe(true);
+    expect(report.messages.some((line) => line.includes('--quiet'))).toBe(true);
+  });
+
+  it('stops the program when the pass is let go of part way', async () => {
+    const tally = join(await mkdtemp(join(tmpdir(), 'epg-command-')), 'signals');
+    const config = site({
+      args: [GRABBER, '--trap', '--dribble'],
+      env: { FAKE_TALLY: tally },
+    });
+    const pass = config.stream({
+      // Both channels, because a channel-day is handed over when a *wanted*
+      // channel's programme follows it: an unwanted one deliberately takes no
+      // part in deciding whether the document is grouped, so wanting only the
+      // first would wait for the end of a document this program never ends.
+      channelDays: [
+        { channel: { xmltvId: 'one.example', siteId: 'one.example' }, day: TODAY },
+        { channel: { xmltvId: 'two.example', siteId: 'two.example' }, day: TODAY },
+      ],
+      days: [TODAY],
+      state: new Map(),
+      log: () => undefined,
+      warn: () => undefined,
+      // No queue, since this is the only thing happening — the same shape
+      // `epg try` hands a pass.
+      paced: (task: (options: { signal?: AbortSignal }) => unknown) => task({}),
+    } as never) as AsyncGenerator<unknown>;
+
+    // One channel-day, then let go of it — which is what a consumer that stops
+    // reading does, and leaves this suspended at a `yield` rather than thrown
+    // out of.
+    await pass.next();
+    await pass.return(undefined);
+
+    // A `catch` would not have covered that, and the program would have been
+    // left writing into a pipe nobody reads.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(await readFile(tally, 'utf8')).toContain('SIGTERM');
+  });
+
+  it('gives up on a program that never finishes', async () => {
+    const report = collect();
+    const control = await startControl();
+
+    control.answer(() => ({ hang: true }));
+
+    await grab([answered(control, { timeoutMs: 150 })], {
+      cache: store(),
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+      reporter: report.reporter,
+    });
+
+    expect(report.failures.map((one) => (one.error as Error).message).join(' ')).toMatch(
+      /was stopped: it was still running after 150ms/,
+    );
+  });
+
+  it('stops the program when the run is called off, rather than hanging on it', async () => {
+    const stop = new AbortController();
+    const report = collect();
+    const control = await startControl();
+
+    control.answer(() => ({ hang: true }));
+
+    const running = grab([answered(control)], {
+      cache: store(),
+      now: NOW,
+      startDay: TODAY,
+      days: 1,
+      signal: stop.signal,
+      reporter: report.reporter,
+    });
+
+    // Long enough for the program to be up, short enough to be a test.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    stop.abort();
+
+    // It comes back at all, which is the assertion: a program that ignores the
+    // abort would hold the run open until the test timed out.
+    await running.catch(() => undefined);
+    expect(report.failures.map((one) => (one.error as Error).message).join(' ')).toMatch(
+      /called off|abort/i,
+    );
+  });
+});

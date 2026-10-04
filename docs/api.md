@@ -349,11 +349,11 @@ names live only on a subpath (marked below).
 | Runners | `build`, `runGrab`, `runMerge`, `guideStream`, `createCacheStore` |
 | Days | `toDayString`, `dayToDate`, `addDays`, `diffDays`, `dayRange` |
 | Options parsing | `parseOptions`, `OptionError` |
-| XMLTV | `escapeXml`, `serializeChannel`, `serializeProgramme`, `writeXmltvStream`, `writeXmltvToFile`, `parseXmltvStream`, `parseXmltvFile`, every [date helper](./xmltv.md#dates) and the [zone helpers](./xmltv.md#named-zones) |
+| XMLTV | `escapeXml`, `escapeXmlText`, `escapeXmlAttribute`, `serializeChannel`, `serializeProgramme`, `writeXmltvStream`, `writeXmltvToFile`, `parseXmltvStream`, `parseXmltvFile`, every [date helper](./xmltv.md#dates) and the [zone helpers](./xmltv.md#named-zones) |
 | M3U | `parseM3uStream`, `parseM3uFile`, `parseM3uString`, `serializeM3uEntry`, `serializeM3uHeader`, `writeM3uStream`, `writeM3uToFile`, `M3uParseStream`, `M3uSerializeStream` |
 | Channels | `parseChannelsXml`, `serializeChannelsXml`, `serializeChannelsXmlEntry`, `matchChannels`, `timeshiftOf`, `timeshiftName` |
 | Cache | `CacheManager`, `CACHE_SCHEMA`, `CacheDriverBase`, `FsCacheDriver`, `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`, `MemoryCacheDriver`, `NoCacheDriver`, `isStale`, `DEFAULT_STALENESS` |
-| Grabber | `grab`, `defineSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `defineXtreamSite`, `defineSchedulesDirectSite`, `schedulesDirectAccount`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`, `xtreamChannelExtras`, `xtreamProgrammeExtras`, `schedulesDirectChannelExtras`, `schedulesDirectProgrammeExtras`, `channelElement`, `siteHttp`, `sitePacing`, `retryAfterMs` |
+| Grabber | `grab`, `defineSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `defineXtreamSite`, `defineSchedulesDirectSite`, `schedulesDirectAccount`, `defineCommandSite`, `defineTvGrabCommandSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`, `xtreamChannelExtras`, `xtreamProgrammeExtras`, `schedulesDirectChannelExtras`, `schedulesDirectProgrammeExtras`, `channelElement`, `siteHttp`, `sitePacing`, `retryAfterMs` |
 | Selection | `channelSelection`, `unmatched` — what `channels` means once `derived` is taken into account, and what it asked for that nothing produced |
 | Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `backfillInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
 
@@ -371,7 +371,7 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 - **Dates** — `parseXmltvDate`, `formatXmltvDate`, `xmltvDate`, `getXmltvOffset`, `setXmltvOffset`, `getXmltvPrecision`, `setXmltvPrecision`, `XMLTV_OFFSET`, `XMLTV_PRECISION`, `XmltvDateError`
 - **Zones** — `zonedXmltvDate`, `xmltvZone`, `setXmltvZone`, `xmltvZoneOffset` — see [named zones](./xmltv.md#named-zones)
 - **Validate** — `validateXmltv` — see [validating a guide](./configuration.md#validating-a-guide)
-- **Other** — `escapeXml`
+- **Other** — `escapeXml` and the two named forms it takes its rule from, `escapeXmlText` and `escapeXmlAttribute` — text escapes `&`, `<` and `>`, an attribute those and `"`; `escapeXml(value, quotes)` says which quotes would end the value where it is going
 
 `*` this subpath only — not re-exported from the root.
 
@@ -618,7 +618,9 @@ grabbed again.
 ### `epg-tools/grabber`
 
 `grab`, `defineSiteConfig`, `defineStreamSiteConfig`, `defineXmltvSite`,
-`defineM3uSite`, `defineXtreamSite`, `defineSchedulesDirectSite`,
+`defineM3uSite`, `defineXtreamSite`, `defineCommandSite`,
+`defineTvGrabCommandSite`, `runCommand`, `splitXmltvDocument`, `streamBytes`,
+`defineSchedulesDirectSite`,
 `schedulesDirectAccount`, `resolveChannels`, `resolveSites`,
 `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`,
 `xtreamChannelExtras`, `xtreamProgrammeExtras`, `schedulesDirectChannelExtras`,

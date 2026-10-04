@@ -20,7 +20,17 @@ import {
   parseDdProgidEpisodeNum,
 } from '../../xmltv/episode-num.js';
 import type { GrabberChannel } from '../types.js';
-import type { WireAiring, WireLogo, WirePerson, WireProgram, WireStation } from './wire.js';
+import type {
+  WireAiring,
+  WireLineup,
+  WireLogo,
+  WirePerson,
+  WireProgram,
+  WireStation,
+} from './wire.js';
+
+/** One entry of a lineup's map — where a station sits on it. */
+type WireLineupEntry = NonNullable<WireLineup['map']>[number];
 
 /**
  * What `tv_grab_zz_sdjson` builds a channel id from, and the two others it
@@ -66,6 +76,19 @@ export interface SchedulesDirectStation {
   state?: string;
   /** The lineup it came from — `GBR-1000014-DEFAULT`, and so a British guide. */
   lineup?: string;
+  /**
+   * Every lineup it sits on, and the number it sits at on each — where that is
+   * more than one.
+   *
+   * A station carried by two of an account's lineups is **one channel**: the
+   * cache is keyed by `(site, channel, day)`, so a second would append to the
+   * first and every programme would appear twice. But it really is on both
+   * platforms, at a number of its own on each — the local network on cable 8
+   * and on air 8.1 — and that is what a lineup document has to say. Absent for
+   * a station on one lineup, which is the whole of the usual account: then
+   * {@link lineup} and {@link channel} are the placement.
+   */
+  on?: { lineup: string; channel?: string }[];
   isRadioStation?: boolean;
   isCommercialFree?: boolean;
 }
@@ -125,6 +148,15 @@ export interface SchedulesDirectProgramme {
   genres: string[];
   showType?: string;
   entityType?: string;
+  /**
+   * What kind of thing it is, in the one word a consumer looks for.
+   *
+   * `movie`, `series`, `sports`, `radio` or `tvshow`, written as a category
+   * beside the genres — which is what the reference grabber does, with the
+   * comment that MythTV specifically looks for those words. Worked out from
+   * `entityType` and, for a station that carries sound only, from the station.
+   */
+  kind?: 'movie' | 'series' | 'sports' | 'radio' | 'tvshow';
   /** Where it was made, as ISO-3166 three-letter codes. */
   countries: string[];
   /** Its own page, and the episode page of whichever vocabulary gave one. */
@@ -198,6 +230,46 @@ export function channelIdOf(
 }
 
 /** A station and its channel number, as the grabber holds one. */
+/**
+ * The number a viewer sees, out of whichever field this lineup says it in.
+ *
+ * What the lineup calls it first — `virtualChannel` where it gives one whole,
+ * then `channel`, which on an American aerial lineup is already the `2.1` a
+ * viewer tunes to (checked against one) — and then the pieces, for a lineup
+ * that gives no number of its own: the ATSC major and minor, the broadcast
+ * channel, the frequency.
+ *
+ * Kept as the service wrote it, leading zeros and all: the maintained reference
+ * grabber turns `003` into `3` and the older one does not, so there is no one
+ * thing to agree with, and what the lineup says is the answer this package has
+ * to the same question everywhere else.
+ */
+export function channelNumberOf(entry: WireLineupEntry | undefined): string | undefined {
+  if (entry === undefined) {
+    return undefined;
+  }
+
+  if (entry.virtualChannel !== undefined && entry.virtualChannel !== '') {
+    return entry.virtualChannel;
+  }
+
+  if (entry.channel !== undefined && entry.channel !== '') {
+    return entry.channel;
+  }
+
+  if (entry.atscMajor !== undefined && entry.atscMinor !== undefined) {
+    // A dot, which is what the maintained grabber writes and what the service
+    // itself puts in `channel`. The older one writes `2_1`.
+    return `${String(entry.atscMajor)}.${String(entry.atscMinor)}`;
+  }
+
+  if (entry.uhfVhf !== undefined) {
+    return String(entry.uhfVhf);
+  }
+
+  return entry.frequencyHz === undefined ? undefined : String(entry.frequencyHz);
+}
+
 export function schedulesDirectStation(
   wire: WireStation,
   channel: string | undefined,
@@ -276,6 +348,38 @@ export function schedulesDirectChannelExtras(
   element: ChannelBuilder,
   station: SchedulesDirectStation,
 ): void {
+  // The callsign and the number, after the name the default element wrote.
+  //
+  // In that order because that is the order the reference grabber writes them
+  // in, with the comment that MythTV assumes the first three display names are
+  // the name, the callsign and the channel number — and because a consumer
+  // matching a guide to its tuner matches on these: tvheadend looks for the
+  // number and the callsign as well as the name. No language on either: a
+  // callsign is not a word, and neither is `8.1`.
+  //
+  // Written even where it says the same as the name, since what is read here is
+  // the *position*: skipped, the number would be read as the callsign.
+  if (station.callsign !== undefined) {
+    // `''` rather than nothing, which would fall back to the station's own
+    // language: a callsign is not a word in it, and neither is `8.1`.
+    element.displayName(station.callsign, '');
+  }
+
+  if (station.channel !== undefined) {
+    element.displayName(station.channel, '');
+    // And once more as `<lcn>`, which says *this* is the number rather than
+    // leaving it to be picked out of the display names. The DTD has no element
+    // for a channel number, so it is an extension — the one this package's own
+    // documentation points at, and the spelling other guides use.
+    //
+    // The display name above is what the consumers checked actually read:
+    // tvheadend takes the number off a numeric `<display-name>` (its
+    // `dn_chnum` setting), and neither Kodi's IPTV Simple nor Jellyfin knows
+    // `lcn` at all. So this is the unambiguous version for whatever does, not
+    // a replacement for saying it where they look.
+    element.extra({ name: 'lcn', value: station.channel });
+  }
+
   if (station.url !== undefined) {
     // A DTD element rather than an extension: `<channel>` has had `<url>` all
     // along, and a fifth of stations give one.
@@ -497,6 +601,41 @@ function subtitlesOf(airing: WireAiring): SchedulesDirectProgramme['subtitles'] 
  * programme the service refused to describe (a `6000`) takes its airing with it
  * rather than becoming a titleless entry.
  */
+/** A duration in seconds, as the biggest unit it divides into exactly. */
+function largestUnit(seconds: number): [number, 'seconds' | 'minutes' | 'hours'] {
+  if (seconds % 3600 === 0) {
+    return [seconds / 3600, 'hours'];
+  }
+
+  if (seconds % 60 === 0) {
+    return [seconds / 60, 'minutes'];
+  }
+
+  return [seconds, 'seconds'];
+}
+
+/** See {@link SchedulesDirectProgramme.kind} — the reference grabber's own rule. */
+function kindOf(
+  entityType: string | undefined,
+  station: SchedulesDirectStation | undefined,
+): NonNullable<SchedulesDirectProgramme['kind']> {
+  const said = entityType?.toLowerCase() ?? '';
+
+  if (said.includes('movie')) {
+    return 'movie';
+  }
+
+  if (said.includes('episode')) {
+    return 'series';
+  }
+
+  if (said.includes('sports')) {
+    return 'sports';
+  }
+
+  return station?.isRadioStation === true ? 'radio' : 'tvshow';
+}
+
 export function schedulesDirectProgramme(
   airing: WireAiring,
   program: WireProgram | undefined,
@@ -586,6 +725,7 @@ export function schedulesDirectProgramme(
     genres: program?.genres?.filter((genre) => genre !== '') ?? [],
     ...(program?.showType === undefined ? {} : { showType: program.showType }),
     ...(program?.entityType === undefined ? {} : { entityType: program.entityType }),
+    kind: kindOf(program?.entityType, station),
     cast: people(program?.cast),
     crew: people(program?.crew),
     ratings: ratingsOf([...(program?.contentRating ?? []), ...(airing.ratings ?? [])]),
@@ -686,6 +826,9 @@ const CAST: Record<string, CreditElement> = {
   host: 'presenter',
   narrator: 'commentator',
   guest: 'guest',
+  // Somebody taking part rather than playing a part — the reference grabber
+  // reads it the same way, and `<actor>` would say they acted.
+  contestant: 'guest',
 };
 
 /** The quality a `videoProperties` entry names, in the DTD's spelling. */
@@ -695,6 +838,64 @@ const QUALITY: Record<string, string> = {
   uhdtv: 'UHDTV',
   '3d': '3D',
 };
+
+/**
+ * Which element a crew role belongs on, by name and then by shape.
+ *
+ * The service names dozens of roles and keeps inventing them — a real fortnight
+ * turned up `Writer (Screenplay)`, `Writer (Comic Book)`, `Line Producer`,
+ * `Co-Executive Producer` and `Second Assistant Director`, none of them in the
+ * table above and every one of them plainly a writer, a producer or a director.
+ * So a role that is not named there is read for its shape.
+ *
+ * Narrowly, and by suffix, because the obvious rule is wrong: the reference
+ * grabber matches `/director/i` and so files an `Art Director`, a `Casting
+ * Director` and a `Director of Photography` as the *director* of the
+ * programme — three different crafts and none of them that one. Those stay
+ * `<credit role="…">`, which loses nobody.
+ */
+function named(role: string | undefined): boolean {
+  return CREW[role?.toLowerCase() ?? ''] !== undefined;
+}
+
+function crewElement(role: string | undefined): CreditElement | undefined {
+  const said = role?.toLowerCase() ?? '';
+  const named = CREW[said];
+
+  if (named !== undefined) {
+    return named;
+  }
+
+  if (said.startsWith('writer (')) {
+    return 'writer';
+  }
+
+  if (said.endsWith(' producer')) {
+    return 'producer';
+  }
+
+  return said.endsWith('assistant director') ? 'director' : undefined;
+}
+
+/**
+ * What the service called this credit, where that says more than the element.
+ *
+ * `Writer (Screenplay)` on a `<writer>`, `Guest Star` and `Voice` and `Judge` on
+ * an `<actor>`, `Contestant` on a `<guest>`: the DTD has one element for a
+ * dozen of the service's roles, and the specific one is worth keeping for a
+ * consumer that cares — an animation credit that says `Voice`, a panel show
+ * whose people are judges rather than actors. `credit`, not `role`, because
+ * `<actor role="…">` is already the part they play.
+ *
+ * Nothing where the table above already names the role, which is most of them:
+ * it says a `Host` is a `<presenter>` and a `Narrator` a `<commentator>`, so
+ * repeating the word on every one of a day's 4,000 presenters is noise. What is
+ * left is what the table did not name — a role read by its shape, or a cast
+ * role that fell through to `<actor>`.
+ */
+function saidRole(role: string | undefined, named: boolean): Record<string, string> | undefined {
+  return named || role === undefined || role === '' ? undefined : { credit: role };
+}
 
 /** What an `audioProperties` entry means for `<audio><stereo>`. */
 const STEREO: Record<string, string> = {
@@ -730,9 +931,12 @@ export function buildProgramme(
   }
 
   if (programme.length !== undefined) {
-    // Seconds, as the service counts them: converting to minutes would round
-    // away the difference between a 90-minute film and a 94-minute one.
-    element.length(programme.length, 'seconds');
+    // The largest unit it divides into exactly, which is what every XMLTV
+    // grabber writes: the rule is `XMLTV.pm`'s own writer, hours for a whole
+    // number of hours, then minutes, then the seconds the service counts in.
+    // Nothing is rounded — a 94-minute film is 94 minutes, and one of 94 and a
+    // half stays 5,670 seconds.
+    element.length(...largestUnit(programme.length));
   }
 
   if (programme.episodeTitle !== undefined) {
@@ -770,12 +974,28 @@ export function buildProgramme(
     element.episodeNum('dd_progid', formatDdProgidEpisodeNum(ddProgid));
   }
 
+  // Once each: a genre and a `showType` are often the same word — `Miniseries`
+  // on both — and the same category twice is the same category twice.
+  const written = new Set<string>();
+  const category = (value: string) => {
+    if (value !== '' && !written.has(value)) {
+      written.add(value);
+      element.category(value, 'en');
+    }
+  };
+
   for (const genre of programme.genres) {
-    element.category(genre, 'en');
+    category(genre);
   }
 
   if (programme.showType !== undefined) {
-    element.category(programme.showType, 'en');
+    category(programme.showType);
+  }
+
+  if (programme.kind !== undefined) {
+    // What it *is*, in the word the reference grabber writes for it — which is
+    // what a consumer that sorts films from series reads, MythTV by name.
+    category(programme.kind);
   }
 
   for (const keyword of programme.keywords) {
@@ -786,21 +1006,27 @@ export function buildProgramme(
   }
 
   for (const person of programme.cast) {
-    const method = CAST[person.role?.toLowerCase() ?? ''];
+    const said = person.role?.toLowerCase() ?? '';
+    const method = CAST[said];
 
     if (method === undefined) {
-      element.actor(person.name, {
-        ...(person.characterName === undefined ? {} : { role: person.characterName }),
-        // A guest star is an actor who is also a guest, and the DTD can say both.
-        ...(person.role?.toLowerCase().includes('guest') === true ? { guest: true } : {}),
-      });
+      element.actor(
+        person.name,
+        {
+          ...(person.characterName === undefined ? {} : { role: person.characterName }),
+          // A guest star is an actor who is also a guest, and the DTD can say both.
+          ...(person.role?.toLowerCase().includes('guest') === true ? { guest: true } : {}),
+        },
+        // `Actor` on an `<actor>` says nothing; `Voice`, `Self` and `Judge` do.
+        saidRole(person.role, said === 'actor'),
+      );
     } else {
-      element[method](person.name);
+      element[method](person.name, {}, saidRole(person.role, true));
     }
   }
 
   for (const person of programme.crew) {
-    const method = CREW[person.role?.toLowerCase() ?? ''];
+    const method = crewElement(person.role);
 
     if (method === undefined) {
       // A role the DTD has no element for — the service names dozens — kept as
@@ -812,7 +1038,9 @@ export function buildProgramme(
         value: person.name,
       });
     } else {
-      element[method](person.name);
+      // Named in the table, or read by its shape: `Writer (Screenplay)` is
+      // worth keeping beside the `<writer>` it became, `Writer` is not.
+      element[method](person.name, {}, saidRole(person.role, named(person.role)));
     }
   }
 

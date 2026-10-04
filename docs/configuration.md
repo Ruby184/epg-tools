@@ -790,8 +790,10 @@ It exits **1** when there is an error — or any warning, under `--strict`.
 
 Findings are grouped **by rule, not by occurrence**: a guide where every
 programme carries an extension is one line with a count, not a hundred thousand
-lines. The names under each are examples, deduplicated and capped, so a report
-stays the same size whatever the guide's — and so does the memory reading it: a
+lines. The names under each are the kinds it tripped on, each with its own count
+and the commonest first — `attribute programId on <programme> (2,278)` — ending
+in `… and 19 more kinds` where there were more than are shown. Capped, so a
+report stays the same size whatever the guide's — and so does the memory reading it: a
 41 MB guide with 336,000 programmes validates in the same 8 MiB heap a 10 MB one
 does.
 

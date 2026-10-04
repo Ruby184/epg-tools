@@ -53,18 +53,55 @@ export interface TryOptions {
   signal?: AbortSignal;
 }
 
-/** One request as it happened, which only the client can say. */
-interface Attempt {
+/**
+ * Where a call's own record is kept while it is in the air.
+ *
+ * On `ky`'s `context`, which is the one thing a call carries through every hook
+ * of its own and shares with nobody: the hook that records a request, the hook
+ * that starts a retry and the hook that times the answer are handed the same
+ * object, whatever the site's own hooks do in between.
+ *
+ * Named rather than a symbol, since `context` is typed as string-keyed and
+ * reaching past that is a cast on every read — and the name is this package's
+ * own, so a site keeping its own context there has nothing to collide with.
+ */
+const CALL = 'epg-tools:try:call';
+
+/**
+ * One call as it happened, however many times it had to be made.
+ *
+ * A retry is the same call to the same url with the same body, so it reads as
+ * another line under the one heading rather than as another request — which is
+ * also how somebody reading this tells "it answered slowly" from "it answered
+ * `503` twice and then answered".
+ */
+interface Call {
   method: string;
   url: string;
+  /** What was sent, where anything was — scrubbed, and cut short. */
+  body?: string;
+  /** One per time it went out, in order. */
+  attempts: Attempt[];
+}
+
+/**
+ * What `ky` hands a hook, of which only the call's own bag matters here.
+ *
+ * `context` as `ky` declares it: "arbitrary contextual data", string-keyed, and
+ * an object on every call whether or not the caller passed one.
+ */
+interface KyContext {
+  context: Record<string, unknown>;
+}
+
+/** One attempt at a call, which only the client can say. */
+interface Attempt {
   status?: number;
   /** When it went out, so the answer can be timed against it. */
   at: number;
   ms: number;
   bytes?: number;
   type?: string;
-  /** What was sent, where anything was — scrubbed, and cut short. */
-  body?: string;
 }
 
 /** The site named, or a message naming the ones there are. */
@@ -159,37 +196,47 @@ async function sent(request: KyRequest): Promise<{ body?: string }> {
   }
 }
 
-function recordingHooks(
-  hooks: KyOptions['hooks'],
-  into: Attempt[],
-): NonNullable<KyOptions['hooks']> {
+function recordingHooks(hooks: KyOptions['hooks'], into: Call[]): NonNullable<KyOptions['hooks']> {
   return {
     ...hooks,
     beforeRequest: [
-      async ({ request }) => {
-        into.push({
+      async ({ request, options }) => {
+        const call: Call = {
           method: request.method,
           url: request.url,
-          at: Date.now(),
-          ms: 0,
           ...(await sent(request)),
-        });
+          attempts: [],
+        };
+
+        into.push(call);
+        rememberCall(options, call);
+        beginAttempt(call);
       },
       ...(hooks?.beforeRequest ?? []),
     ],
+    beforeRetry: [
+      ...(hooks?.beforeRetry ?? []),
+      // `beforeRequest` runs once a *call*, so without this a retried request
+      // is one line covering every attempt of it, timed from the first. `epg
+      // try` is where somebody is looking to find out why a site is slow or
+      // flaky, and three attempts is the answer.
+      ({ options }) => {
+        const call = recordedCall(options);
+
+        if (call !== undefined) {
+          beginAttempt(call);
+        }
+      },
+    ],
     afterResponse: [
       ...(hooks?.afterResponse ?? []),
-      async ({ request, response }) => {
-        // Matched on the record rather than on the request object: `ky` does
-        // not hand this hook the one `beforeRequest` saw — not for a site with
-        // hooks of its own, and not for a plain client either — so a `WeakMap`
-        // keyed on it missed every time and timed every request at 0ms. The
-        // one still waiting for an answer is this one; a retry of the same url
-        // pushed a record of its own.
-        const attempt =
-          into.findLast(
-            (candidate) => candidate.url === request.url && candidate.status === undefined,
-          ) ?? into.findLast((candidate) => candidate.url === request.url);
+      async ({ options, response }) => {
+        // The call this very request belongs to, rather than the last record
+        // whose url looks right: `ky` hands this hook a different `Request`
+        // object from the one `beforeRequest` saw, so a `WeakMap` keyed on it
+        // timed every request at 0ms — and matching on the url instead times
+        // the wrong one as soon as a site asks for the same url twice at once.
+        const attempt = recordedCall(options)?.attempts.at(-1);
 
         if (attempt !== undefined) {
           attempt.ms = Date.now() - attempt.at;
@@ -214,6 +261,20 @@ function recordingHooks(
       },
     ],
   };
+}
+
+/** The call this request belongs to, where one was recorded — see {@link CALL}. */
+const recordedCall = (options: KyContext): Call | undefined =>
+  options.context[CALL] as Call | undefined;
+
+/** Leave it where every hook after this one will find it. */
+const rememberCall = (options: KyContext, call: Call): void => {
+  options.context[CALL] = call;
+};
+
+/** Another attempt at this call, going out now. */
+function beginAttempt(call: Call): void {
+  call.attempts.push({ at: Date.now(), ms: 0 });
 }
 
 function bytes(value: number | undefined): string {
@@ -271,9 +332,9 @@ export async function tryChannelDay(
   // here in the same words — one day of window, since that is what this is.
   const resolved = resolveSite(site, { days: 1 }, day);
 
-  const attempts: Attempt[] = [];
+  const calls: Call[] = [];
   const http: KyInstance = siteHttp(
-    { ...site, ky: { ...site.ky, hooks: recordingHooks(site.ky?.hooks, attempts) } },
+    { ...site, ky: { ...site.ky, hooks: recordingHooks(site.ky?.hooks, calls) } },
     options.signal,
   );
 
@@ -356,26 +417,28 @@ export async function tryChannelDay(
   const programmes = built(parsed);
   const out: string[] = [''];
 
-  for (const attempt of attempts) {
-    const said = [
-      attempt.status === undefined ? 'no response' : String(attempt.status),
-      `${attempt.ms}ms`,
-      bytes(attempt.bytes),
-      attempt.type,
-    ]
-      .filter((part) => part !== undefined && part !== '')
-      .join(', ');
+  for (const call of calls) {
+    out.push(`  ${call.method} ${call.url}`);
 
-    out.push(`  ${attempt.method} ${attempt.url}`);
-
-    if (attempt.body !== undefined) {
-      out.push(`    ↑ ${attempt.body}`);
+    if (call.body !== undefined) {
+      out.push(`    ↑ ${call.body}`);
     }
 
-    out.push(`    → ${said}`);
+    for (const attempt of call.attempts) {
+      const said = [
+        attempt.status === undefined ? 'no response' : String(attempt.status),
+        `${attempt.ms}ms`,
+        bytes(attempt.bytes),
+        attempt.type,
+      ]
+        .filter((part) => part !== undefined && part !== '')
+        .join(', ');
+
+      out.push(`    → ${said}`);
+    }
   }
 
-  if (attempts.length === 0) {
+  if (calls.length === 0) {
     // Which is not a failure: a site may answer from something it already has.
     out.push('  (no request was made)');
   }

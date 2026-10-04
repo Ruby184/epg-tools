@@ -201,6 +201,31 @@ old list would be inviting it to hand the same one straight back. A site that
 ignores `cached` fetches every time, which is what every site did before this
 existed.
 
+**A list can carry what describes it.** Answer with `{ channels, metadata }`
+instead of the array, and the metadata is stored in the same cache entry and
+handed back as `cached.metadata` — for what is true of the *list* rather than of
+any one channel, and would otherwise cost a request to learn again:
+
+```ts
+async channels({ http, cached }) {
+  const account = await http.get('account').json<Account>();
+
+  return {
+    channels: account.lineups.flatMap(toChannels),
+    // One name and one transport per lineup, where a channel carries only the
+    // id of the lineup it came from.
+    metadata: { lineups: account.lineups.map(({ id, name, transport }) => …) },
+  };
+}
+```
+
+It travels with the list rather than in the site's own `state`, which is a
+separate cache entry: either can be lost, copied or pruned without the other,
+and something that describes *this* list has to travel with it. A
+[`tv_grab_*`'s lineups](./tv-grab.md#channel-lineups) is what reads it — that is
+how a Schedules Direct lineup keeps its name and its type on a run that fetched
+nothing.
+
 ## Requests and parsing
 
 `request` fetches, `parseDay` interprets. They are separate because one
@@ -864,6 +889,36 @@ on your behalf. A lineup its headend has **deleted** is skipped with a warning:
 it keeps answering with what it last had, so a guide built from it thins out
 rather than failing.
 
+**The account's lineups are offered as lineups.** A `tv_grab_*` with the
+[`lineups` capability](./tv-grab.md#channel-lineups) lists them one by one, named
+as the reference grabber names them — `Astra FTA (Satellite National)`, `Local
+Broadcast Listings (Antenna 10115)` — so a consumer picks the platform it
+receives rather than "the Schedules Direct site", and two lineups both called
+`Local Broadcast Listings` are told apart by where each is for. The type is the
+reference's mapping too: `Antenna`, `DVB-T`, `DVB-C`, `DVB-S` and `QAM` are
+`DTV`, `Cable` and `Satellite` are the `STB` most people watch them through,
+`IPTV` is `IPTV`, and a transport nobody knows is a plain `List`. A station on
+two lineups — which every account with an aerial and a dish has dozens of — keeps
+the number it sits at on each.
+
+It costs one call for the list of lineups, beside the ones the channel list
+already makes, and nothing at all on a run that keeps its channel list: what the
+account said is stored with the list it describes.
+
+**A channel says its name, its callsign and its number**, in that order, as the
+reference grabber writes them and as MythTV and tvheadend read them — the number
+again as `<lcn>`, which says outright which of the three it is. The number is
+whichever field the lineup gives: the one it shows, the `2.1` an American aerial
+lineup already spells out, or the ATSC halves, the broadcast channel, the
+frequency.
+
+**A credit keeps the word the service used for it** where the DTD has none:
+`Guest Star`, `Voice`, `Self` and `Judge` all have to be an `<actor>`, and
+`Writer (Screenplay)` a `<writer>`, so each carries `credit="…"` beside the name
+— `credit` and not `role`, since `<actor role="…">` is already the part they
+play. Only where it says something the element does not: a `Host` is simply a
+`<presenter>`.
+
 **A lineup is downloaded only when it has moved.** `/status` carries each
 lineup's `modified` stamp and the account check reads it anyway, so a run whose
 lineups are all unchanged keeps the channel list it already had — 223 KiB and a
@@ -953,6 +1008,99 @@ const stations = await account.stations('GBR-1000014-DEFAULT');
 `addLineup` and `removeLineup` are here too, and only here: adding is deliberate,
 by name, and never something a grab does. The answer says how many of the day's
 six changes are left.
+
+### From a program that writes XMLTV
+
+Anything that writes an XMLTV document to stdout is a source: a Python scraper
+you already have, a WebGrab+Plus run, a `curl` through something odd, `cat
+yesterday.xml`, or one of XMLTV's own `tv_grab_*` grabbers.
+
+```ts
+import { defineCommandSite } from 'epg-tools/grabber';
+
+sites: [
+  defineCommandSite({
+    site: 'mine',
+    command: 'python3',
+    // The window, spelled the way this program wants to hear it.
+    args: ({ days, span, startDay }) => ['scrape.py', '--from', startDay, '--for', String(span)],
+    // One cheap run for the channel list, where a program offers one. Without
+    // it the list comes out of the head of a normal run.
+    channelsArgs: ['scrape.py', '--channels'],
+  }),
+],
+```
+
+It is [`defineXmltvSite`](#a-published-guide-as-a-source)'s document reading over
+a child's stdout, so everything that adapter does with a document this does too —
+streaming, splitting by channel-day, `dayZone`, `order`, and sniffing a
+compressed one, which means a program writing a `.xml.gz` works for the same
+reason a server serving one does.
+
+**Nothing is passed for you.** `--days` and `--offset` are a convention that half
+the programs anyone points this at spell differently, and guessing would be a
+silently wrong window. `args` may be a function, and is given `days` (the days
+wanted, **not necessarily contiguous** — a day fresh in the cache is left out),
+`span` (how long a stretch reaches from the first to the last, which is what a
+`--days`-style option means), `startDay`, and `offset` from today.
+
+**The exit code decides whether the document finished.** A child's stdout ends
+*cleanly* when the process dies, and a Perl grabber that fails a fetch part way
+`die`s — XMLTV's own `Get_nice.pm` does — so `end()` never runs and stdout holds
+a truncated, unclosed document that nothing in the bytes marks as such. A
+non-zero exit therefore **fails the channel-days the program never reached**,
+rather than letting them be cached as "nothing on". `okExitCodes: [1]` is for a
+program that reports partial success that way.
+
+Everything it writes to stderr is reported as it arrives, and its last lines
+ride on the failure — so a run without `--quiet` on a chatty program is a noisy
+log. It runs **without a shell**; `shell: true` exists and is worth leaving off,
+since a command line built from anything the config did not write is an
+injection with extra steps. `timeoutMs` and the run's own signal both end it
+with `SIGTERM`, then `SIGKILL`.
+
+#### An XMLTV grabber
+
+`tv_grab_fi`, `tv_grab_uk_freeview` and the handful of others still working
+answer an interface this package also implements — `epg init-grabber` writes a
+`tv_grab_*` for a config of your own — so the arguments can be filled in:
+
+```ts
+import { defineTvGrabCommandSite } from 'epg-tools/grabber';
+
+sites: [
+  defineTvGrabCommandSite({
+    site: 'fi.tv_grab',
+    command: 'tv_grab_fi',
+    configFile: 'fi.conf',
+  }),
+],
+```
+
+That is the whole of it. **It asks the program what it supports** — once, kept in
+the site's own state beside a fingerprint of the command — because the answer
+decides what may be passed: `--days`, `--offset`, `--config-file` and `--quiet`
+are `baseline`, `--cache` is `cache`, and **`--list-channels` is `apiconfig`**. A
+grabber without `apiconfig` has its channel list read out of the head of a normal
+run instead. `capabilities: [...]` says it yourself and skips the asking — save
+for `preferredmethod`, which is a question only the program can answer and so is
+still asked where you name it; `extraArgs` adds anything else it takes.
+
+**`preferredmethod` decides how often it runs.** A grabber answering `allatonce`
+"downloads data in a single chunk and filters out the requested days", so it is
+asked once for the whole stretch; one that does not advertise the capability is
+assumed to cost what it fetches, so a window with a fresh day in the middle is
+two runs of a day each rather than one of three — unless it has no `baseline`
+either, since without `--days` and `--offset` there is no way to ask for one
+stretch rather than another. Each run is then read for its own days alone, so a
+grabber that writes the whole fortnight whatever it was asked for does not have
+the same day written twice. `--description` is asked too,
+and said once a run — which grabber answered is worth a line of a verbose log.
+
+What it does **not** do is configure anything. The `.conf` file is yours to
+write, or the grabber's own `--configure` to write: there are three dialects of
+it among six working grabbers, and nobody has automated that walk in twenty
+years.
 
 ## Sites that answer in one pass
 

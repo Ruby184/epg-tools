@@ -3,7 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { getDefaultHighWaterMark, Readable, Transform, type TransformCallback } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { escapeXml } from './escape.js';
+import { escapeXmlAttribute, escapeXmlText } from './escape.js';
 import { formatXmltvDate } from './date.js';
 import { pick, resolveProfile } from './profile.js';
 import type { DropRef, ProfileRef, ResolvedProfile } from './profile.js';
@@ -275,7 +275,7 @@ function attrs(pairs: [string, AttrValue][]): string {
     // `null` is off the type, but a model built by hand or revived from JSON
     // can carry one, and `String(null)` would write it out as `name="null"`.
     if (value !== undefined && value !== null) {
-      out += ` ${name}="${escapeXml(String(value))}"`;
+      out += ` ${name}="${escapeXmlAttribute(String(value))}"`;
     }
   }
 
@@ -291,7 +291,9 @@ function element(
   text?: string,
 ): string {
   const open = `${pad}<${name}${attrs(attrPairs)}`;
-  return text === undefined ? `${open}/>${f.nl}` : `${open}>${escapeXml(text)}</${name}>${f.nl}`;
+  return text === undefined
+    ? `${open}/>${f.nl}`
+    : `${open}>${escapeXmlText(text)}</${name}>${f.nl}`;
 }
 
 /** Every attribute of an extension element, which is kept whole or not at all. */
@@ -402,7 +404,7 @@ function categoryElements(f: Fmt, pad: string, values: XmltvTextValue[] | undefi
 function extraMarkup(extra: XmltvExtraElement): string {
   const attrString = attrs(pairsOf(extra.attributes));
   const inner =
-    (extra.value !== undefined ? escapeXml(extra.value) : '') +
+    (extra.value !== undefined ? escapeXmlText(extra.value) : '') +
     (extra.children ?? []).map(extraMarkup).join('');
 
   return inner
@@ -502,13 +504,13 @@ function inlineImage(f: Fmt, image: XmltvImage): string {
     ['orient', image.orient],
     ['system', image.system],
     ...extraAttrPairs(f, 'image', image.extraAttributes),
-  ])}>${escapeXml(image.value)}</image>`;
+  ])}>${escapeXmlText(image.value)}</image>`;
 }
 
 function inlineUrl(f: Fmt, url: XmltvUrlValue): string {
   return typeof url === 'string'
-    ? `<url>${escapeXml(url)}</url>`
-    : `<url${attrs([['system', url.system], ...extraAttrPairs(f, 'url', url.extraAttributes)])}>${escapeXml(url.value)}</url>`;
+    ? `<url>${escapeXmlText(url)}</url>`
+    : `<url${attrs([['system', url.system], ...extraAttrPairs(f, 'url', url.extraAttributes)])}>${escapeXmlText(url.value)}</url>`;
 }
 
 const CREDIT_ORDER = [
@@ -584,7 +586,7 @@ function personElement(
     return element(f, pad, role, attrPairs, person.value);
   }
 
-  return `${pad}<${role}${attrs(attrPairs)}>${escapeXml(person.value)}${children}</${role}>${f.nl}`;
+  return `${pad}<${role}${attrs(attrPairs)}>${escapeXmlText(person.value)}${children}</${role}>${f.nl}`;
 }
 
 function creditsElement(f: Fmt, pad: string, credits: XmltvCredits | undefined): string {
@@ -691,7 +693,7 @@ function ratingElements(
   for (const rating of chosen(f, path, ratings)) {
     out += `${pad}<${name}${attrs([['system', rating.system], ...extraAttrPairs(f, name, rating.extraAttributes)])}>${f.nl}`;
     // `<value>` is required by the DTD, so no profile can take it away.
-    out += `${childPad}<value>${escapeXml(rating.value)}</value>${f.nl}`;
+    out += `${childPad}<value>${escapeXmlText(rating.value)}</value>${f.nl}`;
     out += iconElements(f, childPad, iconPath, rating.icon);
     out += extraElements(f, name, childPad, rating.extra);
     out += `${pad}</${name}>${f.nl}`;

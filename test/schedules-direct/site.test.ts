@@ -8,6 +8,7 @@ import {
 } from '../../src/grabber/schedules-direct/main.js';
 import { SiteStateHandle } from '../../src/grabber/state.js';
 import { generateGuide } from '../../src/merge/main.js';
+import { lineupsFromSites } from '../../src/tv-grab/lineups.js';
 import { collect } from '../reporting.js';
 import { sdServer, stopSdServer, type SdServer } from './server.js';
 
@@ -207,6 +208,230 @@ describe('defineSchedulesDirectSite', () => {
 
     expect(source.countOf('token')).toBe(1);
     expect(await (await SiteStateHandle.open(cache, SITE).bag()).get('token')).toBe('token-1');
+  });
+
+  it('writes only the days a batch asked about, when a station is split across batches', async () => {
+    const source = await service();
+    const cache = store();
+    const tomorrow = '2026-09-13';
+
+    for (const [stationID, programID] of [
+      ['101', 'EP000000010009'],
+      ['202', 'EP000000020009'],
+    ] as const) {
+      source.setSchedule(stationID, tomorrow, [
+        { ...airing(programID, 18), airDateTime: `${tomorrow}T18:00:00Z` },
+      ]);
+      source.setProgram(program(programID, `Tomorrow on ${stationID}`));
+    }
+
+    const report = collect();
+    // One station-day a request: each station is split across two batches, and
+    // the days of the second must not be settled while the first is in hand.
+    const summary = await grab([site(source, { days: 2, stationDaysPerRequest: 1 })], {
+      cache,
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    expect(summary.fetched).toBe(4);
+    expect(summary.failed).toBe(0);
+    // Four station-days, each written **once**. A batch that answered for the
+    // whole station would write the days of the batches after it empty first —
+    // appending to them when their own answer arrived, and storing the md5 of
+    // listings nobody had fetched beside them in the meantime. A run that stops
+    // between the two leaves that day empty with a matching md5, which is empty
+    // for as long as the service does not change it.
+    expect(report.of('entry:appended')).toHaveLength(0);
+    expect(
+      report.of('entry:fetched').every((one) => (one as { programmes: number }).programmes > 0),
+    ).toBe(true);
+
+    const xml = await collectGuide(cache, source, 2);
+
+    expect(xml).toContain('Tomorrow on 101');
+    expect(xml).toContain('Tomorrow on 202');
+  });
+
+  it('grabs a configured lineup the headend has deleted, rather than calling it missing', async () => {
+    const source = await service();
+    const report = collect();
+
+    source.answer({
+      status: { account: { messages: [] }, lineups: [{ lineup: LINEUP, isDeleted: true }] },
+    });
+
+    const summary = await grab([site(source)], {
+      cache: store(),
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    // It is on the account and still answers with what it last had, so the
+    // guide thins out rather than stopping — and saying "the account has no
+    // lineup GBR-1000014-DEFAULT" would be telling its owner to add one they
+    // can see on their account.
+    expect(report.of('site:failed')).toHaveLength(0);
+    expect(summary.fetched).toBe(2);
+    expect(report.messages.some((line) => line.includes('deleted at the headend'))).toBe(true);
+  });
+
+  it('refetches when programmeExtras changes, since it is written into the cache', async () => {
+    const source = await service();
+    const cache = store();
+
+    await grab([site(source)], { cache, now: NOW });
+
+    const before = source.countOf('schedules');
+    const summary = await grab([site(source, { programmeExtras: false })], {
+      cache,
+      now: NOW,
+      staleness: { alwaysRefetchDays: 7 },
+    });
+
+    // Without it in the stamp every md5 still matches, and turning the
+    // extensions off is a no-op for as long as the window is.
+    expect(summary.fetched).toBe(2);
+    expect(source.countOf('schedules')).toBe(before + 1);
+    // `programId` is what the default extras put on every programme.
+    expect(await collectGuide(cache, source)).not.toContain('programId=');
+  });
+
+  it('keeps what it has when the state is lost but the cache is not', async () => {
+    const source = await service();
+    const cache = store();
+    const sites = [site(source)];
+
+    await grab(sites, { cache, now: NOW });
+
+    // The cache directory copied without the state file, or a state file lost:
+    // no md5s, and no stamp of what the mapping was.
+    const state = SiteStateHandle.open(cache, SITE);
+    const bag = await state.bag();
+
+    bag.clear();
+    await state.save();
+
+    const summary = await grab(sites, { cache, now: NOW, staleness: { alwaysRefetchDays: 7 } });
+
+    // Nothing says the mapping changed — there is nothing stored to say it —
+    // so the days are validated against what the service last changed them,
+    // which is what having no md5s falls back to. Refetching the fortnight is
+    // what treating a missing stamp as a changed one would cost.
+    expect(summary.fetched).toBe(0);
+    expect(summary.unchanged).toBe(2);
+  });
+
+  it('offers each lineup on the account as a platform of its own', async () => {
+    const shared = {
+      stationID: '101',
+      name: 'BBC One',
+      callsign: 'BBC1',
+      broadcastLanguage: ['en'],
+    };
+    const source = await sdServer({
+      status: {
+        account: { messages: [] },
+        lineups: [
+          { lineup: 'GBR-AERIAL', name: 'Freeview' },
+          { lineup: 'GBR-DISH', name: 'Sky' },
+        ],
+      },
+      // What `GET /lineups` carries and `/status` does not: how each one is
+      // received, and where it is for.
+      onAccount: [
+        { lineup: 'GBR-AERIAL', name: 'Freeview', transport: 'Antenna', location: 'London' },
+        { lineup: 'GBR-DISH', name: 'Sky', transport: 'Satellite', location: 'National' },
+      ],
+      lineups: {
+        'GBR-AERIAL': {
+          map: [
+            { stationID: '101', channel: '001' },
+            { stationID: '202', channel: '003' },
+          ],
+          stations: [shared, { stationID: '202', name: 'ITV', callsign: 'ITV' }],
+        },
+        'GBR-DISH': {
+          map: [
+            { stationID: '101', channel: '101' },
+            { stationID: '303', channel: '110' },
+          ],
+          stations: [shared, { stationID: '303', name: 'Sky One', isRadioStation: false }],
+        },
+      },
+    });
+
+    // With a cache of its own: without one it makes the config's, which for a
+    // config that names no directory is `.epg-cache` in the working directory —
+    // a test reading and writing whatever the last one left there.
+    const lineups = await lineupsFromSites(
+      { sites: [site(source, { lineup: undefined })], days: 1, output: 'guide.xml' },
+      { cache: store() },
+    );
+
+    // One per lineup on the account, not one for the site: somebody subscribed
+    // to each of them, and which to grab is the choice a consumer wants.
+    expect(lineups.map((one) => one.id)).toEqual(['GBR-AERIAL', 'GBR-DISH']);
+    // What a person recognises, in the reference grabber's own format: an
+    // account can hold two lineups both called `Local Broadcast Listings`, and
+    // where each is for is the only thing that tells them apart.
+    expect(lineups.map((one) => one.displayName[0]?.value)).toEqual([
+      'Freeview (Antenna London)',
+      'Sky (Satellite National)',
+    ]);
+
+    const presetOf = (at: number, stationID: string) =>
+      lineups[at]?.entries.find((entry) => entry.station.xmltvId === idOf(stationID))?.preset;
+
+    // The station both carry is one channel in the cache and one entry in each
+    // lineup — at the number it sits at *there*, which is the fact a lineup
+    // document exists to carry.
+    expect(presetOf(0, '101')).toBe('001');
+    expect(presetOf(1, '101')).toBe('101');
+    expect(lineups[0]?.entries.map((one) => one.station.xmltvId)).toEqual([
+      idOf('101'),
+      idOf('202'),
+    ]);
+    expect(lineups[1]?.entries.map((one) => one.station.xmltvId)).toEqual([
+      idOf('101'),
+      idOf('303'),
+    ]);
+    // The mapping the reference grabber makes: an aerial is a raw multiplex,
+    // and a satellite package is the box most people watch it through.
+    expect(lineups[0]?.type).toBe('DTV');
+    expect(lineups[1]?.type).toBe('STB');
+    // Which is also what decides whether the number is written twice: as the
+    // `preset` a guide shows, and as what a box is tuned by.
+    expect(lineups[0]?.entries[0]?.stb).toBeUndefined();
+    expect(lineups[1]?.entries[0]?.stb).toEqual([{ preset: '101' }]);
+    expect(lineups[0]?.entries[0]?.station.shortName).toBe('BBC1');
+  });
+
+  it('still names and types its lineups on a run that fetched nothing', async () => {
+    const source = await sdServer({
+      status: { account: { messages: [] }, lineups: [{ lineup: LINEUP, name: 'Freeview' }] },
+      onAccount: [{ lineup: LINEUP, name: 'Freeview', transport: 'Antenna', location: 'London' }],
+      lineup: {
+        map: [{ stationID: '101', channel: '001' }],
+        stations: [{ stationID: '101', name: 'BBC One', callsign: 'BBC1' }],
+      },
+    });
+    const cache = store();
+    const config = { sites: [site(source)], days: 1, output: 'guide.xml' };
+
+    await lineupsFromSites(config, { cache });
+
+    const before = source.calls.length;
+    const lineups = await lineupsFromSites(config, { cache });
+
+    // Read back out of the cache, with what the account said about the lineup
+    // still beside it: the name and the transport are facts about the platform,
+    // not about any channel, so nothing on the channels could carry them and a
+    // second entry could be lost without this one.
+    expect(source.calls.length).toBe(before);
+    expect(lineups[0]?.displayName[0]?.value).toBe('Freeview (Antenna London)');
+    expect(lineups[0]?.type).toBe('DTV');
+    expect(lineups[0]?.entries[0]?.preset).toBe('001');
   });
 
   it('fails the site, naming what the account does have, when the lineup is not on it', async () => {

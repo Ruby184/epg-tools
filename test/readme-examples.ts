@@ -13,8 +13,10 @@ import {
   build,
   CacheDriverBase,
   defineConfig,
+  defineCommandSite,
   defineSchedulesDirectSite,
   defineSiteConfig,
+  defineTvGrabCommandSite,
   defineStreamSiteConfig,
   defineXmltvSite,
   guideStream,
@@ -312,6 +314,31 @@ export const keptChannels = defineSiteConfig({
 export const fromPublishedGuide = defineConfig({
   sites: [defineXmltvSite({ site: 'published.example', url: 'https://example.test/guide.xml.gz' })],
   output: 'public/epg.xml',
+});
+
+// --- docs/site-config.md: From a program that writes XMLTV ------------------
+export const fromAProgram = defineCommandSite({
+  site: 'mine',
+  command: 'python3',
+  // The window, spelled the way this program wants to hear it.
+  args: ({ days, span, startDay }) => [
+    'scrape.py',
+    '--from',
+    startDay,
+    '--for',
+    String(span),
+    '--wanted',
+    String(days.length),
+  ],
+  // One cheap run for the channel list, where a program offers one.
+  channelsArgs: ['scrape.py', '--channels'],
+});
+
+// --- docs/site-config.md: An XMLTV grabber ----------------------------------
+export const fromAGrabber = defineTvGrabCommandSite({
+  site: 'fi.tv_grab',
+  command: 'tv_grab_fi',
+  configFile: 'fi.conf',
 });
 
 // --- docs/site-config.md: From Schedules Direct -----------------------------

@@ -7,6 +7,8 @@ import { pipeline } from 'node:stream/promises';
 import { describe, expect, it } from 'vitest';
 import {
   escapeXml,
+  escapeXmlAttribute,
+  escapeXmlText,
   formatXmltvDate,
   getXmltvOffset,
   getXmltvPrecision,
@@ -89,6 +91,18 @@ describe('escapeXml', () => {
 
   it('leaves plain text alone', () => {
     expect(escapeXml('Bez zmeny — ľščťžýáí')).toBe('Bez zmeny — ľščťžýáí');
+  });
+
+  it('escapes only what would end the value where it is going', () => {
+    // Text between two tags: a quote is a quote and an apostrophe is an
+    // apostrophe, which is how every other guide writes them.
+    expect(escapeXmlText(`Charlie's "Angels" & <b>`)).toBe(`Charlie's "Angels" &amp; &lt;b&gt;`);
+    // A double-quoted attribute: the double quote would end it, the apostrophe
+    // would not.
+    expect(escapeXmlAttribute(`Charlie's "Angels"`)).toBe(`Charlie's &quot;Angels&quot;`);
+    // Said outright, for a caller writing somewhere this package does not.
+    expect(escapeXml(`Charlie's "Angels"`, "'")).toBe(`Charlie&apos;s "Angels"`);
+    expect(escapeXml(`Charlie's "Angels"`, '')).toBe(`Charlie's "Angels"`);
   });
 });
 

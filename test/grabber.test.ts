@@ -623,9 +623,11 @@ describe('grab', () => {
       // The second run asks the cache instead of the source — and gets the same
       // channels, so it grabs the same channel-days.
       expect(asked).toEqual(['fetched']);
-      expect(cache.state.get('example.com|channels')?.data).toEqual([
-        { xmltvId: 'one', siteId: 'site-one' },
-      ]);
+      // The list, under the one key an entry holds it under — `metadata` beside
+      // it is for a site with something to say about the list itself.
+      expect(cache.state.get('example.com|channels')?.data).toEqual({
+        channels: [{ xmltvId: 'one', siteId: 'site-one' }],
+      });
       expect(cache.stateWrites.filter((key) => key.endsWith('|channels'))).toEqual([
         'example.com|channels',
       ]);
@@ -661,6 +663,28 @@ describe('grab', () => {
 
         expect(seen[0]).toBeUndefined();
         expect(seen[1]).toEqual({ channels: [{ xmltvId: 'one', siteId: 'site-one' }], at: NOW });
+      });
+
+      it('tells a site nothing when the stored list is stamped in the future', async () => {
+        const cache = new MemoryCache();
+        const seen: (ChannelsContext['cached'] | undefined)[] = [];
+        const config = seeing(seen);
+        const state = SiteStateHandle.open(cache, config.site);
+        // A clock that moved, or a cache copied from a machine ahead of this
+        // one — the same list `fresh` already refuses to hand back.
+        const ahead = new Date(NOW.getTime() + 2 * 86_400_000);
+
+        await resolveChannels(config, { state, now: ahead });
+        await state.save();
+        await resolveChannels(config, {
+          state: SiteStateHandle.open(cache, config.site),
+          now: NOW,
+        });
+
+        // Handed it, a site that can tell nothing has changed hands it straight
+        // back — and it is stored again as fetched now, which is how a stale
+        // list outlives the guard that was meant to drop it.
+        expect(seen).toEqual([undefined, undefined]);
       });
 
       it('tells a site nothing when the run was told to refresh', async () => {
@@ -757,10 +781,12 @@ describe('grab', () => {
 
         // What was stored is the site's whole list, so the next run — selecting
         // something else, or nothing — is not quietly short of a channel.
-        expect(cache.state.get('example.com|channels')?.data).toEqual([
-          { xmltvId: 'one', siteId: 'site-one' },
-          { xmltvId: 'two', siteId: 'site-two' },
-        ]);
+        expect(cache.state.get('example.com|channels')?.data).toEqual({
+          channels: [
+            { xmltvId: 'one', siteId: 'site-one' },
+            { xmltvId: 'two', siteId: 'site-two' },
+          ],
+        });
         expect(await resolveChannels(config, { state, now: NOW })).toHaveLength(2);
         expect(asked).toEqual(['fetched']);
       });
@@ -813,13 +839,28 @@ describe('grab', () => {
       const asked: string[] = [];
       const config = fetchingSite(asked, { cacheChannels: true });
 
-      cache.seedState('example.com', 'channels', [{ nothing: 'like a channel' }]);
+      cache.seedState('example.com', 'channels', { channels: [{ nothing: 'like a channel' }] });
       await grab([config], { cache, now: NOW });
 
       expect(asked).toEqual(['fetched']);
-      expect(cache.state.get('example.com|channels')?.data).toEqual([
-        { xmltvId: 'one', siteId: 'site-one' },
-      ]);
+      expect(cache.state.get('example.com|channels')?.data).toEqual({
+        channels: [{ xmltvId: 'one', siteId: 'site-one' }],
+      });
+    });
+
+    it('is fetched again when it was stored as a bare list, before there was metadata', async () => {
+      const cache = new MemoryCache();
+      const asked: string[] = [];
+      const config = fetchingSite(asked, { cacheChannels: true });
+
+      // What an older version of this package wrote. One entry holds the list
+      // and what the site said about it, under one key each — so a list stored
+      // without that envelope is not read, which costs one fetch, once, against
+      // carrying two stored shapes for ever.
+      cache.seedState('example.com', 'channels', [{ xmltvId: 'one', siteId: 'site-one' }]);
+      await grab([config], { cache, now: NOW });
+
+      expect(asked).toEqual(['fetched']);
     });
   });
 

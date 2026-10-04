@@ -36,9 +36,11 @@
 import ky, { type KyInstance } from 'ky';
 import { createHash } from 'node:crypto';
 import { GrabberError } from '../../core/error.js';
+import type { LineupConfig, LineupEntry, LineupType } from '../../tv-grab/lineups.js';
 import {
   defineStreamSiteConfig,
   type ChannelElement,
+  type ChannelsAnswer,
   type ChannelsContext,
   type GrabberChannel,
   type StreamContext,
@@ -51,6 +53,7 @@ import {
   type SchedulesDirectClient,
 } from './client.js';
 import {
+  channelNumberOf,
   schedulesDirectChannelExtras,
   schedulesDirectStation,
   type SchedulesDirectMapOptions,
@@ -138,9 +141,112 @@ function mappingFingerprint(options: SchedulesDirectSiteOptions): string {
       typeof options.channelId === 'function'
         ? String(options.channelId)
         : (options.channelId ?? null),
+    // Baked into the cached day, unlike `channelExtras`, which is written onto
+    // the channel at output time and so needs nothing invalidated. Without it
+    // here, turning the extensions off is a no-op for a fortnight.
+    programmeExtras:
+      typeof options.programmeExtras === 'function'
+        ? String(options.programmeExtras)
+        : (options.programmeExtras ?? null),
   });
 
   return createHash('sha1').update(shape).digest('hex').slice(0, 16);
+}
+
+/**
+ * The service's `transport` as the lineups schema's `type`.
+ *
+ * The same mapping the reference grabber makes — `tv_grab_zz_sdjson_sqlite`'s
+ * `mapTransport` — because a consumer choosing between lineups should see the
+ * same kind named the same way whichever grabber offered them: a raw multiplex
+ * is `DTV`, an operator's channel map is the `STB` most people watch it
+ * through, and `IPTV` is the schema's own word for what the service calls the
+ * same.
+ *
+ * One divergence, deliberate: a transport neither of us knows is `List` — a
+ * plain list of channels, which is exactly what is left when nothing is known
+ * about how they arrive. The reference writes `Unknown` there, which is not one
+ * of the five the schema allows.
+ */
+function lineupTypeOf(transport: string | undefined): LineupType {
+  switch (transport) {
+    case 'Antenna':
+    case 'DVB-T':
+    case 'DVB-C':
+    case 'DVB-S':
+    case 'QAM':
+      return 'DTV';
+    case 'Cable':
+    case 'Satellite':
+      return 'STB';
+    case 'IPTV':
+      // The reference says `STB` here, its comment calling the service's IPTV
+      // "STB-like". The schema has the word the service itself uses.
+      return 'IPTV';
+    default:
+      return 'List';
+  }
+}
+
+/**
+ * What a chooser shows for a lineup: `Astra FTA (Satellite National)`.
+ *
+ * The reference grabber's own format, and for its reason — an account can hold
+ * two lineups both called `Local Broadcast Listings`, and the only thing that
+ * tells them apart is where each is for.
+ */
+function lineupNameOf(id: string, about: AboutLineup | undefined): string {
+  const said = [about?.transport, about?.location].filter((one) => one !== undefined).join(' ');
+  const name = about?.name;
+
+  if (name === undefined) {
+    return said === '' ? id : `${id} (${said})`;
+  }
+
+  return said === '' ? name : `${name} (${said})`;
+}
+
+/** What one lineup is called, how it is received, and where it is for. */
+interface AboutLineup {
+  name?: string;
+  transport?: string;
+  location?: string;
+}
+
+/**
+ * What the account said about the lineups a channel list was built from.
+ *
+ * Kept with the list — one name and one transport per lineup, where a channel
+ * carries only the id of the lineup it came from — so `lineups` below is as good
+ * on a run that fetched nothing as on the one that built the list. The name
+ * comes from `/status` and the transport from the lineup itself, which is the
+ * only place the service says how it is received.
+ */
+interface SchedulesDirectChannelsMetadata {
+  lineups?: Record<string, AboutLineup>;
+}
+
+/** What a stored channel list of this site's says about its lineups. */
+function aboutLineups(metadata: unknown): Record<string, AboutLineup> {
+  const held =
+    metadata === null || typeof metadata !== 'object'
+      ? undefined
+      : (metadata as SchedulesDirectChannelsMetadata).lineups;
+
+  return held === null || typeof held !== 'object' ? {} : held;
+}
+
+/** One placement of a station: a lineup, and the number it sits at on it. */
+function placementOf(
+  lineup: string | undefined,
+  channel: string | undefined,
+): { lineup: string; channel?: string } {
+  return {
+    // Never undefined in practice — the list is built lineup by lineup — and
+    // a station with no lineup behind it is one no platform can offer.
+    lineup: lineup ?? '',
+    ...(channel === undefined ? {} : { channel }),
+  };
 }
 
 /** Where the lineups' own stamps are kept, beside the list they built. */
@@ -350,9 +456,88 @@ export function defineSchedulesDirectSite(
       return site.channelInfo ? site.channelInfo(channel, withExtras) : withExtras();
     },
 
+    /**
+     * The account's own lineups, as platforms a `tv_grab_*` can offer.
+     *
+     * One per lineup on the account rather than one for the site, which is what
+     * they are: somebody subscribed to each of them, and choosing between them
+     * is the choice a consumer wants to make. Built from the channel list alone
+     * — every placement is already on the channels — so `--list-lineups` costs
+     * what the channel list costs and nothing more.
+     *
+     * The type is what the lineup itself says it is — `transport`, which comes
+     * with the lineup rather than with the account — and `List` where this run
+     * has not asked, since a list read back from the cache carries the channels
+     * and not the platform they arrived on.
+     */
+    lineups(channels, metadata): LineupConfig[] {
+      const about = aboutLineups(metadata);
+      const byLineup = new Map<string, LineupEntry[]>();
+
+      for (const channel of channels) {
+        const data = channel.data;
+
+        if (data === undefined) {
+          continue;
+        }
+
+        const type = (lineup: string) => lineupTypeOf(about[lineup]?.transport);
+
+        for (const placement of data.on ?? [placementOf(data.lineup, data.channel)]) {
+          if (placement.lineup === '') {
+            // A `channels` list of somebody's own, which says nothing about
+            // platforms — then there are no lineups here to offer.
+            continue;
+          }
+
+          const held = byLineup.get(placement.lineup) ?? [];
+
+          held.push({
+            ...(placement.channel === undefined ? {} : { preset: placement.channel }),
+            // The number again, as what a box is tuned by — which is what the
+            // reference grabber writes for a lineup watched through one, and
+            // only where the service's number really is a number.
+            ...(type(placement.lineup) === 'STB' &&
+            placement.channel !== undefined &&
+            /^\d+$/.test(placement.channel)
+              ? { stb: [{ preset: placement.channel }] }
+              : {}),
+            station: {
+              xmltvId: channel.xmltvId,
+              name: data.name,
+              ...(data.callsign === undefined ? {} : { shortName: data.callsign }),
+              ...(data.broadcastLanguage === undefined ? {} : { lang: data.broadcastLanguage }),
+              ...(data.logos.length === 0
+                ? {}
+                : { logo: data.logos.map((one) => ({ url: one.url })) }),
+              type: data.isRadioStation === true ? 'Radio' : 'TV',
+              ...(data.isCommercialFree === undefined
+                ? {}
+                : { commercialFree: data.isCommercialFree }),
+            },
+          });
+          byLineup.set(placement.lineup, held);
+        }
+      }
+
+      return [...byLineup].map(([id, entries]) => ({
+        id,
+        type: lineupTypeOf(about[id]?.transport),
+        // What the account calls it and where it is for, which is what a person
+        // choosing between them recognises — the id stands in where a list was
+        // stored before there was anywhere to keep that.
+        displayName: [{ value: lineupNameOf(id, about[id]) }],
+        entries,
+      }));
+    },
+
     channels:
       options.channels ??
-      (async (context: ChannelsContext): Promise<GrabberChannel<SchedulesDirectStation>[]> => {
+      (async (
+        context: ChannelsContext,
+      ): Promise<
+        GrabberChannel<SchedulesDirectStation>[] | ChannelsAnswer<SchedulesDirectStation>
+      > => {
         const client = clientFor(context);
         const status = await client.status();
 
@@ -375,7 +560,12 @@ export function defineSchedulesDirectSite(
         // would be grabbing a list that is on its way to empty.
         const live = onAccount.filter((one) => one.isDeleted !== true);
         const held = live.map((one) => one.lineup!);
-        const missing = configured?.filter((one) => !held.includes(one)) ?? [];
+        // Against everything on the account, deleted or not: one named in the
+        // config is *there*, and still answers with what it last had. Telling
+        // its owner to add a lineup they can see on their account — and
+        // stopping the guide to say it — is the wrong end of the warning above.
+        const missing =
+          configured?.filter((one) => !onAccount.some((two) => two.lineup === one)) ?? [];
 
         if (missing.length > 0) {
           // Nothing here adds one, so this is where a run stops — and the
@@ -416,16 +606,35 @@ export function defineSchedulesDirectSite(
           // account with one lineup.
           context.log('the lineups have not changed since the last run; keeping the channel list');
 
+          // Answered as a list alone, so what the list was stored with stands:
+          // the lineups it describes are the lineups it was built from.
           return context.cached.channels as GrabberChannel<SchedulesDirectStation>[];
         }
 
         const channels: GrabberChannel<SchedulesDirectStation>[] = [];
-        const seen = new Set<string>();
+        const seen = new Map<string, GrabberChannel<SchedulesDirectStation>>();
+        /** What each of them is called, how it arrives and where it is for. */
+        const about: Record<string, AboutLineup> = {};
+        // One call for all of them, and the only one that says how a lineup is
+        // received and where it is for — `/status` gives a name and a stamp.
+        // Asked here rather than beside the account check, because a run that
+        // keeps the channel list keeps what was stored with it and asks nothing.
+        const platforms = new Map(
+          ((await client.lineups()).lineups ?? []).map((one) => [one.lineup, one]),
+        );
 
         for (const id of lineups) {
           const answer = await client.lineup(id);
+          const platform = platforms.get(id);
+
+          about[id] = {
+            ...(platform?.name === undefined ? {} : { name: platform.name }),
+            ...(platform?.transport === undefined ? {} : { transport: platform.transport }),
+            ...(platform?.location === undefined ? {} : { location: platform.location }),
+          };
+
           const numbers = new Map(
-            (answer.map ?? []).map((entry) => [entry.stationID, entry.channel]),
+            (answer.map ?? []).map((entry) => [entry.stationID, channelNumberOf(entry)]),
           );
 
           for (const wire of answer.stations ?? []) {
@@ -434,14 +643,25 @@ export function defineSchedulesDirectSite(
             // through `cacheChannels` rather than needing to be learnt again.
             const channel = schedulesDirectStation(wire, numbers.get(wire.stationID), mapping, id);
 
-            // A station in two lineups is one channel: the cache is keyed by
-            // `(site, channel, day)`, so a second one would append to the first
-            // and every programme would appear twice.
-            if (channel === undefined || seen.has(channel.xmltvId)) {
+            if (channel === undefined) {
               continue;
             }
 
-            seen.add(channel.xmltvId);
+            const already = seen.get(channel.xmltvId);
+
+            if (already?.data !== undefined) {
+              // A station in two lineups is one channel: the cache is keyed by
+              // `(site, channel, day)`, so a second one would append to the
+              // first and every programme would appear twice. Where it sits on
+              // each is kept, since that is a fact about the platforms rather
+              // than about the channel — see `SchedulesDirectStation.on`.
+              already.data.on ??= [placementOf(already.data.lineup, already.data.channel)];
+              already.data.on.push(placementOf(id, channel.data?.channel));
+
+              continue;
+            }
+
+            seen.set(channel.xmltvId, channel);
             channels.push(channel);
           }
         }
@@ -456,7 +676,10 @@ export function defineSchedulesDirectSite(
         // stamps should say "nothing to do" on the next run.
         context.state.set(LINEUP_STAMPS, stamps);
 
-        return channels;
+        // The list, and what the account said about the lineups it came from —
+        // one entry in the cache, so a run that fetches nothing still knows what
+        // to call each platform and how it is received.
+        return { channels, metadata: { lineups: about } satisfies SchedulesDirectChannelsMetadata };
       }),
 
     stream: (context) =>
@@ -675,7 +898,9 @@ export function schedulesDirectAccount(
       ),
     stations: async (lineup) => {
       const answer = await client.lineup(lineup);
-      const numbers = new Map((answer.map ?? []).map((entry) => [entry.stationID, entry.channel]));
+      const numbers = new Map(
+        (answer.map ?? []).map((entry) => [entry.stationID, channelNumberOf(entry)]),
+      );
 
       return (answer.stations ?? []).flatMap((wire) => {
         const channel = schedulesDirectStation(wire, numbers.get(wire.stationID), {}, lineup);

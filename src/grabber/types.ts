@@ -1,6 +1,7 @@
 import type { KyInstance, Options as KyOptions } from 'ky';
 import type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from '../xmltv/builder.js';
 import type { DateInput } from '../xmltv/date.js';
+import type { LineupConfig } from '../tv-grab/lineups.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheEntryMeta, CacheStore, StalenessPolicy } from '../cache/types.js';
 import type { GrabCounts, Reporter, Says } from '../core/events.js';
@@ -174,6 +175,8 @@ export interface ChannelsContext extends Says {
     channels: readonly GrabberChannel[];
     /** When it was stored — for a source that asks "changed since?". */
     at: Date;
+    /** What the run that stored it said about the list — see {@link ChannelsAnswer}. */
+    metadata?: unknown;
   };
 }
 
@@ -194,12 +197,37 @@ export interface SiteTransformContext<TData = unknown> extends Says {
 }
 
 /**
+ * A channel list with what describes the list itself.
+ *
+ * For what is true of the *list* rather than of any one channel, and would
+ * otherwise cost a request to learn again: what a Schedules Direct account calls
+ * each of its lineups, and how each is received. It is stored in the same cache
+ * entry as the channels — so the two cannot come apart, as they could if this
+ * went in the site's own state, which is an entry of its own to be lost, copied
+ * or pruned — and handed back to the next run as {@link ChannelsContext.cached}.
+ *
+ * Through `JSON.stringify`, like everything else cached.
+ */
+export interface ChannelsAnswer<TData = unknown> {
+  channels: GrabberChannel<TData>[];
+  metadata?: unknown;
+}
+
+/**
  * Where a site's channels come from: a list, or a function fetching one with
  * the site's own HTTP client.
+ *
+ * The function may answer with the list alone, or with a {@link ChannelsAnswer}
+ * — the list and what describes it.
  */
 export type ChannelsSource<TData = unknown> =
   | GrabberChannel<TData>[]
-  | ((ctx: ChannelsContext) => GrabberChannel<TData>[] | Promise<GrabberChannel<TData>[]>);
+  | ((
+      ctx: ChannelsContext,
+    ) =>
+      | GrabberChannel<TData>[]
+      | ChannelsAnswer<TData>
+      | Promise<GrabberChannel<TData>[] | ChannelsAnswer<TData>>);
 
 /** The channel a request covers, under a mode of `none` or `days`. */
 interface OneChannel<TData> {
@@ -608,6 +636,25 @@ export interface BaseSiteConfig<TData = unknown> {
     channel: GrabberChannel<TData>,
     element: ChannelElement,
   ): XmltvChannel | ChannelBuilder;
+  /**
+   * How this site's channels divide into reception platforms, where they do.
+   *
+   * Only a `tv_grab_*`'s `lineups` capability asks — see `lineupsFromSites` —
+   * and without this a site is one `List` lineup of everything it carries,
+   * which is right for a site that *is* one platform. A source that knows
+   * better says so here: a Schedules Direct account holds lineups, and each of
+   * them is a platform somebody chose to receive.
+   *
+   * Given the resolved channel list and what the run that fetched it said about
+   * it ({@link ChannelsAnswer}), and nothing else:
+   * whatever divides the channels is already on them —
+   * {@link GrabberChannel.preset} is the number one sits at, `data` is whatever
+   * the site kept — and what belongs to a platform rather than to a channel is
+   * in the metadata, stored in the same cache entry as the list. So this costs
+   * no request of its own, and answers the same from a cached list as from a
+   * fetched one, which is the whole of why it is not asked to go and look.
+   */
+  lineups?(channels: GrabberChannel<TData>[], metadata: unknown): LineupConfig[];
 }
 
 /**

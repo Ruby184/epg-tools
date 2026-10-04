@@ -131,6 +131,40 @@ describe('the Schedules Direct client', () => {
     expect(kept.held.get(TOKEN)).toBe('token-2');
   });
 
+  it('renews a token that expired after the same call had already been retried', async () => {
+    const source = await sdServer();
+    const sd = client(source);
+
+    await sd.status();
+    source.expireTokens();
+    // A `503` on the way, as a busy service answers: the call is retried, and
+    // the retry is the attempt that meets the expired token. Counting retries
+    // rather than refusals would take this for a second refusal and fail the
+    // run, where one login carries it.
+    source.failNext('lineups/USA-OTA-90210', 503, 1);
+
+    await expect(sd.lineup('USA-OTA-90210')).resolves.toBeDefined();
+
+    expect(source.countOf('token')).toBe(2);
+    expect(source.callsTo('lineups/USA-OTA-90210').at(-1)?.token).toBe('token-2');
+  });
+
+  it('replaces a refused token once, however many calls were carrying it', async () => {
+    const source = await sdServer();
+    const sd = client(source);
+
+    await sd.status();
+    // Which is what a token ageing out mid-run looks like: everything in the
+    // air at the time is refused at once.
+    source.expireTokens();
+
+    await Promise.all([sd.status(), sd.status(), sd.status()]);
+
+    // One login for the three of them, and all three sent again with it.
+    expect(source.countOf('token')).toBe(2);
+    expect(source.callsTo('status').filter((call) => call.token === 'token-2')).toHaveLength(3);
+  });
+
   it('gives up rather than looping when a fresh token is refused too', async () => {
     const source = await sdServer();
     const sd = client(source);

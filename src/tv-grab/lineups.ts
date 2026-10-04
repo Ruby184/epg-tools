@@ -16,10 +16,13 @@
  * enforced here rather than left to whoever validates the output.
  */
 
+import { createCacheStore } from '../build.js';
+import type { CacheStore } from '../cache/main.js';
 import type { EpgConfig } from '../config.js';
 import { resolveChannels } from '../grabber/channels.js';
+import { SiteStateHandle } from '../grabber/state.js';
 import type { GrabberChannel } from '../grabber/types.js';
-import { escapeXml } from '../xmltv/escape.js';
+import { escapeXmlAttribute, escapeXmlText } from '../xmltv/escape.js';
 
 /** How the lineup is received. Required on every lineup. */
 export type LineupType = 'DTV' | 'STB' | 'IPTV' | 'Analog' | 'List';
@@ -152,7 +155,7 @@ export interface LineupsMeta {
 type AttrValue = string | number | boolean | undefined;
 
 function attr(name: string, value: AttrValue): string {
-  return value === undefined ? '' : ` ${name}="${escapeXml(String(value))}"`;
+  return value === undefined ? '' : ` ${name}="${escapeXmlAttribute(String(value))}"`;
 }
 
 function attrs(pairs: [string, AttrValue][]): string {
@@ -179,7 +182,7 @@ function metaAttrs(meta: LineupsMeta | undefined): string {
 function el(indent: string, name: string, value: AttrValue, tagAttrs = ''): string {
   return value === undefined
     ? ''
-    : `${indent}<${name}${tagAttrs}>${escapeXml(String(value))}</${name}>\n`;
+    : `${indent}<${name}${tagAttrs}>${escapeXmlText(String(value))}</${name}>\n`;
 }
 
 function logos(indent: string, all: LineupLogo[] | undefined): string {
@@ -354,6 +357,14 @@ export interface LineupsFromSitesOptions {
   type?: LineupType;
   /** Language of the generated names. */
   lang?: string;
+  /**
+   * Where channel lists are kept. The config's own cache unless given.
+   *
+   * What makes `--list-lineups` cost nothing twice running — and what hands a
+   * site back what it said about the list when it fetched it, which is how a
+   * platform keeps its name and its type on a run that fetched nothing.
+   */
+  cache?: CacheStore;
 }
 
 function stationOf(channel: GrabberChannel, lang: string | undefined): LineupStation {
@@ -376,15 +387,36 @@ function stationOf(channel: GrabberChannel, lang: string | undefined): LineupSta
  *
  * `List` by default, since a site says nothing about how its channels are
  * received, and a `List` lineup is the schema's way of saying just that.
+ *
+ * **Unless the site says otherwise.** A source that knows how its channels
+ * divide answers `lineups` with the platforms it actually carries, and those
+ * are taken as they come: a Schedules Direct account with two lineups on it is
+ * two here, and choosing one is choosing what that account is subscribed to
+ * rather than a name this made up. The options below are then beside the point
+ * — they describe a site whose shape had to be guessed at.
  */
 export async function lineupsFromSites(
   config: EpgConfig,
   options: LineupsFromSitesOptions = {},
 ): Promise<LineupConfig[]> {
   const lineups: LineupConfig[] = [];
+  // The same cache a grab uses: a list fetched an hour ago is not fetched again
+  // to answer this, and what the site said about it is read back with it.
+  const cache = options.cache ?? (await createCacheStore(config));
 
   for (const site of config.sites) {
-    const channels = await resolveChannels(site);
+    const state = SiteStateHandle.open(cache, site.site);
+    const channels = await resolveChannels(site, { state });
+
+    await state.save();
+
+    const own = site.lineups?.(channels, (await state.channels()).metadata());
+
+    if (own !== undefined && own.length > 0) {
+      lineups.push(...own);
+
+      continue;
+    }
 
     lineups.push({
       id: site.site,

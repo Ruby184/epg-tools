@@ -54,5 +54,25 @@ export type {
   SchedulesDirectProgramme,
   SchedulesDirectStation,
 } from './schedules-direct/map.js';
-export type { XmltvDayZone, XmltvSiteOptions, XmltvUrlSource } from './xmltv-source.js';
+export { defineCommandSite, runCommand } from './command-source.js';
+export { defineTvGrabCommandSite } from './tv-grab-command-source.js';
+export type { TvGrabCapability, TvGrabCommandSiteOptions } from './tv-grab-command-source.js';
+export type {
+  CommandArgs,
+  CommandArgsContext,
+  CommandSiteOptions,
+  CommandWindow,
+  RunCommandOptions,
+  RunningCommand,
+} from './command-source.js';
+export {
+  asGrabberChannel,
+  dayOf,
+  documentBytes,
+  splitXmltvDocument,
+  streamBytes,
+  xmltvChannelInfo,
+} from './xmltv-document.js';
+export type { SplitXmltvOptions, XmltvDayZone } from './xmltv-document.js';
+export type { XmltvSiteOptions, XmltvUrlSource } from './xmltv-source.js';
 export type * from './types.js';

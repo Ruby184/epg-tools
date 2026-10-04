@@ -58,8 +58,9 @@ describe('validateXmltv', () => {
     expect(finding(report, 'unknown-channel')).toMatchObject({
       severity: 'error',
       count: 2,
-      // Deduplicated: two programmes, one channel that does not exist.
-      examples: ['ghost'],
+      // Counted per kind: two programmes, one channel that does not exist.
+      examples: [{ value: 'ghost', count: 2 }],
+      kinds: 1,
     });
     expect(report.ok).toBe(false);
   });
@@ -86,7 +87,7 @@ describe('validateXmltv', () => {
     expect(finding(report, 'channel-without-display-name')).toMatchObject({
       severity: 'error',
       count: 1,
-      examples: ['bare'],
+      examples: [{ value: 'bare', count: 1 }],
     });
     expect(finding(report, 'duplicate-channel')).toMatchObject({ severity: 'error', count: 1 });
     expect(finding(report, 'programme-without-title')).toMatchObject({
@@ -123,9 +124,9 @@ describe('validateXmltv', () => {
       severity: 'warning',
       count: 3,
       examples: [
-        'attribute data-src on <channel>',
-        'element lcn on <channel>',
-        'attribute uniqueID on <programme>',
+        { value: 'attribute data-src on <channel>', count: 1 },
+        { value: 'element lcn on <channel>', count: 1 },
+        { value: 'attribute uniqueID on <programme>', count: 1 },
       ],
     });
   });
@@ -144,7 +145,9 @@ describe('validateXmltv', () => {
     const unknown = finding(report, 'unknown-element');
 
     expect(unknown).toMatchObject({ severity: 'warning', count: 1 });
-    expect(unknown?.examples[0]).toMatch(/^line \d+:\d+ — unknown top-level element <mystery>/);
+    expect(unknown?.examples[0]?.value).toMatch(
+      /^line \d+:\d+ — unknown top-level element <mystery>/,
+    );
   });
 
   it('treats a document that stops mid-element as an error, not a warning', async () => {
@@ -197,7 +200,12 @@ describe('validateXmltv', () => {
     const many = Array.from({ length: 300 }, () => programme('ghost', START)).join('');
     const report = await validate(guide(channel('one') + many));
 
-    expect(finding(report, 'unknown-channel')).toMatchObject({ count: 300, examples: ['ghost'] });
+    expect(finding(report, 'unknown-channel')).toMatchObject({
+      count: 300,
+      // One kind, 300 of it: the count on the finding says how many programmes,
+      // the count on the example says how many named *this* channel.
+      examples: [{ value: 'ghost', count: 300 }],
+    });
     expect(report.errors).toBe(300);
   });
 
@@ -241,10 +249,12 @@ describe('validateXmltv', () => {
       )
     ).findings.find((item) => item.code === 'extensions')?.examples;
 
-    expect(all).toContain('attribute primary on <display-name>');
-    expect(all).toContain('attribute source on <desc>');
-    expect(all).toContain('attribute eit on <category>');
-    expect(all).toContain('attribute medal on <director>');
+    const named = all?.map((one) => one.value);
+
+    expect(named).toContain('attribute primary on <display-name>');
+    expect(named).toContain('attribute source on <desc>');
+    expect(named).toContain('attribute eit on <category>');
+    expect(named).toContain('attribute medal on <director>');
   });
 
   it('does not descend into an extension it has already named', async () => {
@@ -260,7 +270,7 @@ describe('validateXmltv', () => {
 
     expect(finding(report, 'extensions')).toMatchObject({
       count: 1,
-      examples: ['element crid on <programme>'],
+      examples: [{ value: 'element crid on <programme>', count: 1 }],
     });
   });
 

@@ -65,6 +65,8 @@ export type {
 
 export {
   escapeXml,
+  escapeXmlAttribute,
+  escapeXmlText,
   formatXmltvDate,
   getXmltvOffset,
   getXmltvPrecision,
@@ -207,6 +209,8 @@ export {
   guideUrlsFromM3u,
   defineSiteConfig,
   defineStreamSiteConfig,
+  defineCommandSite,
+  defineTvGrabCommandSite,
   defineXmltvSite,
   defineXtreamSite,
   xtreamChannelExtras,
@@ -234,6 +238,10 @@ export type {
   ChannelsXmlChannelData,
   ChannelsXmlOptions,
   ChannelsXmlSkipReason,
+  CommandSiteOptions,
+  CommandWindow,
+  TvGrabCapability,
+  TvGrabCommandSiteOptions,
   M3uChannelData,
   M3uChannelsOptions,
   M3uSiteOptions,

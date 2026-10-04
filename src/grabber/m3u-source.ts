@@ -22,7 +22,8 @@ import {
   type M3uSkipReason,
 } from './channels.js';
 import type { GrabberChannel, StreamContext, StreamSiteConfig } from './types.js';
-import { defineXmltvSite, documentBytes, type XmltvSiteOptions } from './xmltv-source.js';
+import { documentBytes } from './xmltv-document.js';
+import { defineXmltvSite, type XmltvSiteOptions } from './xmltv-source.js';
 
 /**
  * Where a playlist says its guide is, in the order the header offered them.

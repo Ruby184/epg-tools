@@ -421,13 +421,30 @@ process.exitCode = await runXmltvGrabber(config, {
 
 ```sh
 tv_grab_sk_example --list-lineups     # what is on offer — needs no config file
-tv_grab_sk_example --get-lineup       # the one that was configured
+tv_grab_sk_example --get-lineup       # the one that was configured, with its channels
 ```
+
+`--list-lineups` writes what each lineup *is* — its id, type and name — and not
+what is in it: a caller uses it to choose, and `--get-lineup` answers with the
+channels of the one it chose. That is the reference grabber's division, and for
+an account with a couple of lineups it is the difference between a few lines and
+five thousand stations.
 
 `lineupsFromSites` builds one `List` lineup per site, which fits a grabber whose
 sites genuinely *are* separate platforms; it fills each entry's `<preset>` from
-the optional `preset` on a `GrabberChannel`. Anything else is written out by
-hand as `LineupConfig[]`, since a lineup is normally fed by several sites:
+the optional `preset` on a `GrabberChannel`.
+
+**A site that knows better says so itself.** A source carrying real platforms
+answers `lineups(channels)` with them, and `lineupsFromSites` takes those instead
+of inventing one — a [Schedules Direct](./site-config.md#schedules-direct) site
+offers the lineups on the account, so two lineups there are two to choose
+between, named as the account names them. It is a function of the resolved
+channel list and nothing else, so it costs no request of its own: a station that
+sits on two of the account's lineups is one channel in the guide and one entry in
+each lineup, at the number it sits at on each.
+
+Anything else is written out by hand as `LineupConfig[]`, since a lineup is
+normally fed by several sites:
 
 ```js
 lineupsCapability([{

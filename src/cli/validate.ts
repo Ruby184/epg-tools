@@ -104,12 +104,28 @@ function asText(report: ValidationReport, file: string): string {
 
   const blocks = report.findings.map((finding) => {
     const label = finding.severity === 'error' ? 'error  ' : 'warning';
-    // The count is what says how often; the lines under it are examples, and
-    // deliberately not "and N more" — they are deduplicated, so the remainder
-    // is a number of *occurrences*, which would read as undisclosed examples.
+    // The count on the head says how often the rule tripped; the lines under it
+    // are the kinds it tripped on, each with its own count and the commonest
+    // first — which is what says whether 22,000 extensions are one attribute on
+    // every programme or a hundred different ones.
     const head = `  ${label} ${finding.code} (${grouped(finding.count)}): ${finding.message}`;
+    const lines = finding.examples.map(
+      (example) =>
+        `      ${example.value}${example.count > 1 ? ` (${grouped(example.count)})` : ''}`,
+    );
+    const rest = finding.kinds - finding.examples.length;
 
-    return [head, ...finding.examples.map((example) => `      ${example}`)].join('\n');
+    if (rest > 0 || finding.more === true) {
+      // Kinds, not occurrences: the head already said how many of those there
+      // were, and a reader who sees five lines wants to know what is not shown.
+      lines.push(
+        finding.more === true
+          ? `      … and more kinds (at least ${grouped(rest)})`
+          : `      … and ${plural(rest, 'more kind')}`,
+      );
+    }
+
+    return [head, ...lines].join('\n');
   });
 
   const totals = [plural(report.errors, 'error'), plural(report.warnings, 'warning')].join(', ');

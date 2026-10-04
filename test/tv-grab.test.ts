@@ -2303,31 +2303,45 @@ describe('lineups', () => {
     });
 
     expect(code).toBe(0);
+    // What is on offer, and not what is in each: this is what a caller chooses
+    // from, `--get-lineup` is what answers with channels, and that is how the
+    // reference grabber divides the two. For an account with a couple of
+    // lineups the difference is a few lines against five thousand stations.
     expect(stdout.text).toBe(
       '<?xml version="1.0" encoding="UTF-8"?>\n' +
         '<xmltv-lineups>\n' +
         '  <xmltv-lineup id="cable">\n' +
         '    <type>List</type>\n' +
         '    <display-name lang="en">Cable</display-name>\n' +
-        '    <lineup-entry>\n' +
-        '      <preset>1</preset>\n' +
-        '      <station rfc2838="one.example.tv">\n' +
-        '        <name>One</name>\n' +
-        '      </station>\n' +
-        '    </lineup-entry>\n' +
         '  </xmltv-lineup>\n' +
         '  <xmltv-lineup id="terrestrial">\n' +
         '    <type>DTV</type>\n' +
         '    <display-name>Digital terrestrial</display-name>\n' +
-        '    <lineup-entry>\n' +
-        '      <preset>2</preset>\n' +
-        '      <station rfc2838="two.example.tv">\n' +
-        '        <name>Two</name>\n' +
-        '      </station>\n' +
-        '    </lineup-entry>\n' +
         '  </xmltv-lineup>\n' +
         '</xmltv-lineups>\n',
     );
+  });
+
+  it('answers --get-lineup with the channels of the one that was chosen', async () => {
+    const dir = await tempDir();
+    const { config: epg, options } = withLineups(dir);
+
+    await writeFile(join(dir, 'lineups.conf'), 'lineup=terrestrial\n');
+
+    const stdout = new Sink();
+    const code = await runXmltvGrabber(epg, {
+      ...options,
+      argv: ['--get-lineup', '--config-file', join(dir, 'lineups.conf')],
+      stdout,
+      stderr: new Sink(),
+    });
+
+    expect(code).toBe(0);
+    // The other half of the division: one lineup, with what is in it.
+    expect(stdout.text).toContain('<xmltv-lineup id="terrestrial">');
+    expect(stdout.text).toContain('<preset>2</preset>');
+    expect(stdout.text).toContain('rfc2838="two.example.tv"');
+    expect(stdout.text).not.toContain('id="cable"');
   });
 
   it('honours --output, as every document-producing option does', async () => {

@@ -27,11 +27,13 @@ import type { PacedRequest } from '../types.js';
 import {
   codeOf,
   SCHEDULES_DIRECT_URL,
+  SD_NO_LINEUPS,
   SD_SERVICE_OFFLINE,
   wireMessage,
   type WireArtwork,
   type WireHeadend,
   type WireLineup,
+  type WireLineups,
   type WireLineupChange,
   type WireMd5Response,
   type WireProgram,
@@ -131,6 +133,14 @@ export interface SchedulesDirectClient {
   status: () => Promise<WireStatus>;
   /** What a region has on offer, which needs no lineup on the account. */
   headends: (where: { country: string; postalCode: string }) => Promise<WireHeadend[]>;
+  /**
+   * What is on the account, and what each of them is.
+   *
+   * `/status` says the name and when it moved; this is the one call that says
+   * how a lineup is received and where it is for. An account with none answers
+   * `4102 NO_LINEUPS` at HTTP 400, which is read as the empty list it means.
+   */
+  lineups: () => Promise<WireLineups>;
   lineup: (id: string) => Promise<WireLineup>;
   /**
    * Put one on the account, or take it off.
@@ -211,6 +221,10 @@ export function schedulesDirectHooks(hooks: KyOptions['hooks']): NonNullable<KyO
  * reading it again answers nothing — which is how "HTTP 400" ends up in an error
  * that could have said "Invalid username or password."
  */
+function refusalCode(error: unknown): number | undefined {
+  return error instanceof HTTPError && error.data !== undefined ? codeOf(error.data) : undefined;
+}
+
 function refusal(error: unknown): string | undefined {
   if (!(error instanceof HTTPError)) {
     return undefined;
@@ -328,6 +342,30 @@ export function createSchedulesDirectClient(
     return pending;
   };
 
+  /**
+   * The tokens a `403` has already been answered for.
+   *
+   * One entry per token this client earns — a handful in the longest run, since
+   * a token is good for a day. It is what makes "once" mean once *per token*
+   * rather than once per call: several requests are in the air at a time, and
+   * they all carry the same token, so all of them are refused the moment it
+   * ages out. The first replaces it; the rest send the replacement rather than
+   * each asking for one of their own.
+   */
+  const refusedTokens = new Set<string>();
+
+  /**
+   * Tokens earned *here*, to replace a refused one, until one is seen to work.
+   *
+   * What bounds this to one login: a fresh token refused before it has ever
+   * carried a request is an account that cannot authenticate, not one whose
+   * token aged out, and earning another is how that becomes a loop against a
+   * service that rate-limits authentication. One that has worked and is refused
+   * later has simply aged out in its turn, which is a run long enough to
+   * outlive a day's token and is renewed like any other.
+   */
+  const unproven = new Set<string>();
+
   /** Drop the token everywhere it is held, so the next request earns a new one. */
   const forgetToken = (): void => {
     pending = undefined;
@@ -351,25 +389,51 @@ export function createSchedulesDirectClient(
         },
       ],
       afterResponse: [
-        async ({ request: refused, response, retryCount }) => {
+        async ({ request: refused, response }) => {
           // The status, not a code in the body: `TOKEN_EXPIRED` is the only
           // account error the service answers 403 to — invalid, expired, locked
           // out, hash wrong and JSON-access-off are all 400 — so the status line
           // says it, and reading the body would mean parsing a `/programs`
           // answer twice to learn what it already said.
-          //
-          // `retryCount === 0` is the once. A second 403 is an account that
-          // cannot authenticate rather than a token that aged out mid-run, and
-          // retrying that is how a wrong password becomes a loop.
-          if (response.status !== 403 || retryCount > 0) {
+          const sent = refused.headers.get('token');
+
+          if (sent === null) {
             return;
           }
 
-          forgetToken();
+          if (response.ok) {
+            // It works, so it is no longer one of the untried — see `unproven`.
+            unproven.delete(sent);
+
+            return;
+          }
+
+          if (response.status !== 403 || unproven.has(sent)) {
+            return;
+          }
+
+          // The token that was refused decides, not how many times `ky` has
+          // retried this call: `retryCount` counts every retry, so a `503`
+          // retried a moment earlier would make an expired token look like a
+          // second refusal — and the run would fail where one login would have
+          // carried it. A token refused twice is asked about once.
+          if (!refusedTokens.has(sent)) {
+            refusedTokens.add(sent);
+            forgetToken();
+          }
+
+          const fresh = await ensureToken();
+
+          if (fresh === sent) {
+            // Nothing to send that has not just been refused.
+            return;
+          }
+
+          unproven.add(fresh);
 
           const headers = new Headers(refused.headers);
 
-          headers.set('token', await ensureToken());
+          headers.set('token', fresh);
 
           // Forced through `ky` rather than sent again by hand, so it counts
           // against `retry.limit` and is visible to anything watching retries.
@@ -420,6 +484,16 @@ export function createSchedulesDirectClient(
         `headends?${new URLSearchParams({ country: where.country, postalcode: where.postalCode }).toString()}`,
         undefined,
       ),
+    lineups: async () => {
+      try {
+        return await request<WireLineups>('lineups');
+      } catch (error) {
+        // An account with no lineups is not a failed request — the service's
+        // own client does the same, and everything above here is already
+        // written for an account that has none.
+        return refusalCode(error) === SD_NO_LINEUPS ? {} : Promise.reject(error);
+      }
+    },
     lineup: (id) => request<WireLineup>(`lineups/${encodeURIComponent(id)}`),
     addLineup: (id) => change<WireLineupChange>(`lineups/${encodeURIComponent(id)}`, 'put'),
     removeLineup: (id) => change<WireLineupChange>(`lineups/${encodeURIComponent(id)}`, 'delete'),

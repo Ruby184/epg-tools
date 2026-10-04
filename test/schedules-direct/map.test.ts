@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   buildProgramme,
   channelIdOf,
+  channelNumberOf,
   schedulesDirectChannelExtras,
   schedulesDirectProgramme,
   schedulesDirectStation,
+  type SchedulesDirectStation,
 } from '../../src/grabber/schedules-direct/map.js';
 import type {
   WireAiring,
@@ -91,6 +93,51 @@ describe('a station', () => {
 
   it('is not a channel at all without an id to ask about it by', () => {
     expect(schedulesDirectStation({ name: 'Nameless' }, '001')).toBeUndefined();
+  });
+
+  it('says its callsign and its number as display names, in that order', () => {
+    const element = ChannelBuilder.of('I20454.json.schedulesdirect.org', 'WBBMDT (WBBM-DT)');
+
+    schedulesDirectChannelExtras(element, schedulesDirectStation(STATION, '002')!.data!);
+
+    // The name, the callsign, the number: the order the reference grabber
+    // writes, with the comment that MythTV assumes exactly those three — and
+    // what tvheadend matches a guide to a tuner by.
+    expect(element.build().displayName).toEqual([
+      { value: 'WBBMDT (WBBM-DT)' },
+      { value: 'WBBMDT' },
+      { value: '002' },
+    ]);
+  });
+
+  it('writes the number as an lcn as well, for a consumer that wants a number', () => {
+    const element = ChannelBuilder.of('I20454.json.schedulesdirect.org', 'WBBMDT (WBBM-DT)');
+
+    schedulesDirectChannelExtras(element, schedulesDirectStation(STATION, '002')!.data!);
+
+    // Where tvheadend and Kodi look, instead of guessing which display name is
+    // the number.
+    expect(element.build().extra).toEqual(expect.arrayContaining([{ name: 'lcn', value: '002' }]));
+  });
+
+  it('takes the number from whichever field its lineup says it in', () => {
+    // The reference grabber's precedence, and the reason it has one: a cable
+    // map says `channel`, an ATSC one says `8.1` in two halves, and a lineup
+    // with neither has only the frequency to call a station by.
+    expect(
+      channelNumberOf({ virtualChannel: '8.1', channel: '3', atscMajor: 9, atscMinor: 2 }),
+    ).toBe('8.1');
+    // An American aerial lineup says `2.1` in `channel` as well as in halves —
+    // checked against a real one — so the halves are the fallback, not the rule.
+    expect(channelNumberOf({ channel: '2.1', atscMajor: 2, atscMinor: 1, uhfVhf: 31 })).toBe('2.1');
+    expect(channelNumberOf({ atscMajor: 9, atscMinor: 2, uhfVhf: 31 })).toBe('9.2');
+    expect(channelNumberOf({ uhfVhf: 31 })).toBe('31');
+    // As the service wrote it: the two reference grabbers disagree about
+    // whether to make a number of it, and this is what the lineup says.
+    expect(channelNumberOf({ channel: '003' })).toBe('003');
+    expect(channelNumberOf({ frequencyHz: 578000000 })).toBe('578000000');
+    expect(channelNumberOf({})).toBeUndefined();
+    expect(channelNumberOf(undefined)).toBeUndefined();
   });
 
   it('writes every logo the service holds, for a consumer to choose between', () => {
@@ -224,7 +271,45 @@ describe('a programme', () => {
       expect(built().category).toEqual([
         { value: 'Crime drama', lang: 'en' },
         { value: 'Series', lang: 'en' },
+        // What it *is*, in the word the reference grabber writes for it: a
+        // consumer sorting films from series reads this one, MythTV by name.
+        { value: 'series', lang: 'en' },
       ]);
+    });
+
+    it('writes a repeated term once', () => {
+      // `Miniseries` arrives as a genre and as the `showType`, on 69 of one
+      // real day's 2,173 airings — and the same category twice is the same
+      // category twice.
+      const programme = built({}, { genres: ['Miniseries'], showType: 'Miniseries' });
+
+      expect(programme.category).toEqual([
+        { value: 'Miniseries', lang: 'en' },
+        { value: 'series', lang: 'en' },
+      ]);
+    });
+
+    it('calls a film a movie and a radio programme radio', () => {
+      // Neither a genre nor a `showType` on these, so the only category left is
+      // the one that says what kind of thing it is.
+      const bare = (entityType: string): WireProgram => {
+        const program = { ...PROGRAM, genres: [], entityType };
+
+        delete program.showType;
+
+        return program;
+      };
+      const of = (program: WireProgram, station: SchedulesDirectStation) =>
+        buildProgramme(
+          'I20454.json.schedulesdirect.org',
+          schedulesDirectProgramme(AIRING, program, station)!,
+        ).build();
+
+      expect(of(bare('Movie'), station).category).toEqual([{ value: 'movie', lang: 'en' }]);
+      expect(
+        of(bare('Show'), schedulesDirectStation({ ...STATION, isRadioStation: true }, '002')!.data!)
+          .category,
+      ).toEqual([{ value: 'radio', lang: 'en' }]);
     });
 
     it('calls them English even on a station that is not', () => {
@@ -247,17 +332,105 @@ describe('a programme', () => {
       expect(programme.category).toEqual([
         { value: 'Crime drama', lang: 'en' },
         { value: 'Series', lang: 'en' },
+        { value: 'series', lang: 'en' },
       ]);
     });
   });
 
   describe('and its people', () => {
+    it('reads a role the table does not name by its shape', () => {
+      // All five turned up in one real fortnight, and the service keeps
+      // inventing more.
+      const programme = built(
+        {},
+        {
+          crew: [
+            { personId: '1', name: 'A Writer', role: 'Writer (Screenplay)' },
+            { personId: '2', name: 'B Writer', role: 'Writer (Comic Book)' },
+            { personId: '3', name: 'C Producer', role: 'Line Producer' },
+            { personId: '4', name: 'D Producer', role: 'Co-Executive Producer' },
+            { personId: '5', name: 'E Director', role: 'Second Assistant Director' },
+          ],
+        },
+      );
+
+      // On the element the DTD has for them, each carrying what the service
+      // actually called it — the specific role is worth keeping for a consumer
+      // that cares which kind of writer wrote it.
+      expect(programme.credits?.writer).toEqual([
+        { value: 'A Writer', extraAttributes: { credit: 'Writer (Screenplay)' } },
+        { value: 'B Writer', extraAttributes: { credit: 'Writer (Comic Book)' } },
+      ]);
+      expect(programme.credits?.producer).toEqual([
+        { value: 'C Producer', extraAttributes: { credit: 'Line Producer' } },
+        { value: 'D Producer', extraAttributes: { credit: 'Co-Executive Producer' } },
+      ]);
+      expect(programme.credits?.director).toEqual([
+        { value: 'E Director', extraAttributes: { credit: 'Second Assistant Director' } },
+      ]);
+    });
+
+    it('does not make a director of an art director', () => {
+      // What the reference grabber's `/director/i` does: three different crafts
+      // filed as the one who directed the programme. They keep their own names
+      // instead, which loses nobody.
+      const programme = built(
+        {},
+        {
+          crew: [
+            { personId: '1', name: 'A Designer', role: 'Art Director' },
+            { personId: '2', name: 'B Caster', role: 'Casting Director' },
+            { personId: '3', name: 'C Shooter', role: 'Director of Photography' },
+          ],
+        },
+      );
+
+      expect(programme.credits?.director).toBeUndefined();
+      expect(programme.credits?.extra?.map((one) => one.attributes?.role)).toEqual([
+        'Art Director',
+        'Casting Director',
+        'Director of Photography',
+      ]);
+    });
+
+    it('calls somebody taking part a guest rather than an actor', () => {
+      // The reference grabber reads `contestant` the same way, and `<actor>`
+      // would say they acted.
+      const programme = built(
+        {},
+        { cast: [{ personId: '9', name: 'A Player', role: 'Contestant' }] },
+      );
+
+      // Named in the table, so the element says it: no `credit` beside it.
+      expect(programme.credits?.guest).toEqual(['A Player']);
+      expect(programme.credits?.actor).toBeUndefined();
+    });
+
+    it('keeps a cast role the DTD cannot say, beside the name it can', () => {
+      // `Judge`, `Correspondent` and `Voice` all turn up in a day's listings
+      // and all become actors; what kind of credit it was is worth keeping.
+      const programme = built(
+        {},
+        {
+          cast: [
+            { personId: '1', name: 'A Voice', role: 'Voice', characterName: 'Narrator' },
+            { personId: '2', name: 'B Judge', role: 'Judge' },
+          ],
+        },
+      );
+
+      expect(programme.credits?.actor).toEqual([
+        { value: 'A Voice', role: 'Narrator', extraAttributes: { credit: 'Voice' } },
+        { value: 'B Judge', extraAttributes: { credit: 'Judge' } },
+      ]);
+    });
+
     it('puts each on the element its role belongs to', () => {
       const programme = built();
 
       expect(programme.credits?.actor).toEqual([{ value: 'Tom Selleck', role: 'Frank Reagan' }]);
       // `Executive Producer` is a producer as far as the DTD is concerned — and
-      // a credit with nothing to say but a name is written as one.
+      // the table says so, so the name is written on its own.
       expect(programme.credits?.producer).toEqual(['Leonard Goldberg']);
     });
 
@@ -410,15 +583,28 @@ describe('a programme', () => {
       // the DTD keeps the two apart.
       const programme = built({ duration: 3600 }, { duration: 3000 });
 
-      expect(programme.length).toEqual({ units: 'seconds', value: 3000 });
+      // In minutes: 3,000 seconds is 50 of them exactly, and `XMLTV.pm`'s own
+      // writer — which every Perl grabber's output goes through — writes the
+      // largest unit a duration divides into.
+      expect(programme.length).toEqual({ units: 'minutes', value: 50 });
       expect(programme.stop).toEqual(new Date('2026-09-12T21:00:00Z'));
     });
 
     it('takes a film`s runtime from where the service keeps it', () => {
       expect(built({}, { movie: { year: '1957', duration: 5580 } }).length).toEqual({
-        units: 'seconds',
-        value: 5580,
+        units: 'minutes',
+        value: 93,
       });
+    });
+
+    it('writes a whole number of hours as hours, as the same rule has it', () => {
+      expect(built({}, { duration: 7200 }).length).toEqual({ units: 'hours', value: 2 });
+    });
+
+    it('stays in seconds where the minutes would not be whole', () => {
+      // 94 minutes and 30 seconds. Rounding is how a 94-minute film becomes a
+      // 90-minute one, so a runtime that does not divide is left as it came.
+      expect(built({}, { duration: 5670 }).length).toEqual({ units: 'seconds', value: 5670 });
     });
 
     it('writes how it was made and what it is shown for as keywords', () => {

@@ -6,15 +6,88 @@ const ESCAPES: Record<string, string> = {
   "'": '&apos;',
 };
 
-const NEEDS_ESCAPE = /[&<>"']/;
-const ESCAPE_ALL = /[&<>"']/g;
+/**
+ * Which quote characters would end a value where the escaped text is going.
+ *
+ * All there are: `"` inside a double-quoted attribute, `'` inside a
+ * single-quoted one, both for a caller who does not know yet, and neither in
+ * text between two tags.
+ */
+export type XmlQuotes = '"' | "'" | `"'` | '';
 
 /**
- * Escape a string for use in XML text content or attribute values.
+ * Both patterns for one quoting: the test for the fast path, and the replace.
+ *
+ * As plain pairs of constants rather than an object apiece, because the two
+ * named forms below are on the hot path — every title, description and
+ * attribute of a guide — and reading the pair out of a record costs a
+ * measurable tenth against naming the two regexes directly.
+ */
+const TEXT_ANY = /[&<>]/;
+const TEXT_ALL = /[&<>]/g;
+const DOUBLE_ANY = /[&<>"]/;
+const DOUBLE_ALL = /[&<>"]/g;
+const SINGLE_ANY = /[&<>']/;
+const SINGLE_ALL = /[&<>']/g;
+const EITHER_ANY = /[&<>"']/;
+const EITHER_ALL = /[&<>"']/g;
+
+const replacement = (char: string): string => ESCAPES[char]!;
+
+/** Written out rather than built: there are four quotings and no more. */
+const PATTERNS: Record<XmlQuotes, [RegExp, RegExp]> = {
+  '': [TEXT_ANY, TEXT_ALL],
+  '"': [DOUBLE_ANY, DOUBLE_ALL],
+  "'": [SINGLE_ANY, SINGLE_ALL],
+  [`"'`]: [EITHER_ANY, EITHER_ALL],
+};
+
+/**
+ * Escape a string for XML: the three it always needs, plus whichever quotes you
+ * say.
+ *
+ * Always an `&` that is not an entity, a `<` that would open a tag, and a `>` —
+ * which only `]]>` requires, but one character keeps a stray one from ever
+ * looking like markup.
+ *
+ * `quotes` is what would end the value where this is going — `"` inside a
+ * double-quoted attribute, `'` inside a single-quoted one, nothing at all in
+ * text between two tags, where a quote is a quote and an apostrophe is an
+ * apostrophe. It defaults to both, which is safe wherever the result lands and
+ * is what a caller with no particular place in mind wants.
+ *
+ * The two named forms below are the two places this package writes to, and they
+ * reach their pattern without a lookup; other libraries split it the same way,
+ * `entities` as `escapeText` and `escapeAttribute`, Python's `saxutils` as
+ * `escape` and `quoteattr`.
+ *
  * Fast path: most strings contain nothing to escape and are returned as-is.
  */
-export function escapeXml(value: string): string {
-  return NEEDS_ESCAPE.test(value) ? value.replace(ESCAPE_ALL, (char) => ESCAPES[char]!) : value;
+export function escapeXml(value: string, quotes: XmlQuotes = `"'`): string {
+  if (quotes === `"'`) {
+    // The default, which is what a caller who says nothing gets: straight at the
+    // pattern, the way the two named forms below go at theirs.
+    return EITHER_ANY.test(value) ? value.replace(EITHER_ALL, replacement) : value;
+  }
+
+  const [any, all] = PATTERNS[quotes];
+
+  return any.test(value) ? value.replace(all, replacement) : value;
+}
+
+/**
+ * Escape a string for XML text — the three, and no quotes.
+ *
+ * Which is what every other guide writes: `Charlie's Angels` reads as it is
+ * written rather than as `Charlie&apos;s Angels`.
+ */
+export function escapeXmlText(value: string): string {
+  return TEXT_ANY.test(value) ? value.replace(TEXT_ALL, replacement) : value;
+}
+
+/** Escape a string for a double-quoted attribute value — the three, and `"`. */
+export function escapeXmlAttribute(value: string): string {
+  return DOUBLE_ANY.test(value) ? value.replace(DOUBLE_ALL, replacement) : value;
 }
 
 const HASH = '#'.charCodeAt(0);

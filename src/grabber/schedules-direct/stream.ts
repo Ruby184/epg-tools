@@ -164,9 +164,17 @@ export async function* schedulesDirectPass(
   const { channelDays, days, state, warn, signal } = context;
   const { client, mapping, fingerprint, stationDaysPerRequest, programmesPerRequest, queuedWaits } =
     deps;
-  const remapped = state.get(MAPPING) !== fingerprint;
+  const stamp = state.get(MAPPING);
+  // A *different* stamp, not the absence of one: the stamp and the md5s live in
+  // the same state, so a run that has neither has nothing to invalidate — while
+  // treating it as a change would refetch a fortnight the cache already holds,
+  // which is the very thing comparing the service's clock against ours is there
+  // to avoid when a cache outlives its state.
+  const remapped = stamp !== undefined && stamp !== fingerprint;
 
   if (!remapped) {
+    state.set(MAPPING, fingerprint);
+
     // Only what has left the window, which the run has already pruned from
     // the cache — an md5 with no entry behind it is the one thing this must
     // not keep.
@@ -349,6 +357,21 @@ export async function* schedulesDirectPass(
     // themselves abort on the run's signal through the site's client.
     signal?.throwIfAborted();
 
+    /**
+     * The days **this** batch asked about, by station.
+     *
+     * `fetching` holds every day of every station, and a station with more days
+     * than one request may carry is split across batches — so reading a
+     * station's days out of `fetching` here would answer for days another batch
+     * has yet to ask about. Written empty, with the md5 of listings nobody
+     * fetched stored beside them, they would then be "unchanged" for ever.
+     */
+    const scope = new Map<string, string[]>();
+
+    for (const { stationID, date } of batch) {
+      scope.set(stationID, [...(scope.get(stationID) ?? []), ...(date ?? [])]);
+    }
+
     const airings = new Map<string, Map<string, Airing[]>>();
     const missing = new Set<string>();
     /**
@@ -380,7 +403,12 @@ export async function* schedulesDirectPass(
         // as empty.
         const refused =
           schedule.requestedDate === undefined
-            ? [...(fetching.get(stationID)?.keys() ?? [])]
+            ? // Only what this batch asked for: an answer that names no day is
+              // the station's verdict on the days in hand, and says nothing
+              // about the ones a later batch carries.
+              (scope.get(stationID) ?? []).filter(
+                (day) => fetching.get(stationID)?.has(day) === true,
+              )
             : [schedule.requestedDate];
 
         for (const day of refused) {
@@ -503,7 +531,15 @@ export async function* schedulesDirectPass(
     }
 
     for (const [stationID, byDay] of airings) {
-      for (const [day, md5] of fetching.get(stationID) ?? []) {
+      const held = fetching.get(stationID);
+
+      for (const day of scope.get(stationID) ?? []) {
+        if (held?.has(day) !== true) {
+          // Refused above, and already written as whatever that refusal meant.
+          continue;
+        }
+
+        const md5 = held.get(day);
         const pairs = asked.get(stationID)?.get(day) ?? [];
         let complete = true;
 
