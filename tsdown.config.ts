@@ -1,10 +1,36 @@
 import { readFileSync } from 'node:fs';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { defineConfig } from 'tsdown';
 
 const { name, version } = JSON.parse(readFileSync('./package.json', 'utf8')) as {
   name: string;
   version: string;
 };
+
+/**
+ * What a declaration needs before it can name `Symbol.asyncDispose`.
+ *
+ * `CacheManager` and `SqliteCacheDriver` are disposable, so the types shipped
+ * for them name `AsyncDisposable` and `Symbol.asyncDispose` — which exist only
+ * with TypeScript's `esnext.disposable` lib. Without this a consumer on
+ * `"lib": ["ES2022"]` cannot read our types at all, and the error names a
+ * symbol they never asked for; with it they need nothing in their own config.
+ *
+ * Written onto the output rather than into the source: a `/// <reference lib>`
+ * in a `.ts` file is not carried through to the declaration the generator
+ * emits — tried, and it is simply dropped.
+ */
+const DISPOSABLE = '/// <reference lib="esnext.disposable" />';
+
+/** Every `.d.ts` under `dir`, however deep the entry points nest them. */
+async function declarations(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.d.ts'))
+    .map((entry) => join(entry.parentPath, entry.name));
+}
 
 export default defineConfig({
   entry: {
@@ -46,4 +72,23 @@ export default defineConfig({
   // The export map is written by hand — one entry per module, documented in
   // docs/api.md — and `bin` with it. Nothing here rewrites package.json.
   exports: false,
+  hooks: {
+    // See `DISPOSABLE`: the two chunks that name a disposable say so for
+    // themselves, so nothing is asked of whoever imports them.
+    'build:done': async ({ options }) => {
+      const dir = options.outDir;
+
+      await Promise.all(
+        (await declarations(dir)).map(async (file) => {
+          const text = await readFile(file, 'utf8');
+
+          if (!text.includes('asyncDispose') || text.startsWith(DISPOSABLE)) {
+            return;
+          }
+
+          await writeFile(file, `${DISPOSABLE}\n${text}`, 'utf8');
+        }),
+      );
+    },
+  },
 });
