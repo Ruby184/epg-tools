@@ -182,6 +182,60 @@ describe('serveGuide', () => {
     expect(await (await fetch(server.url)).text()).toContain('<channel id="two.plus1">');
   });
 
+  it('writes urls for the host that asked, when told to', async () => {
+    // The case this exists for: a box reachable by two names, whose pictures
+    // are served by whatever is serving the guide.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const config: EpgConfig = {
+      ...configFor([]),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: [{ xmltvId: 'one', siteId: 'one', name: 'One', logo: '/logos/one.png' }],
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+      serve: { baseUrl: true },
+    };
+
+    const server = await serve(config, cache);
+    // Whatever this client addressed the server as. `fetch` sends the `Host`
+    // and will not let a test forge it, which is the real path anyway.
+    const direct = await fetch(server.url);
+    const host = new URL(server.url).host;
+
+    expect(await direct.text()).toContain(`<icon src="http://${host}/logos/one.png"/>`);
+    // A cache in between has to be told the document depends on who asked.
+    expect(direct.headers.get('vary')).toContain('Host');
+
+    // What something in front says it terminated is believed over the
+    // connection this server actually got.
+    const forwarded = await fetch(server.url, {
+      headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'epg.example' },
+    });
+
+    expect(await forwarded.text()).toContain('<icon src="https://epg.example/logos/one.png"/>');
+
+    // Another name for the same box is another document, and says so in the
+    // validator — a consumer polling with the first one's etag is not told 304.
+    expect(forwarded.headers.get('etag')).not.toBe(direct.headers.get('etag'));
+
+    const again = await fetch(server.url, {
+      headers: {
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'epg.example',
+        'if-none-match': forwarded.headers.get('etag') ?? '',
+      },
+    });
+
+    // The same host asking again with what it was given: nothing changed.
+    expect(again.status).toBe(304);
+  });
+
   it('picks the channel up at once when told to reload, ceiling or no ceiling', async () => {
     // The ceiling is a guess at how long a new channel may stay invisible; this
     // is the operator saying they know. `sitesMaxAgeMs` is an hour here, so

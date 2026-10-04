@@ -337,6 +337,63 @@ describe('serialize', () => {
     expect(xml.endsWith('</channel>')).toBe(true);
   });
 
+  describe('baseUrl', () => {
+    const relative: XmltvChannel = {
+      id: 'one.example.tv',
+      displayName: [{ value: 'One' }],
+      icon: [{ src: '/logos/one.png' }, { src: 'https://cdn.example/two.png' }],
+      url: ['/about/one'],
+    };
+
+    it('resolves every relative url, and leaves an absolute one alone', () => {
+      const xml = serializeChannel(relative, { baseUrl: 'https://pi.local/' });
+
+      expect(xml).toContain('<icon src="https://pi.local/logos/one.png"/>');
+      // Somebody else's url: it already says where it is.
+      expect(xml).toContain('<icon src="https://cdn.example/two.png"/>');
+      expect(xml).toContain('<url>https://pi.local/about/one</url>');
+    });
+
+    it('does the same for a programme, its images and its people', () => {
+      const xml = serializeProgramme(
+        {
+          channel: 'one.example.tv',
+          start: new Date('2026-07-17T20:30:00Z'),
+          title: [{ value: 'A' }],
+          icon: [{ src: 'stills/a.png' }],
+          image: [{ value: '/art/a.jpg', type: 'poster' }],
+          url: ['/programmes/a'],
+          credits: { actor: [{ value: 'Somebody', image: [{ value: '/people/s.jpg' }] }] },
+        },
+        { baseUrl: 'https://pi.local/guide/' },
+      );
+
+      // Relative to the base's own path, as a relative url is.
+      expect(xml).toContain('<icon src="https://pi.local/guide/stills/a.png"/>');
+      expect(xml).toContain('>https://pi.local/art/a.jpg</image>');
+      expect(xml).toContain('<url>https://pi.local/programmes/a</url>');
+      expect(xml).toContain('>https://pi.local/people/s.jpg</image>');
+    });
+
+    it('writes the document unchanged without one', () => {
+      expect(serializeChannel(relative)).toContain('<icon src="/logos/one.png"/>');
+    });
+
+    it('refuses a base that cannot make anything absolute', () => {
+      // Quietly resolving nothing is the failure that gets found by reading the
+      // guide, which is the one thing worth throwing over here.
+      expect(() => serializeChannel(relative, { baseUrl: '/logos/' })).toThrow(
+        /baseUrl must be an absolute url/,
+      );
+    });
+
+    it('takes a URL as it is', () => {
+      expect(serializeChannel(relative, { baseUrl: new URL('https://pi.local/') })).toContain(
+        '<icon src="https://pi.local/logos/one.png"/>',
+      );
+    });
+  });
+
   it('pretty-prints with the indent option (spaces or a custom string)', () => {
     const spaces = serializeChannel(channels[0]!, { indent: 2 });
     expect(spaces.startsWith('  <channel ')).toBe(true);

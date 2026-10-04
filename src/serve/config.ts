@@ -6,6 +6,7 @@
  * in `node:http` and the merge behind it to read a config field.
  */
 
+import type { IncomingMessage } from 'node:http';
 import type { CompressionFormat } from '../core/output.js';
 import type { NextGrab } from './schedule.js';
 
@@ -69,4 +70,25 @@ export interface EpgServeConfig {
    * dashboard of your own, and worth doing on purpose.
    */
   cors?: boolean | string;
+  /**
+   * Resolve relative urls in the guide against this, overriding `baseUrl` on
+   * the configuration — see `SerializeOptions.baseUrl`.
+   *
+   * A url for a fixed one. `true` builds it from the request: the forwarded
+   * protocol and host where something in front says so, the `Host` header
+   * otherwise. That is what a box reachable by two names needs, since neither
+   * of them is the one to write down. A function decides for itself, and
+   * falling back to the configured base by answering `undefined`.
+   *
+   * ```ts
+   * serve: { baseUrl: true }
+   * serve: { baseUrl: (request) => `https://${request.headers.host ?? 'pi.local'}/` }
+   * ```
+   *
+   * What it costs: a guide that differs by who asked for it. The validators
+   * carry the base, so a consumer is told the document changed when it did, and
+   * the response says it varies on the headers the base was read from — without
+   * which a cache in between would hand one host another's document.
+   */
+  baseUrl?: string | URL | true | ((request: IncomingMessage) => string | URL | undefined);
 }

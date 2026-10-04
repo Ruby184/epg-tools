@@ -154,6 +154,20 @@ export interface EpgConfig {
    */
   extensions?: SerializeOptions['extensions'];
   /**
+   * Resolve every relative url the guide writes against this one — an
+   * `<icon src>`, an `<image>`, a `<url>`.
+   *
+   * For a guide whose pictures are served alongside it: a channel list that
+   * says `/logos/one.png` goes out saying `https://pi.local/logos/one.png`, so
+   * a consumer with nothing but the document can fetch them. A url that already
+   * names where it is is left alone, and a base that is not absolute is refused
+   * rather than quietly resolving nothing.
+   *
+   * `serve.baseUrl` overrides it, and can answer per request — a box reachable
+   * at two names cannot write one base here and be right for both.
+   */
+  baseUrl?: string | URL;
+  /**
    * Shape the guide for the consumer that will read it: which `<episode-num>`
    * systems go out and in what order, what a `<category>` is called, how many
    * `<icon>`s a programme needs, which optional elements are left out.

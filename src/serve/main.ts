@@ -22,6 +22,7 @@
 
 import { createHash } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { TLSSocket } from 'node:tls';
 import type { AddressInfo } from 'node:net';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -478,6 +479,59 @@ function corsHeaders(cors: boolean | string): Record<string, string> {
   };
 }
 
+/**
+ * The headers a base read off the request is built from.
+ *
+ * `Forwarded` and the `X-Forwarded-*` pair because something in front may be
+ * terminating TLS or answering on another name, and `Host` because that is what
+ * the request says when nothing is. Any of them changing changes the document,
+ * which is what `Vary` is for.
+ */
+const FORWARDED = ['Host', 'X-Forwarded-Host', 'X-Forwarded-Proto', 'Forwarded'] as const;
+
+/** One header, where it is a single value. */
+const header = (request: IncomingMessage, name: string): string | undefined => {
+  const value = request.headers[name];
+
+  return Array.isArray(value) ? value[0] : value;
+};
+
+/**
+ * Where this request reached us, as a url to resolve the guide's own against.
+ *
+ * What a proxy says first, then the `Host` the request carries. `https` only
+ * when something says so: a server on loopback behind a proxy sees plain HTTP,
+ * and guessing the scheme would write urls nobody can fetch.
+ */
+function requestBase(request: IncomingMessage): string | undefined {
+  const host = header(request, 'x-forwarded-host') ?? header(request, 'host');
+
+  if (host === undefined || host === '') {
+    // HTTP/1.0 without a `Host`, which is allowed and leaves nothing to build
+    // from. The configured base stands, as it does when there is none.
+    return undefined;
+  }
+
+  // What a proxy says it terminated, then what this very connection is: a
+  // handler mounted on an HTTPS server of somebody's own has an encrypted
+  // socket and no forwarded header at all. `http` only when neither says
+  // otherwise, since guessing `https` writes urls nobody can fetch.
+  const proto =
+    header(request, 'x-forwarded-proto')?.split(',')[0]?.trim() ??
+    ((request.socket as TLSSocket).encrypted === true ? 'https' : 'http');
+
+  return `${proto}://${host}/`;
+}
+
+/** An etag of the same guide written for somewhere else — see `serve.baseUrl`. */
+function taggedWith(etag: string, base: string): string {
+  const digest = createHash('sha256').update(base).digest('base64url').slice(0, 8);
+
+  // Inside the quotes, so it stays one opaque validator: a client compares the
+  // whole string and never reads this.
+  return etag.replace(/"$/, `-${digest}"`);
+}
+
 /** Whether the client already has this, by either validator. */
 function unchanged(request: IncomingMessage, print: Fingerprint): boolean {
   const noneMatch = request.headers['if-none-match'];
@@ -555,6 +609,38 @@ export async function serveGuide(
   const cors = options.cors ?? config.serve?.cors ?? false;
   const sitesMaxAgeMs = options.sitesMaxAgeMs ?? DEFAULT_SITES_MAX_AGE_MS;
   const schedule = options.grab ?? config.serve?.grab;
+  const declaredBase = config.serve?.baseUrl;
+
+  /**
+   * Where this request's guide says its urls are, or nothing for the config's
+   * own — see `baseUrl` on the serve config.
+   *
+   * A function may decline by answering `undefined`, which is what makes "the
+   * host that asked, except for this one caller" a line rather than a branch.
+   */
+  const baseFor = (request: IncomingMessage): string | URL | undefined => {
+    if (declaredBase === undefined) {
+      return undefined;
+    }
+
+    if (declaredBase === true) {
+      return requestBase(request);
+    }
+
+    return typeof declaredBase === 'function' ? declaredBase(request) : declaredBase;
+  };
+
+  /**
+   * What the answer depends on besides the encoding.
+   *
+   * Only where the base is read off the request: a fixed one is the same
+   * document for everybody, and naming headers that change nothing would cost a
+   * shared cache its hit rate for no reason.
+   */
+  const varyOn = [
+    'Accept-Encoding',
+    ...(declaredBase === true || typeof declaredBase === 'function' ? FORWARDED : []),
+  ].join(', ');
 
   const opened = options.cache === undefined;
   const cache = options.cache ?? (await createCacheStore(config, options.signal));
@@ -881,7 +967,17 @@ export async function serveGuide(
       }
 
       const now = options.now ?? new Date();
-      const { print: fingerprint, sites, derived } = await current(now);
+      const { print: snapshot, sites, derived } = await current(now);
+      // Where this document says its urls are, which may be read off this very
+      // request — see `baseUrl` on the serve config.
+      const base = baseFor(request);
+      const fingerprint =
+        base === undefined
+          ? snapshot
+          : // In the etag, because it is in the document: two hosts are served
+            // two guides, and a consumer polling with the other one's validator
+            // has to be told it changed.
+            { ...snapshot, etag: taggedWith(snapshot.etag, String(base)) };
 
       /** What is true of the guide whether or not a body goes with it. */
       const validators: Record<string, string> = {
@@ -890,7 +986,9 @@ export async function serveGuide(
         // "Use it, but ask first" — which is exactly what a poller should do,
         // and what makes the 304 below possible at all.
         'cache-control': 'no-cache',
-        vary: 'Accept-Encoding',
+        // With whatever a per-request base was read from: a cache in between
+        // must not hand one host the document written for another.
+        vary: varyOn,
         // In the validators rather than beside them, so a 304 carries it too:
         // a browser refused the headers on a revalidation would treat every
         // conditional poll as a failure.
@@ -940,6 +1038,7 @@ export async function serveGuide(
 
         const guide = generateGuide({
           ...guideOptions(now, sites, derived),
+          ...(base === undefined ? {} : { baseUrl: base }),
           signal: stops.signal,
         });
         const chain =

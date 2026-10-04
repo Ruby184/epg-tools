@@ -59,7 +59,8 @@ hardcode — a username, a password, a region. See
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 | `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — all of them | Which provider extensions the guide carries — see [Provider extensions](#provider-extensions). `false` leaves every one out, which is what makes the guide valid against the DTD. |
 | `profile` | `'tvheadend' \| 'jellyfin' \| OutputProfile` | none | Shape the guide for the consumer that reads it — see [Output profiles](#output-profiles). Applies on the way out, so switching it refetches nothing. |
-| `serve` | `{ port?, host?, path?, compress?, cors? }` | `8080`, `127.0.0.1`, `/guide.xml`, `gzip`, off | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). |
+| `baseUrl` | `string \| URL` | none | Resolve every relative `<icon src>`, `<image>` and `<url>` the guide writes against this. See [serving the guide](#serving-the-guide). |
+| `serve` | `{ port?, host?, path?, compress?, cors?, baseUrl? }` | `8080`, `127.0.0.1`, `/guide.xml`, `gzip`, off, none | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). |
 | `allowMissing` | `number \| string` | none — anything missing fails | How much of the guide may be missing and the run still exit **0**: a number of channel-days, or a share like `'5%'` — see [allowing some of the guide to be missing](#allowing-some-of-the-guide-to-be-missing). |
 | `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'progress'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
 
@@ -612,6 +613,35 @@ default is 5, which is *below* the 60 nginx and Traefik keep, and that ordering
 is what produces the intermittent `502` nobody can reproduce: the proxy sends a
 request down a pooled socket at the moment Node is tearing it down. Holding
 longer means the proxy is always the one to decide a connection is finished.
+
+**For pictures served beside the guide**, set a base url. A relative
+`<icon src>`, `<image>` or `<url>` is relative to the document, and a guide is
+read somewhere other than where it was written — so `baseUrl` on the
+configuration resolves every one of them on the way out:
+
+```ts
+baseUrl: 'https://pi.local/'    // /logos/one.png → https://pi.local/logos/one.png
+```
+
+A url that already says where it is — `https://`, `//cdn`, a `data:` — is left
+exactly as it came, and a base that is not absolute is refused rather than
+quietly resolving nothing.
+
+`serve.baseUrl` overrides it, and can answer **per request**, which is what a
+box reachable by two names needs:
+
+```ts
+serve: { baseUrl: true }                                   // the host that asked
+serve: { baseUrl: (request) => bases[request.headers.host] }   // or your own rule
+```
+
+`true` reads the forwarded protocol and host where something in front says so,
+falls back to the `Host` header, and treats the connection as `https` when the
+socket itself is TLS. A per-request base is folded into the `ETag` and the
+response says it varies on the headers it was read from, so a consumer is told
+the document changed when it did and a cache in between never hands one host
+another's guide. A fixed base adds neither, being the same document for
+everybody.
 
 **For a browser**, set `serve.cors` — `true` for any origin, or one origin to
 allow only it. It is off by default because loopback is not the boundary it
