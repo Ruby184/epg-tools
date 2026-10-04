@@ -323,7 +323,14 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
           registry.push(entry);
         }
 
-        if (channelStrategy === 'first-wins' && entry.sources.length > 0) {
+        if (
+          (channelStrategy === 'first-wins' || channelStrategy === 'first-only') &&
+          entry.sources.length > 0
+        ) {
+          // `first-only` has usually taken the lower sites' channels away
+          // before the grab, so there is nothing here to pass over — but a
+          // merge run on its own resolves the lists itself, and the two have to
+          // produce the same guide either way.
           continue;
         }
 

@@ -12,10 +12,16 @@ import type { Reporter, Says } from '../core/events.js';
  *   `src`); programmes are combined per {@link ProgrammeStrategy}. Site
  *   order = priority.
  * - `first-wins`: one `<channel>` element; only the first (highest priority)
- *   covering site contributes programmes.
+ *   covering site contributes programmes. The others are still grabbed, so
+ *   switching to one of the strategies that use them costs no refetch.
+ * - `first-only`: the same guide, and the others are **not grabbed**. A channel
+ *   a higher-priority site covers is dropped from the lists of the sites below
+ *   it before the run starts, so what the merge was going to discard is never
+ *   fetched. For a lineup assembled from several providers in preference order,
+ *   which is what the saving is: one request each, not one per provider.
  * - `keep-all`: no deduplication at all; everything is emitted as-is.
  */
-export type ChannelStrategy = 'merge-programmes' | 'first-wins' | 'keep-all';
+export type ChannelStrategy = 'merge-programmes' | 'first-wins' | 'first-only' | 'keep-all';
 
 /**
  * How programmes of one channel from multiple sites are combined

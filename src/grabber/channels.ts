@@ -218,6 +218,43 @@ export async function resolveChannels(
  * there and writes a fetched one back — one state handle per site, opened and
  * saved here, since resolving is the whole of what this call does with a site.
  */
+/**
+ * Resolved sites with every channel left to the first site that covers it.
+ *
+ * What `channelStrategy: 'first-only'` means before the grab rather than after
+ * it: the merge keeps one source per channel whatever the sites below offer, so
+ * asking them for the same channel-days is asking for what is going to be
+ * thrown away. Site order is priority order, as it is everywhere else here.
+ *
+ * Takes resolved sites — lists, not functions — since which channels a site has
+ * is the whole of what this decides on.
+ */
+export function coveredOnce(
+  sites: AnySiteConfig[],
+  dropped?: (site: string, count: number) => void,
+): AnySiteConfig[] {
+  const claimed = new Set<string>();
+
+  return sites.map((site) => {
+    const channels = (site.channels as GrabberChannel[]).filter((channel) => {
+      if (claimed.has(channel.xmltvId)) {
+        return false;
+      }
+
+      claimed.add(channel.xmltvId);
+
+      return true;
+    });
+    const lost = (site.channels as GrabberChannel[]).length - channels.length;
+
+    if (lost > 0) {
+      dropped?.(site.site, lost);
+    }
+
+    return { ...site, channels };
+  });
+}
+
 export async function resolveSites(
   sites: AnySiteConfig[],
   options: {

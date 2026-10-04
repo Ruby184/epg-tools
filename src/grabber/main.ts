@@ -3,6 +3,7 @@ export {
   channelElement,
   channelsFromChannelsXml,
   channelsFromM3u,
+  coveredOnce,
   defaultChannelInfo,
   resolveChannels,
   resolveSites,

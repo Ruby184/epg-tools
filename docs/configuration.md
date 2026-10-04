@@ -1157,12 +1157,19 @@ When several sites cover the same `xmltvId` (site order in `sites` = priority):
 
 - `channelStrategy`
   - `merge-programmes` (default) — one `<channel>` with metadata merged from all covering sites (display names unioned by `(lang, value)`, icons by `src`, priority site first), programmes combined from all covering sites
-  - `first-wins` — one `<channel>`, programmes only from the first covering site
+  - `first-wins` — one `<channel>`, programmes only from the first covering site. The others are still grabbed, so switching to a strategy that uses them costs no refetch
+  - `first-only` — the same guide, and the others are **not grabbed**: a channel a higher-priority site covers is taken off the lists of the sites below it before the run starts, so what the merge was going to discard is never fetched. For a lineup assembled from several providers in preference order, this is one request per channel instead of one per provider
   - `keep-all` — no deduplication
 - `programmeStrategy` (for `merge-programmes`)
   - `merge` (default) — programmes describing the same broadcast become one element; language-tagged fields (`title`, `desc`, `category`, …) are unioned by `(lang, value)` — grab the same channel from a Slovak and an English source and get both languages in one programme
   - `concat` — keep all programmes sorted by start
   - `backfill` — the first covering site contributes everything it has, and a lower-priority one only what falls in a hole it left; nothing is combined — see [filling the gaps](#filling-the-gaps)
+
+`first-only` is read by the grab as well as by the merge, so `epg grab`,
+`epg build` and `epg serve`'s own grabs all stop asking — and each site says how
+many channels it left to one above it. What it costs is the lower site's copy:
+where `first-wins` has it cached and switching strategy is free, here the days
+are not there, and asking for them later is a fetch.
 
 ### What counts as the same broadcast
 

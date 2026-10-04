@@ -6,7 +6,7 @@ import {
   MemoryCacheDriver,
 } from './cache/main.js';
 import type { CacheDriver, CacheStore } from './cache/main.js';
-import { grab, resolveSites } from './grabber/main.js';
+import { coveredOnce, grab, resolveSites } from './grabber/main.js';
 import type { GrabberChannel, GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
 import { channelSelection, declaredDerived, unmatched, unmatchedMessage } from './merge/select.js';
@@ -14,7 +14,7 @@ import type { BuildGuideOptions } from './merge/types.js';
 import { outputOptions } from './xmltv/serialize.js';
 import { addDays, toDayString } from './core/days.js';
 import { GrabberError } from './core/error.js';
-import type { Reporter } from './core/events.js';
+import type { Emit, Reporter } from './core/events.js';
 import { emitter } from './core/events.js';
 import {
   resolveConfigSource,
@@ -175,6 +175,26 @@ async function withCache<T>(
   }
 }
 
+/**
+ * Whether a channel belongs to one site only — `channelStrategy: 'first-only'`.
+ *
+ * Read off the config rather than passed around: the grab has to know it as
+ * much as the merge does, and they have to read it the same way or a run fetches
+ * what the guide then leaves out.
+ */
+const exclusive = (config: EpgConfig): boolean => config.merge?.channelStrategy === 'first-only';
+
+/** Said once per site that lost channels to one above it, with how many. */
+const droppedBy =
+  (emit: Emit) =>
+  (site: string, count: number): void => {
+    emit({
+      type: 'site:note',
+      site,
+      message: `${String(count)} channel(s) left to a higher-priority site: channelStrategy is first-only`,
+    });
+  };
+
 /** First day of the window implied by `now` + `offset`. */
 function startDayOf(options: RunOptions, now: Date): string {
   const today = toDayString(now);
@@ -230,7 +250,27 @@ export async function runGrab(
   const startDay = startDayOf(options, now);
 
   return withCache(config, options, async (cache) => {
-    const summary = await grab(config.sites, {
+    const emit = emitter(options);
+    // Resolved here only to decide what not to ask for. Every site resolves its
+    // own list anyway — this is the same work, done early enough to compare the
+    // lists against each other, and a `cacheChannels` site answers from the
+    // cache both times.
+    const sites = exclusive(config)
+      ? coveredOnce(
+          await resolveSites(config.sites, {
+            ...(config.siteConcurrency !== undefined
+              ? { concurrency: config.siteConcurrency }
+              : {}),
+            ...(options.signal ? { signal: options.signal } : {}),
+            ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
+            emit,
+            store: cache,
+            now,
+          }),
+          droppedBy(emit),
+        )
+      : config.sites;
+    const summary = await grab(sites, {
       cache,
       startDay,
       ...(config.days !== undefined ? { days: config.days } : {}),
@@ -354,17 +394,21 @@ export async function build(source: ConfigSource, options: RunOptions = {}): Pro
       ...(config.channels ? { channels: config.channels } : {}),
       ...(declarations ? { derived: declarations } : {}),
     });
+    const selected = selection
+      ? sites.map((site) => ({
+          ...site,
+          channels: (site.channels as GrabberChannel[]).filter((channel) =>
+            selection.select.has(channel.xmltvId),
+          ),
+        }))
+      : sites;
     const resolved: EpgConfig = {
       ...config,
       ...(declarations ? { derived: declarations } : {}),
-      sites: selection
-        ? sites.map((site) => ({
-            ...site,
-            channels: (site.channels as GrabberChannel[]).filter((channel) =>
-              selection.select.has(channel.xmltvId),
-            ),
-          }))
-        : sites,
+      // Before the grab, which is the whole of what `first-only` is for: the
+      // merge below keeps one source per channel either way, so the sites under
+      // the first to cover one are never asked about it.
+      sites: exclusive(config) ? coveredOnce(selected, droppedBy(emit)) : selected,
     };
 
     // Here rather than only in the merge below, because here is before the
