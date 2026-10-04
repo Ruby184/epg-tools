@@ -1,6 +1,8 @@
 import type { EpgConfig } from '../config.js';
 import { resolveChannels } from '../grabber/channels.js';
+import type { GrabberChannel } from '../grabber/types.js';
 import { resolveDeclarations } from '../merge/derive.js';
+import { declaredDerived } from '../merge/select.js';
 
 /**
  * Restrict a config to the selected channel ids.
@@ -18,30 +20,41 @@ export function applyChannelSelection(config: EpgConfig, selected: Set<string>):
 
 /** Every channel id a config can deliver, in site priority order, deduplicated. */
 export async function resolveChannelIds(config: EpgConfig): Promise<string[]> {
-  const ids: string[] = [];
-  const seen = new Set<string>();
+  // One `Set` and no list beside it: it dedupes and keeps insertion order, which
+  // is the two things the ids are wanted for.
+  const ids = new Set<string>();
+  const channels: GrabberChannel[] = [];
 
   for (const site of config.sites) {
-    const channels = await resolveChannels(site);
+    const listed = await resolveChannels(site);
 
-    for (const channel of channels) {
-      if (!seen.has(channel.xmltvId)) {
-        seen.add(channel.xmltvId);
-        ids.push(channel.xmltvId);
-      }
+    channels.push(...listed);
+
+    for (const channel of listed) {
+      ids.add(channel.xmltvId);
     }
   }
 
-  if (config.derived?.length) {
+  // Asked against the lists just read, so a `derived` function offers what this
+  // run would build rather than what was written down.
+  const declarations = await declaredDerived(config.derived, {
+    channels,
+    now: new Date(),
+    log: () => {},
+    warn: () => {},
+  });
+
+  if (declarations?.length) {
     // After the real ones, and counted the same: a selection offering them, and
     // `--channel-updates` not calling them "no longer offered" every run.
-    for (const { declaration } of resolveDeclarations(config.derived, seen, new Set())) {
-      if (!seen.has(declaration.xmltvId)) {
-        seen.add(declaration.xmltvId);
-        ids.push(declaration.xmltvId);
-      }
+    //
+    // `ids` is both what a declaration is resolved against and where its own id
+    // lands, as it was before: a chain is declared in terms of what came
+    // earlier, so each one is on the books by the time the next is read.
+    for (const { declaration } of resolveDeclarations(declarations, ids, new Set())) {
+      ids.add(declaration.xmltvId);
     }
   }
 
-  return ids;
+  return [...ids];
 }

@@ -1609,6 +1609,69 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
         ...options,
       });
 
+    it('asks a function what to derive, against the channels there are', async () => {
+      // The form that exists for a lineup nobody writes down: a provider sync
+      // adds a channel, and its `+1` has to follow without the config changing.
+      const seen: string[][] = [];
+      const output = await guide(
+        ({ channels }) => {
+          seen.push(channels.map((channel) => channel.xmltvId));
+
+          return channels.map((channel) => ({
+            xmltvId: `${channel.xmltvId}.plus1`,
+            from: channel.xmltvId,
+            offset: 60,
+          }));
+        },
+        withDays({ [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'A')] }),
+      );
+
+      // The channels the sites resolved to, which is what makes it answerable.
+      expect(seen).toEqual([['X']]);
+      expect(output).toContain('<channel id="X.plus1">');
+      expect(aired(output)).toEqual(['X 20260115100000', 'X.plus1 20260115110000']);
+    });
+
+    it('lets a function say why it derived nothing', async () => {
+      const said: string[] = [];
+      const output = await guide(
+        ({ channels, warn }) => {
+          warn(`no shift for ${String(channels.length)} channel(s)`);
+
+          return [];
+        },
+        withDays({ [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'A')] }),
+        {
+          reporter: (event) =>
+            said.push(`${event.type}:${'message' in event ? event.message : ''}`),
+        },
+      );
+
+      expect(said).toContain('merge:warning:no shift for 1 channel(s)');
+      expect(aired(output)).toEqual(['X 20260115100000']);
+    });
+
+    it('keeps the source a function-declared shift needs, under a selection', async () => {
+      // `channels` selects only the derived id; the source it shifts has to
+      // survive the narrowing, which is the thing a plain filter gets wrong.
+      const output = await guide(
+        ({ channels }) =>
+          channels.map((channel) => ({
+            xmltvId: `${channel.xmltvId}.plus1`,
+            from: channel.xmltvId,
+            offset: 60,
+          })),
+        withDays({ [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'A')] }),
+        { channels: ['X.plus1'] },
+      );
+
+      // The source is kept and published with it — what a selection of a shift
+      // means, and the thing a plain filter on the sites gets wrong.
+      expect(output).toContain('<channel id="X.plus1">');
+      expect(output).toContain('<channel id="X">');
+      expect(aired(output)).toEqual(['X 20260115100000', 'X.plus1 20260115110000']);
+    });
+
     it('publishes a channel of its own, with every programme under its id', async () => {
       const output = await guide(
         [{ xmltvId: 'X.plus1', from: 'X', offset: 60 }],

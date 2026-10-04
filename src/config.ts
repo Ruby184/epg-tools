@@ -16,7 +16,7 @@ import type { CompressionFormat, CompressionOptions } from './core/output.js';
 import type { MissingAllowance } from './grabber/missing.js';
 import type { EpgServeConfig } from './serve/config.js';
 import type { AnySiteConfig } from './grabber/types.js';
-import type { DerivedChannel, MergeOptions } from './merge/types.js';
+import type { DerivedChannels, MergeOptions } from './merge/types.js';
 import type { SerializeOptions } from './xmltv/serialize.js';
 import type { XmltvDocumentMeta } from './xmltv/types.js';
 import type { ReporterFactory, ReporterName } from './core/reporters.js';
@@ -100,13 +100,18 @@ export interface EpgConfig {
   /**
    * Channels that are other channels shifted — a `+1` and its like. They cost
    * no requests: each reads its source's cached days again and moves every
-   * programme along. See {@link DerivedChannel}.
+   * programme along. See `DerivedChannel`.
    *
    * `epg channels` is what usually sends you here: shown a playlist wanting
    * `Sky One +1`, it refuses to map it onto `skyone.uk` and says it looks like
    * a shift of it instead.
+   *
+   * A **function** is asked once per run, with the channels the sites resolved
+   * to — for a lineup that is not written down here. A list cannot follow one
+   * that changes: `epg serve` reads this configuration once and goes on serving
+   * under it, so a channel added between grabs would never get its `+1`.
    */
-  derived?: DerivedChannel[];
+  derived?: DerivedChannels;
   /**
    * Keep only these channels, by `xmltvId`. Every one of them, by default.
    *

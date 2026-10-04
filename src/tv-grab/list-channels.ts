@@ -2,6 +2,7 @@ import type { EpgConfig } from '../config.js';
 import { channelElement, resolveChannels } from '../grabber/channels.js';
 import type { GrabberChannel } from '../grabber/types.js';
 import { derivedChannelElement, resolveDeclarations } from '../merge/derive.js';
+import { declaredDerived } from '../merge/select.js';
 import { mergeChannels } from '../merge/main.js';
 import {
   serializeChannel,
@@ -18,9 +19,12 @@ import type { XmltvChannel } from '../xmltv/types.js';
  */
 async function collectChannels(config: EpgConfig): Promise<XmltvChannel[]> {
   const byId = new Map<string, XmltvChannel>();
+  const all: GrabberChannel[] = [];
 
   for (const site of config.sites) {
     const channels: GrabberChannel[] = await resolveChannels(site);
+
+    all.push(...channels);
 
     for (const channel of channels) {
       const info = channelElement(site, channel);
@@ -35,9 +39,20 @@ async function collectChannels(config: EpgConfig): Promise<XmltvChannel[]> {
   // A derived channel is one this grabber can deliver, so it belongs in the
   // list a caller chooses from — without it, tvheadend can never map the `+1`.
   // Built from the source's merged element, exactly as the guide builds it.
-  if (config.derived?.length) {
+  // Asked against the lists just collected, so a `derived` function offers the
+  // same channels the guide will carry — `--list-channels` answering for a
+  // lineup the grab does not have is how a consumer maps a channel that never
+  // arrives.
+  const declarations = await declaredDerived(config.derived, {
+    channels: all,
+    now: new Date(),
+    log: () => {},
+    warn: () => {},
+  });
+
+  if (declarations?.length) {
     for (const { declaration, rootId, offsetMinutes } of resolveDeclarations(
-      config.derived,
+      declarations,
       new Set(byId.keys()),
       new Set(),
     )) {

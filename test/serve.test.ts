@@ -141,6 +141,47 @@ describe('serveGuide', () => {
     expect(await (await fetch(server.url)).text()).toContain('<channel id="two">');
   });
 
+  it('derives a shift for a channel that arrived after it started', async () => {
+    // The reason `derived` takes a function: a server reads its configuration
+    // once, so a `+1` written out by hand can only ever describe the lineup as
+    // it was. Asked against the lists each snapshot resolves, it follows.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    let lineup = ['one'];
+    const config: EpgConfig = {
+      ...configFor([]),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: () => lineup.map((id) => ({ xmltvId: id, siteId: id, name: id })),
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+      derived: ({ channels }) =>
+        channels.map((channel) => ({
+          xmltvId: `${channel.xmltvId}.plus1`,
+          from: channel.xmltvId,
+          offset: 60,
+        })),
+    };
+
+    const server = await serve(config, cache, { revalidateMs: 0, sitesMaxAgeMs: 0 });
+    const first = await (await fetch(server.url)).text();
+
+    expect(first).toContain('<channel id="one.plus1">');
+    expect(first).not.toContain('<channel id="two.plus1">');
+
+    lineup = ['one', 'two'];
+    await cache.write({ site: 'example.tv', channelId: 'two', day: DAY }, [programme('two', 6)], {
+      grabbedAt: '2026-09-03T04:00:00.000Z',
+    });
+
+    expect(await (await fetch(server.url)).text()).toContain('<channel id="two.plus1">');
+  });
+
   it('picks the channel up at once when told to reload, ceiling or no ceiling', async () => {
     // The ceiling is a guess at how long a new channel may stay invisible; this
     // is the operator saying they know. `sitesMaxAgeMs` is an hour here, so

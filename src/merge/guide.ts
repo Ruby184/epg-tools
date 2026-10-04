@@ -12,7 +12,7 @@ import { mergeChannels } from './channel.js';
 import { derivedChannelElement, resolveDerived, shiftProgrammes } from './derive.js';
 import { backfillInto, DEFAULT_FILL_STOP_MS, mergeInto, resolveMatch } from './programme.js';
 import type { ChannelSource, RegistryEntry } from './registry.js';
-import { channelSelection, unmatched, unmatchedMessage } from './select.js';
+import { channelSelection, declaredDerived, unmatched, unmatchedMessage } from './select.js';
 import type { BuildGuideOptions, FillGapsContext, FillGapsOptions } from './types.js';
 
 /**
@@ -266,20 +266,41 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   // The cache goes with it: a site that keeps its channel list there has one the
   // grab just wrote, and a merge asking the source again could only disagree
   // with what it is about to read.
-  // What `channels` selects, with the sources a derived channel needs added to
-  // it — asked here rather than passed in, since the answer is the same however
-  // the caller arrived and this is where the lists are fetched.
-  const selection = channelSelection(options);
-  const resolved = (
+  const sites = (
     await resolveSites(options.sites, {
       emit,
       ...(options.siteConcurrency !== undefined ? { concurrency: options.siteConcurrency } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
-      ...(selection ? { select: selection.select } : {}),
       store: cache,
       now,
     })
   ).map((config) => ({ config, channels: config.channels as GrabberChannel[] }));
+
+  // What `channels` selects, with the sources a derived channel needs added to
+  // it — asked here rather than passed in, since the answer is the same however
+  // the caller arrived and this is where the lists are fetched.
+  //
+  // After the lists rather than before them, because a `derived` function is a
+  // function *of* them: what it declares cannot be known until there are
+  // channels to declare it about. The selection then narrows what was resolved,
+  // which is the same answer as narrowing on the way out of each site — what a
+  // site stores is its whole list either way.
+  const declarations = await declaredDerived(options.derived, {
+    channels: sites.flatMap((site) => site.channels),
+    now,
+    ...mergeSays,
+  });
+  const selection = channelSelection({
+    ...(options.channels ? { channels: options.channels } : {}),
+    ...(declarations ? { derived: declarations } : {}),
+  });
+  const resolved =
+    selection === undefined
+      ? sites
+      : sites.map((site) => ({
+          ...site,
+          channels: site.channels.filter((channel) => selection.select.has(channel.xmltvId)),
+        }));
 
   const registry: RegistryEntry[] = [];
 
@@ -317,7 +338,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   // right, warned about for a source that merely is not here today.
   // The selection's own, where there is one: a declaration whose source was not
   // selected has been flattened past it, and one nobody selected is gone.
-  const declared = selection?.derived ?? options.derived;
+  const declared = selection?.derived ?? declarations;
   const derived = declared?.length ? resolveDerived(declared, registry, mergeSays) : [];
 
   const channels: XmltvChannel[] = [];

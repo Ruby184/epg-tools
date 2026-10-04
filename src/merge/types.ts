@@ -1,7 +1,7 @@
 import type { SerializeOptions } from '../xmltv/serialize.js';
 import type { XmltvChannel, XmltvDocumentMeta, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheStore } from '../cache/types.js';
-import type { AnySiteConfig } from '../grabber/types.js';
+import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import type { Reporter, Says } from '../core/events.js';
 
 /**
@@ -314,6 +314,41 @@ export interface DerivedChannel {
   channelInfo?: (element: XmltvChannel) => XmltvChannel;
 }
 
+/**
+ * The channels a derivation is declared against: every one the sites resolved
+ * to, before anything is derived from them.
+ *
+ * With the same `log` and `warn` a `merge.transform` is given, and going to the
+ * same place: a declaration that decides *not* to shift something — a channel
+ * whose `+1` the provider dropped — is worth a line, and it is the only line
+ * anyone will get about it.
+ */
+export interface DerivedContext extends Says {
+  channels: readonly GrabberChannel[];
+  now: Date;
+}
+
+/**
+ * Where derived channels come from: a list, or a function of the channels there
+ * turned out to be.
+ *
+ * The function form is for a lineup that is not written down — one a site
+ * fetches, or one a provider sync rewrites between grabs. A static list cannot
+ * follow it: `serveGuide` resolves its configuration once, so a `+1` declared
+ * by hand goes stale the moment a channel is added. Asked per run, against the
+ * lists that run resolved, it does not.
+ *
+ * ```ts
+ * derived: ({ channels }) =>
+ *   channels
+ *     .filter((channel) => channel.data?.timeshift === true)
+ *     .map((channel) => ({ xmltvId: `${channel.xmltvId}.plus1`, from: channel.xmltvId, offset: 60 })),
+ * ```
+ */
+export type DerivedChannels =
+  | DerivedChannel[]
+  | ((context: DerivedContext) => DerivedChannel[] | Promise<DerivedChannel[]>);
+
 export interface BuildGuideOptions {
   /** Site configs in priority order (first = highest). */
   sites: AnySiteConfig[];
@@ -359,8 +394,11 @@ export interface BuildGuideOptions {
   /**
    * Channels that are other channels shifted — see {@link DerivedChannel}. They
    * cost no requests: each reads its source's cached days again.
+   *
+   * A function instead of a list is asked once per run, with the channels the
+   * sites resolved to — see {@link DerivedChannels}.
    */
-  derived?: DerivedChannel[];
+  derived?: DerivedChannels;
   /**
    * Keep only these channels, by `xmltvId` — see `EpgConfig.channels`.
    *

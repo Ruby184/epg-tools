@@ -53,7 +53,7 @@ hardcode — a username, a password, a region. See
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
 | `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source. |
 | `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true, dropContainers: true }` | How several sites covering one channel are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
-| `derived` | `DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. See [Derived channels](#derived-channels). |
+| `derived` | `DerivedChannel[] \| (context) => DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. A function is asked per run, with the channels there turned out to be. See [Derived channels](#derived-channels). |
 | `channels` | `readonly string[]` | all of them | Keep only these channels, by `xmltvId` — see [keeping only some channels](#keeping-only-some-channels). `--channels` overrides it. |
 | `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
@@ -1400,6 +1400,28 @@ matches by name even before its `tvg-id` is set.
 `from` may name another derived channel. A chain is resolved to its root with
 the offsets summed, since a shift of a shift is one shift, and it takes its name
 from that root — so a `+2` reads as one.
+
+**A lineup nobody writes down takes a function instead of a list.** It is asked
+once per run, with the channels the sites resolved to — so a `+1` follows a
+lineup that a provider sync rewrites between grabs, which a list cannot:
+`epg serve` reads its configuration once and goes on serving under it.
+
+```ts
+derived: ({ channels, warn }) =>
+  channels
+    .filter((channel) => channel.data?.timeshift === true)
+    .map((channel) => ({
+      xmltvId: `${channel.xmltvId}.plus1`,
+      from: channel.xmltvId,
+      offset: 60,
+    })),
+```
+
+It is asked where the channel lists are — once for a `build`, so the grab and
+the merge agree about what exists, and once per snapshot under `epg serve`
+rather than once per request. `warn` and `log` go where a `merge.transform`'s
+do, which is the only place a declaration that decided *not* to shift something
+can say so.
 
 **What moves:** the start, the stop, and the PDC/VPS starts. Not `<date>`, which
 is the year the programme was made, and not `previously-shown`, which describes

@@ -9,12 +9,32 @@
  * is what lets option handling ask the question without firing a request.
  */
 
-import type { DerivedChannel } from './types.js';
+import type { DerivedChannel, DerivedChannels, DerivedContext } from './types.js';
 
 /** The two fields a selection reads. `EpgConfig` and `BuildGuideOptions` both fit. */
 export interface Selectable {
   channels?: readonly string[];
   derived?: readonly DerivedChannel[];
+}
+
+/**
+ * The derivations a run goes by: a list as it stands, or what the function
+ * declared about the channels this run actually resolved.
+ *
+ * Asked once per run and the answer passed around, for the reason the channel
+ * lists are: the grab and the merge have to agree about what exists, and a
+ * function asked twice may answer twice — a lineup that changed in between
+ * would leave the guide describing a shift of a channel nobody grabbed.
+ */
+export async function declaredDerived(
+  declarations: DerivedChannels | undefined,
+  context: DerivedContext,
+): Promise<DerivedChannel[] | undefined> {
+  if (typeof declarations !== 'function') {
+    return declarations;
+  }
+
+  return declarations(context);
 }
 
 /** What a selection amounts to once its derived channels are accounted for. */

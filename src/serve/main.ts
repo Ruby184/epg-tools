@@ -30,13 +30,13 @@ import { resolveConfigSource, type ConfigSource } from '../config.js';
 import { createCacheStore } from '../build.js';
 import type { CacheEntryMeta, CacheStore, ChannelDayKey } from '../cache/types.js';
 import { dayRange, toDayString, addDays } from '../core/days.js';
-import { emitter, type Reporter } from '../core/events.js';
+import { emitter, type Reporter, type Says } from '../core/events.js';
 import { compressor, type CompressionFormat } from '../core/output.js';
 import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { generateGuide } from '../merge/guide.js';
-import { channelSelection } from '../merge/select.js';
-import type { BuildGuideOptions } from '../merge/types.js';
+import { channelSelection, declaredDerived } from '../merge/select.js';
+import type { BuildGuideOptions, DerivedChannel } from '../merge/types.js';
 import { outputOptions } from '../xmltv/serialize.js';
 import type { GuideOutputOptions } from '../xmltv/serialize.js';
 import type { NextGrab } from './schedule.js';
@@ -559,15 +559,11 @@ export async function serveGuide(
   const opened = options.cache === undefined;
   const cache = options.cache ?? (await createCacheStore(config, options.signal));
 
-  /**
-   * What `config.channels` narrows the guide to, resolved once.
-   *
-   * `generateGuide` asks for this itself, so passing `channels` through
-   * `guideOptions` is what makes the served guide honour it. This copy is for
-   * the snapshot below, which would otherwise resolve — and fingerprint —
-   * channels that are never served.
-   */
-  const selection = channelSelection(config);
+  /** Where a `derived` function says things, which is where a merge's do. */
+  const mergeSays: Says = {
+    log: (message, data) => emit({ type: 'merge:note', message, ...(data ? { data } : {}) }),
+    warn: (message, data) => emit({ type: 'merge:warning', message, ...(data ? { data } : {}) }),
+  };
 
   /**
    * What the served document's shape amounts to, in the validators.
@@ -590,6 +586,16 @@ export async function serveGuide(
   interface Snapshot {
     print: Fingerprint;
     sites: AnySiteConfig[];
+    /**
+     * What `derived` declared about *these* lists.
+     *
+     * Resolved with the sites rather than per request, for the two reasons the
+     * sites are: a function asked twice may answer twice, and a server answers
+     * a poll every few seconds. So a declaration follows a lineup that changes
+     * — which is the whole point of the function form — at the pace the lists
+     * themselves are re-read.
+     */
+    derived: DerivedChannel[] | undefined;
   }
 
   let snapshot: Snapshot | undefined;
@@ -608,20 +614,42 @@ export async function serveGuide(
   /** One reading of the cache: the sites it is keyed by, and what it amounts to. */
   const take = async (now: Date, known?: AnySiteConfig[]): Promise<Snapshot> => {
     const window = windowOf(now);
-    const sites =
+    const resolved =
       known ??
       (await resolveSites(config.sites, {
         emit,
         ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
-        ...(selection ? { select: selection.select } : {}),
         store: cache,
         now,
       }));
 
+    // After the lists, because a `derived` function is a function of them — and
+    // the selection after that, since a shift declared here is what decides
+    // whether a source nobody asked for has to be kept.
+    const derived = await declaredDerived(config.derived, {
+      channels: resolved.flatMap((site) => site.channels as GrabberChannel[]),
+      now,
+      ...mergeSays,
+    });
+    const selection = channelSelection({
+      ...(config.channels ? { channels: config.channels } : {}),
+      ...(derived ? { derived } : {}),
+    });
+    const sites =
+      selection === undefined
+        ? resolved
+        : resolved.map((site) => ({
+            ...site,
+            channels: (site.channels as GrabberChannel[]).filter((channel) =>
+              selection.select.has(channel.xmltvId),
+            ),
+          }));
+
     return {
       print: await fingerprintOf(cache, keysFor(sites, window.days), window.id, shape),
       sites,
+      derived: selection?.derived ?? derived,
     };
   };
 
@@ -697,7 +725,17 @@ export async function serveGuide(
     concurrency: Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY),
   });
 
-  const guideOptions = (now: Date, sites: AnySiteConfig[]): BuildGuideOptions => {
+  const guideOptions = (
+    now: Date,
+    sites: AnySiteConfig[],
+    /**
+     * What the snapshot resolved `derived` to — a list, however the config
+     * spelled it, so a function is asked once per snapshot rather than once per
+     * request. A poll every few seconds is not a reason to ask again what the
+     * lineup should be shifted into.
+     */
+    derived: DerivedChannel[] | undefined,
+  ): BuildGuideOptions => {
     const window = windowOf(now);
 
     return {
@@ -709,7 +747,7 @@ export async function serveGuide(
       ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
       ...(config.localConcurrency !== undefined ? { readAhead: config.localConcurrency } : {}),
       ...(config.merge ? { merge: config.merge } : {}),
-      ...(config.derived ? { derived: config.derived } : {}),
+      ...(derived ? { derived } : {}),
       ...(config.channels ? { channels: config.channels } : {}),
       ...(config.meta ? { meta: config.meta } : {}),
       ...outputOptions(config),
@@ -843,7 +881,7 @@ export async function serveGuide(
       }
 
       const now = options.now ?? new Date();
-      const { print: fingerprint, sites } = await current(now);
+      const { print: fingerprint, sites, derived } = await current(now);
 
       /** What is true of the guide whether or not a body goes with it. */
       const validators: Record<string, string> = {
@@ -900,7 +938,10 @@ export async function serveGuide(
 
         response.writeHead(200, headers);
 
-        const guide = generateGuide({ ...guideOptions(now, sites), signal: stops.signal });
+        const guide = generateGuide({
+          ...guideOptions(now, sites, derived),
+          signal: stops.signal,
+        });
         const chain =
           encoding === undefined
             ? ([Readable.from(guide), response] as const)
