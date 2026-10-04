@@ -1,6 +1,6 @@
 {
   "name": "epg-tools",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Memory-efficient EPG toolkit for Node: grab from XMLTV, M3U and Xtream Codes sources with day-level caching, then merge, validate and serve XMLTV guides",
   "keywords": [
     "cli",

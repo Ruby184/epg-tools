@@ -11,6 +11,82 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.5.0](https://github.com/Ruby184/epg-tools/compare/v0.4.0...v0.5.0) (2026-10-04)
+
+
+### Features
+
+* a server that grabs on its own, and a way to see a run before making it ([933b366](https://github.com/Ruby184/epg-tools/commit/933b366b43c957b9bc7a3c149bb8792a661bbb8c))
+* **cli:** say what a run would fetch, with --dry-run ([55361d7](https://github.com/Ruby184/epg-tools/commit/55361d7a97f30bc62555e46a6d31eb5782fd5fea))
+* **grabber:** a channel list is stored with what describes it ([0744f23](https://github.com/Ruby184/epg-tools/commit/0744f235d7ef0ec72ca8c5dec71c9a1811e7c110))
+* **grabber:** a Schedules Direct client that keeps its token and not its secrets ([0c66a38](https://github.com/Ruby184/epg-tools/commit/0c66a38eab8e3ff61aca7de6d27e6a23c86351bf))
+* **grabber:** a site says how its channels divide into lineups ([4ad6633](https://github.com/Ruby184/epg-tools/commit/4ad6633e5402be323bb7768382c3248e34ac27f6))
+* **grabber:** any program that writes XMLTV is a source, and Schedules Direct as the reference writes it ([254deb1](https://github.com/Ruby184/epg-tools/commit/254deb123d849cd7c021a9ab47d6f212ecd709e9))
+* **grabber:** defineCommandSite, a program that writes XMLTV as a source ([6aeb466](https://github.com/Ruby184/epg-tools/commit/6aeb4665a76f2cfb7c33fae52a2bbfd2f8ff4639))
+* **grabber:** defineSchedulesDirectSite, Schedules Direct as a source ([958f047](https://github.com/Ruby184/epg-tools/commit/958f04729be8955803a7b33a936d8a38bd7991b2))
+* **grabber:** defineTvGrabCommandSite, for a grabber that speaks XMLTV's interface ([65f6df4](https://github.com/Ruby184/epg-tools/commit/65f6df4ab94707fbb7b23da3e3883ae6566ca9f1))
+* **grabber:** do what Schedules Direct asks of a client ([2e45e57](https://github.com/Ruby184/epg-tools/commit/2e45e5754b832540cf8939e7f6c3a05ac0cdbf67))
+* **grabber:** hand a fetched channel list the site's own state ([8cfa662](https://github.com/Ruby184/epg-tools/commit/8cfa6625d05a055bdf2fdb424e5016c8343df2b1))
+* **grabber:** hand a site the channel list it stored last time ([2b46627](https://github.com/Ruby184/epg-tools/commit/2b46627bea2cfbd28fbdb02fcbe689847eebfae6))
+* **grabber:** keep the md5 the listings came with, and say how far the service goes ([80a033b](https://github.com/Ruby184/epg-tools/commit/80a033bb018757482085017ce27370b8c40eee4d))
+* **grabber:** keep the service's own words for a credit and a channel number ([47b77eb](https://github.com/Ruby184/epg-tools/commit/47b77eb3341c95edfa01f4448128808d3f58570a))
+* **grabber:** let a pass pace its own requests ([9df62a2](https://github.com/Ruby184/epg-tools/commit/9df62a24ed599a0363254d040262aa1658ee256f))
+* **grabber:** map a Schedules Direct programme onto the DTD ([0b9fd1c](https://github.com/Ruby184/epg-tools/commit/0b9fd1caf67487759ee3a526172c4b3bbf9d0225))
+* **grabber:** offer Schedules Direct lineups the way the reference does ([d962f6f](https://github.com/Ruby184/epg-tools/commit/d962f6f7f6d8d6932ad453e3714cde9728bc1189))
+* **grabber:** read a crew role by its shape where the table does not name it ([b098518](https://github.com/Ruby184/epg-tools/commit/b09851874677e69f41ef01fc353c5bb4d3b2e84a))
+* **grabber:** remember a Schedules Direct station-day by its md5 ([3b5f3b5](https://github.com/Ruby184/epg-tools/commit/3b5f3b5acd42b80d12009fd1e548608a21450e0a))
+* **grabber:** say a station's callsign and its number, as a consumer reads them ([31775bc](https://github.com/Ruby184/epg-tools/commit/31775bc5c4b8913ee43bb5646a52f5945816d79c))
+* **grabber:** Schedules Direct as a source ([35db494](https://github.com/Ruby184/epg-tools/commit/35db49446b6221a1983b2e426955530b30125161))
+* **grabber:** schedulesDirectAccount, for the questions that come before a config ([cfb3f1f](https://github.com/Ruby184/epg-tools/commit/cfb3f1f324605a267380968e0fddb5f562b2ba37))
+* **grabber:** wait for a Schedules Direct programme it is still writing ([c5e4d08](https://github.com/Ruby184/epg-tools/commit/c5e4d08305c75e0877738dc3a0c0de46f8803347))
+* **grabber:** wait for a Schedules Direct schedule it is still generating ([3a9919f](https://github.com/Ruby184/epg-tools/commit/3a9919fe95d0091069b0187c0b47f14516986e4f))
+* **grabber:** write everything Schedules Direct sends, and let a profile choose ([9ddd16e](https://github.com/Ruby184/epg-tools/commit/9ddd16e1003b71c0711de1be4410fa90825fae55))
+* **serve:** grab on a schedule, instead of leaving it to cron ([230f18c](https://github.com/Ruby184/epg-tools/commit/230f18c2e35a91613c1a8ba739b092b2353a63e3))
+* **serve:** say whether the guide is any good, at /health ([b93712b](https://github.com/Ruby184/epg-tools/commit/b93712bcec8b4f22bd453f00321a5ef174d98ae5))
+* **xmltv:** say which kinds a rule tripped on, and how often each ([141b483](https://github.com/Ruby184/epg-tools/commit/141b4833c228e437fe9556250612c95a35a03631))
+
+
+### Bug Fixes
+
+* **cli:** make --dry-run describe the run it claims to ([ec510bb](https://github.com/Ruby184/epg-tools/commit/ec510bb73e74ee74f09c87f2a0716bc78a836b57))
+* **cli:** match a request to its answer through ky's own context ([ef76db0](https://github.com/Ruby184/epg-tools/commit/ef76db03e94fa309767be79d4dffc0fdd5dee047))
+* **cli:** time each request in epg try, and show what a POST asked ([d67583b](https://github.com/Ruby184/epg-tools/commit/d67583b78a28379b13ed48d21f9286280ba677e2))
+* **grabber:** ask a grabber for a stretch of days, and split it the way it prefers ([a9259e7](https://github.com/Ruby184/epg-tools/commit/a9259e76114e1da32a4d0b0c5c61985f5c6bb988))
+* **grabber:** cache a Schedules Direct day past its horizon, rather than failing it ([01691a6](https://github.com/Ruby184/epg-tools/commit/01691a6195892c1e7254cf617687ac8b2339f6fd))
+* **grabber:** four things a review found in the command site ([40f01eb](https://github.com/Ruby184/epg-tools/commit/40f01ebdad9782c686570a13d938120b45679e56))
+* **grabber:** one category each, and the word a consumer sorts by ([921cfb1](https://github.com/Ruby184/epg-tools/commit/921cfb1055147026e0da01a5c026354e5cb5615d))
+* **grabber:** read the subtitle language the wire sends, not the one it documents ([d10dfda](https://github.com/Ruby184/epg-tools/commit/d10dfdab6b34a91286f2b830f5b0af2fd71b7458))
+* **grabber:** send the trailing slash Schedules Direct artwork needs ([68a9831](https://github.com/Ruby184/epg-tools/commit/68a983131d68e20c3c79dfeed17f3a7ae83ecf4c))
+* **grabber:** six things a review found, each with the run that shows it ([6192526](https://github.com/Ruby184/epg-tools/commit/619252638d6634c04700dccc8edae4401c434c38))
+* **grabber:** stop a program a pass was let go of, and say when a config file cannot be passed ([b2f4b6d](https://github.com/Ruby184/epg-tools/commit/b2f4b6dc261a1041cf9b8fd585d334c1bdc4fa75))
+* **grabber:** tell a Schedules Direct programme that will never come from one that has not yet ([b224b1a](https://github.com/Ruby184/epg-tools/commit/b224b1a3ee63161187e6fcf31b7f1c22287bfd4b))
+* **grabber:** write a length in the largest unit it divides into ([d7b383e](https://github.com/Ruby184/epg-tools/commit/d7b383ebf965e94e78996379fe8add49e97cff6d))
+* **serve:** abort a scheduled grab that is still starting up ([19f628c](https://github.com/Ruby184/epg-tools/commit/19f628ce62743a7ba4592c8ab6d80e4e349d326e))
+* **serve:** settle the validator only when the window has ([82b4f92](https://github.com/Ruby184/epg-tools/commit/82b4f920f78cce5050187a5b972d62b1d00ed13b))
+
+
+### Performance
+
+* **xmltv:** escape for where the text is going, not for everywhere ([6180e5f](https://github.com/Ruby184/epg-tools/commit/6180e5f5c22250eed99732a31d14a3e175865477))
+
+
+### Refactoring
+
+* **grabber:** peek at a document with a web stream, not a Readable ([aa7316b](https://github.com/Ruby184/epg-tools/commit/aa7316b5a0bbe9ba6fa47441176b663346a3a4c3))
+* **grabber:** read an XMLTV document apart from fetching one ([399aecb](https://github.com/Ruby184/epg-tools/commit/399aecbad954cd0d4724c99826601ff0987a512c))
+* **grabber:** read each md5 batch as it lands ([7d7d353](https://github.com/Ruby184/epg-tools/commit/7d7d35326c4994547c1278c86d04d91a2d8b94c3))
+* **grabber:** say what went wrong with a command, and keep it from shouting ([9aa741b](https://github.com/Ruby184/epg-tools/commit/9aa741b72af69952a838042c2019dfca3ef24719))
+* **grabber:** stop choosing a Schedules Direct consumer's credits and descriptions ([671805a](https://github.com/Ruby184/epg-tools/commit/671805a6a9baaa0e57dddc39a59c674553361c98))
+* **grabber:** write down the md5 of a day kept by its clock ([3b1e102](https://github.com/Ruby184/epg-tools/commit/3b1e102f412c92fe36b007b5628ebd878a564969))
+
+
+### Documentation
+
+* any program that writes XMLTV is a source ([b448ae7](https://github.com/Ruby184/epg-tools/commit/b448ae7c0f4598f79e2dc10c42c8d69f18410f64))
+* how to grab from Schedules Direct ([208556a](https://github.com/Ruby184/epg-tools/commit/208556aabd6cbdd1ba9dbfdd31b25429b87fea06))
+* what a channel list may carry, and what a Schedules Direct channel says ([9c9589c](https://github.com/Ruby184/epg-tools/commit/9c9589c2287839526dba6ddfb641715a150937ef))
+* what a declared capability does and does not skip ([cb224d2](https://github.com/Ruby184/epg-tools/commit/cb224d254b0c7cfbc82902bce324709b65b46ce5))
+
 ## [0.4.0](https://github.com/Ruby184/epg-tools/compare/v0.3.0...v0.4.0) (2026-09-10)
 
 
