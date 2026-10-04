@@ -601,6 +601,17 @@ export const configured = defineConfig({
   },
 });
 
+// --- docs/configuration.md: Root <tv> attributes, asked per run ------------
+export const namedAfterTheLineup = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  meta: ({ channels, now }) => ({
+    generatorInfoName: 'epg-tools',
+    sourceInfoName: `Example TV — ${String(channels.length)} channels`,
+    date: xmltvDate(now),
+  }),
+});
+
 // --- docs/api.md: A driver of your own -------------------------------------
 
 /**

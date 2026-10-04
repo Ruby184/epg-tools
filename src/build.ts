@@ -9,7 +9,7 @@ import type { CacheDriver, CacheStore } from './cache/main.js';
 import { coveredOnce, grab, resolveSites } from './grabber/main.js';
 import type { GrabberChannel, GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
-import { channelSelection, declaredDerived, unmatched, unmatchedMessage } from './merge/select.js';
+import { channelSelection, configured, unmatched, unmatchedMessage } from './merge/select.js';
 import type { BuildGuideOptions } from './merge/types.js';
 import { outputOptions } from './xmltv/serialize.js';
 import { addDays, toDayString } from './core/days.js';
@@ -382,7 +382,7 @@ export async function build(source: ConfigSource, options: RunOptions = {}): Pro
     // The selection then narrows what was resolved, which is the same answer as
     // narrowing on the way out of each site: what a site stores is its whole
     // list either way.
-    const declarations = await declaredDerived(config.derived, {
+    const declarations = await configured(config.derived, {
       channels: sites.flatMap((site) => site.channels as GrabberChannel[]),
       now,
       log: (message, data) => emit({ type: 'merge:note', message, ...(data ? { data } : {}) }),

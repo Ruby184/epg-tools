@@ -7,6 +7,12 @@ import {
   type ConfigReader,
 } from '../src/core/answers.js';
 import { GrabberError } from '../src/core/error.js';
+import type { XmltvDocumentMeta } from '../src/xmltv/types.js';
+
+/** What a resolved config named itself — `meta` here is always written by hand. */
+function sourceInfoName(config: EpgConfig): string | undefined {
+  return (config.meta as XmltvDocumentMeta | undefined)?.sourceInfoName;
+}
 
 const STAGES = [
   {
@@ -106,7 +112,7 @@ describe('defineConfig', () => {
 
     try {
       const config = defineConfig(named, { env: 'EPG_' });
-      expect((await config()).meta?.sourceInfoName).toBe('from-env');
+      expect(sourceInfoName(await config())).toBe('from-env');
     } finally {
       vi.unstubAllEnvs();
     }
@@ -119,7 +125,7 @@ describe('defineConfig', () => {
       const config = defineConfig(named, { env: 'EPG_' });
       const resolved = await config(fixed('conf', { username: ['supplied'] }));
 
-      expect(resolved.meta?.sourceInfoName).toBe('supplied');
+      expect(sourceInfoName(resolved)).toBe('supplied');
     } finally {
       vi.unstubAllEnvs();
     }
@@ -133,7 +139,7 @@ describe('defineConfig', () => {
         readers: (supplied) => [envReader('EPG_'), ...supplied],
       });
 
-      expect((await config(fixed('conf', { username: ['supplied'] }))).meta?.sourceInfoName).toBe(
+      expect(sourceInfoName(await config(fixed('conf', { username: ['supplied'] })))).toBe(
         'from-env',
       );
     } finally {
@@ -151,7 +157,7 @@ describe('defineConfig', () => {
       { stages: STAGES, env: 'EPG_' },
     );
 
-    expect((await config()).meta?.sourceInfoName).toBe('west');
+    expect(sourceInfoName(await config())).toBe('west');
   });
 
   it('carries its stages, so a grabber shim cannot pass one without the other', () => {

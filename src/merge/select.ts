@@ -9,7 +9,7 @@
  * is what lets option handling ask the question without firing a request.
  */
 
-import type { DerivedChannel, DerivedChannels, DerivedContext } from './types.js';
+import type { DerivedChannel, GuideContext } from './types.js';
 
 /** The two fields a selection reads. `EpgConfig` and `BuildGuideOptions` both fit. */
 export interface Selectable {
@@ -18,23 +18,24 @@ export interface Selectable {
 }
 
 /**
- * The derivations a run goes by: a list as it stands, or what the function
- * declared about the channels this run actually resolved.
+ * What the configuration says, where it may answer with a function of the run.
  *
- * Asked once per run and the answer passed around, for the reason the channel
- * lists are: the grab and the merge have to agree about what exists, and a
- * function asked twice may answer twice — a lineup that changed in between
- * would leave the guide describing a shift of a channel nobody grabbed.
+ * The two that do — `derived` and `meta` — are asked the same question in the
+ * same place, so they are asked the same way: once, with the channels this run
+ * resolved, and the answer passed around rather than the question repeated.
+ *
+ * Asking twice is the thing to avoid, and `derived` is why: the grab and the
+ * merge have to agree about what exists, and a function asked twice may answer
+ * twice — a lineup that changed in between would leave the guide describing a
+ * shift of a channel nobody grabbed.
  */
-export async function declaredDerived(
-  declarations: DerivedChannels | undefined,
-  context: DerivedContext,
-): Promise<DerivedChannel[] | undefined> {
-  if (typeof declarations !== 'function') {
-    return declarations;
-  }
-
-  return declarations(context);
+export async function configured<T>(
+  value: T | ((context: GuideContext) => T | Promise<T>) | undefined,
+  context: GuideContext,
+): Promise<T | undefined> {
+  return typeof value === 'function'
+    ? (value as (context: GuideContext) => T | Promise<T>)(context)
+    : value;
 }
 
 /** What a selection amounts to once its derived channels are accounted for. */

@@ -182,6 +182,50 @@ describe('serveGuide', () => {
     expect(await (await fetch(server.url)).text()).toContain('<channel id="two.plus1">');
   });
 
+  it('names the document after the lineup, once per snapshot rather than per request', async () => {
+    // `meta` is asked what `derived` is asked, at the pace the lists are
+    // re-read — a poll every few seconds is not a reason to ask again what the
+    // document should call itself.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    let asked = 0;
+    let lineup = ['one'];
+    const config: EpgConfig = {
+      ...configFor([]),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: () => lineup.map((id) => ({ xmltvId: id, siteId: id, name: id })),
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+      meta: ({ channels }) => {
+        asked += 1;
+
+        return { sourceInfoName: `${String(channels.length)} channels` };
+      },
+    };
+
+    const server = await serve(config, cache, { revalidateMs: 60_000, sitesMaxAgeMs: 60_000 });
+
+    expect(await (await fetch(server.url)).text()).toContain('source-info-name="1 channels"');
+    // The second request serves the snapshot the first took.
+    expect(await (await fetch(server.url)).text()).toContain('source-info-name="1 channels"');
+    expect(asked).toBe(1);
+
+    lineup = ['one', 'two'];
+    await cache.write({ site: 'example.tv', channelId: 'two', day: DAY }, [programme('two', 6)], {
+      grabbedAt: '2026-09-03T04:00:00.000Z',
+    });
+
+    const server2 = await serve(config, cache, { revalidateMs: 0, sitesMaxAgeMs: 0 });
+
+    expect(await (await fetch(server2.url)).text()).toContain('source-info-name="2 channels"');
+  });
+
   it('writes urls for the host that asked, when told to', async () => {
     // The case this exists for: a box reachable by two names, whose pictures
     // are served by whatever is serving the guide.

@@ -2,7 +2,7 @@ import type { EpgConfig } from '../config.js';
 import { resolveChannels } from '../grabber/channels.js';
 import type { GrabberChannel } from '../grabber/types.js';
 import { resolveDeclarations } from '../merge/derive.js';
-import { declaredDerived } from '../merge/select.js';
+import { configured } from '../merge/select.js';
 
 /**
  * Restrict a config to the selected channel ids.
@@ -37,7 +37,7 @@ export async function resolveChannelIds(config: EpgConfig): Promise<string[]> {
 
   // Asked against the lists just read, so a `derived` function offers what this
   // run would build rather than what was written down.
-  const declarations = await declaredDerived(config.derived, {
+  const declarations = await configured(config.derived, {
     channels,
     now: new Date(),
     log: () => {},

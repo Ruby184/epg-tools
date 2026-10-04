@@ -321,15 +321,15 @@ export interface DerivedChannel {
 }
 
 /**
- * The channels a derivation is declared against: every one the sites resolved
- * to, before anything is derived from them.
+ * What a function in the configuration is told about the run asking it.
  *
- * With the same `log` and `warn` a `merge.transform` is given, and going to the
- * same place: a declaration that decides *not* to shift something — a channel
- * whose `+1` the provider dropped — is worth a line, and it is the only line
- * anyone will get about it.
+ * The channels every site resolved to, before anything is derived from them,
+ * and the run's own `now`. With the same `log` and `warn` a `merge.transform`
+ * is given, and going to the same place: a declaration that decides *not* to
+ * shift something — a channel whose `+1` the provider dropped — is worth a
+ * line, and it is the only line anyone will get about it.
  */
-export interface DerivedContext extends Says {
+export interface GuideContext extends Says {
   channels: readonly GrabberChannel[];
   now: Date;
 }
@@ -353,7 +353,26 @@ export interface DerivedContext extends Says {
  */
 export type DerivedChannels =
   | DerivedChannel[]
-  | ((context: DerivedContext) => DerivedChannel[] | Promise<DerivedChannel[]>);
+  | ((context: GuideContext) => DerivedChannel[] | Promise<DerivedChannel[]>);
+
+/**
+ * The root `<tv>` element's attributes, or a function asked for them.
+ *
+ * The function form is told what {@link DerivedChannels} is, and is for the
+ * same reason: a `source-info-name` that counts the channels that turned up,
+ * or a `source-info-url` that depends on which ones did, cannot be written
+ * down ahead of a run that decides them.
+ *
+ * ```ts
+ * meta: ({ channels }) => ({
+ *   'source-info-name': `${channels.length} channels`,
+ *   date: xmltvDate(new Date()),
+ * }),
+ * ```
+ */
+export type GuideMeta =
+  | XmltvDocumentMeta
+  | ((context: GuideContext) => XmltvDocumentMeta | Promise<XmltvDocumentMeta>);
 
 export interface BuildGuideOptions {
   /** Site configs in priority order (first = highest). */
@@ -413,7 +432,13 @@ export interface BuildGuideOptions {
    * produces is reported once, as a `merge:warning`.
    */
   channels?: readonly string[];
-  meta?: XmltvDocumentMeta;
+  /**
+   * The root `<tv>` element's attributes, or a function asked for them.
+   *
+   * The function form is told the same thing `derived` is — see
+   * {@link GuideMeta}.
+   */
+  meta?: GuideMeta;
   /**
    * Where this merge's events go — see {@link Reporter}.
    */

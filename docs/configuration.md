@@ -55,7 +55,7 @@ hardcode — a username, a password, a region. See
 | `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true, dropContainers: true }` | How several sites covering one channel are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
 | `derived` | `DerivedChannel[] \| (context) => DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. A function is asked per run, with the channels there turned out to be. See [Derived channels](#derived-channels). |
 | `channels` | `readonly string[]` | all of them | Keep only these channels, by `xmltvId` — see [keeping only some channels](#keeping-only-some-channels). `--channels` overrides it. |
-| `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
+| `meta` | `XmltvDocumentMeta \| (context) => XmltvDocumentMeta` | — | Attributes for the root `<tv>` element. A function is asked per run, with the channels there turned out to be — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 | `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — all of them | Which provider extensions the guide carries — see [Provider extensions](#provider-extensions). `false` leaves every one out, which is what makes the guide valid against the DTD. |
 | `profile` | `'tvheadend' \| 'jellyfin' \| OutputProfile` | none | Shape the guide for the consumer that reads it — see [Output profiles](#output-profiles). Applies on the way out, so switching it refetches nothing. |
@@ -92,6 +92,29 @@ export default defineConfig({
 | `generatorInfoName` / `generatorInfoUrl` | `generator-info-name` / `generator-info-url` |
 
 Non-DTD attributes go in `extraAttributes` and are emitted verbatim.
+
+`meta` may also be a **function**, asked the same question [`derived`](#derived-channels)
+is and given the same context — the channels the sites resolved to, this run's
+`now`, and `log`/`warn`. It is for what cannot be written down ahead of a run
+that decides it:
+
+```ts
+export default defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  meta: ({ channels, now }) => ({
+    generatorInfoName: 'epg-tools',
+    sourceInfoName: `Example TV — ${String(channels.length)} channels`,
+    date: xmltvDate(now),
+  }),
+});
+```
+
+Under `epg serve` it is asked once per snapshot rather than once per request, at
+the pace the channel lists are re-read — so it follows a lineup that changes
+without costing a poll anything. It is **not** part of the ETag, which follows
+the cache: a `meta` that answers differently without the grid having moved is a
+change this server cannot see.
 
 ## Cache reference
 

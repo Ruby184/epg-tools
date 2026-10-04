@@ -12,8 +12,8 @@ import { mergeChannels } from './channel.js';
 import { derivedChannelElement, resolveDerived, shiftProgrammes } from './derive.js';
 import { backfillInto, DEFAULT_FILL_STOP_MS, mergeInto, resolveMatch } from './programme.js';
 import type { ChannelSource, RegistryEntry } from './registry.js';
-import { channelSelection, declaredDerived, unmatched, unmatchedMessage } from './select.js';
-import type { BuildGuideOptions, FillGapsContext, FillGapsOptions } from './types.js';
+import { channelSelection, configured, unmatched, unmatchedMessage } from './select.js';
+import type { BuildGuideOptions, FillGapsContext, FillGapsOptions, GuideContext } from './types.js';
 
 /**
  * How many channel-days are read from the cache ahead of the writer when
@@ -285,11 +285,12 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   // channels to declare it about. The selection then narrows what was resolved,
   // which is the same answer as narrowing on the way out of each site — what a
   // site stores is its whole list either way.
-  const declarations = await declaredDerived(options.derived, {
+  const guideContext: GuideContext = {
     channels: sites.flatMap((site) => site.channels),
     now,
     ...mergeSays,
-  });
+  };
+  const declarations = await configured(options.derived, guideContext);
   const selection = channelSelection({
     ...(options.channels ? { channels: options.channels } : {}),
     ...(declarations ? { derived: declarations } : {}),
@@ -766,9 +767,13 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     }
   }
 
+  // Asked the same thing `derived` was, and here rather than up there because
+  // nothing between the two needs it — the writer is the only reader of it.
+  const meta = await configured(options.meta, guideContext);
+
   yield* writeXmltvStream(
     {
-      ...(options.meta ? { meta: options.meta } : {}),
+      ...(meta ? { meta } : {}),
       channels,
       programmes: programmes(),
     },

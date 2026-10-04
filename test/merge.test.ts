@@ -1590,6 +1590,46 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     });
   });
 
+  describe('document meta', () => {
+    const site = makeSite('site-a.sk', [{ xmltvId: 'X', siteId: 'a-x', name: 'Sky One' }]);
+
+    it('asks a function for the root attributes, against the channels there are', async () => {
+      // The same question `derived` is asked, for the same reason: what the
+      // document calls itself can depend on which channels turned up.
+      const seen: { ids: string[]; now: Date }[] = [];
+      const output = await generate({
+        sites: [site],
+        cache: createFakeCache({
+          [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'A')],
+        }),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        meta: ({ channels, now }) => {
+          seen.push({ ids: channels.map((channel) => channel.xmltvId), now });
+
+          return { sourceInfoName: `${String(channels.length)} channels` };
+        },
+      });
+
+      expect(seen).toEqual([{ ids: ['X'], now: NOW }]);
+      expect(output).toContain('source-info-name="1 channels"');
+    });
+
+    it('takes a plain object as it always did', async () => {
+      const output = await generate({
+        sites: [site],
+        cache: createFakeCache({ [`site-a.sk|X|${DAY}`]: [] }),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        meta: { sourceInfoName: 'written down' },
+      });
+
+      expect(output).toContain('source-info-name="written down"');
+    });
+  });
+
   describe('derived channels', () => {
     const site = makeSite('site-a.sk', [{ xmltvId: 'X', siteId: 'a-x', name: 'Sky One' }]);
     const DAY2 = '2026-01-16';

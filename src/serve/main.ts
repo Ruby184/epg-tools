@@ -36,8 +36,9 @@ import { compressor, type CompressionFormat } from '../core/output.js';
 import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { generateGuide } from '../merge/guide.js';
-import { channelSelection, declaredDerived } from '../merge/select.js';
-import type { BuildGuideOptions, DerivedChannel } from '../merge/types.js';
+import { channelSelection, configured } from '../merge/select.js';
+import type { BuildGuideOptions, DerivedChannel, GuideContext } from '../merge/types.js';
+import type { XmltvDocumentMeta } from '../xmltv/types.js';
 import { outputOptions } from '../xmltv/serialize.js';
 import type { GuideOutputOptions } from '../xmltv/serialize.js';
 import type { NextGrab } from './schedule.js';
@@ -682,6 +683,16 @@ export async function serveGuide(
      * themselves are re-read.
      */
     derived: DerivedChannel[] | undefined;
+    /**
+     * What `meta` said about them, for the same reason and at the same pace.
+     *
+     * Not in the etag. A tag follows the cache, and a `meta` that answers
+     * differently without the grid having moved — a timestamp of its own
+     * making — is a document this server cannot tell has changed. The two
+     * things it is for, counting the channels and naming their source, both
+     * move when the lists do, and the lists are in the fingerprint.
+     */
+    meta: XmltvDocumentMeta | undefined;
   }
 
   let snapshot: Snapshot | undefined;
@@ -713,11 +724,13 @@ export async function serveGuide(
     // After the lists, because a `derived` function is a function of them — and
     // the selection after that, since a shift declared here is what decides
     // whether a source nobody asked for has to be kept.
-    const derived = await declaredDerived(config.derived, {
+    const guideContext: GuideContext = {
       channels: resolved.flatMap((site) => site.channels as GrabberChannel[]),
       now,
       ...mergeSays,
-    });
+    };
+    const derived = await configured(config.derived, guideContext);
+    const meta = await configured(config.meta, guideContext);
     const selection = channelSelection({
       ...(config.channels ? { channels: config.channels } : {}),
       ...(derived ? { derived } : {}),
@@ -736,6 +749,7 @@ export async function serveGuide(
       print: await fingerprintOf(cache, keysFor(sites, window.days), window.id, shape),
       sites,
       derived: selection?.derived ?? derived,
+      meta,
     };
   };
 
@@ -821,6 +835,8 @@ export async function serveGuide(
      * lineup should be shifted into.
      */
     derived: DerivedChannel[] | undefined,
+    /** Likewise what `meta` answered for them — see {@link Snapshot.meta}. */
+    meta: XmltvDocumentMeta | undefined,
   ): BuildGuideOptions => {
     const window = windowOf(now);
 
@@ -835,7 +851,7 @@ export async function serveGuide(
       ...(config.merge ? { merge: config.merge } : {}),
       ...(derived ? { derived } : {}),
       ...(config.channels ? { channels: config.channels } : {}),
-      ...(config.meta ? { meta: config.meta } : {}),
+      ...(meta ? { meta } : {}),
       ...outputOptions(config),
     };
   };
@@ -967,7 +983,7 @@ export async function serveGuide(
       }
 
       const now = options.now ?? new Date();
-      const { print: snapshot, sites, derived } = await current(now);
+      const { print: snapshot, sites, derived, meta } = await current(now);
       // Where this document says its urls are, which may be read off this very
       // request — see `baseUrl` on the serve config.
       const base = baseFor(request);
@@ -1037,7 +1053,7 @@ export async function serveGuide(
         response.writeHead(200, headers);
 
         const guide = generateGuide({
-          ...guideOptions(now, sites, derived),
+          ...guideOptions(now, sites, derived, meta),
           ...(base === undefined ? {} : { baseUrl: base }),
           signal: stops.signal,
         });

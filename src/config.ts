@@ -16,9 +16,8 @@ import type { CompressionFormat, CompressionOptions } from './core/output.js';
 import type { MissingAllowance } from './grabber/missing.js';
 import type { EpgServeConfig } from './serve/config.js';
 import type { AnySiteConfig } from './grabber/types.js';
-import type { DerivedChannels, MergeOptions } from './merge/types.js';
+import type { DerivedChannels, GuideMeta, MergeOptions } from './merge/types.js';
 import type { SerializeOptions } from './xmltv/serialize.js';
-import type { XmltvDocumentMeta } from './xmltv/types.js';
 import type { ReporterFactory, ReporterName } from './core/reporters.js';
 
 /**
@@ -132,8 +131,11 @@ export interface EpgConfig {
    * `*.channels.xml`, a guide, or a plain list of ids — as well as ids.
    */
   channels?: readonly string[];
-  /** Attributes for the root `<tv>` element. */
-  meta?: XmltvDocumentMeta;
+  /**
+   * Attributes for the root `<tv>` element, or a function asked for them once
+   * the channel lists are known — see {@link GuideMeta}.
+   */
+  meta?: GuideMeta;
   /**
    * Pretty-print the generated guide with this indentation (a number of
    * spaces or a string like `'\t'`). Omit for compact output — the default.
