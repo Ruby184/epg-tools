@@ -16,6 +16,7 @@
 
 import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
 import type { TLSSocket } from 'node:tls';
 import { Readable, pipeline as pipe } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -187,6 +188,20 @@ export interface GuideHandlerOptions {
 }
 
 /**
+ * What a Node request handler is handed.
+ *
+ * Both shapes, because HTTP/2's compatibility API is the same request in
+ * everything that matters here — a method, a url, headers and a socket that
+ * knows whether it is encrypted — and is nonetheless a different class. A
+ * handler that takes either is one `http.createServer`,
+ * `https.createServer` and `http2.createSecureServer` all accept.
+ */
+export type NodeRequest = IncomingMessage | Http2ServerRequest;
+
+/** What it answers through — see {@link NodeRequest}. */
+export type NodeResponse = ServerResponse | Http2ServerResponse;
+
+/**
  * Which of the two answers a request is for.
  *
  * Named because it travels: a route decided where an app mounted the guide is
@@ -214,7 +229,16 @@ export interface GuideRequest {
    * left out: an app that has already routed has nothing left to say with it.
    */
   url?: string | undefined;
-  /** Lower-cased names, as every server hands them over. */
+  /**
+   * Lower-cased names, as every server hands them over.
+   *
+   * HTTP/2's pseudo-headers belong in here too, which is where Node's
+   * compatibility API puts them: `:authority` is the host a request over one
+   * names, there being no `Host` header, and `:scheme` is what
+   * `X-Forwarded-Proto` is over HTTP/1. Nothing needs to know which version it
+   * is answering — a request over HTTP/1 carrying either is one Node has
+   * already refused, `:` not being a character a header name may contain.
+   */
   headers: Record<string, string | string[] | undefined>;
   /** Answer this, whatever the path says — for an app that routed already. */
   route?: GuideRoute | undefined;
@@ -350,7 +374,7 @@ export interface GuideHandler {
    * given with whatever arguments it likes — express's third is `next` — and a
    * route named when it is mounted cannot be mistaken for one of those.
    */
-  node(route?: GuideRoute): (request: IncomingMessage, response: ServerResponse) => Promise<void>;
+  node(route?: GuideRoute): (request: NodeRequest, response: NodeResponse) => Promise<void>;
   /** The same for a fetch-style app — hono, elysia, bun, a worker. */
   fetch(route?: GuideRoute): (request: Request) => Promise<Response>;
   /**
@@ -673,12 +697,22 @@ const header = (request: GuideRequest, name: string): string | undefined => {
 /**
  * Where this request reached us, as a url to resolve the guide's own against.
  *
- * What a proxy says first, then the `Host` the request carries. `https` only
- * when something says so: a server on loopback behind a proxy sees plain HTTP,
- * and guessing the scheme would write urls nobody can fetch.
+ * Read outermost first, because what a guide's urls should say is how the
+ * *client* reached this rather than how the last hop did: what a proxy says it
+ * was asked for, then what this request says about itself, then what the
+ * connection underneath actually is. `https` only when something says so — a
+ * server on loopback behind a proxy sees plain HTTP, and guessing the scheme
+ * would write urls nobody can fetch.
  */
 function requestBase(request: GuideRequest): string | undefined {
-  const host = header(request, 'x-forwarded-host') ?? header(request, 'host');
+  const host =
+    header(request, 'x-forwarded-host') ??
+    // Before `Host`, not after: over HTTP/2 the authority is this one, there is
+    // no `Host` header to speak of, and a client sending `:authority` is told
+    // by RFC 9113 not to send one. Over HTTP/1 there is no `:authority` and
+    // this costs a lookup.
+    header(request, ':authority') ??
+    header(request, 'host');
 
   if (host === undefined || host === '') {
     // HTTP/1.0 without a `Host`, which is allowed and leaves nothing to build
@@ -686,21 +720,24 @@ function requestBase(request: GuideRequest): string | undefined {
     return undefined;
   }
 
-  // What a proxy says it terminated, then what this very connection is: a
-  // handler mounted on an HTTPS server of somebody's own has an encrypted
-  // socket and no forwarded header at all. `http` only when neither says
-  // otherwise, since guessing `https` writes urls nobody can fetch.
-  const forwarded = header(request, 'x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
+  // The same order, and here it is load-bearing rather than tidy: a proxy that
+  // terminates TLS and forwards cleartext HTTP/2 sends `:scheme: http` with
+  // `X-Forwarded-Proto: https`, and `https` is the one the client used. Last is
+  // the socket, which is all there is for a handler mounted on an HTTPS server
+  // of somebody's own, where nothing is claiming anything.
+  //
+  // Both claims are the client's word in the end — a request reaching this
+  // directly can put anything in either — and both are taken for the same
+  // reason: whatever terminated TLS is the only thing that knows it did.
   const proto =
-    // Only the two, and never what the header merely said: an empty
-    // `X-Forwarded-Proto` or a word nobody has heard of would otherwise be
-    // written into a base — and `://host/` is a url that throws when the guide
-    // is already half sent.
-    forwarded === 'http' || forwarded === 'https'
-      ? forwarded
-      : request.encrypted === true
-        ? 'https'
-        : 'http';
+    [header(request, 'x-forwarded-proto')?.split(',')[0], header(request, ':scheme')]
+      .map((claimed) => claimed?.trim().toLowerCase())
+      // Only the two, and never what a header merely said: an empty
+      // `X-Forwarded-Proto` or a word nobody has heard of would otherwise be
+      // written into a base — and `://host/` is a url that throws when the
+      // guide is already half sent.
+      .find((claimed) => claimed === 'http' || claimed === 'https') ??
+    (request.encrypted === true ? 'https' : 'http');
 
   try {
     // Parsed here rather than trusted downstream, because the authority is a
@@ -1544,7 +1581,7 @@ export async function createGuideHandler(
    */
   const node =
     (route?: GuideRoute) =>
-    async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
+    async (request: NodeRequest, response: NodeResponse): Promise<void> => {
       const gone = new AbortController();
 
       response.on('close', () => {
@@ -1565,13 +1602,22 @@ export async function createGuideHandler(
         encrypted: (request.socket as TLSSocket).encrypted === true,
       });
 
-      if (result.body === undefined || typeof result.body === 'string') {
-        response.writeHead(result.status, result.headers).end(result.body);
+      // One spelling, two unrelated declarations of it: HTTP/1 and HTTP/2's
+      // compatibility API both have `writeHead(status, headers)` and TypeScript
+      // will not call it across the union of their overloads.
+      (response as ServerResponse).writeHead(result.status, result.headers);
+
+      if (result.body === undefined) {
+        response.end();
 
         return;
       }
 
-      response.writeHead(result.status, result.headers);
+      if (typeof result.body === 'string') {
+        response.end(result.body);
+
+        return;
+      }
 
       try {
         await pipeline(Readable.from(result.body), response, { signal: gone.signal });

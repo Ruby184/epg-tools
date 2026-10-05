@@ -8,10 +8,11 @@
  */
 
 import { createServer, type Server } from 'node:http';
+import { connect, constants, createSecureServer } from 'node:http2';
 import { createServer as createHttpsServer, get as httpsGet } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import Fastify from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/types.js';
 import type { EpgConfig } from '../src/config.js';
@@ -313,6 +314,11 @@ describe('on fastify', () => {
 
       expect((await fetch(`${url}/healthz`)).status).toBe(200);
 
+      // Waited for rather than asserted outright: `onResponse` runs after the
+      // response is on its way, so a client holding the whole body is no proof
+      // that the hook has been called yet.
+      await vi.waitFor(() => expect(seen).toHaveLength(3));
+
       // Which is the assertion this test is for.
       expect(seen).toEqual([
         { status: 200, url: '/epg.xml' },
@@ -441,6 +447,164 @@ describe('serve.server', () => {
       );
     } finally {
       await server.close();
+    }
+  });
+
+  it('writes https urls over HTTP/2, which has no Host header to build them from', async () => {
+    // Two things differ there and both are easy to miss: the authority is a
+    // pseudo-header rather than `Host`, so a base had nothing to be built from
+    // at all, and the scheme is said by `:scheme` where HTTP/1 says
+    // `X-Forwarded-Proto` — with the socket underneath as the fallback for
+    // both, which is what answers here.
+    const cache = await cacheWith({ one: [programme('one', 6)] });
+    const config = configFor(['one'], {
+      baseUrl: true,
+      server: ({ node }, where) =>
+        createSecureServer({ key: KEY, cert: CERT }, node()).listen(where.port, where.host),
+    });
+
+    config.sites[0]!.channels = [
+      { xmltvId: 'one', siteId: 'one', name: 'One', logo: '/logos/one.png' },
+    ];
+
+    const server = await serveGuide(config, { port: 0, host: '127.0.0.1', now: NOW, cache });
+    const client = connect(`https://localhost:${server.port}`, { rejectUnauthorized: false });
+
+    try {
+      const body = await new Promise<string>((resolve, reject) => {
+        const request = client.request({ [constants.HTTP2_HEADER_PATH]: '/guide.xml' });
+        let text = '';
+
+        request.setEncoding('utf8');
+        request.on('data', (part: string) => (text += part));
+        request.on('end', () => resolve(text));
+        request.on('error', reject);
+      });
+
+      expect(body).toContain(`<icon src="https://localhost:${server.port}/logos/one.png"/>`);
+    } finally {
+      client.destroy();
+      await server.close();
+    }
+  });
+
+  it('refuses a scheme or an authority that is not one, pseudo-header or not', async () => {
+    // At the answer rather than through a transport, because this is a request
+    // no transport will carry: Node refuses an HTTP/1 request with a `:scheme`
+    // header outright, and an HTTP/2 client cannot send a pseudo-header that
+    // is not one. What is left is somebody calling `answer` directly, and the
+    // same rule has to hold there — a scheme is one of two words.
+    const config = configFor(['one'], { baseUrl: true });
+
+    config.sites[0]!.channels = [
+      { xmltvId: 'one', siteId: 'one', name: 'One', logo: '/logos/one.png' },
+    ];
+
+    const handler = await handlerFor(config, await cacheWith({ one: [programme('one', 6)] }));
+    const guideWith = async (headers: Record<string, string>): Promise<string> => {
+      const { body } = await handler.answer({ headers, route: 'guide' });
+      let text = '';
+
+      for await (const chunk of body as AsyncIterable<Uint8Array>) {
+        text += Buffer.from(chunk).toString('utf8');
+      }
+
+      return text;
+    };
+
+    // The authority stands in for `Host`, and the scheme for
+    // `X-Forwarded-Proto` — both read, neither trusted to be anything.
+    expect(await guideWith({ ':authority': 'pi.local', ':scheme': 'https' })).toContain(
+      '<icon src="https://pi.local/logos/one.png"/>',
+    );
+    expect(await guideWith({ ':authority': 'pi.local', ':scheme': 'javascript' })).toContain(
+      '<icon src="http://pi.local/logos/one.png"/>',
+    );
+
+    const refused = await guideWith({ ':authority': 'not an authority' });
+
+    expect(refused).toContain('<icon src="/logos/one.png"/>');
+
+    // Outermost first, all the way down: what a proxy says the client asked
+    // for beats what this request says about itself, which beats `Host` — the
+    // one a client sending `:authority` is told not to send at all.
+    expect(
+      await guideWith({
+        'x-forwarded-host': 'epg.example',
+        'x-forwarded-proto': 'https',
+        ':authority': 'pi.local',
+        ':scheme': 'http',
+        host: 'box.lan',
+      }),
+    ).toContain('<icon src="https://epg.example/logos/one.png"/>');
+    expect(await guideWith({ ':authority': 'pi.local', host: 'box.lan' })).toContain(
+      '<icon src="http://pi.local/logos/one.png"/>',
+    );
+  });
+
+  it('serves over HTTP/2, and stops on a guide still being sent', async () => {
+    // HTTP/2's compatibility API is the same request in everything answering it
+    // needs — and a different class, holding sessions where HTTP/1 holds
+    // connections. Node closes an idle session itself, but a session with a
+    // stream in flight it waits for: without cutting those, a stop would wait
+    // out whatever guide was still being written.
+    const cache = await cacheWith({ one: [programme('one', 6)] });
+    /** Releases the merge, so nothing is left hanging when the test ends. */
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The second channel never arrives, so the guide is still being written
+    // when the stop comes.
+    const slow = new Proxy(cache, {
+      get(store, name) {
+        if (name === 'read') {
+          return async (key: Parameters<CacheStore['read']>[0]) => {
+            if (key.channelId === 'two') {
+              await held;
+            }
+
+            return store.read(key);
+          };
+        }
+
+        const found = Reflect.get(store, name, store) as unknown;
+
+        return typeof found === 'function' ? found.bind(store) : found;
+      },
+    }) as CacheStore;
+
+    const config = configFor(['one', 'two'], {
+      server: ({ node }, where) =>
+        createSecureServer({ key: KEY, cert: CERT }, node()).listen(where.port, where.host),
+    });
+
+    const server = await serveGuide(config, {
+      port: 0,
+      host: '127.0.0.1',
+      now: NOW,
+      cache: slow,
+    });
+    const client = connect(`https://localhost:${server.port}`, { rejectUnauthorized: false });
+
+    try {
+      const request = client.request({ [constants.HTTP2_HEADER_PATH]: '/guide.xml' });
+
+      request.resume();
+
+      // Answered, and not finished: the headers are out and the body is
+      // waiting on a channel that never comes.
+      await new Promise<void>((resolve, reject) => {
+        request.once('response', () => resolve());
+        request.once('error', reject);
+      });
+
+      // These resolving at all is the assertion.
+      await server.close();
+      await server.closed;
+    } finally {
+      release();
+      client.destroy();
     }
   });
 

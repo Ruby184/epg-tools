@@ -766,6 +766,21 @@ serve: {
 }
 ```
 
+HTTP/2 works the same way, through Node's compatibility API:
+
+```ts
+serve: {
+  server: ({ node }, { port, host }) =>
+    createSecureServer({ key, cert }, node()).listen(port, host),   // node:http2
+}
+```
+
+What differs is stopping. HTTP/2 holds sessions rather than connections, and
+there is no `closeAllConnections` for them — Node closes an idle session itself
+but waits for one with a stream in flight, so `epg serve` keeps track of them
+and cuts them, exactly as it cuts connections for HTTP/1. A guide half sent is
+a guide nobody is waiting for by then.
+
 A guide written with `baseUrl: true` says `https://` there without being told:
 the scheme comes from the connection rather than from a header, which is the
 one thing `X-Forwarded-Proto` cannot be trusted about. The url `epg serve`

@@ -10,6 +10,7 @@
  */
 
 import { createServer } from 'node:http';
+import { createSecureServer } from 'node:http2';
 import { createServer as createHttpsServer } from 'node:https';
 import Fastify from 'fastify';
 import {
@@ -906,6 +907,16 @@ export const servedOverTls = defineConfig({
   serve: {
     server: ({ node }, { port, host }) =>
       createHttpsServer({ key: 'KEY', cert: 'CERT' }, node()).listen(port, host),
+  },
+});
+
+// --- docs/configuration.md: Keep the command, over HTTP/2 ------------------
+export const servedOverHttp2 = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  serve: {
+    server: ({ node }, { port, host }) =>
+      createSecureServer({ key: 'KEY', cert: 'CERT' }, node()).listen(port, host),
   },
 });
 

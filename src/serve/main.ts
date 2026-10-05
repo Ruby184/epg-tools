@@ -11,9 +11,10 @@
  * request that has no matching one.
  */
 
-import { createServer, type Server } from 'node:http';
-import type { Server as TlsServer } from 'node:https';
+import { createServer } from 'node:http';
+import type { ServerHttp2Session } from 'node:http2';
 import type { AddressInfo } from 'node:net';
+import type { ListeningServer } from './config.js';
 import { emitter } from '../core/events.js';
 import type { ConfigSource } from '../config.js';
 import type { GuideListening } from './config.js';
@@ -97,9 +98,44 @@ export interface GuideServer {
   closed: Promise<void>;
 }
 
+/**
+ * How to disconnect everyone still connected, worked out once.
+ *
+ * One name for two things, which is the whole reason this exists: what HTTP/1
+ * is holding is connections and `closeAllConnections` ends them, while HTTP/2
+ * is holding sessions — long-lived by design, and cut by nothing wholesale, so
+ * they are kept as they arrive and destroyed here. Either way the caller ends
+ * up with one function and nothing to decide at the moment of stopping.
+ */
+function disconnectAllFor(server: ListeningServer): () => void {
+  if ('closeAllConnections' in server) {
+    return () => server.closeAllConnections();
+  }
+
+  const sessions = new Set<ServerHttp2Session>();
+
+  server.on('session', (session) => {
+    sessions.add(session);
+    // Ended, errored or destroyed: `close` is the one event all three arrive
+    // at, so nothing stays in here longer than it is open.
+    session.once('close', () => sessions.delete(session));
+  });
+
+  return () => {
+    for (const session of sessions) {
+      session.destroy();
+    }
+
+    // Destroying says `close` and empties this by itself, though not until the
+    // loop is over — and a session that somehow never says so is not worth
+    // holding on to either.
+    sessions.clear();
+  };
+}
+
 /** Resolved once the server is listening, or rejected if it never will be. */
 async function listening(
-  server: Server | TlsServer,
+  server: ListeningServer,
   start: (listen: () => void) => void,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
@@ -135,9 +171,11 @@ export async function serveGuide(
    * below, after `listen`, and this one carries the cancelling.
    */
   const work = new AbortController();
-  let server: Server | TlsServer | undefined;
+  let server: ListeningServer | undefined;
   /** How a server of somebody's own stops, where it has a way of its own. */
   let stopListening: (() => void | Promise<void>) | undefined;
+  /** Lets go of everyone still connected — see {@link disconnectAllFor}. */
+  let disconnectAll: (() => void) | undefined;
 
   const handler = await createGuideHandler(source, {
     ...options,
@@ -168,7 +206,8 @@ export async function serveGuide(
       // Before the await, not after: `close` only calls back once the last
       // response has ended, so a stalled consumer would hold this promise open
       // forever and the cut-off would never be reached.
-      server.closeAllConnections();
+      //
+      disconnectAll?.();
 
       await shut;
     },
@@ -228,6 +267,10 @@ export async function serveGuide(
 
     throw error;
   }
+
+  // Before the url rather than at the stop, because the HTTP/2 half of it has
+  // to be watching from the first session onwards.
+  disconnectAll = disconnectAllFor(server);
 
   const address = server.address();
   // A unix socket, or a server of someone's own that is bound to something

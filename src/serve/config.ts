@@ -8,9 +8,21 @@
 
 import type { Server } from 'node:http';
 import type { Server as TlsServer } from 'node:https';
+import type { Http2Server, Http2SecureServer } from 'node:http2';
 import type { CompressionFormat } from '../core/output.js';
 import type { NextGrab } from './schedule.js';
 import type { GuideHandler, GuideRequest } from './handler.js';
+
+/**
+ * Anything this command can listen on: HTTP, HTTPS, or either over HTTP/2.
+ *
+ * An HTTP/2 server cuts its connections differently — it has no
+ * `closeAllConnections`, having sessions rather than connections — so stopping
+ * one asks it to close idle sessions and then waits. A consumer part way
+ * through a guide will hold that until it is done, which is what a `close` of
+ * your own is for.
+ */
+export type ListeningServer = Server | TlsServer | Http2Server | Http2SecureServer;
 
 /**
  * What {@link EpgServeConfig.server} hands back: the server it is listening on,
@@ -18,8 +30,8 @@ import type { GuideHandler, GuideRequest } from './handler.js';
  *
  * A bare `Server` is the common case — express's `app.listen()` returns one and
  * `node:http` is one; `node:https` is the other, for a guide served over TLS
- * without a proxy in front to terminate it. Give a `close` too wherever the
- * thing listening has a
+ * without a proxy in front to terminate it, and `node:http2` works too through
+ * its compatibility API. Give a `close` too wherever the thing listening has a
  * lifecycle of its own, fastify above all: `app.close()` is what runs its
  * `onClose` hooks and lets its plugins put themselves away, and closing the
  * socket underneath it would skip every one of them.
@@ -28,11 +40,10 @@ import type { GuideHandler, GuideRequest } from './handler.js';
  * `return app` is the whole of it there.
  */
 export type GuideListening =
-  | Server
-  | TlsServer
+  | ListeningServer
   | {
       /** The one actually bound, for the port and the url the command reports. */
-      server: Server | TlsServer;
+      server: ListeningServer;
       /**
        * Stop listening, your way — awaited while the handler stops.
        *
