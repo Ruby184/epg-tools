@@ -303,23 +303,26 @@ import { createGuideHandler } from 'epg-tools/serve';
 
 const handler = await createGuideHandler(config, { grab: grabEvery('4h') });
 
-app.get(handler.guidePath, handler.node('guide'));              // express, fastify, http
+app.get(handler.guidePath, handler.node('guide'));              // express, koa, http
+fast.get('/epg.xml', handler.fastify('guide'));                 // fastify, hooks and all
 hono.get('/epg.xml', (c) => handler.fetch('guide')(c.req.raw)); // or fetch-style
 
 await handler.close();                                          // yours to close
 ```
 
-It gives back `{ answer, node, fetch, guidePath, healthPath, config, reload, close }`
+It gives back `{ answer, node, fastify, fetch, guidePath, healthPath, config, reload, close }`
 and takes everything `serveGuide` does except `port`, `host` and `keepAliveMs`,
 plus `shutdown` — a hook run while stopping, after the scheduled grab has been
 called off and before the cache is let go of, which is where ending the
 requests still in flight belongs. `serveGuide` is this plus a socket, and
 passes its own shutdown there.
 
-`node(route?)` and `fetch(route?)` build a handler for one answer — `'guide'`
-or `'health'` — wherever it is mounted; a builder rather than a method because
-a framework calls what it is given with whatever arguments it likes, and
-express's third is `next`. With no route they route by path instead, answering
+`node(route?)`, `fastify(route?)` and `fetch(route?)` build a handler for one
+answer — `'guide'` or `'health'` — wherever it is mounted; a builder rather
+than a method because a framework calls what it is given with whatever
+arguments it likes, and express's third is `next`. The fastify one writes
+through the reply rather than around it, so that its `onSend` and `onResponse`
+hooks still see the guide; `reply.hijack()` over `node()` runs none of them. With no route they route by path instead, answering
 `guidePath`, `healthPath` and then 404, which is what makes
 `createServer(handler.node())` a whole server.
 
@@ -328,6 +331,7 @@ Underneath both is `answer(request)`, which has no transport in it at all:
 ```ts
 const { status, headers, body } = await handler.answer({
   method: 'GET',
+  url: '/guide.xml',            // or a whole url; only its path is read
   headers: { 'if-none-match': tag },
   route: 'guide',
   signal,                       // the consumer going away stops the merge
@@ -342,8 +346,9 @@ stop: it ends the merge and gives back the concurrency slot. `answer` never
 rejects; a failure is a `500` with the reason already reported.
 
 To keep the command instead of writing a program, `serve.server` hands
-`epg serve` a server of yours — see [on a server of your
-own](./configuration.md#on-a-server-of-your-own).
+`epg serve` a server of yours, returning the `http.Server` it is listening on
+or `{ server, close }` where stopping is more than closing a socket — see [on a
+server of your own](./configuration.md#on-a-server-of-your-own).
 
 `reload()` resolves the channel lists again on the next poll, whatever those
 clocks say — the ceiling is a guess, and this is the caller saying they know. It

@@ -8,13 +8,16 @@
  */
 
 import { createServer, type Server } from 'node:http';
+import { createServer as createHttpsServer, get as httpsGet } from 'node:https';
 import type { AddressInfo } from 'node:net';
+import Fastify from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/types.js';
 import type { EpgConfig } from '../src/config.js';
 import { createGuideHandler, serveGuide, type GuideHandler } from '../src/serve/main.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
+import { CERT, KEY } from './fixtures/self-signed.js';
 import { collect } from './reporting.js';
 
 const NOW = new Date('2026-09-03T05:00:00.000Z');
@@ -159,6 +162,26 @@ describe('createGuideHandler', () => {
     expect((await fetch(`${url}/anything`)).status).toBe(404);
   });
 
+  it('reads a path out of a request target or a whole url, and routes nothing else', async () => {
+    const handler = await handlerFor(
+      configFor(['one']),
+      await cacheWith({ one: [programme('one', 6)] }),
+    );
+
+    const statusOf = async (url: string | undefined): Promise<number> =>
+      (await handler.answer({ headers: {}, ...(url === undefined ? {} : { url }) })).status;
+
+    // What Node and fastify hand over, and what a `Request` carries.
+    expect(await statusOf('/guide.xml?days=3')).toBe(200);
+    expect(await statusOf('https://pi.local/guide.xml')).toBe(200);
+    expect(await statusOf('/health')).toBe(200);
+    expect(await statusOf('/nope')).toBe(404);
+    expect(await statusOf(undefined)).toBe(404);
+    // A target nothing can parse routes nowhere — and does not throw where
+    // every answer is decided, which would be a 500 anyone could ask for.
+    expect(await statusOf('http://[')).toBe(404);
+  });
+
   it('answers a conditional poll out of the answer itself, with no transport in it', async () => {
     const handler = await handlerFor(
       configFor(['one']),
@@ -250,7 +273,177 @@ describe('createGuideHandler', () => {
   });
 });
 
+describe('on fastify', () => {
+  it('writes through the reply, so the app’s hooks see the guide', async () => {
+    // The reason this exists rather than a `reply.hijack()` recipe: a hijacked
+    // reply runs none of fastify's `onSend`/`onResponse` hooks, so a plugin
+    // that logs, times or counts responses stops seeing the guide at all.
+    const handler = await handlerFor(
+      configFor(['one']),
+      await cacheWith({ one: [programme('one', 6)] }),
+    );
+    const seen: { status: number; url: string }[] = [];
+    const app = Fastify();
+
+    app.addHook('onResponse', async (request, reply) => {
+      seen.push({ status: reply.statusCode, url: request.url });
+    });
+    app.get('/epg.xml', handler.fastify('guide'));
+    app.get('/healthz', handler.fastify('health'));
+
+    await app.listen({ port: 0, host: '127.0.0.1' });
+
+    try {
+      const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+      const guide = await fetch(`${url}/epg.xml`);
+      const body = await guide.text();
+
+      expect(guide.status).toBe(200);
+      expect(guide.headers.get('content-type')).toBe('application/xml; charset=utf-8');
+      expect(guide.headers.get('etag')).toMatch(/^W\//);
+      expect(body).toContain('<channel id="one">');
+
+      // A conditional poll is answered as a conditional poll, through fastify.
+      const again = await fetch(`${url}/epg.xml`, {
+        headers: { 'if-none-match': guide.headers.get('etag')! },
+      });
+
+      expect(again.status).toBe(304);
+      expect(await again.text()).toBe('');
+
+      expect((await fetch(`${url}/healthz`)).status).toBe(200);
+
+      // Which is the assertion this test is for.
+      expect(seen).toEqual([
+        { status: 200, url: '/epg.xml' },
+        { status: 304, url: '/epg.xml' },
+        { status: 200, url: '/healthz' },
+      ]);
+    } finally {
+      await app.close();
+    }
+  });
+});
+
 describe('serve.server', () => {
+  it('runs a close of its own, before the cache it serves from goes', async () => {
+    // What fastify needs: `app.close()` is where its `onClose` hooks run, and
+    // closing the socket underneath it would skip every one of them. It has to
+    // happen while the cache is still there, too — a hook that answers one last
+    // request is answering it from somewhere.
+    const said: string[] = [];
+    const driver = new MemoryCacheDriver();
+    const seeded = new CacheManager({ driver });
+
+    await seeded.write({ site: 'example.tv', channelId: 'one', day: DAY }, [programme('one', 6)], {
+      grabbedAt: '2026-09-03T04:00:00.000Z',
+    });
+
+    const watched = new Proxy(driver, {
+      get(store, name) {
+        if (name === 'close') {
+          return async () => {
+            said.push('cache closed');
+          };
+        }
+
+        const held = Reflect.get(store, name, store) as unknown;
+
+        return typeof held === 'function' ? held.bind(store) : held;
+      },
+    });
+
+    const config: EpgConfig = {
+      ...configFor(['one'], {
+        server: ({ node }, where) => {
+          const app = createServer(node());
+
+          app.listen(where.port, where.host);
+
+          // A method that wants its own object, which is what a framework's
+          // close is: lifted off the listener, its `this` would be gone.
+          const listener = {
+            server: app,
+            name: 'app',
+            close() {
+              said.push(`${this.name} closed`);
+            },
+          };
+
+          return listener;
+        },
+      }),
+      // Opened by the server rather than handed to it, so that closing it is
+      // this server's to do and the order is observable.
+      cache: { driver: () => watched },
+    };
+
+    const server = await serveGuide(config, { port: 0, host: '127.0.0.1', now: NOW });
+
+    expect(await (await fetch(server.url)).text()).toContain('<channel id="one">');
+
+    await server.close();
+
+    expect(said).toEqual(['app closed', 'cache closed']);
+  });
+
+  it('listens over TLS, and writes https urls without being told', async () => {
+    // The seam is the whole answer to "can it serve HTTPS": this package does
+    // not manage certificates, and an `https.Server` is a server like any
+    // other — except that it is not `instanceof http.Server`, which is why the
+    // listener is taken by what it has rather than by what it is.
+    const cache = await cacheWith({ one: [programme('one', 6)] });
+    const config = configFor(['one'], {
+      baseUrl: true,
+      server: ({ node }, where) =>
+        createHttpsServer({ key: KEY, cert: CERT }, node()).listen(where.port, where.host),
+    });
+
+    config.sites[0]!.channels = [
+      { xmltvId: 'one', siteId: 'one', name: 'One', logo: '/logos/one.png' },
+    ];
+
+    const server = await serveGuide(config, {
+      port: 0,
+      host: '127.0.0.1',
+      now: NOW,
+      cache,
+    });
+
+    try {
+      expect(server.port).toBeGreaterThan(0);
+
+      // `https.get` rather than `fetch`, which has no way to be told that a
+      // self-signed certificate is the point of the test rather than a problem.
+      const answered = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        httpsGet(
+          `https://localhost:${server.port}/guide.xml`,
+          { rejectUnauthorized: false },
+          (response) => {
+            const parts: Buffer[] = [];
+
+            response.on('data', (part: Buffer) => parts.push(part));
+            response.on('end', () =>
+              resolve({
+                status: response.statusCode ?? 0,
+                body: Buffer.concat(parts).toString('utf8'),
+              }),
+            );
+          },
+        ).on('error', reject);
+      });
+
+      expect(answered.status).toBe(200);
+      // `https` off the connection itself, which is the one thing
+      // `X-Forwarded-Proto` cannot be trusted about.
+      expect(answered.body).toContain(
+        `<icon src="https://localhost:${server.port}/logos/one.png"/>`,
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
   it('lets the config hand `epg serve` a server of its own', async () => {
     const cache = await cacheWith({ one: [programme('one', 6)] });
     let given: { port: number; host: string } | undefined;

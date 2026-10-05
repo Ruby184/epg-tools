@@ -12,9 +12,11 @@
  */
 
 import { createServer, type Server } from 'node:http';
+import type { Server as TlsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { emitter } from '../core/events.js';
 import type { ConfigSource } from '../config.js';
+import type { GuideListening } from './config.js';
 import {
   createGuideHandler,
   DEFAULT_SERVE_PATH,
@@ -68,7 +70,7 @@ export interface ServeOptions extends GuideHandlerOptions {
   server?: (
     handler: GuideHandler,
     where: { port: number; host: string },
-  ) => Server | Promise<Server>;
+  ) => GuideListening | Promise<GuideListening>;
 }
 
 export interface GuideServer {
@@ -96,7 +98,10 @@ export interface GuideServer {
 }
 
 /** Resolved once the server is listening, or rejected if it never will be. */
-async function listening(server: Server, start: (listen: () => void) => void): Promise<void> {
+async function listening(
+  server: Server | TlsServer,
+  start: (listen: () => void) => void,
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const failed = (error: Error): void => reject(error);
 
@@ -130,7 +135,9 @@ export async function serveGuide(
    * below, after `listen`, and this one carries the cancelling.
    */
   const work = new AbortController();
-  let server: Server | undefined;
+  let server: Server | TlsServer | undefined;
+  /** How a server of somebody's own stops, where it has a way of its own. */
+  let stopListening: (() => void | Promise<void>) | undefined;
 
   const handler = await createGuideHandler(source, {
     ...options,
@@ -140,6 +147,11 @@ export async function serveGuide(
       // is taken away.
       work.abort();
       await options.shutdown?.();
+      // First, and awaited: `fastify.close()` is what runs the `onClose` hooks
+      // a plugin registered, and closing the socket under it would skip every
+      // one of them. What is left listening afterwards is still closed below —
+      // this is the graceful half, not the whole of it.
+      await stopListening?.();
 
       if (server === undefined) {
         return;
@@ -185,7 +197,20 @@ export async function serveGuide(
       // Already listening, usually: `app.listen()` returns before the socket is
       // bound, and `fastify.listen()` after. Waiting on both is one line and
       // saves a url reported before there is a port to report.
-      server = await own(handler, where);
+      const listener = await own(handler, where);
+
+      // By what it has rather than by what it is: a `Server` has no `server` of
+      // its own, and `instanceof` would have to name both `node:http`'s and
+      // `node:https`'s — which are unrelated classes.
+      if ('server' in listener) {
+        server = listener.server;
+        // Called *on* the listener rather than lifted off it: `app.close` is a
+        // method, and a method taken off its object is a method whose `this` is
+        // gone — which is most of what a framework's close has to work with.
+        stopListening = async () => listener.close?.();
+      } else {
+        server = listener;
+      }
 
       await listening(server, (listen) => {
         if (server?.listening === true) {
@@ -260,7 +285,15 @@ export {
   DEFAULT_REVALIDATE_MS,
   DEFAULT_SITES_MAX_AGE_MS,
 } from './handler.js';
-export type { GuideAnswer, GuideHandler, GuideHandlerOptions, GuideRequest } from './handler.js';
-export type { EpgServeConfig } from './config.js';
+export type {
+  GuideAnswer,
+  GuideHandler,
+  GuideHandlerOptions,
+  GuideRequest,
+  GuideRoute,
+  Replying,
+  ReplyingRequest,
+} from './handler.js';
+export type { EpgServeConfig, GuideListening } from './config.js';
 export { grabEvery } from './schedule.js';
 export type { GrabEveryOptions, NextGrab } from './schedule.js';

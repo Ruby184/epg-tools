@@ -10,6 +10,8 @@
  */
 
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import Fastify from 'fastify';
 import {
   build,
   CacheDriverBase,
@@ -877,7 +879,7 @@ export async function mountedOnAnAppOfMyOwn(): Promise<void> {
 
   const answered = await handler.answer({
     method: 'GET',
-    path: handler.guidePath,
+    url: handler.guidePath,
     headers: { 'if-none-match': 'W/"nope"' },
     route: 'guide',
     encrypted: true,
@@ -896,6 +898,43 @@ export async function mountedOnAnAppOfMyOwn(): Promise<void> {
   handler.reload();
   await handler.close();
 }
+
+// --- docs/configuration.md: Keep the command, over TLS ---------------------
+export const servedOverTls = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  serve: {
+    server: ({ node }, { port, host }) =>
+      createHttpsServer({ key: 'KEY', cert: 'CERT' }, node()).listen(port, host),
+  },
+});
+
+// --- docs/configuration.md: Keep the command, on fastify -------------------
+/**
+ * Where `return app` is the claim worth checking: a fastify instance is a
+ * `server` and a `close()`, which is all `GuideListening` asks for — and
+ * `fastify('guide')` has to be a fastify route handler, which only fastify's
+ * own types can say.
+ */
+export const servedByFastify = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  serve: {
+    server: async ({ fastify: route, guidePath, healthPath }, { port, host }) => {
+      const app = Fastify({ forceCloseConnections: true });
+
+      app.get(guidePath, route('guide'));
+
+      if (healthPath !== false) {
+        app.get(healthPath, route('health'));
+      }
+
+      await app.listen({ port, host });
+
+      return app;
+    },
+  },
+});
 
 // --- docs/configuration.md: Keep the command, bring your own server --------
 export const servedByMyOwnApp = defineConfig({

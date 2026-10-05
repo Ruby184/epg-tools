@@ -187,6 +187,14 @@ export interface GuideHandlerOptions {
 }
 
 /**
+ * Which of the two answers a request is for.
+ *
+ * Named because it travels: a route decided where an app mounted the guide is
+ * carried to {@link GuideHandler.answer} and read back out in `GuideRequest`.
+ */
+export type GuideRoute = 'guide' | 'health';
+
+/**
  * One request, in the terms answering it actually needs.
  *
  * Node's `IncomingMessage`, a `Request`, a fastify request and whatever comes
@@ -198,16 +206,18 @@ export interface GuideRequest {
   /** Defaults to `GET`. */
   method?: string | undefined;
   /**
-   * The path asked for, query string and all.
+   * The url asked for, whatever the transport means by that.
    *
-   * Read only when {@link route} is left out — it is what the routing is done
-   * on, and an app that has already routed has nothing left to say with it.
+   * A request target — `/guide.xml?days=3`, which is what Node, express and
+   * fastify all call `url` — or a whole url, which is what a `Request`
+   * carries. Either way only its path is read, and only when {@link route} is
+   * left out: an app that has already routed has nothing left to say with it.
    */
-  path?: string | undefined;
+  url?: string | undefined;
   /** Lower-cased names, as every server hands them over. */
   headers: Record<string, string | string[] | undefined>;
   /** Answer this, whatever the path says — for an app that routed already. */
-  route?: 'guide' | 'health' | undefined;
+  route?: GuideRoute | undefined;
   /**
    * The consumer went away.
    *
@@ -264,6 +274,34 @@ export interface GuideAnswer {
 }
 
 /**
+ * The half of a request a reply-shaped framework hands over — `FastifyRequest`
+ * fits it, and so does anything else that names these.
+ */
+export interface ReplyingRequest {
+  method?: string | undefined;
+  url?: string | undefined;
+  headers: Record<string, string | string[] | undefined>;
+  /** Node's own, where the framework keeps it — fastify calls it `raw`. */
+  raw?: IncomingMessage | undefined;
+}
+
+/**
+ * The half of a reply this writes through — `FastifyReply` fits it.
+ *
+ * Writing through the framework rather than around it is the whole point:
+ * `reply.raw` works and is what `node()` would take, but a reply hijacked that
+ * way leaves every `onSend` and `onResponse` hook unrun, and a plugin that
+ * logs, times or counts responses stops seeing the guide at all.
+ */
+export interface Replying {
+  status(code: number): Replying;
+  headers(values: Record<string, string>): Replying;
+  send(payload?: unknown): unknown;
+  /** Only to know when the consumer went away, never to write to. */
+  raw: ServerResponse;
+}
+
+/**
  * The guide, ready to answer requests, for an app that is already listening.
  *
  * `serveGuide` is this plus a socket. Mounting it instead gives you the same
@@ -312,11 +350,26 @@ export interface GuideHandler {
    * given with whatever arguments it likes — express's third is `next` — and a
    * route named when it is mounted cannot be mistaken for one of those.
    */
-  node(
-    route?: 'guide' | 'health',
-  ): (request: IncomingMessage, response: ServerResponse) => Promise<void>;
+  node(route?: GuideRoute): (request: IncomingMessage, response: ServerResponse) => Promise<void>;
   /** The same for a fetch-style app — hono, elysia, bun, a worker. */
-  fetch(route?: 'guide' | 'health'): (request: Request) => Promise<Response>;
+  fetch(route?: GuideRoute): (request: Request) => Promise<Response>;
+  /**
+   * The same for fastify, written through the reply rather than around it:
+   *
+   * ```ts
+   * app.get(handler.guidePath, handler.fastify('guide'));
+   * ```
+   *
+   * `node()` over `request.raw`/`reply.raw` works too, but only after
+   * `reply.hijack()` — and a hijacked reply runs none of fastify's `onSend` or
+   * `onResponse` hooks, so a plugin that logs, times or counts responses stops
+   * seeing the guide. This hands fastify the status, the headers and the body
+   * and lets it do what it does with them.
+   *
+   * Compression is this package's by then: the answer is already encoded and
+   * says so, so set `serve.compress: false` if the app compresses for itself.
+   */
+  fastify(route?: GuideRoute): (request: ReplyingRequest, reply: Replying) => Promise<unknown>;
   /** Where the guide answers when it routes for itself — `serve.path`. */
   readonly guidePath: string;
   /** Where the health check answers, or `false` — `serve.health`. */
@@ -656,6 +709,25 @@ function requestBase(request: GuideRequest): string | undefined {
     return `${new URL(`${proto}://${host}`).origin}/`;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * The path a request asked for, however its transport spells a url.
+ *
+ * Against a base, which is what makes one reading do for both: a request
+ * target — `/guide.xml?days=3`, what Node and fastify hand over — resolves
+ * against it, and a whole url, which is what a `Request` carries, ignores it.
+ * Only the path decides anything here.
+ */
+function pathOf(url: string | undefined): string {
+  try {
+    return new URL(url ?? '/', 'http://request.invalid').pathname;
+  } catch {
+    // A target nothing can parse is one nothing routes to — `http://[` is a
+    // request anyone can send, and a 404 is the answer to it rather than a
+    // throw where every answer is decided.
+    return url ?? '/';
   }
 }
 
@@ -1009,7 +1081,7 @@ export async function createGuideHandler(
   const answer = async (request: GuideRequest): Promise<GuideAnswer> => {
     const began = Date.now();
     const method = request.method ?? 'GET';
-    const [requestPath = '/'] = (request.path ?? '/').split('?');
+    const requestPath = pathOf(request.url);
 
     const done = (status: number): void => {
       emit({ type: 'serve:response', method, path: requestPath, status, ms: Date.now() - began });
@@ -1203,7 +1275,7 @@ export async function createGuideHandler(
    * the guide there — the path they named explicitly beats the one that
    * defaulted.
    */
-  function routeFor(requestPath: string): 'guide' | 'health' | 'none' {
+  function routeFor(requestPath: string): GuideRoute | 'none' {
     if (requestPath === path) {
       return 'guide';
     }
@@ -1471,7 +1543,7 @@ export async function createGuideHandler(
    * after its headers had already gone out.
    */
   const node =
-    (route?: 'guide' | 'health') =>
+    (route?: GuideRoute) =>
     async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
       const gone = new AbortController();
 
@@ -1483,7 +1555,7 @@ export async function createGuideHandler(
 
       const result = await answer({
         method: request.method,
-        path: request.url,
+        url: request.url,
         headers: request.headers,
         raw: request,
         ...(route === undefined ? {} : { route }),
@@ -1513,12 +1585,12 @@ export async function createGuideHandler(
 
   /** The same answer for a fetch-style app — hono, elysia, bun, a worker. */
   const fetch =
-    (route?: 'guide' | 'health') =>
+    (route?: GuideRoute) =>
     async (request: Request): Promise<Response> => {
       const url = new URL(request.url);
       const result = await answer({
         method: request.method,
-        path: `${url.pathname}${url.search}`,
+        url: request.url,
         // The url's authority first, because a `Request` carries no `Host` of
         // its own — the transport adds that on the way out, and here there is
         // no way out. Anything the request does carry still wins, forwarded
@@ -1561,6 +1633,40 @@ export async function createGuideHandler(
       );
     };
 
+  /** See {@link GuideHandler.fastify}. */
+  const fastify =
+    (route?: GuideRoute) =>
+    async (request: ReplyingRequest, reply: Replying): Promise<unknown> => {
+      const gone = new AbortController();
+
+      reply.raw.on('close', () => {
+        if (!reply.raw.writableEnded) {
+          gone.abort(new Error('the client closed the connection'));
+        }
+      });
+
+      const result = await answer({
+        method: request.method,
+        url: request.url,
+        headers: request.headers,
+        raw: request,
+        ...(route === undefined ? {} : { route }),
+        signal: gone.signal,
+        encrypted: (request.raw?.socket as TLSSocket | undefined)?.encrypted === true,
+      });
+
+      reply.status(result.status).headers(result.headers);
+
+      // A stream, so that the framework's own backpressure and its hooks both
+      // apply — and so that a reply abandoned half way ends the merge, which is
+      // what destroying the stream does to the generator behind it.
+      return reply.send(
+        result.body === undefined || typeof result.body === 'string'
+          ? result.body
+          : Readable.from(result.body),
+      );
+    };
+
   options.reloadOn?.addEventListener('reload', onReload);
 
   // One or the other, because a listener answers only a signal that fires
@@ -1574,5 +1680,15 @@ export async function createGuideHandler(
     options.signal?.addEventListener('abort', () => void close(), { once: true });
   }
 
-  return { answer, node, fetch, guidePath: path, healthPath: health, config, reload, close };
+  return {
+    answer,
+    node,
+    fetch,
+    fastify,
+    guidePath: path,
+    healthPath: health,
+    config,
+    reload,
+    close,
+  };
 }

@@ -734,20 +734,68 @@ url. Mount the paths the handler gives you rather than writing your own, or
 the command. `keepAliveMs` is not applied to a server this package did not
 make.
 
+**Where stopping is more than closing a socket**, return `{ server, close }`
+instead of the bare server — which a fastify instance already is, so there it
+is just `return app`. That is what fastify needs: `app.close()` runs its `onClose` hooks and
+lets its plugins put themselves away, and closing the socket underneath it
+would skip every one of them. It is awaited while the handler stops — after the
+scheduled grab is called off, before the cache is let go of — and whatever is
+still listening afterwards is closed and its connections cut anyway, so yours
+is free to be the graceful half.
+
+```ts
+serve: {
+  server: async ({ fastify: route, guidePath }, { port, host }) => {
+    const app = Fastify({ forceCloseConnections: true });
+
+    app.get(guidePath, route('guide'));
+    await app.listen({ port, host });
+
+    return app;      // already a `server` and a `close()`
+  },
+}
+```
+
+**Over TLS**, the same seam serves: return an `https.Server` and `epg serve`
+listens on it exactly as it would on its own.
+
+```ts
+serve: {
+  server: ({ node }, { port, host }) =>
+    createHttpsServer({ key, cert }, node()).listen(port, host),
+}
+```
+
+A guide written with `baseUrl: true` says `https://` there without being told:
+the scheme comes from the connection rather than from a header, which is the
+one thing `X-Forwarded-Proto` cannot be trusted about. The url `epg serve`
+reports is still written `http://`, since it does not know what you handed it —
+that is the one cost.
+
+`handler.fastify(route?)` is fastify's own adapter: it hands fastify the
+status, the headers and the body rather than writing around it, so `onSend` and
+`onResponse` hooks still see the guide — a `reply.hijack()` over `reply.raw`
+works too, but runs none of them, and a plugin that logs or counts responses
+goes blind. And a close that waits for every request in flight will wait for a
+guide for as long as its consumer takes to read one, so
+`forceCloseConnections: true` is the answer there rather than a longer timeout.
+
 **Own the process** — `createGuideHandler(config, options)` is `serveGuide`
 without the socket, for a program that has its own startup and shutdown:
 
 ```ts
 const handler = await createGuideHandler(config, { grab: grabEvery('4h') });
 
-app.get('/epg.xml', handler.node('guide'));        // express, fastify, http
+app.get('/epg.xml', handler.node('guide'));                      // express, koa, http
+fast.get('/epg.xml', handler.fastify('guide'));                  // fastify, hooks and all
 hono.get('/epg.xml', (c) => handler.fetch('guide')(c.req.raw));  // or fetch-style
 
 process.on('SIGINT', () => void handler.close());  // yours to close
 ```
 
-`handler.node(route?)` and `handler.fetch(route?)` build a handler for one
-answer — `'guide'` or `'health'` — wherever you mount it. With no route they
+`handler.node(route?)`, `handler.fastify(route?)` and `handler.fetch(route?)`
+build a handler for one answer — `'guide'` or `'health'` — wherever you mount
+it. With no route they
 route by path instead and answer anything else with a 404, which is what makes
 `createServer(handler.node())` a whole server and `app.use(handler.node())`
 wrong for an app with routes of its own. Underneath both is

@@ -7,9 +7,48 @@
  */
 
 import type { Server } from 'node:http';
+import type { Server as TlsServer } from 'node:https';
 import type { CompressionFormat } from '../core/output.js';
 import type { NextGrab } from './schedule.js';
 import type { GuideHandler, GuideRequest } from './handler.js';
+
+/**
+ * What {@link EpgServeConfig.server} hands back: the server it is listening on,
+ * and how to stop it where stopping is more than closing a socket.
+ *
+ * A bare `Server` is the common case — express's `app.listen()` returns one and
+ * `node:http` is one; `node:https` is the other, for a guide served over TLS
+ * without a proxy in front to terminate it. Give a `close` too wherever the
+ * thing listening has a
+ * lifecycle of its own, fastify above all: `app.close()` is what runs its
+ * `onClose` hooks and lets its plugins put themselves away, and closing the
+ * socket underneath it would skip every one of them.
+ *
+ * A fastify instance already *is* this shape — a `server` and a `close()` — so
+ * `return app` is the whole of it there.
+ */
+export type GuideListening =
+  | Server
+  | TlsServer
+  | {
+      /** The one actually bound, for the port and the url the command reports. */
+      server: Server | TlsServer;
+      /**
+       * Stop listening, your way — awaited while the handler stops.
+       *
+       * Called after the scheduled grab has been called off and before the
+       * cache is let go of, which is the only window where requests are still
+       * being answered and the cache is still there to answer them from.
+       * Whatever is still listening afterwards is closed and its connections
+       * cut, so this is free to be the graceful half.
+       *
+       * It is also the half that can hang: a guide takes as long as a consumer
+       * takes to read it, and a close that waits for every request will wait
+       * for that one. Fastify's `forceCloseConnections: true` is the answer
+       * there.
+       */
+      close?: () => void | Promise<void>;
+    };
 
 export interface EpgServeConfig {
   /**
@@ -106,9 +145,11 @@ export interface EpgServeConfig {
    *
    * Given the guide as a handler and where the command was told to listen, and
    * returning the `http.Server` it is listening on — which is what `express`,
-   * `fastify` and `node:http` all have. `epg serve` carries on around it: the
-   * reporter, `SIGHUP` to reload, a scheduled grab, and a stop that cuts the
-   * connections still open before it lets go of the cache.
+   * `fastify` and `node:http` all have — or that server with a `close` of your
+   * own beside it, which is how an app with shutdown hooks keeps them. See
+   * {@link GuideListening}. `epg serve` carries on around it: the reporter,
+   * `SIGHUP` to reload, a scheduled grab, and a stop that cuts the connections
+   * still open before it lets go of the cache.
    *
    * ```ts
    * serve: {
@@ -137,6 +178,24 @@ export interface EpgServeConfig {
    * is not the shortcut it looks like either: `node()` with no route answers a
    * path it does not know with a 404, so it would swallow the rest of your app.
    *
+   * Fastify has a handler of its own — `handler.fastify`, which writes through
+   * the reply so that its `onSend` and `onResponse` hooks still see the guide —
+   * and its `close` is what runs the `onClose` hooks a plugin registered:
+   *
+   * ```ts
+   * serve: {
+   *   server: async ({ fastify: route, guidePath }, { port, host }) => {
+   *     const app = Fastify({ forceCloseConnections: true });
+   *
+   *     app.get(guidePath, route('guide'));
+   *     await app.listen({ port, host });
+   *
+   *     // Already a `server` and a `close()`, which is all this asks for.
+   *     return app;
+   *   },
+   * }
+   * ```
+   *
    * For a program that owns its own process, `createGuideHandler` is this
    * without the command around it. This is for keeping the command.
    *
@@ -146,5 +205,5 @@ export interface EpgServeConfig {
   server?: (
     handler: GuideHandler,
     where: { port: number; host: string },
-  ) => Server | Promise<Server>;
+  ) => GuideListening | Promise<GuideListening>;
 }
