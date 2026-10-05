@@ -685,6 +685,50 @@ describe('epg', () => {
       expect(written).toContain('xmltv_id="already.set"');
     });
 
+    it('keeps a derived function’s warning out of the report it is printing', async () => {
+      // `--format json` means something is parsing stdout. A warning written
+      // into the middle of the document breaks exactly the reader it was
+      // written for, so it goes where warnings go.
+      const dir = await tempDir();
+      const config = await configFile(
+        dir,
+        `export default {
+        sites: [{
+          site: 'example.tv',
+          channels: [{ xmltvId: 'bbcone.uk', siteId: '1', name: 'BBC One' }],
+          async request() { return {}; },
+          parseDay: () => [],
+        }],
+        derived: ({ warn }) => { warn('nothing to shift'); return []; },
+        days: 1,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+      const file = join(dir, 'c.channels.xml');
+
+      await writeFile(
+        file,
+        `<?xml version="1.0" encoding="UTF-8"?>\n<channels site="example.tv">\n` +
+          `  <channel site_id="1" xmltv_id="bbcone.uk">BBC One</channel>\n` +
+          `</channels>\n`,
+      );
+
+      const { code, stdout, stderr } = await run([
+        'channels',
+        '-c',
+        config,
+        '--against',
+        file,
+        '--format',
+        'json',
+      ]);
+
+      expect(code).toBe(0);
+      expect(stderr).toContain('nothing to shift');
+      expect(() => JSON.parse(stdout) as unknown).not.toThrow();
+    });
+
     it('fills a playlist`s tvg-id in place', async () => {
       const dir = await tempDir();
       const config = await siteConfig(dir);

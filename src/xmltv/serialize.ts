@@ -299,6 +299,17 @@ function makeFmt(options: SerializeOptions | undefined): Fmt {
 const BASES = new Map<string, URL>();
 
 /**
+ * How many parsed bases are kept.
+ *
+ * A guide has one base, and a process has a handful: this is a cache for the
+ * element loop, not a store. The cap is what keeps it one — `epg serve` with
+ * `baseUrl: true` hands over a `URL` precisely so that a `Host` header never
+ * reaches this, and a bound here means a caller who does pass strings from
+ * somewhere untrusted is wrong about the speed rather than about the memory.
+ */
+const MAX_BASES = 64;
+
+/**
  * {@link SerializeOptions.baseUrl} as a `URL`.
  *
  * `makeFmt` runs once per element, so parsing the same base again for every
@@ -329,6 +340,13 @@ function resolvedBase(value: string | URL | undefined): URL | undefined {
       );
     }
 
+    if (BASES.size >= MAX_BASES) {
+      // The oldest, which a `Map` hands over first. One guide's base is used
+      // for every element of it, so the one being evicted is never the one in
+      // use.
+      BASES.delete(BASES.keys().next().value!);
+    }
+
     BASES.set(value, held);
   }
 
@@ -339,8 +357,13 @@ function resolvedBase(value: string | URL | undefined): URL | undefined {
  * A picture's url, resolved against {@link SerializeOptions.baseUrl}.
  *
  * `URL` is what decides relative from absolute, since that is exactly what it
- * is for: `https://cdn/x.png`, `//cdn/x.png` and a `data:` all name where they
- * are and come back untouched, while `/logos/one.png` lands on the base.
+ * is for: `https://cdn/x.png` and a `data:` name where they are and come back
+ * untouched, while `/logos/one.png` lands on the base.
+ *
+ * A protocol-relative `//cdn/x.png` keeps its host and takes the base's scheme,
+ * which is what resolving it means — and the right answer for a document that
+ * is read somewhere other than over the connection it was served on, where
+ * "whatever scheme this page used" has no meaning at all.
  */
 function absolute(f: Fmt, src: string): string {
   if (f.baseUrl === undefined) {

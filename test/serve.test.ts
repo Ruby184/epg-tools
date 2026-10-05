@@ -280,6 +280,76 @@ describe('serveGuide', () => {
     expect(again.status).toBe(304);
   });
 
+  it('refuses to build a base out of a header that is not one', async () => {
+    // Both halves of it are somebody else's words. An empty or invented
+    // `X-Forwarded-Proto` used to go straight into the base — `://host/`, a url
+    // that throws where it is read, which is half way through a guide whose
+    // 200 has already gone out.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const config: EpgConfig = {
+      ...configFor([]),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: [{ xmltvId: 'one', siteId: 'one', name: 'One', logo: '/logos/one.png' }],
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+      serve: { baseUrl: true },
+    };
+
+    const report = collect();
+    const server = await serve(config, cache, { reporter: report.reporter });
+
+    for (const headers of [
+      { 'x-forwarded-proto': '' },
+      { 'x-forwarded-proto': 'nonsense' },
+      { 'x-forwarded-host': 'not a host' },
+    ]) {
+      const answered = await fetch(server.url, { headers });
+
+      expect(answered.status).toBe(200);
+
+      const body = await answered.text();
+
+      // Either the connection's own scheme and host, or the url left as it came
+      // — never a url built out of what the header said.
+      expect(body).toContain('<icon src=');
+      expect(body).not.toContain('://not a host/');
+      expect(body).not.toContain('"://');
+      expect(body).not.toContain('nonsense://');
+    }
+
+    // And nothing failed along the way, which is the point: this used to be a
+    // guide destroyed mid-send, once per request.
+    expect(report.of('serve:failed')).toHaveLength(0);
+  });
+
+  it('says the guide varies on who asked, even when an origin is allowed', async () => {
+    // `corsHeaders` names `Origin` for a named origin, and used to be spread
+    // over the `vary` that named the forwarded host. A shared cache reading
+    // that one would hand one host the guide written for another.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(
+      { ...configFor(['one']), serve: { baseUrl: true, cors: 'https://dash.example' } },
+      cache,
+    );
+    const answered = await fetch(server.url);
+    const vary = answered.headers.get('vary') ?? '';
+
+    expect(vary).toContain('Host');
+    expect(vary).toContain('X-Forwarded-Host');
+    expect(vary).toContain('Origin');
+    expect(vary).toContain('Accept-Encoding');
+  });
+
   it('picks the channel up at once when told to reload, ceiling or no ceiling', async () => {
     // The ceiling is a guess at how long a new channel may stay invisible; this
     // is the operator saying they know. `sitesMaxAgeMs` is an hour here, so
@@ -822,6 +892,55 @@ describe('serveGuide', () => {
     expect(report.of('serve:response').map((event) => event.status)).toEqual([200, 304]);
   });
 
+  it('counts a guide that failed half way, rather than only naming it', async () => {
+    // The headers went out as a 200 and the socket is destroyed, so there is no
+    // status on the wire to count — which is exactly why it has to be said
+    // here. A reporter that sees every other request end and not this one
+    // under-counts by the ones worth knowing about.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    // Only the payload read, and only for the second channel: the metadata
+    // sweep behind the ETag has to get through, or this is a 500 decided before
+    // a byte went out, which is the other path entirely.
+    //
+    // A `Proxy` rather than an object over it, so that every call it passes
+    // through keeps `this` on the real store — `CacheManager` holds its driver
+    // in a private field, and a stand-in that is not one cannot read it.
+    const falling = new Proxy(cache, {
+      get(store, name) {
+        if (name === 'read') {
+          return async (key: Parameters<CacheStore['read']>[0]) => {
+            if (key.channelId === 'two') {
+              throw new Error('the cache went away mid-guide');
+            }
+
+            return store.read(key);
+          };
+        }
+
+        const held = Reflect.get(store, name, store) as unknown;
+
+        return typeof held === 'function' ? held.bind(store) : held;
+      },
+    }) as CacheStore;
+
+    const report = collect();
+    const server = await serve(configFor(['one', 'two']), falling, {
+      reporter: report.reporter,
+    });
+
+    // Destroyed part way through, which is what tells a consumer the document
+    // it received is not whole.
+    // Destroyed part way through, which is what tells a consumer the document
+    // it received is not whole.
+    await expect(fetch(server.url).then(async (answered) => answered.text())).rejects.toThrow();
+
+    expect(report.of('serve:failed')).toHaveLength(1);
+    expect(report.of('serve:response').map((event) => event.status)).toEqual([500]);
+  });
+
   it('stops when its signal fires, and again is not an error', async () => {
     const cache = cacheWith({});
     const controller = new AbortController();
@@ -1026,6 +1145,15 @@ describe('outputFingerprint', () => {
     expect(of({ extensions: ['lcn'] })).not.toBe(of({ extensions: ['uniqueID'] }));
     expect(of({ extensions: true })).not.toBe(of({ extensions: ['lcn'] }));
     expect(of({ extensions: true })).not.toBe(of({ extensions: false }));
+    // Where the urls point is part of the document too — a base changed in the
+    // config between two runs of the server would otherwise leave every poller
+    // on a validator that still matched.
+    expect(of({})).not.toBe(of({ baseUrl: 'https://pi.local/' }));
+    expect(of({ baseUrl: 'https://pi.local/' })).not.toBe(of({ baseUrl: 'https://box.lan/' }));
+    // However it was spelled: `URL` and string are the same base.
+    expect(of({ baseUrl: new URL('https://pi.local/') })).toBe(
+      of({ baseUrl: 'https://pi.local/' }),
+    );
   });
 
   it('notices a function’s body changing, which JSON cannot see at all', () => {

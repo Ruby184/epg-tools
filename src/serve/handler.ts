@@ -273,10 +273,10 @@ export interface GuideAnswer {
  * ```ts
  * const handler = await createGuideHandler(config, { grab: grabEvery('4h') });
  *
- * app.use(handler.node);                             // express, or node itself
- * app.get('/guide.xml', (c) => handler.fetch(c.req.raw));  // a fetch-style app
+ * app.get(handler.guidePath, handler.node('guide'));              // express, fastify, http
+ * hono.get('/epg.xml', (c) => handler.fetch('guide')(c.req.raw)); // a fetch-style app
  *
- * await handler.close();                             // when the app stops
+ * await handler.close();                                          // when the app stops
  * ```
  */
 export interface GuideHandler {
@@ -480,7 +480,17 @@ export function outputFingerprint(options: GuideOutputOptions): string {
     : options.extensions;
 
   return createHash('sha1')
-    .update(canonical({ indent: options.indent, extensions, profile: options.profile }))
+    .update(
+      canonical({
+        indent: options.indent,
+        extensions,
+        profile: options.profile,
+        // A guide whose urls point somewhere else is a different guide, and a
+        // base changed in the config between two runs of the server would
+        // otherwise leave every poller on a validator that still matches.
+        baseUrl: options.baseUrl === undefined ? undefined : String(options.baseUrl),
+      }),
+    )
     .digest('base64url')
     .slice(0, 10);
 }
@@ -627,11 +637,26 @@ function requestBase(request: GuideRequest): string | undefined {
   // handler mounted on an HTTPS server of somebody's own has an encrypted
   // socket and no forwarded header at all. `http` only when neither says
   // otherwise, since guessing `https` writes urls nobody can fetch.
+  const forwarded = header(request, 'x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
   const proto =
-    header(request, 'x-forwarded-proto')?.split(',')[0]?.trim() ??
-    (request.encrypted === true ? 'https' : 'http');
+    // Only the two, and never what the header merely said: an empty
+    // `X-Forwarded-Proto` or a word nobody has heard of would otherwise be
+    // written into a base — and `://host/` is a url that throws when the guide
+    // is already half sent.
+    forwarded === 'http' || forwarded === 'https'
+      ? forwarded
+      : request.encrypted === true
+        ? 'https'
+        : 'http';
 
-  return `${proto}://${host}/`;
+  try {
+    // Parsed here rather than trusted downstream, because the authority is a
+    // header too: a `Host` with a space in it is a request anyone can send, and
+    // the alternative to refusing it here is a 200 whose body throws.
+    return `${new URL(`${proto}://${host}`).origin}/`;
+  } catch {
+    return undefined;
+  }
 }
 
 /** An etag of the same guide written for somewhere else — see `serve.baseUrl`. */
@@ -752,6 +777,11 @@ export async function createGuideHandler(
   const varyOn = [
     'Accept-Encoding',
     ...(declaredBase === true || typeof declaredBase === 'function' ? FORWARDED : []),
+    // What `corsHeaders` would say on its own, said here instead: this is the
+    // one that goes out with the validators, and a `vary` naming only the
+    // origin would let a shared cache hand one host the guide written for
+    // another.
+    ...(cors !== false && cors !== true ? ['Origin'] : []),
   ].join(', ');
 
   const opened = options.cache === undefined;
@@ -1103,13 +1133,14 @@ export async function createGuideHandler(
         // "Use it, but ask first" — which is exactly what a poller should do,
         // and what makes the 304 below possible at all.
         'cache-control': 'no-cache',
-        // With whatever a per-request base was read from: a cache in between
-        // must not hand one host the document written for another.
-        vary: varyOn,
         // In the validators rather than beside them, so a 304 carries it too:
         // a browser refused the headers on a revalidation would treat every
         // conditional poll as a failure.
         ...allowed,
+        // After them, not before: `corsHeaders` names `Origin` for an allowed
+        // origin, and whatever a per-request base was read from has to be in
+        // here too — `varyOn` is the one that carries both.
+        vary: varyOn,
       };
 
       if (unchanged(request, fingerprint)) {
@@ -1142,7 +1173,10 @@ export async function createGuideHandler(
           request,
           {
             ...guideOptions(now, sites, derived, meta),
-            ...(base === undefined ? {} : { baseUrl: base }),
+            // As a `URL`, which is what keeps a base read off the request out
+            // of the serializer's parse cache: that cache is keyed by the
+            // string, and the string here is a `Host` header.
+            ...(base === undefined ? {} : { baseUrl: new URL(String(base)) }),
           },
           encoding,
           { path: requestPath, began, done },
@@ -1258,6 +1292,10 @@ export async function createGuideHandler(
       }
 
       emit({ type: 'serve:failed', path: report.path, error });
+      // Counted as the failure it is, and not left out: a reporter that sees
+      // every other request end would otherwise under-count by exactly the
+      // ones worth knowing about.
+      report.done(500);
 
       // Part of a guide has already gone out and there is no way to unsay it.
       // Throwing is what tells the transport the document is not whole —

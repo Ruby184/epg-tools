@@ -202,23 +202,6 @@ export async function resolveChannels(
 }
 
 /**
- * Every site with its channels resolved to a plain list.
- *
- * What to reach for when more than one pass has to agree about the same sites:
- * a fetched list resolved separately by a grab and by the merge that reads what
- * it wrote can differ between the two, leaving the guide describing channels
- * nothing ever grabbed. Resolving up front is also one request per site instead
- * of one per pass.
- *
- * `concurrency` defaults to all of them at once — one request each, to one host
- * each; pass the run's `siteConcurrency` to hold it to the same bound the grab
- * itself uses.
- *
- * Given a `store`, a site that asked for `cacheChannels` reads its list from
- * there and writes a fetched one back — one state handle per site, opened and
- * saved here, since resolving is the whole of what this call does with a site.
- */
-/**
  * Resolved sites with every channel left to the first site that covers it.
  *
  * What `channelStrategy: 'first-only'` means before the grab rather than after
@@ -255,6 +238,23 @@ export function coveredOnce(
   });
 }
 
+/**
+ * Every site with its channels resolved to a plain list.
+ *
+ * What to reach for when more than one pass has to agree about the same sites:
+ * a fetched list resolved separately by a grab and by the merge that reads what
+ * it wrote can differ between the two, leaving the guide describing channels
+ * nothing ever grabbed. Resolving up front is also one request per site instead
+ * of one per pass.
+ *
+ * `concurrency` defaults to all of them at once — one request each, to one host
+ * each; pass the run's `siteConcurrency` to hold it to the same bound the grab
+ * itself uses.
+ *
+ * Given a `store`, a site that asked for `cacheChannels` reads its list from
+ * there and writes a fetched one back — one state handle per site, opened and
+ * saved here, since resolving is the whole of what this call does with a site.
+ */
 export async function resolveSites(
   sites: AnySiteConfig[],
   options: {

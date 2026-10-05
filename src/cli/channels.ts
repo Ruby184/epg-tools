@@ -170,6 +170,8 @@ export async function reportChannelsCommand(
   config: EpgConfig,
   options: ChannelsCommandOptions,
   stdout: Writable,
+  /** Where a `derived` function's warnings go — never into the report. */
+  stderr: Writable = process.stderr,
 ): Promise<number> {
   if (options.against === undefined) {
     throw new Error('epg channels needs --against <playlist.m3u | channels.xml | guide.xml>');
@@ -216,7 +218,10 @@ export async function reportChannelsCommand(
     now: new Date(),
     log: () => {},
     warn: (message) => {
-      stdout.write(`${message}\n`);
+      // Not `stdout`: that is the report, and `--format json` means something
+      // is parsing it. A warning written into the middle of a document is a
+      // warning that breaks whoever it was meant to reach.
+      stderr.write(`${message}\n`);
     },
   });
   const derived = declarations?.length

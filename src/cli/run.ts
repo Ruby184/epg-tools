@@ -823,6 +823,7 @@ async function execute(
           ...(signal ? { signal } : {}),
         },
         stdout,
+        stderr,
       );
     }
     case 'serve': {

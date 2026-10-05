@@ -387,6 +387,21 @@ describe('serialize', () => {
       );
     });
 
+    it('gives a protocol-relative url the base’s scheme, and a data: nothing', () => {
+      const xml = serializeChannel(
+        {
+          ...relative,
+          icon: [{ src: '//cdn.example/three.png' }, { src: 'data:image/gif;base64,R0lGOD' }],
+        },
+        { baseUrl: 'https://pi.local/' },
+      );
+
+      // Its host is its own; only the scheme was missing, and "whatever scheme
+      // this page used" means nothing in a document read somewhere else.
+      expect(xml).toContain('<icon src="https://cdn.example/three.png"/>');
+      expect(xml).toContain('<icon src="data:image/gif;base64,R0lGOD"/>');
+    });
+
     it('takes a URL as it is', () => {
       expect(serializeChannel(relative, { baseUrl: new URL('https://pi.local/') })).toContain(
         '<icon src="https://pi.local/logos/one.png"/>',
