@@ -654,8 +654,8 @@ quietly resolving nothing.
 box reachable by two names needs:
 
 ```ts
-serve: { baseUrl: true }                                   // the host that asked
-serve: { baseUrl: (request) => bases[request.headers.host] }   // or your own rule
+serve: { baseUrl: true }                                        // the host that asked
+serve: { baseUrl: ({ headers }) => bases[String(headers.host)] }  // or your own rule
 ```
 
 `true` reads the forwarded protocol and host where something in front says so,
@@ -692,6 +692,73 @@ with. `SIGHUP` reloads rather than stops, as [above](#serving-the-guide).
 
 `serveGuide(config, options)` is the same thing as a library, returning
 `{ url, port, reload, close, closed }` — see [the API reference](./api.md).
+
+#### On a server of your own
+
+The answering and the listening are separate, so the guide can be a route in an
+app you already have. Two ways in, depending on which process you want to be
+the one running.
+
+**Keep the command** — `serve.server` hands `epg serve` a server of yours, and
+everything the command does carries on around it: the reporter, `SIGHUP` to
+reload, a scheduled grab, and a stop that cuts the connections still open
+before it lets go of the cache.
+
+```ts
+import express from 'express';
+
+export default defineConfig({
+  sites: [example],
+  output: 'guide.xml',
+  serve: {
+    server: ({ node, guidePath, healthPath }, { port, host }) => {
+      const app = express();
+
+      app.get(guidePath, node('guide'));
+      app.get('/dashboard', mine);
+
+      if (healthPath !== false) {
+        app.get(healthPath, node('health'));
+      }
+
+      return app.listen(port, host);
+    },
+  },
+});
+```
+
+Return the server you are listening on — `app.listen()` gives you one, as does
+`fastify.server` — and `epg serve` waits for it to be bound before it reports a
+url. Mount the paths the handler gives you rather than writing your own, or
+`serve.path`, `serve.health` and `--path` stop meaning anything to whoever runs
+the command. `keepAliveMs` is not applied to a server this package did not
+make.
+
+**Own the process** — `createGuideHandler(config, options)` is `serveGuide`
+without the socket, for a program that has its own startup and shutdown:
+
+```ts
+const handler = await createGuideHandler(config, { grab: grabEvery('4h') });
+
+app.get('/epg.xml', handler.node('guide'));        // express, fastify, http
+hono.get('/epg.xml', (c) => handler.fetch('guide')(c.req.raw));  // or fetch-style
+
+process.on('SIGINT', () => void handler.close());  // yours to close
+```
+
+`handler.node(route?)` and `handler.fetch(route?)` build a handler for one
+answer — `'guide'` or `'health'` — wherever you mount it. With no route they
+route by path instead and answer anything else with a 404, which is what makes
+`createServer(handler.node())` a whole server and `app.use(handler.node())`
+wrong for an app with routes of its own. Underneath both is
+`handler.answer(request)`, which takes a method, a path, headers and a signal
+and returns `{ status, headers, body }` with nothing of any transport in it —
+that is the seam a framework nobody here has heard of is adapted at.
+
+A mounted handler is the whole of a served guide: the same ETags, the same
+snapshot of the channel lists, the same concurrency limit, and the scheduled
+grab if the config asks for one. Which means **`close()` is not optional** — it
+holds a cache, and with a schedule a timer that keeps the process alive.
 
 #### Is it healthy
 

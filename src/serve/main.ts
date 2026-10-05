@@ -1,50 +1,29 @@
 /**
- * `epg serve` — the merged guide over HTTP, for a consumer that polls.
+ * `epg serve`: the guide on a port of its own.
  *
- * The serving half of what `conditionalGet` does on the fetching side, and for
- * the same reason: a consumer that asks hourly for a guide that changes nightly
- * spends twenty-three of those asks receiving a document it already has. An
- * answer of `304 Not Modified` costs a header instead of a merge.
+ * The answering is next door in `handler.ts` and has no transport in it; this
+ * is the socket around it — binding a port, keep-alive, and stopping in the
+ * order that lets a consumer part way through a guide be cut off rather than
+ * hold the process open.
  *
- * Which turns on having a validator that is **cheaper than the guide** — and a
- * guide is a generator, so its bytes cannot be hashed without buffering the
- * document this package exists to avoid buffering. The cache answers instead:
- * the newest `grabbedAt` across the window, with how many entries are in it.
- *
- * That is not quite everything, and the gap is worth naming because it is
- * invisible when wrong. The cache says what the *content* would be; it says
- * nothing about the *shape* it would be written in, so `indent`, `extensions`
- * and a profile leave no trace in it. Change one, restart, and a consumer's
- * conditional request matches a validator built from the same entries and is
- * told 304 — forever, for a document that did change.
- * {@link outputFingerprint} is the other half of the validator.
+ * What a consumer actually gets, and why a poll is cheap, is documented there:
+ * one metadata sweep decides the ETag, and a guide is generated only for a
+ * request that has no matching one.
  */
 
-import { createHash } from 'node:crypto';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import type { TLSSocket } from 'node:tls';
+import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
-import PQueue from 'p-queue';
-import { resolveConfigSource, type ConfigSource } from '../config.js';
-import { createCacheStore } from '../build.js';
-import type { CacheEntryMeta, CacheStore, ChannelDayKey } from '../cache/types.js';
-import { dayRange, toDayString, addDays } from '../core/days.js';
-import { emitter, type Reporter, type Says } from '../core/events.js';
-import { compressor, type CompressionFormat } from '../core/output.js';
-import { resolveSites } from '../grabber/channels.js';
-import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
-import { generateGuide } from '../merge/guide.js';
-import { channelSelection, configured } from '../merge/select.js';
-import type { BuildGuideOptions, DerivedChannel, GuideContext } from '../merge/types.js';
-import type { XmltvDocumentMeta } from '../xmltv/types.js';
-import { outputOptions } from '../xmltv/serialize.js';
-import type { GuideOutputOptions } from '../xmltv/serialize.js';
-import type { NextGrab } from './schedule.js';
+import { emitter } from '../core/events.js';
+import type { ConfigSource } from '../config.js';
+import {
+  createGuideHandler,
+  DEFAULT_SERVE_PATH,
+  type GuideHandler,
+  type GuideHandlerOptions,
+} from './handler.js';
 
 /** Where the guide is served from when nothing says otherwise. */
-export const DEFAULT_SERVE_PATH = '/guide.xml';
+export { DEFAULT_SERVE_PATH };
 
 export const DEFAULT_SERVE_PORT = 8080;
 
@@ -57,55 +36,6 @@ export const DEFAULT_SERVE_PORT = 8080;
  * chosen once. `--host 0.0.0.0` is one word, and is a decision.
  */
 export const DEFAULT_SERVE_HOST = '127.0.0.1';
-
-/**
- * How long a fingerprint stands before it is worked out again.
- *
- * Not a cache of the answer so much as a collapse of bursts: a client that
- * sends `HEAD` and then `GET`, two consumers polling on the same cron minute,
- * a browser revalidating a subresource. A poll a minute apart pays for its own
- * sweep, which is the intent — the point is not to skip the check but to make
- * it much cheaper than the merge it avoids.
- */
-export const DEFAULT_REVALIDATE_MS = 1000;
-
-/**
- * How long a resolved channel list is kept before it is asked for again.
- *
- * Much longer than {@link DEFAULT_REVALIDATE_MS} on purpose. Rereading the
- * cache's metadata is cheap and happens per second; resolving the *sites* can
- * mean a request per site, so a poll must never drive one. Between the two, a
- * changed fingerprint still re-resolves immediately — this is only the floor
- * under the case the fingerprint cannot see, a grab that adds a channel and
- * touches nothing already in the grid.
- */
-export const DEFAULT_SITES_MAX_AGE_MS = 10 * 60 * 1000;
-
-/**
- * Where a health check is answered, when nothing says otherwise.
- *
- * `serve.health: false` switches it off, as `serve.path` does not — a guide has
- * to be somewhere, a health check does not have to exist.
- */
-export const DEFAULT_HEALTH_PATH = '/health';
-
-/** How many guides are generated at once, when nothing says. */
-const DEFAULT_CONCURRENCY = 2;
-
-/**
- * The shortest gap allowed *between* two scheduled grabs.
- *
- * A schedule is asked again only once a grab has finished, so a working one
- * paces itself and never reaches this. It is here for the one that does not — a
- * function that always answers with a time already past — which without a floor
- * would grab back to back for as long as the server ran.
- *
- * A second rather than a few milliseconds because a grab already costs tens of
- * them, and a floor under that throttles nothing. It is not charged to the
- * first call: a schedule asking to run at startup is asking for something it
- * cannot repeat, since there is no run behind it to loop with.
- */
-const MIN_GRAB_GAP_MS = 1000;
 
 /**
  * How long an idle connection is held open, and how long a request's headers
@@ -125,84 +55,20 @@ const MIN_GRAB_GAP_MS = 1000;
  */
 export const DEFAULT_KEEP_ALIVE_MS = 65_000;
 
-export interface ServeOptions {
+export interface ServeOptions extends GuideHandlerOptions {
   port?: number;
   /** Defaults to `127.0.0.1` — see {@link DEFAULT_SERVE_HOST}. */
   host?: string;
-  /** The one path that answers with a guide. Defaults to `/guide.xml`. */
-  path?: string;
-  /** Where the health check answers. Defaults to `/health`; `false` is off. */
-  health?: string | false;
-  /**
-   * How many guides may be generated at once. Defaults to 2.
-   *
-   * A slot is held for as long as the response takes, a slow consumer included,
-   * which is the point: a merge reads the whole cache, and a burst of polls
-   * that each started one would turn a cheap poll into the most expensive thing
-   * the machine does.
-   */
-  concurrency?: number;
-  /** See {@link DEFAULT_SITES_MAX_AGE_MS}. */
-  sitesMaxAgeMs?: number;
-  /** See {@link DEFAULT_REVALIDATE_MS}. */
-  revalidateMs?: number;
-  /**
-   * What to compress a served guide with, when the client accepts it.
-   *
-   * Defaults to `'gzip'`: every consumer understands it, and on a guide it is
-   * within a few seconds of what brotli costs at the quality this package would
-   * pick. `false` never compresses. Whatever is chosen is only used when the
-   * request's `Accept-Encoding` names it.
-   */
-  compress?: CompressionFormat | false;
   /** See {@link DEFAULT_KEEP_ALIVE_MS}. Raise it above whatever proxies this. */
   keepAliveMs?: number;
   /**
-   * Let a browser read the guide, by naming who may: `true` for any origin, or
-   * one origin to allow it alone. Off by default.
-   *
-   * Off, because loopback is not the boundary it looks like. A page in a
-   * browser on this machine can reach `127.0.0.1`, so `true` lets any site the
-   * viewer happens to open read which channels they watch — the same thing
-   * {@link DEFAULT_SERVE_HOST} declines to publish. It is a fair trade for a
-   * dashboard you wrote, and one to make on purpose.
-   *
-   * Turning it on does the whole job rather than the one header: `OPTIONS` is
-   * answered, `If-None-Match` and `If-Modified-Since` are allowed through, and
-   * `ETag` is exposed — without which a browser cannot read the validator and
-   * the conditional GET this server exists for does not happen.
+   * Listen with a server of your own — see {@link EpgServeConfig.server},
+   * which this overrides as every other option here does.
    */
-  cors?: boolean | string;
-  /** Stop serving. The returned promise resolves once the server has closed. */
-  signal?: AbortSignal;
-  /**
-   * Where a `'reload'` event means {@link GuideServer.reload}.
-   *
-   * The repeatable counterpart to {@link signal}, which fires once and is over:
-   * an `EventTarget` can say the same thing again next week, which is what a
-   * server that outlives its own start needs. The `epg` bin points `SIGHUP` at
-   * one.
-   *
-   * The listener calls `preventDefault()`, which is how a caller dispatching a
-   * cancelable event learns the reload was taken by someone.
-   */
-  reloadOn?: EventTarget;
-  reporter?: Reporter;
-  now?: Date;
-  /** Shift the window, as a run's `offset` does. */
-  offset?: number;
-  /**
-   * A cache to serve from, rather than the one the config describes.
-   *
-   * It stays the caller's, as it does for a run: nothing here closes what it
-   * did not open.
-   */
-  cache?: CacheStore;
-  /**
-   * Grab on a schedule as well as serving — see {@link EpgServeConfig.grab}.
-   * Overrides the config's, as every other option here does.
-   */
-  grab?: NextGrab;
+  server?: (
+    handler: GuideHandler,
+    where: { port: number; host: string },
+  ) => Server | Promise<Server>;
 }
 
 export interface GuideServer {
@@ -229,365 +95,17 @@ export interface GuideServer {
   closed: Promise<void>;
 }
 
-/** What the cache says the guide would be, without generating it. */
-interface Fingerprint {
-  etag: string;
-  /** The newest `grabbedAt` in the window, to the second. */
-  lastModified: Date;
-  /**
-   * How many of the window's channel-days the cache actually holds, against how
-   * many it would hold if every site had answered for every day.
-   *
-   * Counted here because the sweep has them in hand and nothing else does — and
-   * a share is the one thing a health check can say about a guide without
-   * generating it. See {@link ServeOptions.health}.
-   */
-  present: number;
-  expected: number;
-}
+/** Resolved once the server is listening, or rejected if it never will be. */
+async function listening(server: Server, start: (listen: () => void) => void): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const failed = (error: Error): void => reject(error);
 
-/**
- * The channel-days a guide is made of — the same grid the merge will read.
- *
- * Which is why the sites are resolved once and kept: `generateGuide` resolves
- * its own otherwise, and a site whose `channels` is a function would make a
- * request on every poll.
- */
-function keysFor(sites: AnySiteConfig[], days: string[]): ChannelDayKey[] {
-  const keys: ChannelDayKey[] = [];
-
-  for (const site of sites) {
-    for (const channel of site.channels as GrabberChannel[]) {
-      for (const day of days) {
-        keys.push({ site: site.site, channelId: channel.xmltvId, day });
-      }
-    }
-  }
-
-  return keys;
-}
-
-/**
- * How many channel-days go in one question to the cache, and how many of those
- * questions are asked at once.
- *
- * A batch is one piece of work by the store's own contract, and the *caller* is
- * what decides how many to have in flight — precisely so a store cannot
- * multiply somebody else's bound into a descriptor storm. This is that
- * decision, made here because this is the caller holding thousands of keys: a
- * grab asks about one channel's window at a time, a dozen keys, and has nothing
- * to gain from it.
- *
- * Measured over 3,500 channel-days, five rounds, median: **384ms** as a single
- * question against **228ms** at 64 × 8. The floor is per-file syscall cost
- * rather than the thread pool — `UV_THREADPOOL_SIZE=16` barely moves it — which
- * is why the win here is modest and why the real answer for a served guide is
- * the sqlite driver, where the same sweep is one query and **32ms**.
- */
-const SWEEP_KEYS_PER_ASK = 64;
-
-const SWEEP_ASKS_IN_FLIGHT = 8;
-
-/** Every key's metadata, asked for in bounded batches. */
-async function metasOf(
-  cache: CacheStore,
-  keys: ChannelDayKey[],
-): Promise<Array<CacheEntryMeta | undefined>> {
-  if (keys.length <= SWEEP_KEYS_PER_ASK) {
-    return cache.getMetas(keys);
-  }
-
-  const asks: ChannelDayKey[][] = [];
-
-  for (let at = 0; at < keys.length; at += SWEEP_KEYS_PER_ASK) {
-    asks.push(keys.slice(at, at + SWEEP_KEYS_PER_ASK));
-  }
-
-  const found: Array<Array<CacheEntryMeta | undefined>> = Array.from({ length: asks.length });
-  let next = 0;
-
-  // Workers over a shared cursor rather than one promise per batch: what is
-  // bounded is how many are in flight, not how many there are. Each writes to
-  // its own slot, so the answers come back in the order they were asked.
-  await Promise.all(
-    Array.from({ length: Math.min(SWEEP_ASKS_IN_FLIGHT, asks.length) }, async () => {
-      for (let mine = next++; mine < asks.length; mine = next++) {
-        found[mine] = await cache.getMetas(asks[mine]!);
-      }
-    }),
-  );
-
-  return found.flat();
-}
-
-/**
- * A value as a string that is the same every run for the same value.
- *
- * `JSON.stringify` will not do: object key order is insertion order, so two
- * structurally identical configs can serialize differently, and a function
- * stringifies to nothing at all — which would silently drop a category mapper
- * out of the fingerprint below.
- *
- * A function becomes its source, which is stable for a given build and changes
- * exactly when the behaviour does. Array order is kept, because for
- * `episodeNum.systems` the order *is* the meaning.
- */
-function canonical(value: unknown): string {
-  if (typeof value === 'function') {
-    return `fn(${value.toString()})`;
-  }
-
-  if (Array.isArray(value)) {
-    return `[${value.map(canonical).join(',')}]`;
-  }
-
-  if (typeof value === 'object' && value !== null) {
-    return `{${Object.keys(value)
-      .sort()
-      .map((key) => `${key}:${canonical((value as Record<string, unknown>)[key])}`)
-      .join(',')}}`;
-  }
-
-  return String(value);
-}
-
-/**
- * What the served document's *shape* amounts to, for the validators.
- *
- * Without this a profile is invisible to a polling consumer: the fingerprint
- * below counts cache entries and their ages, so switching profile and
- * restarting leaves the etag byte-identical and every client is told 304
- * forever. Latent for `indent` and `extensions` already; fatal for a knob whose
- * whole purpose is to be changed and observed.
- *
- * Computed once, where the options are resolved — never per request.
- */
-export function outputFingerprint(options: GuideOutputOptions): string {
-  // A list of extension names is a set, so its order is not part of the answer
-  // — unlike everything else here.
-  const extensions = Array.isArray(options.extensions)
-    ? [...options.extensions].sort()
-    : options.extensions;
-
-  return createHash('sha1')
-    .update(canonical({ indent: options.indent, extensions, profile: options.profile }))
-    .digest('base64url')
-    .slice(0, 10);
-}
-
-/**
- * Ends one entry's contribution to the content digest below, so the digest is a
- * run of terminated fields and an empty one means "nothing cached here".
- *
- * A character that cannot occur in either field it follows: `grabbedAt` is an
- * ISO timestamp and `programmeCount` a number, so no entry can run into the
- * next and two different windows cannot digest alike.
- */
-const END_OF_ENTRY = '|';
-
-/**
- * Read the window's metadata and say what it amounts to.
- *
- * Metadata only — no payloads, no parsing, no serializing. How much that saves
- * depends on the driver, and by more than one might guess: see
- * {@link SWEEP_KEYS_PER_ASK}.
- */
-async function fingerprintOf(
-  cache: CacheStore,
-  keys: ChannelDayKey[],
-  window: string,
-  shape: string,
-): Promise<Fingerprint> {
-  const metas = await metasOf(cache, keys);
-  /**
-   * Every entry's own state, rather than the newest of them.
-   *
-   * The newest alone is not a validator. A grab stamps one `grabbedAt`, taken
-   * once at the start, onto every entry it writes — so the maximum reaches its
-   * final, post-grab value the moment the **first** entry lands, while the rest
-   * of the window is still last night's. A poll in that gap would be handed a
-   * half-updated guide wearing the finished grab's tag, and every poll after it
-   * answered 304 against that tag until the next grab moved it: not a moment's
-   * skew, a consumer pinned to half a guide for a day.
-   *
-   * Digesting each entry instead means the tag settles only when the content
-   * does. The sweep already visits all of them, so this costs a hash and no
-   * extra reads.
-   */
-  const content = createHash('sha1');
-  let newest = 0;
-  let present = 0;
-
-  for (const meta of metas) {
-    if (meta === undefined) {
-      // An empty field, so the gap keeps its place — which is what carries how
-      // many entries there are and which ones they were. One appearing as
-      // another disappears leaves the count unmoved and only the order differs.
-      content.update(END_OF_ENTRY);
-      continue;
-    }
-
-    content.update(`${meta.grabbedAt}:${meta.programmeCount}${END_OF_ENTRY}`);
-    present++;
-
-    const at = Date.parse(meta.grabbedAt);
-
-    if (Number.isFinite(at) && at > newest) {
-      newest = at;
-    }
-  }
-
-  // Truncated to the second, because `Last-Modified` has no more than that and
-  // the two must agree: a validator finer than the header it travels in would
-  // make every conditional request a miss.
-  //
-  // Still the newest, because a date is what this header is. It is the weaker
-  // of the two validators for exactly the reason above — a client sending only
-  // `If-Modified-Since` can still be told 304 mid-grab — and HTTP prefers the
-  // etag whenever both are present, which is whenever this server answered.
-  const lastModified = new Date(Math.floor(newest / 1000) * 1000);
-
-  // Weak, because two responses that mean the same guide are not required to be
-  // byte-identical — a different `Accept-Encoding` alone changes the bytes.
-  return {
-    etag: `W/"${content.digest('base64url').slice(0, 16)}-${window}-${shape}"`,
-    lastModified,
-    present,
-    expected: metas.length,
-  };
-}
-
-/**
- * What a browser needs to be allowed to read the guide, or nothing at all.
- *
- * `Vary: Origin` goes with a named origin because the answer then depends on
- * who asked, and a cache in between must not hand one origin's response to
- * another. `*` is the same for everybody, so it does not.
- */
-function corsHeaders(cors: boolean | string): Record<string, string> {
-  if (cors === false) {
-    return {};
-  }
-
-  const origin = cors === true ? '*' : cors;
-
-  return {
-    'access-control-allow-origin': origin,
-    // Without this a browser hides the validator from the page, and a
-    // conditional GET — the entire point of this server — cannot be made.
-    'access-control-expose-headers': 'ETag, Last-Modified',
-    ...(origin === '*' ? {} : { vary: 'Accept-Encoding, Origin' }),
-  };
-}
-
-/**
- * The headers a base read off the request is built from.
- *
- * `Forwarded` and the `X-Forwarded-*` pair because something in front may be
- * terminating TLS or answering on another name, and `Host` because that is what
- * the request says when nothing is. Any of them changing changes the document,
- * which is what `Vary` is for.
- */
-const FORWARDED = ['Host', 'X-Forwarded-Host', 'X-Forwarded-Proto', 'Forwarded'] as const;
-
-/** One header, where it is a single value. */
-const header = (request: IncomingMessage, name: string): string | undefined => {
-  const value = request.headers[name];
-
-  return Array.isArray(value) ? value[0] : value;
-};
-
-/**
- * Where this request reached us, as a url to resolve the guide's own against.
- *
- * What a proxy says first, then the `Host` the request carries. `https` only
- * when something says so: a server on loopback behind a proxy sees plain HTTP,
- * and guessing the scheme would write urls nobody can fetch.
- */
-function requestBase(request: IncomingMessage): string | undefined {
-  const host = header(request, 'x-forwarded-host') ?? header(request, 'host');
-
-  if (host === undefined || host === '') {
-    // HTTP/1.0 without a `Host`, which is allowed and leaves nothing to build
-    // from. The configured base stands, as it does when there is none.
-    return undefined;
-  }
-
-  // What a proxy says it terminated, then what this very connection is: a
-  // handler mounted on an HTTPS server of somebody's own has an encrypted
-  // socket and no forwarded header at all. `http` only when neither says
-  // otherwise, since guessing `https` writes urls nobody can fetch.
-  const proto =
-    header(request, 'x-forwarded-proto')?.split(',')[0]?.trim() ??
-    ((request.socket as TLSSocket).encrypted === true ? 'https' : 'http');
-
-  return `${proto}://${host}/`;
-}
-
-/** An etag of the same guide written for somewhere else — see `serve.baseUrl`. */
-function taggedWith(etag: string, base: string): string {
-  const digest = createHash('sha256').update(base).digest('base64url').slice(0, 8);
-
-  // Inside the quotes, so it stays one opaque validator: a client compares the
-  // whole string and never reads this.
-  return etag.replace(/"$/, `-${digest}"`);
-}
-
-/** Whether the client already has this, by either validator. */
-function unchanged(request: IncomingMessage, print: Fingerprint): boolean {
-  const noneMatch = request.headers['if-none-match'];
-
-  if (noneMatch !== undefined) {
-    // Whatever else it holds, the client is entitled to send back several, and
-    // `*` means "anything you have". Weak comparison is the only one defined
-    // for a conditional GET, so both sides lose their `W/` before matching.
-    const weak = (tag: string): string => tag.trim().replace(/^W\//, '');
-    const mine = weak(print.etag);
-
-    return noneMatch.split(',').some((tag) => tag.trim() === '*' || weak(tag) === mine);
-  }
-
-  const since = request.headers['if-modified-since'];
-
-  if (since !== undefined) {
-    const asked = Date.parse(since);
-
-    // Not `>=` by accident: the header means "if it changed after this", and
-    // both sides are already whole seconds.
-    return Number.isFinite(asked) && print.lastModified.getTime() <= asked;
-  }
-
-  return false;
-}
-
-/** The format to answer in, if the client accepts one we would use. */
-function encodingFor(
-  request: IncomingMessage,
-  compress: CompressionFormat | false,
-): CompressionFormat | undefined {
-  if (compress === false) {
-    return undefined;
-  }
-
-  // `gzip;q=0` is a refusal, not an offer — the token alone would read it as
-  // the opposite of what it says.
-  const accepted = new Set(
-    String(request.headers['accept-encoding'] ?? '')
-      .split(',')
-      .map((part) => {
-        const [token, ...params] = part.split(';');
-        const q = params.map((p) => /^\s*q=([\d.]+)\s*$/i.exec(p)).find((match) => match !== null);
-
-        return q !== undefined && Number.parseFloat(q[1]!) === 0
-          ? undefined
-          : token!.trim().toLowerCase();
-      })
-      .filter((name) => name !== undefined && name !== ''),
-  );
-
-  const name = compress === 'brotli' ? 'br' : compress === 'zstd' ? 'zstd' : 'gzip';
-
-  return accepted.has(name) || accepted.has('*') ? compress : undefined;
+    server.once('error', failed);
+    start(() => {
+      server.removeListener('error', failed);
+      resolve();
+    });
+  });
 }
 
 /**
@@ -601,627 +119,34 @@ export async function serveGuide(
   source: ConfigSource,
   options: ServeOptions = {},
 ): Promise<GuideServer> {
-  const config = await resolveConfigSource(source);
   const emit = emitter(options);
-  const path = options.path ?? config.serve?.path ?? DEFAULT_SERVE_PATH;
-  const health = options.health ?? config.serve?.health ?? DEFAULT_HEALTH_PATH;
-  const compress = options.compress ?? config.serve?.compress ?? 'gzip';
-  const revalidateMs = options.revalidateMs ?? DEFAULT_REVALIDATE_MS;
-  const cors = options.cors ?? config.serve?.cors ?? false;
-  const sitesMaxAgeMs = options.sitesMaxAgeMs ?? DEFAULT_SITES_MAX_AGE_MS;
-  const schedule = options.grab ?? config.serve?.grab;
-  const declaredBase = config.serve?.baseUrl;
-
   /**
-   * Where this request's guide says its urls are, or nothing for the config's
-   * own — see `baseUrl` on the serve config.
+   * What the work in flight is stopped by, which is not the caller's signal.
    *
-   * A function may decline by answering `undefined`, which is what makes "the
-   * host that asked, except for this one caller" a line rather than a branch.
+   * The handler closes itself for a signal that has already fired, and a
+   * `serveGuide` called off before it began must still bind, say it started
+   * and say it stopped — in that order, rather than reporting the end of
+   * something that never had a beginning. So the caller's signal is wired up
+   * below, after `listen`, and this one carries the cancelling.
    */
-  const baseFor = (request: IncomingMessage): string | URL | undefined => {
-    if (declaredBase === undefined) {
-      return undefined;
-    }
+  const work = new AbortController();
+  let server: Server | undefined;
 
-    if (declaredBase === true) {
-      return requestBase(request);
-    }
+  const handler = await createGuideHandler(source, {
+    ...options,
+    signal: work.signal,
+    shutdown: async () => {
+      // Whatever is still resolving or being read, before the cache it reads
+      // is taken away.
+      work.abort();
+      await options.shutdown?.();
 
-    return typeof declaredBase === 'function' ? declaredBase(request) : declaredBase;
-  };
-
-  /**
-   * What the answer depends on besides the encoding.
-   *
-   * Only where the base is read off the request: a fixed one is the same
-   * document for everybody, and naming headers that change nothing would cost a
-   * shared cache its hit rate for no reason.
-   */
-  const varyOn = [
-    'Accept-Encoding',
-    ...(declaredBase === true || typeof declaredBase === 'function' ? FORWARDED : []),
-  ].join(', ');
-
-  const opened = options.cache === undefined;
-  const cache = options.cache ?? (await createCacheStore(config, options.signal));
-
-  /** Where a `derived` function says things, which is where a merge's do. */
-  const mergeSays: Says = {
-    log: (message, data) => emit({ type: 'merge:note', message, ...(data ? { data } : {}) }),
-    warn: (message, data) => emit({ type: 'merge:warning', message, ...(data ? { data } : {}) }),
-  };
-
-  /**
-   * What the served document's shape amounts to, in the validators.
-   *
-   * Once, here — a config cannot change under a running server, and this is
-   * the only thing the fingerprint cannot read off the cache.
-   */
-  const shape = outputFingerprint(outputOptions(config));
-
-  /**
-   * What the cache amounted to when it was last looked at, and the channel
-   * lists that grid was built from.
-   *
-   * The two travel together on purpose. They were once separate, and the bug
-   * that produced is worth remembering: invalidating the sites on a changed
-   * fingerprint left the very request that noticed the change serving a guide
-   * with no channels in it — an empty document, exactly once, immediately after
-   * every grab, which is the moment a consumer is most likely to be asking.
-   */
-  interface Snapshot {
-    print: Fingerprint;
-    sites: AnySiteConfig[];
-    /**
-     * What `derived` declared about *these* lists.
-     *
-     * Resolved with the sites rather than per request, for the two reasons the
-     * sites are: a function asked twice may answer twice, and a server answers
-     * a poll every few seconds. So a declaration follows a lineup that changes
-     * — which is the whole point of the function form — at the pace the lists
-     * themselves are re-read.
-     */
-    derived: DerivedChannel[] | undefined;
-    /**
-     * What `meta` said about them, for the same reason and at the same pace.
-     *
-     * Not in the etag. A tag follows the cache, and a `meta` that answers
-     * differently without the grid having moved — a timestamp of its own
-     * making — is a document this server cannot tell has changed. The two
-     * things it is for, counting the channels and naming their source, both
-     * move when the lists do, and the lists are in the fingerprint.
-     */
-    meta: XmltvDocumentMeta | undefined;
-  }
-
-  let snapshot: Snapshot | undefined;
-  let checkedAt = 0;
-  let resolvedAt = 0;
-  let inFlight: Promise<Snapshot> | undefined;
-
-  const windowOf = (now: Date): { days: string[]; startDay: string; id: string } => {
-    const today = toDayString(now);
-    const startDay = options.offset ? addDays(today, options.offset) : today;
-    const days = [...dayRange(startDay, config.days ?? 7)];
-
-    return { days, startDay, id: `${startDay}+${days.length}` };
-  };
-
-  /** One reading of the cache: the sites it is keyed by, and what it amounts to. */
-  const take = async (now: Date, known?: AnySiteConfig[]): Promise<Snapshot> => {
-    const window = windowOf(now);
-    const resolved =
-      known ??
-      (await resolveSites(config.sites, {
-        emit,
-        ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
-        ...(options.signal ? { signal: options.signal } : {}),
-        store: cache,
-        now,
-      }));
-
-    // After the lists, because a `derived` function is a function of them — and
-    // the selection after that, since a shift declared here is what decides
-    // whether a source nobody asked for has to be kept.
-    const guideContext: GuideContext = {
-      channels: resolved.flatMap((site) => site.channels as GrabberChannel[]),
-      now,
-      ...mergeSays,
-    };
-    const derived = await configured(config.derived, guideContext);
-    const meta = await configured(config.meta, guideContext);
-    const selection = channelSelection({
-      ...(config.channels ? { channels: config.channels } : {}),
-      ...(derived ? { derived } : {}),
-    });
-    const sites =
-      selection === undefined
-        ? resolved
-        : resolved.map((site) => ({
-            ...site,
-            channels: (site.channels as GrabberChannel[]).filter((channel) =>
-              selection.select.has(channel.xmltvId),
-            ),
-          }));
-
-    return {
-      print: await fingerprintOf(cache, keysFor(sites, window.days), window.id, shape),
-      sites,
-      derived: selection?.derived ?? derived,
-      meta,
-    };
-  };
-
-  /**
-   * What the cache amounts to now — read at most once per `revalidateMs`, and
-   * by one caller at a time.
-   *
-   * The `inFlight` promise is the part that matters under load: without it, ten
-   * polls arriving together would each sweep the same thousands of keys, which
-   * is the storm this whole design exists to avoid.
-   */
-  const current = async (now: Date): Promise<Snapshot> => {
-    if (snapshot !== undefined && Date.now() - checkedAt < revalidateMs) {
-      return snapshot;
-    }
-
-    inFlight ??= (async () => {
-      // Over the grid already in hand: a channel list mostly changes when a
-      // grab has been, and a grab is what the fingerprint detects.
-      //
-      // Mostly, not always — which is the second condition. A grab that adds a
-      // channel and refreshes nothing else touches no key the held grid names,
-      // so the fingerprint over that grid is identical and the new channel
-      // would stay invisible until the day window rolled at midnight. Ageing
-      // the grid out puts a ceiling on that, without letting a poll drive a
-      // request the way resolving on every revalidation would.
-      const held = snapshot;
-      const stale = held === undefined || Date.now() - resolvedAt >= sitesMaxAgeMs;
-      const next = stale ? await take(now) : await take(now, held.sites);
-
-      // And if a grab has been, the list may have changed with it — so the
-      // sites are resolved again *now*, and the fingerprint taken over what
-      // results, rather than leaving this request with a grid that is out of
-      // date.
-      const fresh =
-        !stale && held !== undefined && next.print.etag !== held.print.etag
-          ? await take(now)
-          : next;
-
-      snapshot = fresh;
-      checkedAt = Date.now();
-
-      if (fresh !== next || stale) {
-        resolvedAt = checkedAt;
-      }
-
-      return fresh;
-    })().finally(() => {
-      inFlight = undefined;
-    });
-
-    return inFlight;
-  };
-
-  /** Taken rather than ignored, which is what tells the bin not to fall back. */
-  const onReload = (event: Event): void => {
-    event.preventDefault();
-    reload();
-  };
-
-  /** See {@link GuideServer.reload}. */
-  const reload = (): void => {
-    // Both clocks, and nothing else. What is held stays the answer until the
-    // next poll asks for one, and if resolving then finds the same channels the
-    // fingerprint is the same and a poller still gets its 304 — a reload asks a
-    // question rather than asserting that anything changed. Dropping the
-    // snapshot instead would turn every stray signal into a full re-send.
-    resolvedAt = 0;
-    checkedAt = 0;
-  };
-
-  const guides = new PQueue({
-    concurrency: Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY),
-  });
-
-  const guideOptions = (
-    now: Date,
-    sites: AnySiteConfig[],
-    /**
-     * What the snapshot resolved `derived` to — a list, however the config
-     * spelled it, so a function is asked once per snapshot rather than once per
-     * request. A poll every few seconds is not a reason to ask again what the
-     * lineup should be shifted into.
-     */
-    derived: DerivedChannel[] | undefined,
-    /** Likewise what `meta` answered for them — see {@link Snapshot.meta}. */
-    meta: XmltvDocumentMeta | undefined,
-  ): BuildGuideOptions => {
-    const window = windowOf(now);
-
-    return {
-      sites,
-      cache,
-      startDay: window.startDay,
-      now,
-      ...(config.days !== undefined ? { days: config.days } : {}),
-      ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
-      ...(config.localConcurrency !== undefined ? { readAhead: config.localConcurrency } : {}),
-      ...(config.merge ? { merge: config.merge } : {}),
-      ...(derived ? { derived } : {}),
-      ...(config.channels ? { channels: config.channels } : {}),
-      ...(meta ? { meta } : {}),
-      ...outputOptions(config),
-    };
-  };
-
-  const server = createServer((request, response) => {
-    void answer(request, response);
-  });
-
-  // See DEFAULT_KEEP_ALIVE_MS: above whatever is in front of this, so the proxy
-  // is always the one that decides a pooled connection is finished.
-  server.keepAliveTimeout = Math.max(0, options.keepAliveMs ?? DEFAULT_KEEP_ALIVE_MS);
-  server.headersTimeout = server.keepAliveTimeout + 1000;
-
-  async function answer(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const began = Date.now();
-    const url = request.url ?? '/';
-    const [requestPath] = url.split('?') as [string];
-    /**
-     * What stops the guide when the consumer goes away, kept in scope so the
-     * `catch` can tell that apart from a fault.
-     *
-     * Asked of the signal rather than of the error, because the error is
-     * whichever of several won a race: the pipeline's own `AbortError` usually,
-     * but a write to a socket the client already destroyed can arrive first as
-     * an `EPIPE` or a premature close. The signal is the one thing that says it
-     * was *our* abort.
-     */
-    let gone: AbortController | undefined;
-
-    const done = (status: number): void => {
-      emit({
-        type: 'serve:response',
-        method: request.method ?? 'GET',
-        path: requestPath,
-        status,
-        ms: Date.now() - began,
-      });
-    };
-
-    const allowed = corsHeaders(cors);
-
-    try {
-      // A browser asks before it fetches, whenever the fetch carries a header
-      // that is not on the safelist — `If-None-Match` is not, so every
-      // conditional GET from a page begins here.
-      if (cors !== false && request.method === 'OPTIONS') {
-        response
-          .writeHead(204, {
-            ...allowed,
-            'access-control-allow-methods': 'GET, HEAD, OPTIONS',
-            'access-control-allow-headers': 'If-None-Match, If-Modified-Since',
-            'access-control-max-age': '86400',
-          })
-          .end();
-
-        return done(204);
-      }
-
-      if (request.method !== 'GET' && request.method !== 'HEAD') {
-        response
-          .writeHead(405, { allow: cors === false ? 'GET, HEAD' : 'GET, HEAD, OPTIONS' })
-          .end();
-
-        return done(405);
-      }
-
-      // The guide first, so an operator who pointed `serve.path` at `/health`
-      // gets the guide there — the path they named explicitly beats the one
-      // that defaulted.
-      if (requestPath !== path && requestPath === health) {
-        // `current` rather than a stored snapshot: a server whose only traffic
-        // is its own health check would otherwise never take one and would
-        // report unhealthy for as long as it ran. It is throttled and
-        // single-flighted, and reads metadata only.
-        // One reading of the clock, not two: the window and the sweep that
-        // counts it must be the same window, and two `new Date()` either side
-        // of midnight would not be.
-        const now = options.now ?? new Date();
-        const { print } = await current(now);
-        const window = windowOf(now);
-        // The one unambiguous "cannot do its job": nothing at all is cached, so
-        // there is no guide to serve. How stale is too stale is the operator's
-        // judgement and not this server's, so age is reported and not ruled on.
-        const ok = print.present > 0;
-        const body = `${JSON.stringify(
-          {
-            ok,
-            // Not 1970: with nothing cached the newest `grabbedAt` is zero, and
-            // a date is a worse answer than saying there is none.
-            grabbedAt: ok ? print.lastModified.toISOString() : null,
-            ageSeconds: ok
-              ? Math.max(0, Math.round((now.getTime() - print.lastModified.getTime()) / 1000))
-              : null,
-            window: { startDay: window.startDay, days: window.days.length },
-            // Coverage, not a bare count — the share of the grid that answered
-            // is the thing worth alerting on, and the sweep has both numbers.
-            counts: { present: print.present, expected: print.expected },
-            // No site or channel names, which is the same line
-            // `DEFAULT_SERVE_HOST` draws. Aggregates only.
-            shape,
-          },
-          undefined,
-          2,
-        )}\n`;
-
-        const headers = {
-          'content-type': 'application/json; charset=utf-8',
-          // No etag and no compression: the body changes every second by
-          // construction, so a validator would never match and a few hundred
-          // bytes are not worth a compressor.
-          'cache-control': 'no-store',
-          'content-length': String(Buffer.byteLength(body)),
-          ...allowed,
-        };
-
-        // HEAD reaches here too, the method gate being above the routing — and
-        // a body on one is a protocol error, not a waste.
-        response
-          .writeHead(ok ? 200 : 503, headers)
-          .end(request.method === 'HEAD' ? undefined : body);
-
-        return done(ok ? 200 : 503);
-      }
-
-      if (requestPath !== path) {
-        response.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('Not found\n');
-
-        return done(404);
-      }
-
-      const now = options.now ?? new Date();
-      const { print: snapshot, sites, derived, meta } = await current(now);
-      // Where this document says its urls are, which may be read off this very
-      // request — see `baseUrl` on the serve config.
-      const base = baseFor(request);
-      const fingerprint =
-        base === undefined
-          ? snapshot
-          : // In the etag, because it is in the document: two hosts are served
-            // two guides, and a consumer polling with the other one's validator
-            // has to be told it changed.
-            { ...snapshot, etag: taggedWith(snapshot.etag, String(base)) };
-
-      /** What is true of the guide whether or not a body goes with it. */
-      const validators: Record<string, string> = {
-        etag: fingerprint.etag,
-        'last-modified': fingerprint.lastModified.toUTCString(),
-        // "Use it, but ask first" — which is exactly what a poller should do,
-        // and what makes the 304 below possible at all.
-        'cache-control': 'no-cache',
-        // With whatever a per-request base was read from: a cache in between
-        // must not hand one host the document written for another.
-        vary: varyOn,
-        // In the validators rather than beside them, so a 304 carries it too:
-        // a browser refused the headers on a revalidation would treat every
-        // conditional poll as a failure.
-        ...allowed,
-      };
-
-      if (unchanged(request, fingerprint)) {
-        // The validators and nothing else: a 304 sends no body, so a
-        // `content-type` on it would be describing something that is not there.
-        response.writeHead(304, validators).end();
-
-        return done(304);
-      }
-
-      const encoding = encodingFor(request, compress);
-      const headers: Record<string, string> = {
-        ...validators,
-        'content-type': 'application/xml; charset=utf-8',
-        ...(encoding === undefined
-          ? {}
-          : { 'content-encoding': encoding === 'brotli' ? 'br' : encoding }),
-      };
-
-      if (request.method === 'HEAD') {
-        response.writeHead(200, headers).end();
-
-        return done(200);
-      }
-
-      // A slot for the whole response, so a burst of polls cannot each start a
-      // merge — and taken only now, after the cheap answers have been given.
-      await guides.add(async () => {
-        // The client going away is what stops the merge: a generator abandoned
-        // half way is a merge that carries on reading the cache for a guide
-        // nobody is left to receive.
-        const stops = new AbortController();
-
-        gone = stops;
-
-        response.on('close', () => {
-          if (!response.writableEnded) {
-            stops.abort(new Error('the client closed the connection'));
-          }
-        });
-
-        response.writeHead(200, headers);
-
-        const guide = generateGuide({
-          ...guideOptions(now, sites, derived, meta),
-          ...(base === undefined ? {} : { baseUrl: base }),
-          signal: stops.signal,
-        });
-        const chain =
-          encoding === undefined
-            ? ([Readable.from(guide), response] as const)
-            : ([Readable.from(guide), compressor(encoding), response] as const);
-
-        await pipeline(chain, { signal: stops.signal });
-      });
-
-      done(200);
-    } catch (error) {
-      if (gone?.signal.aborted === true) {
-        // Normal, and not ours to answer for: a reader that had seen enough, a
-        // proxy that timed out, a tab that closed. Calling it a failure — and
-        // returning the 500 below — is how a log fills with alarms about the
-        // ordinary, and how somebody ends up paged for a browser refresh.
-        emit({ type: 'serve:disconnected', path: requestPath, ms: Date.now() - began });
-        response.destroy();
-
+      if (server === undefined) {
         return;
       }
-
-      emit({ type: 'serve:failed', path: requestPath, error });
-
-      if (!response.headersSent) {
-        response.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' }).end('Failed\n');
-      } else {
-        // Part of a guide has already gone out, and there is no way to unsay
-        // it: destroying the socket is what tells a consumer the document it
-        // received is not whole, which a clean end would not.
-        response.destroy();
-      }
-
-      done(500);
-    }
-  }
-
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(
-      options.port ?? config.serve?.port ?? DEFAULT_SERVE_PORT,
-      options.host ?? config.serve?.host ?? DEFAULT_SERVE_HOST,
-      () => {
-        server.removeListener('error', reject);
-        resolve();
-      },
-    );
-  });
-
-  const address = server.address() as AddressInfo;
-  // Any literal IPv6, not just the wildcard: `::1` unbracketed makes an
-  // address no client can parse.
-  const host = address.address.includes(':') ? `[${address.address}]` : address.address;
-  const url = `http://${host}:${address.port}${path}`;
-
-  /**
-   * The scheduled grab, if there is one.
-   *
-   * All of it created **after** `listen` resolved. A timer started before it
-   * would outlive a `listen` that rejects, since that rejection leaves
-   * `serveGuide` without anyone ever calling `close`.
-   */
-  let timer: NodeJS.Timeout | undefined;
-  /** Aborts a grab in flight, so stopping does not wait for one to finish. */
-  let grabbing: AbortController | undefined;
-  /** The grab now running, so `close` can let it unwind before the cache shuts. */
-  let running: Promise<void> | undefined;
-  let runs = 0;
-  let stopped = false;
-
-  /**
-   * Run one, then ask when the next should be.
-   *
-   * Wrapped whole, because `runGrab` can reject for reasons a grab's own counts
-   * never cover — a config factory that could not get a token, a cache that
-   * would not open, a prune that failed — and an unhandled rejection out of a
-   * timer ends the process. A server that cannot grab tonight should still be
-   * serving what it already has.
-   */
-  const grabNow = async (): Promise<void> => {
-    // Before the import, not after it: `close` aborts whatever `grabbing`
-    // holds, and on the first run that import is a real module load. A
-    // controller published only afterwards leaves a window in which stopping
-    // the server aborts nothing and then waits out the whole grab.
-    const stops = new AbortController();
-
-    grabbing = stops;
-
-    const { runGrab } = await import('../build.js');
-
-    try {
-      // `close` may have happened while that import was resolving, and an
-      // aborted signal is not enough on its own: `runGrab` opens the cache and
-      // resolves the config before it looks at one.
-      if (stopped) {
-        return;
-      }
-
-      await runGrab(config, {
-        // This server's own store rather than one of its own: `RunOptions.cache`
-        // is the caller's and is left open. A second store would be wasteful for
-        // a file cache and silently useless for `memory`, where the grab would
-        // fill a different cache than the one being served.
-        cache,
-        ...(options.reporter ? { reporter: options.reporter } : {}),
-        ...(options.offset === undefined ? {} : { offset: options.offset }),
-        signal: stops.signal,
-      });
-    } catch (error) {
-      emit({ type: 'serve:grabFailed', error });
-    } finally {
-      grabbing = undefined;
-      runs++;
-      // The held snapshot predates everything this wrote, so the next poll has
-      // to sweep rather than trust it.
-      checkedAt = 0;
-    }
-  };
-
-  /**
-   * Ask the schedule when to run, and set the timer it asks for.
-   *
-   * Only ever called once nothing is running — at startup, and from the
-   * `finally` of the grab before — so two can never overlap and there is no
-   * overlap to detect. A grab that overruns its own interval simply pushes the
-   * next question later, and the schedule answers from the finish time.
-   */
-  const planNext = (from: Date): void => {
-    if (schedule === undefined || stopped) {
-      return;
-    }
-
-    const next = schedule(from, runs);
-
-    if (next === undefined) {
-      return;
-    }
-
-    const at = typeof next === 'number' ? next : next.getTime();
-    const delay = Math.max(runs === 0 ? 0 : MIN_GRAB_GAP_MS, at - from.getTime());
-
-    // Not `unref`'d: a server whose only remaining work is the next grab is
-    // still a server that should be running.
-    timer = setTimeout(() => {
-      running = grabNow().finally(() => {
-        running = undefined;
-        planNext(new Date());
-      });
-    }, delay);
-  };
-
-  planNext(options.now ?? new Date());
-
-  let closing: Promise<void> | undefined;
-
-  const close = async (): Promise<void> => {
-    closing ??= (async () => {
-      // Before anything else: `planNext` schedules from a grab's `finally`, so
-      // a stop that did not say so first would have the run in flight plan
-      // another on its way out.
-      stopped = true;
-      clearTimeout(timer);
-      grabbing?.abort();
 
       const shut = new Promise<void>((resolve) => {
-        server.close(() => resolve());
+        server?.close(() => resolve());
       });
 
       // Every open connection, not just the idle ones: a consumer part way
@@ -1234,34 +159,72 @@ export async function serveGuide(
       server.closeAllConnections();
 
       await shut;
-      // Aborted above, awaited here: a grab still unwinding would otherwise be
-      // reading a store that `cache.close()` is about to take away.
-      await running;
-      guides.clear();
-      // A target is the caller's and may outlive this server — one left
-      // listening would hold the whole closure, cache and all.
-      options.reloadOn?.removeEventListener('reload', onReload);
+    },
+  });
 
-      if (opened) {
-        await cache.close();
-      }
-
-      emit({ type: 'serve:stopped' });
-    })();
-
-    return closing;
+  const where = {
+    port: options.port ?? handler.config.serve?.port ?? DEFAULT_SERVE_PORT,
+    host: options.host ?? handler.config.serve?.host ?? DEFAULT_SERVE_HOST,
   };
+  const own = options.server ?? handler.config.serve?.server;
+
+  try {
+    if (own === undefined) {
+      server = createServer(handler.node());
+
+      // See DEFAULT_KEEP_ALIVE_MS: above whatever is in front of this, so the
+      // proxy is always the one that decides a pooled connection is finished.
+      // Only on a server this made — somebody else's timeouts are theirs.
+      server.keepAliveTimeout = Math.max(0, options.keepAliveMs ?? DEFAULT_KEEP_ALIVE_MS);
+      server.headersTimeout = server.keepAliveTimeout + 1000;
+
+      await listening(server, (listen) => {
+        server?.listen(where.port, where.host, listen);
+      });
+    } else {
+      // Already listening, usually: `app.listen()` returns before the socket is
+      // bound, and `fastify.listen()` after. Waiting on both is one line and
+      // saves a url reported before there is a port to report.
+      server = await own(handler, where);
+
+      await listening(server, (listen) => {
+        if (server?.listening === true) {
+          listen();
+        } else {
+          server?.once('listening', listen);
+        }
+      });
+    }
+  } catch (error) {
+    // A port already taken, usually. The handler is holding a cache and may
+    // have a grab scheduled, and nobody downstream has anything to close it
+    // with — this call is the last place that can.
+    await handler.close();
+
+    throw error;
+  }
+
+  const address = server.address();
+  // A unix socket, or a server of someone's own that is bound to something
+  // else again: there is no authority to build a url from, so what the command
+  // was told to listen on is the best this can say.
+  const bound =
+    typeof address === 'object' && address !== null
+      ? address
+      : ({ address: where.host, port: where.port } as AddressInfo);
+  // Any literal IPv6, not just the wildcard: `::1` unbracketed makes an
+  // address no client can parse.
+  const host = bound.address.includes(':') ? `[${bound.address}]` : bound.address;
+  const url = `http://${host}:${bound.port}${handler.guidePath}`;
 
   // Listened for before anything can close, or a server stopped during its own
   // startup would leave this promise waiting on an event that has already been
   // and gone.
   const closed = new Promise<void>((resolve) => {
-    server.once('close', () => resolve());
+    server?.once('close', () => resolve());
   });
 
   emit({ type: 'serve:started', url });
-
-  options.reloadOn?.addEventListener('reload', onReload);
 
   // One or the other, because a listener answers only a signal that fires
   // *after* it is added: one already aborted never emits again, and one that
@@ -1276,14 +239,28 @@ export async function serveGuide(
   // through a guide holds the port open; it releases no cache; and it says
   // nothing. Two owners of one lifecycle, the lesser racing the greater.
   if (options.signal?.aborted === true) {
-    await close();
+    await handler.close();
   } else {
-    options.signal?.addEventListener('abort', () => void close(), { once: true });
+    options.signal?.addEventListener('abort', () => void handler.close(), { once: true });
   }
 
-  return { url, port: address.port, reload, close, closed };
+  return {
+    url,
+    port: bound.port,
+    reload: () => handler.reload(),
+    close: () => handler.close(),
+    closed,
+  };
 }
 
+export {
+  createGuideHandler,
+  outputFingerprint,
+  DEFAULT_HEALTH_PATH,
+  DEFAULT_REVALIDATE_MS,
+  DEFAULT_SITES_MAX_AGE_MS,
+} from './handler.js';
+export type { GuideAnswer, GuideHandler, GuideHandlerOptions, GuideRequest } from './handler.js';
 export type { EpgServeConfig } from './config.js';
 export { grabEvery } from './schedule.js';
 export type { GrabEveryOptions, NextGrab } from './schedule.js';

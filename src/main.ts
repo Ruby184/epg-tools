@@ -264,10 +264,14 @@ export type {
 } from './grabber/main.js';
 export type * from './grabber/types.js';
 
-export { grabEvery, serveGuide } from './serve/main.js';
+export { createGuideHandler, grabEvery, serveGuide } from './serve/main.js';
 export type {
   EpgServeConfig,
   GrabEveryOptions,
+  GuideAnswer,
+  GuideHandler,
+  GuideHandlerOptions,
+  GuideRequest,
   GuideServer,
   NextGrab,
   ServeOptions,

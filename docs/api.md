@@ -293,6 +293,58 @@ which is re-resolved when the fingerprint moves and at least every
 invisible until midnight. See [serving the
 guide](./configuration.md#serving-the-guide) for what that costs and saves.
 
+### On a server of your own
+
+`createGuideHandler(config, options)` is that answer without the listening, for
+an app that already has a port of its own:
+
+```ts
+import { createGuideHandler } from 'epg-tools/serve';
+
+const handler = await createGuideHandler(config, { grab: grabEvery('4h') });
+
+app.get(handler.guidePath, handler.node('guide'));              // express, fastify, http
+hono.get('/epg.xml', (c) => handler.fetch('guide')(c.req.raw)); // or fetch-style
+
+await handler.close();                                          // yours to close
+```
+
+It gives back `{ answer, node, fetch, guidePath, healthPath, config, reload, close }`
+and takes everything `serveGuide` does except `port`, `host` and `keepAliveMs`,
+plus `shutdown` — a hook run while stopping, after the scheduled grab has been
+called off and before the cache is let go of, which is where ending the
+requests still in flight belongs. `serveGuide` is this plus a socket, and
+passes its own shutdown there.
+
+`node(route?)` and `fetch(route?)` build a handler for one answer — `'guide'`
+or `'health'` — wherever it is mounted; a builder rather than a method because
+a framework calls what it is given with whatever arguments it likes, and
+express's third is `next`. With no route they route by path instead, answering
+`guidePath`, `healthPath` and then 404, which is what makes
+`createServer(handler.node())` a whole server.
+
+Underneath both is `answer(request)`, which has no transport in it at all:
+
+```ts
+const { status, headers, body } = await handler.answer({
+  method: 'GET',
+  headers: { 'if-none-match': tag },
+  route: 'guide',
+  signal,                       // the consumer going away stops the merge
+  encrypted: true,              // for `serve.baseUrl`, which no header can say
+});
+```
+
+`body` is absent for a `304`, a `204` and every `HEAD`, a string for the small
+answers, and an async iterable of bytes for the guide — already compressed if
+`content-encoding` says so. Abandoning that iterable is the supported way to
+stop: it ends the merge and gives back the concurrency slot. `answer` never
+rejects; a failure is a `500` with the reason already reported.
+
+To keep the command instead of writing a program, `serve.server` hands
+`epg serve` a server of yours — see [on a server of your
+own](./configuration.md#on-a-server-of-your-own).
+
 `reload()` resolves the channel lists again on the next poll, whatever those
 clocks say — the ceiling is a guess, and this is the caller saying they know. It
 is lazy (it marks; the next request does the work) and it asserts nothing: if
@@ -745,8 +797,9 @@ channels](./configuration.md#derived-channels).
 
 ### `epg-tools/serve`
 
-`serveGuide` and the `GuideServer` / `ServeOptions` / `EpgServeConfig` types,
-with `DEFAULT_SERVE_PORT`, `DEFAULT_SERVE_HOST`, `DEFAULT_SERVE_PATH`,
+`serveGuide` and `createGuideHandler`, the `GuideServer` / `ServeOptions` /
+`EpgServeConfig` / `GuideHandler` / `GuideHandlerOptions` / `GuideRequest` /
+`GuideAnswer` types, with `DEFAULT_SERVE_PORT`, `DEFAULT_SERVE_HOST`, `DEFAULT_SERVE_PATH`,
 `DEFAULT_REVALIDATE_MS`, `DEFAULT_KEEP_ALIVE_MS` and `DEFAULT_SITES_MAX_AGE_MS`. Loaded only when named, so nothing else pulls in
 `node:http`.
 

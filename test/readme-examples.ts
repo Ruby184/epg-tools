@@ -9,9 +9,12 @@
  * below name the page each group of examples comes from.
  */
 
+import { createServer } from 'node:http';
 import {
   build,
   CacheDriverBase,
+  createGuideHandler,
+  grabEvery,
   defineConfig,
   defineCommandSite,
   defineSchedulesDirectSite,
@@ -851,3 +854,61 @@ export const zoned = (epochSeconds: number): Date[] => [
   // A source that gives an instant, where the guide should still read locally.
   setXmltvZone(new Date(epochSeconds * 1000), 'Europe/Bratislava'),
 ];
+
+// --- docs/api.md: On a server of your own ----------------------------------
+/**
+ * Express and hono are not dependencies of this package, so what the docs show
+ * with them is shown here with `node:http` — the handler is the same object,
+ * and these are the calls that would break if it changed.
+ */
+export async function mountedOnAnAppOfMyOwn(): Promise<void> {
+  const handler = await createGuideHandler(configured, { grab: grabEvery('4h') });
+
+  // One answer, wherever it is mounted — `app.get(path, handler.node('guide'))`.
+  const guide = handler.node('guide');
+  const health = handler.node('health');
+  const asFetch = handler.fetch('guide');
+  // Or routing by itself, which is what makes it a whole server.
+  const server = createServer(handler.node());
+
+  server.on('request', (request, response) => {
+    void (request.url === handler.healthPath ? health : guide)(request, response);
+  });
+
+  const answered = await handler.answer({
+    method: 'GET',
+    path: handler.guidePath,
+    headers: { 'if-none-match': 'W/"nope"' },
+    route: 'guide',
+    encrypted: true,
+  });
+
+  if (typeof answered.body === 'object') {
+    for await (const chunk of answered.body) {
+      void chunk.byteLength;
+    }
+  }
+
+  void (await asFetch(new Request('https://pi.local/epg.xml'))).status;
+  void answered.status;
+  void handler.config.days;
+
+  handler.reload();
+  await handler.close();
+}
+
+// --- docs/configuration.md: Keep the command, bring your own server --------
+export const servedByMyOwnApp = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  serve: {
+    server: ({ node, guidePath, healthPath }, { port, host }) => {
+      const guide = node('guide');
+      const health = healthPath === false ? undefined : node('health');
+
+      return createServer((request, response) => {
+        void (request.url === guidePath ? guide : (health ?? node()))(request, response);
+      }).listen(port, host);
+    },
+  },
+});

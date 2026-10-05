@@ -6,9 +6,10 @@
  * in `node:http` and the merge behind it to read a config field.
  */
 
-import type { IncomingMessage } from 'node:http';
+import type { Server } from 'node:http';
 import type { CompressionFormat } from '../core/output.js';
 import type { NextGrab } from './schedule.js';
+import type { GuideHandler, GuideRequest } from './handler.js';
 
 export interface EpgServeConfig {
   /**
@@ -80,9 +81,18 @@ export interface EpgServeConfig {
    * of them is the one to write down. A function decides for itself, and
    * falling back to the configured base by answering `undefined`.
    *
+   * It is given the request as {@link GuideRequest} describes it — the method,
+   * the path, the headers, and whether this one arrived over TLS — so that it
+   * answers the same wherever the guide is mounted. What the transport itself
+   * was handed is there as `raw`, for a function that knows which server it is
+   * running on and wants more than the shape above.
+   *
    * ```ts
    * serve: { baseUrl: true }
-   * serve: { baseUrl: (request) => `https://${request.headers.host ?? 'pi.local'}/` }
+   * serve: {
+   *   baseUrl: ({ headers, encrypted }) =>
+   *     `${encrypted === true ? 'https' : 'http'}://${String(headers.host ?? 'pi.local')}/`,
+   * }
    * ```
    *
    * What it costs: a guide that differs by who asked for it. The validators
@@ -90,5 +100,51 @@ export interface EpgServeConfig {
    * the response says it varies on the headers the base was read from — without
    * which a cache in between would hand one host another's document.
    */
-  baseUrl?: string | URL | true | ((request: IncomingMessage) => string | URL | undefined);
+  baseUrl?: string | URL | true | ((request: GuideRequest) => string | URL | undefined);
+  /**
+   * Listen with a server of your own, instead of the one `epg serve` makes.
+   *
+   * Given the guide as a handler and where the command was told to listen, and
+   * returning the `http.Server` it is listening on — which is what `express`,
+   * `fastify` and `node:http` all have. `epg serve` carries on around it: the
+   * reporter, `SIGHUP` to reload, a scheduled grab, and a stop that cuts the
+   * connections still open before it lets go of the cache.
+   *
+   * ```ts
+   * serve: {
+   *   server: ({ node, guidePath, healthPath }, { port, host }) => {
+   *     const app = express();
+   *
+   *     app.get(guidePath, node('guide'));
+   *     app.get('/my/own/route', mine);
+   *
+   *     if (healthPath !== false) {
+   *       app.get(healthPath, node('health'));
+   *     }
+   *
+   *     return app.listen(port, host);
+   *   },
+   * }
+   * ```
+   *
+   * The paths come from the handler on purpose: they are what `serve.path`,
+   * `serve.health` and `--path` settled on, and an app that writes its own
+   * instead has quietly taken those away from whoever runs the command. Mount
+   * something else only when you mean to — `node('guide')` answers wherever it
+   * is mounted.
+   *
+   * Nothing is mounted on your behalf, the health check included. `app.use`
+   * is not the shortcut it looks like either: `node()` with no route answers a
+   * path it does not know with a 404, so it would swallow the rest of your app.
+   *
+   * For a program that owns its own process, `createGuideHandler` is this
+   * without the command around it. This is for keeping the command.
+   *
+   * `keepAliveMs` is not applied to a server it did not make — see
+   * {@link DEFAULT_KEEP_ALIVE_MS} for the timeouts worth setting on your own.
+   */
+  server?: (
+    handler: GuideHandler,
+    where: { port: number; host: string },
+  ) => Server | Promise<Server>;
 }
