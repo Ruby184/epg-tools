@@ -1243,6 +1243,54 @@ Only that site is tunnelled; the others go out directly. Three things to know:
 Node 24 also understands `NODE_USE_ENV_PROXY=1` with `HTTP_PROXY`/`HTTPS_PROXY`
 /`NO_PROXY`, but that applies to the whole process — every site or none.
 
+### A source whose TLS is older than Node
+
+The same seam answers the other common cliff: a site that fails the handshake
+outright, before any of this gets a chance to parse anything.
+
+```
+ERR_SSL_DH_KEY_TOO_SMALL
+```
+
+That is OpenSSL 3 refusing a server, not a bug in the site or in this package.
+Its default security level is 2, which requires a 2048-bit key exchange; a
+server still offering a 1024-bit Diffie-Hellman group — `tvprogram.cz` is a
+real example, TLS 1.2 with `DHE-RSA-AES256-GCM-SHA384` and a 1024-bit group —
+is refused before a byte of HTTP is sent. `fetch` has no way to say "that is
+fine for this one host", because the TLS options live on the connection rather
+than on the request. The dispatcher is where the connection is made:
+
+```ts
+import { Agent } from 'undici';
+
+const oldTls = defineSiteConfig({
+  site: 'tvprogram.cz',
+  ky: {
+    prefix: 'https://www.tvprogram.cz',
+    // Only this site's connections; everything else keeps Node's defaults.
+    dispatcher: new Agent({ connect: { ciphers: 'DEFAULT:@SECLEVEL=0' } }),
+  },
+  // …
+});
+```
+
+Two things that look like the fix and are not:
+
+- **`rejectUnauthorized: false` does nothing here.** It turns off certificate
+  *verification*, and this is not a trust problem — the certificate is a
+  perfectly good Let's Encrypt one. The handshake fails over the key exchange,
+  which happens whether or not anyone is checking the certificate.
+- **`@SECLEVEL=1` is not enough**, though it is the gentler-looking option: it
+  swaps `ERR_SSL_DH_KEY_TOO_SMALL` for `ERR_SSL_WRONG_SIGNATURE_TYPE`. Level 0
+  is what gets through, and it is per site.
+
+What it costs is worth saying plainly: that site's connections drop to
+pre-2015 cryptography, and a guide is not worth pretending otherwise about. It
+is a listings site serving public television schedules over a connection
+somebody could in principle tamper with — judge it as that, rather than as a
+flag that makes a red message go away. Everything else in the run is unaffected,
+which is the whole reason this belongs on a site and not on the process.
+
 ## Rate limits and backoff
 
 `concurrency` says how many requests a site may have in flight — and, with

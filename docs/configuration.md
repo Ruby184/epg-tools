@@ -41,6 +41,65 @@ The factory form takes a context and is how a config gets answers it cannot
 hardcode — a username, a password, a region. See
 [Asking for more than channels](./tv-grab.md#asking-for-more-than-channels).
 
+### A config in a TypeScript project
+
+A config that is one file needs nothing more than the above. One that imports
+from the rest of a project — your sites, your constants — meets the one real
+trap, and it is worth knowing before it happens:
+
+```
+Cannot find module /app/src/sites/a.js imported from /app/src/epg.config.ts
+```
+
+Type stripping strips types. It does not resolve modules the way `tsc` does, so
+the `./sites/a.js` a TypeScript project is *supposed* to write — the specifier
+that points at what the build will emit — points at a file that does not exist
+yet. Three ways out, and the first is the one to reach for:
+
+**Write the real extension, and let `tsc` rewrite it.** Since TypeScript 5.7
+that is a supported pair of options rather than a hack:
+
+```jsonc
+// tsconfig.json
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,  // ./sites/a.ts → ./sites/a.js on the way out
+    "erasableSyntaxOnly": true                // see below
+  }
+}
+```
+
+```ts
+import { a } from './sites/a.ts';   // runs under `epg -c epg.config.ts`, builds to `.js`
+```
+
+Nothing to install, no flag to remember, and the same file serves the CLI and
+the build.
+
+**Or point the CLI at the built config** — `epg grab -c dist/epg.config.js` —
+which asks nothing of the config at all, as long as the build has run. Fine for
+a container, awkward in development, where `epg` then needs a build first.
+
+**Or load the TypeScript yourself**, with [tsx](https://tsx.is):
+`NODE_OPTIONS='--import tsx' epg grab -c epg.config.ts`. It resolves `.js` to
+`.ts` the way `tsc` does, so nothing in the project has to change — at the cost
+of a dependency and of a flag everyone has to remember.
+
+**The other half of the trap is syntax.** Type stripping erases types; it does
+not *transform* code, so a config that reaches anything built from `enum`,
+`namespace` or a constructor's parameter properties fails with:
+
+```
+TypeScript enum is not supported in strip-only mode
+```
+
+`erasableSyntaxOnly: true` is what turns that into a build error with a line
+number instead of a surprise at run time. Node's
+`--experimental-transform-types` handles the syntax half, but not the
+resolution half above — a `.js` specifier still does not find a `.ts` file —
+so it solves half a problem.
+
 ## `EpgConfig` reference
 
 | field | type | default | what it is |
