@@ -907,8 +907,31 @@ export async function createGuideHandler(
    *
    * Once, here — a config cannot change under a running server, and this is
    * the only thing the fingerprint cannot read off the cache.
+   *
+   * `meta` and `derived` are in it as they were *written*, not as they answer:
+   * `canonical` hashes a function by its source, so changing what either one
+   * says moves every validator, while a function that answers differently for
+   * reasons of its own — a `date` of the moment, most obviously — does not,
+   * and a poll stays the cheap thing this server exists for. A document that
+   * really did change because the lineup did is caught by the fingerprint
+   * instead, new channels being new keys.
+   *
+   * They have to be here because nothing else covers them. A changed
+   * `source-info-name` is a changed document that no cache entry knows about,
+   * and a derived channel has no entry of its own at all — it is written out of
+   * its source's. `channels` needs no entry here: narrowing the sites changes
+   * which keys are swept, which the fingerprint reads directly.
    */
-  const shape = outputFingerprint(outputOptions(config));
+  const shape = createHash('sha1')
+    .update(
+      canonical({
+        output: outputFingerprint(outputOptions(config)),
+        meta: config.meta,
+        derived: config.derived,
+      }),
+    )
+    .digest('base64url')
+    .slice(0, 10);
 
   /**
    * What the cache amounted to when it was last looked at, and the channel
@@ -936,11 +959,11 @@ export async function createGuideHandler(
     /**
      * What `meta` said about them, for the same reason and at the same pace.
      *
-     * Not in the etag. A tag follows the cache, and a `meta` that answers
-     * differently without the grid having moved — a timestamp of its own
-     * making — is a document this server cannot tell has changed. The two
-     * things it is for, counting the channels and naming their source, both
-     * move when the lists do, and the lists are in the fingerprint.
+     * What it *says* is in the etag — see `shape` — but not what it answers:
+     * a timestamp of its own making would otherwise move every validator on
+     * every snapshot, and a poll would never be cheap again. A `meta` that
+     * follows the lineup still moves the tag, the lineup being in the
+     * fingerprint.
      */
     meta: XmltvDocumentMeta | undefined;
   }

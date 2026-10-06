@@ -171,9 +171,14 @@ export default defineConfig({
 
 Under `epg serve` it is asked once per snapshot rather than once per request, at
 the pace the channel lists are re-read — so it follows a lineup that changes
-without costing a poll anything. It is **not** part of the ETag, which follows
-the cache: a `meta` that answers differently without the grid having moved is a
-change this server cannot see.
+without costing a poll anything.
+
+The ETag covers `meta` **as written, not as answered**: a changed
+`source-info-name` moves every validator, and so does changing the body of the
+function, but a function that answers differently for reasons of its own does
+not. That is deliberate — `date` is the generation time by definition, and a
+validator that moved with it would turn every poll into a full merge. A `meta`
+that follows the lineup still moves the tag, because the lineup does.
 
 ## Cache reference
 

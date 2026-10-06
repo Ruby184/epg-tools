@@ -350,6 +350,104 @@ describe('serveGuide', () => {
     expect(vary).toContain('Accept-Encoding');
   });
 
+  it('moves the validator when what the document says about itself changes', async () => {
+    // A changed `source-info-name` is a changed document that no cache entry
+    // knows anything about — the keys are the same, the grid is the same, and
+    // a poller holding the old tag would be told 304 until the next grab.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const tagFor = async (meta: EpgConfig['meta']): Promise<string> => {
+      const server = await serve({ ...configFor(['one']), ...(meta ? { meta } : {}) }, cache);
+      const answered = await fetch(server.url);
+
+      await answered.text();
+      await server.close();
+
+      return answered.headers.get('etag') ?? '';
+    };
+
+    const named = await tagFor({ sourceInfoName: 'Before' });
+
+    expect(named).not.toBe(await tagFor({ sourceInfoName: 'After' }));
+    expect(named).not.toBe(await tagFor(undefined));
+    // Same config, same answer: a restart must not invalidate every client for
+    // nothing, which is the other half of what a validator is for.
+    expect(named).toBe(await tagFor({ sourceInfoName: 'Before' }));
+
+    // A function is hashed by what it says rather than by what it answers —
+    // so changing its body moves the tag…
+    const counts = await tagFor(({ channels }) => ({
+      sourceInfoName: `${String(channels.length)} channels`,
+    }));
+
+    expect(counts).not.toBe(
+      await tagFor(({ channels }) => ({ sourceInfoName: `${String(channels.length)} ch` })),
+    );
+  });
+
+  it('keeps a poll cheap for a meta that answers differently every time', async () => {
+    // The reason the declaration is hashed and not the answer: `<tv date>` is
+    // the generation time by definition, and a validator that moved with it
+    // would turn every poll into a full merge — which is the whole thing this
+    // server exists not to do.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    let asked = 0;
+    const server = await serve(
+      {
+        ...configFor(['one']),
+        meta: () => {
+          asked += 1;
+
+          return { sourceInfoName: `run ${String(asked)}` };
+        },
+      },
+      cache,
+      // No held snapshot: every request asks again, which is the worst case.
+      { revalidateMs: 0, sitesMaxAgeMs: 0 },
+    );
+
+    const first = await fetch(server.url);
+
+    await first.text();
+
+    const again = await fetch(server.url, {
+      headers: { 'if-none-match': first.headers.get('etag')! },
+    });
+
+    expect(asked).toBeGreaterThan(1);
+    expect(again.status).toBe(304);
+  });
+
+  it('moves the validator for a derived channel nobody grabbed', async () => {
+    // A derived channel is written out of its source's entries and has none of
+    // its own, so declaring one adds a channel to the document that the cache
+    // sweep cannot see at all.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const tagFor = async (derived: EpgConfig['derived']): Promise<string> => {
+      const server = await serve({ ...configFor(['one']), ...(derived ? { derived } : {}) }, cache);
+      const answered = await fetch(server.url);
+
+      await answered.text();
+      await server.close();
+
+      return answered.headers.get('etag') ?? '';
+    };
+
+    const plain = await tagFor(undefined);
+    const shifted = await tagFor([{ xmltvId: 'one.plus1', from: 'one', offset: 60 }]);
+
+    expect(plain).not.toBe(shifted);
+    expect(shifted).not.toBe(await tagFor([{ xmltvId: 'one.plus1', from: 'one', offset: 120 }]));
+  });
+
   it('picks the channel up at once when told to reload, ceiling or no ceiling', async () => {
     // The ceiling is a guess at how long a new channel may stay invisible; this
     // is the operator saying they know. `sitesMaxAgeMs` is an hour here, so
