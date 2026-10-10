@@ -1,11 +1,15 @@
 import type { SerializeOptions } from '../xmltv/serialize.js';
 import type { XmltvChannel, XmltvDocumentMeta, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheStore } from '../cache/types.js';
-import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
+import type { AnySiteConfig, CoverageRule, GrabberChannel } from '../grabber/types.js';
 import type { Reporter, Says } from '../core/events.js';
 
 /**
- * What to do when multiple sites cover the same xmltv channel id.
+ * How the sources of one channel are **combined**, where several cover it.
+ *
+ * Who the sources are is {@link ChannelCoverage}'s question, and the two are
+ * separate on purpose: one decides what a run fetches, this one decides what
+ * the guide makes of it.
  *
  * - `merge-programmes`: one `<channel>` element with metadata merged from
  *   all covering sites (display names unioned by `(lang, value)`, icons by
@@ -13,15 +17,27 @@ import type { Reporter, Says } from '../core/events.js';
  *   order = priority.
  * - `first-wins`: one `<channel>` element; only the first (highest priority)
  *   covering site contributes programmes. The others are still grabbed, so
- *   switching to one of the strategies that use them costs no refetch.
- * - `first-only`: the same guide, and the others are **not grabbed**. A channel
- *   a higher-priority site covers is dropped from the lists of the sites below
- *   it before the run starts, so what the merge was going to discard is never
- *   fetched. For a lineup assembled from several providers in preference order,
- *   which is what the saving is: one request each, not one per provider.
+ *   switching to a strategy that uses them costs no refetch — and `cover`
+ *   is how to stop fetching them.
  * - `keep-all`: no deduplication at all; everything is emitted as-is.
  */
-export type ChannelStrategy = 'merge-programmes' | 'first-wins' | 'first-only' | 'keep-all';
+export type ChannelStrategy = 'merge-programmes' | 'first-wins' | 'keep-all';
+
+/**
+ * Who **grabs** a channel that more than one site offers.
+ *
+ * - `all` (the default): everybody who has it. What the guide then does with
+ *   them is {@link ChannelStrategy}'s question.
+ * - `first`: the site highest in the config, and the others are **not
+ *   grabbed** — their lists lose the channel before the run starts, so what
+ *   the merge was going to discard is never fetched. For a lineup assembled
+ *   from several providers in preference order, that is one request per
+ *   channel instead of one per provider.
+ * - a {@link CoverageRule}: the same decision made per channel rather than
+ *   once for all of them — "this provider, except where it has no picture",
+ *   "that one only for what nobody above it has".
+ */
+export type ChannelCoverage = 'all' | 'first' | CoverageRule;
 
 /**
  * How programmes of one channel from multiple sites are combined
@@ -185,6 +201,14 @@ export interface FillGapsContext {
 
 export interface MergeOptions {
   channelStrategy?: ChannelStrategy;
+  /**
+   * Who grabs a channel several sites offer — see {@link ChannelCoverage}.
+   *
+   * Read by the grab as much as by the merge, since it decides what is fetched:
+   * `epg grab`, `epg build` and `epg serve` all answer it the same way, or a
+   * run would fetch what the guide then leaves out.
+   */
+  cover?: ChannelCoverage;
   programmeStrategy?: ProgrammeStrategy;
   /**
    * How two programmes are recognized as the same broadcast under

@@ -416,7 +416,7 @@ describe('a configuration that still needs its answers', () => {
   });
 });
 
-describe("channelStrategy: 'first-only'", () => {
+describe("cover: 'first'", () => {
   /** A site whose channels are given, recording every (channel, day) it fetched. */
   function covering(name: string, ids: string[], asked: string[]): SiteConfig<unknown> {
     return {
@@ -447,7 +447,7 @@ describe("channelStrategy: 'first-only'", () => {
         covering('a.example', ['one', 'two'], asked),
         covering('b.example', ['two', 'three'], asked),
       ],
-      merge: { channelStrategy: 'first-only' },
+      merge: { cover: 'first' },
     });
 
     await build(epg, { now: NOW });
@@ -470,7 +470,7 @@ describe("channelStrategy: 'first-only'", () => {
     const asked: string[] = [];
     const epg = config(dir, {
       sites: [covering('a.example', ['one'], asked), covering('b.example', ['one'], asked)],
-      merge: { channelStrategy: 'first-only' },
+      merge: { cover: 'first' },
     });
 
     await runGrab(epg, { now: NOW });
@@ -491,6 +491,81 @@ describe("channelStrategy: 'first-only'", () => {
     // What `first-wins` keeps: the lower site's copy is cached, so switching to
     // a strategy that reads it costs no refetch.
     expect(asked.sort()).toEqual([`a.example one ${TODAY}`, `b.example one ${TODAY}`]);
+  });
+
+  it('lets a rule decide per channel, lower site and all', async () => {
+    // The case `'first'` cannot express: the site that comes first is not the
+    // right answer for every channel, and which one is depends on what each
+    // offers. Here the second site wins `two`, which is the direction site
+    // order alone can never go.
+    const dir = await tempDir();
+    const asked: string[] = [];
+    const first = covering('a.example', ['one', 'two'], asked);
+    const second = covering('b.example', ['two', 'three'], asked);
+
+    // The first site has no picture for `two` and the second one does, which is
+    // the whole of what the rule decides on.
+    first.channels = [
+      { xmltvId: 'one', siteId: 'one', name: 'one', logo: 'https://a.example/one.png' },
+      { xmltvId: 'two', siteId: 'two', name: 'two' },
+    ];
+    second.channels = [
+      { xmltvId: 'two', siteId: 'two', name: 'two', logo: 'https://b.example/two.png' },
+      { xmltvId: 'three', siteId: 'three', name: 'three' },
+    ];
+
+    const seen: string[] = [];
+    const epg = config(dir, {
+      sites: [first, second],
+      merge: {
+        cover: ({ xmltvId, offers }) => {
+          seen.push(`${xmltvId}:${offers.map((offer) => offer.site).join('+')}`);
+
+          const best = offers.find((offer) => offer.channel.logo !== undefined);
+
+          return best === undefined ? offers.slice(0, 1) : [best];
+        },
+      },
+    });
+
+    await build(epg, { now: NOW });
+
+    // Asked only about what was contested: `one` and `three` have one site each.
+    expect(seen).toEqual(['two:a.example+b.example']);
+    expect(asked.sort()).toEqual([
+      `a.example one ${TODAY}`,
+      `b.example three ${TODAY}`,
+      `b.example two ${TODAY}`,
+    ]);
+
+    const guide = await readFile(join(dir, 'guide.xml'), 'utf8');
+
+    expect(guide).toContain('<title>b.example-two</title>');
+    expect(guide).not.toContain('a.example-two');
+  });
+
+  it('says so when a rule keeps a site that offered nothing', async () => {
+    const dir = await tempDir();
+    const asked: string[] = [];
+    const said: string[] = [];
+    const epg = config(dir, {
+      sites: [covering('a.example', ['one'], asked), covering('b.example', ['one'], asked)],
+      merge: { cover: () => ['c.example'] },
+    });
+
+    await runGrab(epg, {
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:warning') {
+          said.push(event.message);
+        }
+      },
+    });
+
+    // A misspelled site name reads exactly like a rule that decided against
+    // everybody, so it is said rather than left to look deliberate.
+    expect(said.join('\n')).toContain('c.example');
+    expect(asked).toEqual([]);
   });
 });
 

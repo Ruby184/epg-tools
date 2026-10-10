@@ -3,7 +3,7 @@ import { GrabberError } from '../core/error.js';
 import { writeOutput, type OutputOptions, type OutputTarget } from '../core/output.js';
 import { emitter } from '../core/events.js';
 import type { Says } from '../core/events.js';
-import { channelElement, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
+import { channelElement, covered, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
 import type { GrabberChannel } from '../grabber/types.js';
 import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
 import { outputOptions } from '../xmltv/serialize.js';
@@ -266,14 +266,23 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   // The cache goes with it: a site that keeps its channel list there has one the
   // grab just wrote, and a merge asking the source again could only disagree
   // with what it is about to read.
+  // `cover` here as well as before the grab, for the reason the lists are
+  // resolved here at all: a merge run on its own has no grab to have narrowed
+  // them, and the two have to produce the same guide either way. Over lists a
+  // grab already narrowed it changes nothing — a channel one site is left with
+  // is a channel nobody is asked about.
   const sites = (
-    await resolveSites(options.sites, {
-      emit,
-      ...(options.siteConcurrency !== undefined ? { concurrency: options.siteConcurrency } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
-      store: cache,
-      now,
-    })
+    await covered(
+      await resolveSites(options.sites, {
+        emit,
+        ...(options.siteConcurrency !== undefined ? { concurrency: options.siteConcurrency } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+        store: cache,
+        now,
+      }),
+      options.merge?.cover,
+      { now, ...mergeSays },
+    )
   ).map((config) => ({ config, channels: config.channels as GrabberChannel[] }));
 
   // What `channels` selects, with the sources a derived channel needs added to
@@ -324,14 +333,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
           registry.push(entry);
         }
 
-        if (
-          (channelStrategy === 'first-wins' || channelStrategy === 'first-only') &&
-          entry.sources.length > 0
-        ) {
-          // `first-only` has usually taken the lower sites' channels away
-          // before the grab, so there is nothing here to pass over — but a
-          // merge run on its own resolves the lists itself, and the two have to
-          // produce the same guide either way.
+        if (channelStrategy === 'first-wins' && entry.sources.length > 0) {
           continue;
         }
 

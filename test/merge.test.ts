@@ -1138,12 +1138,12 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     expect(output).not.toContain('News');
   });
 
-  it("'first-only' builds the same guide as 'first-wins'", async () => {
+  it("cover: 'first' builds the same guide as 'first-wins'", async () => {
     // The difference between them is what a *grab* asks for; a merge handed the
     // same cache has to answer identically, since a merge run on its own
     // resolves the lists itself and nothing has narrowed them.
     const options = { sites: [siteA, siteB], cache: cacheForBothSites(), days: 1, now: NOW };
-    const only = await generate({ ...options, merge: { channelStrategy: 'first-only' } });
+    const only = await generate({ ...options, merge: { cover: 'first' } });
 
     expect(only).toBe(await generate({ ...options, merge: { channelStrategy: 'first-wins' } }));
     expect(only.match(/id=["']X["']/g)).toHaveLength(1);

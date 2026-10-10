@@ -6,7 +6,7 @@ import {
   MemoryCacheDriver,
 } from './cache/main.js';
 import type { CacheDriver, CacheStore } from './cache/main.js';
-import { coveredOnce, grab, resolveSites } from './grabber/main.js';
+import { covered, coverageOf, grab, resolveSites } from './grabber/main.js';
 import type { GrabberChannel, GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
 import { channelSelection, configured, unmatched, unmatchedMessage } from './merge/select.js';
@@ -14,7 +14,7 @@ import type { BuildGuideOptions } from './merge/types.js';
 import { outputOptions } from './xmltv/serialize.js';
 import { addDays, toDayString } from './core/days.js';
 import { GrabberError } from './core/error.js';
-import type { Emit, Reporter } from './core/events.js';
+import type { Emit, Reporter, Says } from './core/events.js';
 import { emitter } from './core/events.js';
 import {
   resolveConfigSource,
@@ -176,22 +176,30 @@ async function withCache<T>(
 }
 
 /**
- * Whether a channel belongs to one site only — `channelStrategy: 'first-only'`.
+ * Whether `cover` can take a channel away from a site.
  *
  * Read off the config rather than passed around: the grab has to know it as
- * much as the merge does, and they have to read it the same way or a run fetches
- * what the guide then leaves out.
+ * much as the merge does, and they have to read it the same way or a run
+ * fetches what the guide then leaves out. It also says whether the channel
+ * lists are worth resolving early — a coverage that takes nothing away gives a
+ * run nothing to compare them for.
  */
-const exclusive = (config: EpgConfig): boolean => config.merge?.channelStrategy === 'first-only';
+const narrowed = (config: EpgConfig): boolean => coverageOf(config.merge?.cover) !== undefined;
 
-/** Said once per site that lost channels to one above it, with how many. */
+/** Where a `cover` rule's own words go, which is where a merge's do. */
+const saysOf = (emit: Emit): Says => ({
+  log: (message, data) => emit({ type: 'merge:note', message, ...(data ? { data } : {}) }),
+  warn: (message, data) => emit({ type: 'merge:warning', message, ...(data ? { data } : {}) }),
+});
+
+/** Said once per site that lost channels to another, with how many. */
 const droppedBy =
   (emit: Emit) =>
   (site: string, count: number): void => {
     emit({
       type: 'site:note',
       site,
-      message: `${String(count)} channel(s) left to a higher-priority site: channelStrategy is first-only`,
+      message: `${String(count)} channel(s) left to another site by \`cover\``,
     });
   };
 
@@ -255,8 +263,8 @@ export async function runGrab(
     // own list anyway — this is the same work, done early enough to compare the
     // lists against each other, and a `cacheChannels` site answers from the
     // cache both times.
-    const sites = exclusive(config)
-      ? coveredOnce(
+    const sites = narrowed(config)
+      ? await covered(
           await resolveSites(config.sites, {
             ...(config.siteConcurrency !== undefined
               ? { concurrency: config.siteConcurrency }
@@ -267,6 +275,8 @@ export async function runGrab(
             store: cache,
             now,
           }),
+          config.merge?.cover,
+          { now, ...saysOf(emit) },
           droppedBy(emit),
         )
       : config.sites;
@@ -405,10 +415,12 @@ export async function build(source: ConfigSource, options: RunOptions = {}): Pro
     const resolved: EpgConfig = {
       ...config,
       ...(declarations ? { derived: declarations } : {}),
-      // Before the grab, which is the whole of what `first-only` is for: the
-      // merge below keeps one source per channel either way, so the sites under
-      // the first to cover one are never asked about it.
-      sites: exclusive(config) ? coveredOnce(selected, droppedBy(emit)) : selected,
+      // Before the grab, which is the whole of what `cover` is for: the merge
+      // below keeps what it chose either way, so a site it did not choose is
+      // never asked about that channel at all.
+      sites: narrowed(config)
+        ? await covered(selected, config.merge?.cover, { now, ...saysOf(emit) }, droppedBy(emit))
+        : selected,
     };
 
     // Here rather than only in the merge below, because here is before the

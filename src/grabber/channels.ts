@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { parseChannelsXml } from '../channels/parse.js';
 import { parseM3uFile } from '../m3u/parse.js';
 import type { ChannelListEntry, ChannelListWarning } from '../channels/types.js';
+import type { ChannelCoverage } from '../merge/types.js';
 import type { CacheStore } from '../cache/types.js';
 import type { Emit, Says } from '../core/events.js';
 import type {
@@ -18,7 +19,13 @@ import { ChannelBuilder } from '../xmltv/builder.js';
 import type { XmltvChannel } from '../xmltv/types.js';
 import { revalidationHooks } from './revalidate.js';
 import { channelsMaxAgeMs, SiteStateHandle } from './state.js';
-import type { AnySiteConfig, ChannelsContext, GrabberChannel } from './types.js';
+import type {
+  AnySiteConfig,
+  ChannelOffer,
+  ChannelsContext,
+  CoverageRule,
+  GrabberChannel,
+} from './types.js';
 
 /**
  * A site's own HTTP client, built from its `ky` options.
@@ -202,39 +209,137 @@ export async function resolveChannels(
 }
 
 /**
- * Resolved sites with every channel left to the first site that covers it.
+ * The named coverages as the rule each one stands for.
  *
- * What `channelStrategy: 'first-only'` means before the grab rather than after
- * it: the merge keeps one source per channel whatever the sites below offer, so
- * asking them for the same channel-days is asking for what is going to be
- * thrown away. Site order is priority order, as it is everywhere else here.
- *
- * Takes resolved sites — lists, not functions — since which channels a site has
- * is the whole of what this decides on.
+ * One table rather than a check at each reader, because the grab and the merge
+ * have to agree about who was supposed to fetch what, and the way to be sure of
+ * that is for there to be one answer to ask for.
  */
-export function coveredOnce(
+const RULES: Record<'all' | 'first', CoverageRule | undefined> = {
+  // Nobody loses anything, which is worth not walking a lineup to discover.
+  all: undefined,
+  // Site order is priority order, as it is everywhere else here.
+  first: ({ offers }) => offers.slice(0, 1),
+};
+
+/**
+ * Who grabs a contested channel, as a {@link ChannelCoverage} answers it.
+ *
+ * `undefined` where the answer is everybody, which is also how a caller knows
+ * it need not resolve the channel lists early to find out.
+ */
+export function coverageOf(cover: ChannelCoverage | undefined): CoverageRule | undefined {
+  if (typeof cover === 'function') {
+    return cover;
+  }
+
+  return cover === undefined ? undefined : RULES[cover];
+}
+
+/**
+ * Resolved sites with every contested channel left to whoever `cover` says.
+ *
+ * Asked once per channel more than one site offers, given every offer, and
+ * answering with the ones to keep. A channel one site has is never a question —
+ * there is nothing to decide about it, and a rule asked about every channel of
+ * a large lineup would be asked thousands of times to answer "yes" each time.
+ *
+ * Before the grab rather than after it, which is the whole point: the merge
+ * keeps what the rule chose whatever the other sites offer, so asking them for
+ * the same channel-days is asking for what is going to be thrown away. For a
+ * lineup assembled from several providers in preference order, that is one
+ * request each rather than one per provider.
+ *
+ * Takes resolved sites — lists, not functions — since what a site offers is the
+ * whole of what this decides on.
+ */
+export async function covered(
   sites: AnySiteConfig[],
+  coverage: ChannelCoverage | undefined,
+  context: Says & { now: Date },
   dropped?: (site: string, count: number) => void,
-): AnySiteConfig[] {
-  const claimed = new Set<string>();
+): Promise<AnySiteConfig[]> {
+  const cover = coverageOf(coverage);
 
-  return sites.map((site) => {
-    const channels = (site.channels as GrabberChannel[]).filter((channel) => {
-      if (claimed.has(channel.xmltvId)) {
-        return false;
+  if (cover === undefined) {
+    return sites;
+  }
+
+  const offers = new Map<string, ChannelOffer[]>();
+
+  for (const site of sites) {
+    for (const channel of site.channels as GrabberChannel[]) {
+      const held = offers.get(channel.xmltvId);
+
+      if (held === undefined) {
+        offers.set(channel.xmltvId, [{ site: site.site, channel }]);
+      } else {
+        held.push({ site: site.site, channel });
       }
+    }
+  }
 
-      claimed.add(channel.xmltvId);
+  /** What each site is *not* to grab, which is the smaller half to carry. */
+  const losing = new Map<string, Set<string>>();
 
-      return true;
-    });
-    const lost = (site.channels as GrabberChannel[]).length - channels.length;
-
-    if (lost > 0) {
-      dropped?.(site.site, lost);
+  for (const [xmltvId, offered] of offers) {
+    if (offered.length < 2) {
+      continue;
     }
 
-    return { ...site, channels };
+    const answer = await cover({
+      xmltvId,
+      offers: offered,
+      now: context.now,
+      log: context.log,
+      warn: context.warn,
+    });
+
+    // Nothing said is not nothing kept: a rule with no opinion about this
+    // channel leaves it to everyone offering it, which is what the merge would
+    // have done anyway.
+    if (answer === undefined) {
+      continue;
+    }
+
+    const kept = new Set(answer.map((one) => (typeof one === 'string' ? one : one.site)));
+
+    for (const name of kept) {
+      if (!offered.some((offer) => offer.site === name)) {
+        // Said rather than quietly ignored: a misspelled site name reads
+        // exactly like a rule that decided against everybody.
+        context.warn(`cover kept "${name}" for ${xmltvId}, which no site here offers`);
+      }
+    }
+
+    for (const offer of offered) {
+      if (kept.has(offer.site)) {
+        continue;
+      }
+
+      const already = losing.get(offer.site);
+
+      if (already === undefined) {
+        losing.set(offer.site, new Set([xmltvId]));
+      } else {
+        already.add(xmltvId);
+      }
+    }
+  }
+
+  return sites.map((site) => {
+    const lost = losing.get(site.site);
+
+    if (lost === undefined || lost.size === 0) {
+      return site;
+    }
+
+    dropped?.(site.site, lost.size);
+
+    return {
+      ...site,
+      channels: (site.channels as GrabberChannel[]).filter((channel) => !lost.has(channel.xmltvId)),
+    };
   });
 }
 

@@ -111,7 +111,7 @@ so it solves half a problem.
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
 | `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source. |
-| `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true, dropContainers: true }` | How several sites covering one channel are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
+| `merge` | `MergeOptions` | `{ cover: 'all', channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true, dropContainers: true }` | Who grabs a channel several sites offer (`cover`) and how the ones that did are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
 | `derived` | `DerivedChannel[] \| (context) => DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. A function is asked per run, with the channels there turned out to be. See [Derived channels](#derived-channels). |
 | `channels` | `readonly string[]` | all of them | Keep only these channels, by `xmltvId` — see [keeping only some channels](#keeping-only-some-channels). `--channels` overrides it. |
 | `meta` | `XmltvDocumentMeta \| (context) => XmltvDocumentMeta` | — | Attributes for the root `<tv>` element. A function is asked per run, with the channels there turned out to be — see [below](#root-tv-attributes). |
@@ -1402,21 +1402,60 @@ runs Node's file operations (four threads by default).
 
 When several sites cover the same `xmltvId` (site order in `sites` = priority):
 
-- `channelStrategy`
+Two questions, and they are separate options because they are separate
+questions: **who grabs** the channel, and **how what was grabbed is combined**.
+
+- `cover` — who grabs it
+  - `all` (default) — everybody who has it
+  - `first` — the first covering site, and the others are **not grabbed**: the channel is taken off the lists of the sites below it before the run starts, so what the merge was going to discard is never fetched. For a lineup assembled from several providers in preference order, this is one request per channel instead of one per provider
+  - a **function** — the same decision per channel rather than once for all of them, given every site's offer of it; see [choosing per channel](#choosing-per-channel)
+- `channelStrategy` — how the ones that did grab it are combined
   - `merge-programmes` (default) — one `<channel>` with metadata merged from all covering sites (display names unioned by `(lang, value)`, icons by `src`, priority site first), programmes combined from all covering sites
   - `first-wins` — one `<channel>`, programmes only from the first covering site. The others are still grabbed, so switching to a strategy that uses them costs no refetch
-  - `first-only` — the same guide, and the others are **not grabbed**: a channel a higher-priority site covers is taken off the lists of the sites below it before the run starts, so what the merge was going to discard is never fetched. For a lineup assembled from several providers in preference order, this is one request per channel instead of one per provider
   - `keep-all` — no deduplication
 - `programmeStrategy` (for `merge-programmes`)
   - `merge` (default) — programmes describing the same broadcast become one element; language-tagged fields (`title`, `desc`, `category`, …) are unioned by `(lang, value)` — grab the same channel from a Slovak and an English source and get both languages in one programme
   - `concat` — keep all programmes sorted by start
   - `backfill` — the first covering site contributes everything it has, and a lower-priority one only what falls in a hole it left; nothing is combined — see [filling the gaps](#filling-the-gaps)
 
-`first-only` is read by the grab as well as by the merge, so `epg grab`,
-`epg build` and `epg serve`'s own grabs all stop asking — and each site says how
-many channels it left to one above it. What it costs is the lower site's copy:
-where `first-wins` has it cached and switching strategy is free, here the days
-are not there, and asking for them later is a fetch.
+`cover` is read by the grab as well as by the merge, so `epg grab`, `epg build`
+and `epg serve`'s own grabs all stop asking — and each site says how many
+channels it left to another. What it costs is the other site's copy: where
+`first-wins` has it cached and switching strategy is free, here the days are not
+there, and asking for them later is a fetch.
+
+### Choosing per channel
+
+`cover: 'first'` says the site highest in the config takes every contested
+channel. A function says it per channel, against what each site offers:
+
+```ts
+merge: {
+  cover: ({ xmltvId, offers }) => {
+    // Whoever has a picture for it, and the first site otherwise.
+    const best = offers.find((offer) => offer.channel.logo !== undefined);
+
+    return best ? [best] : offers.slice(0, 1);
+  },
+}
+```
+
+It is asked **once per contested channel** — a channel one site offers is not a
+question — and **before the grab**, so a channel left to one site costs the
+others nothing. Each offer is `{ site, channel }`: the site's name as the config
+spells it, and that site's whole entry, `logo`, `siteId`, `data` and all.
+
+Return the offers to keep, as objects or as site names. `undefined` keeps every
+one of them, and `[]` means nobody grabs it. The returned *order* is not a
+priority — that stays the order of `sites` — so choosing a single offer is how
+a lower site wins a channel. What is kept is then combined by
+`channelStrategy`, which is the other half of the question.
+
+Two things it cannot do, both for the same reason. It sees what a site **says
+about a channel**, not what that site's listings turn out to hold, so "whoever
+has programme images for it" is a question only the merge can answer, and only
+after both were fetched. And a rule that keeps a site offering nothing is told
+so — a misspelled name reads exactly like a decision against everybody.
 
 ### What counts as the same broadcast
 

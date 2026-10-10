@@ -27,7 +27,7 @@ import type { CacheEntryMeta, CacheStore, ChannelDayKey } from '../cache/types.j
 import { dayRange, toDayString, addDays } from '../core/days.js';
 import { emitter, type Reporter, type Says } from '../core/events.js';
 import { compressor, type CompressionFormat } from '../core/output.js';
-import { resolveSites } from '../grabber/channels.js';
+import { covered, resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { generateGuide } from '../merge/guide.js';
 import { channelSelection, configured } from '../merge/select.js';
@@ -928,6 +928,10 @@ export async function createGuideHandler(
         output: outputFingerprint(outputOptions(config)),
         meta: config.meta,
         derived: config.derived,
+        // Every merge option, `cover` above all: which sites a channel is
+        // taken from is as much what the document says as how they are
+        // combined, and neither is anything a cache key knows.
+        merge: config.merge,
       }),
     )
     .digest('base64url')
@@ -986,13 +990,20 @@ export async function createGuideHandler(
     const window = windowOf(now);
     const resolved =
       known ??
-      (await resolveSites(config.sites, {
-        emit,
-        ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
-        ...(options.signal ? { signal: options.signal } : {}),
-        store: cache,
-        now,
-      }));
+      // `cover` before anything is counted: a channel this run leaves to
+      // another site has no entry of its own, and sweeping for one would have
+      // the grid expecting what nobody was asked to grab.
+      (await covered(
+        await resolveSites(config.sites, {
+          emit,
+          ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
+          ...(options.signal ? { signal: options.signal } : {}),
+          store: cache,
+          now,
+        }),
+        config.merge?.cover,
+        { now, ...mergeSays },
+      ));
 
     // After the lists, because a `derived` function is a function of them — and
     // the selection after that, since a shift declared here is what decides

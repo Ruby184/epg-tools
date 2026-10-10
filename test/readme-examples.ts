@@ -858,6 +858,20 @@ export const zoned = (epochSeconds: number): Date[] => [
   setXmltvZone(new Date(epochSeconds * 1000), 'Europe/Bratislava'),
 ];
 
+// --- docs/configuration.md: Choosing per channel ---------------------------
+export const coveredPerChannel = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  merge: {
+    cover: ({ offers }) => {
+      // Whoever has a picture for it, and the first site otherwise.
+      const best = offers.find((offer) => offer.channel.logo !== undefined);
+
+      return best ? [best] : offers.slice(0, 1);
+    },
+  },
+});
+
 // --- docs/api.md: On a server of your own ----------------------------------
 /**
  * Express and hono are not dependencies of this package, so what the docs show
