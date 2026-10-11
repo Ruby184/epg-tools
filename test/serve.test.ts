@@ -1039,6 +1039,26 @@ describe('serveGuide', () => {
     expect(report.of('serve:response').map((event) => event.status)).toEqual([500]);
   });
 
+  it('says it reloaded, so an app can reload what it keeps beside the guide', async () => {
+    // The point of saying it rather than only doing it: a consumer sharing
+    // this server's `SIGHUP` hears about the reload instead of adding a second
+    // handler for the same signal — and the same event is where a supervisor
+    // readiness ping belongs, which is why this package sends none itself.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const report = collect();
+    const reloadOn = new EventTarget();
+
+    await serve(configFor(['one']), cache, { reporter: report.reporter, reloadOn });
+
+    reloadOn.dispatchEvent(new Event('reload', { cancelable: true }));
+
+    expect(report.of('serve:reloaded')).toHaveLength(1);
+    expect(report.messages).toContain('Reloading the channel lists on the next request');
+  });
+
   it('stops when its signal fires, and again is not an error', async () => {
     const cache = cacheWith({});
     const controller = new AbortController();

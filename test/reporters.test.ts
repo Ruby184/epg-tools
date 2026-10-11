@@ -5,6 +5,7 @@ import {
   EVENT_KINDS,
   jsonReporter,
   LEVELS,
+  loggerReporter,
   progressReporter,
   render,
   renderFailure,
@@ -676,6 +677,79 @@ describe('progressReporter', () => {
     // At `debug` the per-channel-day lines are the point and a live line would
     // swallow them; below `info` there is no progress to show.
     expect(out.raw).not.toContain('\u001b[K');
+  });
+});
+
+describe('loggerReporter', () => {
+  /** A logger of the shape every logging library has. */
+  function logger(): {
+    lines: string[];
+    info: (m: string) => void;
+    warn: (m: string) => void;
+    error: (m: string) => void;
+  } {
+    const lines: string[] = [];
+
+    return {
+      lines,
+      info: (message) => lines.push(`info ${message}`),
+      warn: (message) => lines.push(`warn ${message}`),
+      error: (message) => lines.push(`error ${message}`),
+    };
+  }
+
+  it('sends each line to the method its level names', () => {
+    const log = logger();
+    const report = loggerReporter({ logger: log });
+
+    report(event({ type: 'serve:started', url: 'http://127.0.0.1:8080/guide.xml' }));
+    report(event({ type: 'site:warning', site: 'a.tv', message: 'odd' }));
+    report(
+      event({
+        type: 'site:failed',
+        site: 'a.tv',
+        error: new Error('no'),
+      }),
+    );
+
+    expect(log.lines).toEqual([
+      'info Serving the guide at http://127.0.0.1:8080/guide.xml',
+      'warn [a.tv] odd',
+      'error FAILED [a.tv] site failed: no',
+    ]);
+  });
+
+  it('passes on only what the level asks for', () => {
+    const log = logger();
+    const report = loggerReporter({ logger: log, level: 'warn' });
+
+    report(event({ type: 'serve:started', url: 'http://127.0.0.1:8080/guide.xml' }));
+    report(event({ type: 'site:warning', site: 'a.tv', message: 'odd' }));
+
+    // A failure is not filtered: it is the one thing a logger is for.
+    report(event({ type: 'site:failed', site: 'a.tv', error: new Error('no') }));
+
+    expect(log.lines).toEqual(['warn [a.tv] odd', 'error FAILED [a.tv] site failed: no']);
+  });
+
+  it('uses debug where the logger has one, and info where it does not', () => {
+    const log = logger();
+    const debugged: string[] = [];
+    const report = loggerReporter({
+      logger: { ...log, debug: (message) => debugged.push(message) },
+      level: 'debug',
+    });
+
+    report(event({ type: 'merge:channel', channelId: 'one' }));
+
+    expect(debugged).toEqual(['merge: channel one done']);
+    expect(log.lines).toEqual([]);
+
+    loggerReporter({ logger: log, level: 'debug' })(
+      event({ type: 'merge:channel', channelId: 'one' }),
+    );
+
+    expect(log.lines).toEqual(['info merge: channel one done']);
   });
 });
 

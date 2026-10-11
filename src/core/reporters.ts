@@ -253,6 +253,8 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       return `${event.path}: ${errorChain(event.error)}`;
     case 'serve:grabFailed':
       return `Scheduled grab failed: ${errorChain(event.error)}`;
+    case 'serve:reloaded':
+      return 'Reloading the channel lists on the next request';
     case 'serve:stopped':
       return 'Stopped serving';
     case 'prune:done':
@@ -343,6 +345,89 @@ export function renderFailure(event: FailureEvent, prefix = true, cause = false)
     default:
       return `FAILED ${where}site failed: ${said(event.error)}`;
   }
+}
+
+/**
+ * The three methods this needs of a logger — pino, bunyan, winston and
+ * `console` all have them, and so does anything written for the occasion.
+ *
+ * A message and nothing else: what a logger does with structure is its own
+ * business, and an event rendered twice — once as a line and once as fields —
+ * is the same news written two ways in one file.
+ */
+export interface ReporterLogger {
+  info(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
+  /** Where there is one; otherwise `info` takes the detail. */
+  debug?(message: string): void;
+}
+
+export interface LoggerReporterOptions {
+  logger: ReporterLogger;
+  /** How much to pass on. Defaults to `info`. */
+  level?: EventLevel;
+  /** Tag each line with the site it is about. On by default. */
+  prefix?: boolean;
+}
+
+/**
+ * Everything a run says, to a logger of your own.
+ *
+ * For a process that already has one — a server under a supervisor, where two
+ * log streams is one too many, and whatever the logger does about files,
+ * rotation and levels should happen to this too. The lines are the ones
+ * {@link textReporter} writes; where they *go* is the logger's business, which
+ * is the whole point.
+ *
+ * ```ts
+ * serveGuide(config, { reporter: loggerReporter({ logger: pino() }) });
+ * ```
+ *
+ * Failures go to `error` whole, rather than being held back for a block at the
+ * end as the text reporter holds them: a logger has its own idea of how to
+ * group things, and a reporter sitting on lines for minutes would be the
+ * wrong one.
+ */
+export function loggerReporter(options: LoggerReporterOptions): Reporter {
+  const { logger, level = 'info', prefix = true } = options;
+  const cause = atLevel('debug', level);
+
+  return (event) => {
+    if (isFailure(event)) {
+      logger.error(renderFailure(event, prefix, cause));
+
+      return;
+    }
+
+    if (!atLevel(event.level, level)) {
+      return;
+    }
+
+    const line = render(event, prefix);
+
+    if (line === undefined) {
+      return;
+    }
+
+    switch (event.level) {
+      case 'error': {
+        logger.error(line);
+        break;
+      }
+      case 'warn': {
+        logger.warn(line);
+        break;
+      }
+      case 'debug': {
+        (logger.debug ?? logger.info).call(logger, line);
+        break;
+      }
+      default: {
+        logger.info(line);
+      }
+    }
+  };
 }
 
 export interface TextReporterOptions {

@@ -1159,6 +1159,10 @@ export async function createGuideHandler(
     // snapshot instead would turn every stray signal into a full re-send.
     resolvedAt = 0;
     checkedAt = 0;
+    // Said as well as done: an app that shares this server's `SIGHUP` reloads
+    // what it keeps beside the guide when it hears this, rather than adding a
+    // second handler for the same signal.
+    emit({ type: 'serve:reloaded' });
   };
 
   const guides = new PQueue({
@@ -1721,7 +1725,15 @@ export async function createGuideHandler(
           ...result.headers,
           ...(text === undefined ? {} : { 'content-length': String(Buffer.byteLength(text)) }),
         });
-        response.end(text);
+
+        // Apart, because the two spellings differ in their overloads where they
+        // differ in nothing else: a `HEAD`, a `304` and a `204` end with no
+        // body at all rather than with an empty one.
+        if (text === undefined) {
+          response.end();
+        } else {
+          response.end(text);
+        }
 
         return;
       }

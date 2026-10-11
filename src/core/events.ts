@@ -355,6 +355,16 @@ export type EpgEventInput =
    * failures as counts and returns normally.
    */
   | { type: 'serve:grabFailed'; error: unknown }
+  /**
+   * The channel lists will be resolved again on the next request.
+   *
+   * Said rather than done, because that is what `reload` does — it marks, and
+   * the next request pays. Its use to a consumer is as a signal of its own: an
+   * app sharing this server's `SIGHUP` reloads whatever it keeps beside the
+   * guide when this arrives, instead of adding a second handler for the same
+   * signal.
+   */
+  | { type: 'serve:reloaded' }
   | { type: 'serve:stopped' };
 
 export type EpgEventType = EpgEventInput['type'];
@@ -411,6 +421,7 @@ export const EVENT_KINDS = {
   'serve:disconnected': { level: 'debug', phase: 'serve' },
   'serve:failed': { level: 'error', phase: 'serve' },
   'serve:grabFailed': { level: 'error', phase: 'serve' },
+  'serve:reloaded': { level: 'info', phase: 'serve' },
   'serve:stopped': { level: 'info', phase: 'serve' },
 } as const satisfies Record<EpgEventType, EventKind>;
 
