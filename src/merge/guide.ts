@@ -10,7 +10,13 @@ import { outputOptions } from '../xmltv/serialize.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import { mergeChannels } from './channel.js';
 import { derivedChannelElement, resolveDerived, shiftProgrammes } from './derive.js';
-import { backfillInto, DEFAULT_FILL_STOP_MS, mergeInto, resolveMatch } from './programme.js';
+import {
+  backfillInto,
+  DEFAULT_FILL_STOP_MS,
+  mergeInto,
+  resolveMatch,
+  type MergeWatch,
+} from './programme.js';
 import type { ChannelSource, RegistryEntry } from './registry.js';
 import { channelSelection, configured, unmatched, unmatchedMessage } from './select.js';
 import type { BuildGuideOptions, FillGapsContext, FillGapsOptions, GuideContext } from './types.js';
@@ -241,6 +247,20 @@ function* blocks(
  * waits a fold longer to be emitted. One day plus the largest offset declared,
  * which is why an offset is held under a day.
  */
+/**
+ * How many near misses are reported in full.
+ *
+ * Enough to see whether they are one channel or all of them, which is the
+ * question a count cannot answer, and few enough that a guide of thousands
+ * carries the same handful as a guide of ten.
+ */
+const MAX_NEAR_MISSES = 5;
+
+/** A programme's title, for saying which one nearly matched which. */
+function titleOf(programme: XmltvProgramme): string {
+  return programme.title[0]?.value ?? '';
+}
+
 export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator<string> {
   const now = options.now ?? new Date();
   const days = [...dayRange(options.startDay ?? toDayString(now), options.days ?? 7)];
@@ -409,6 +429,20 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     mergeSays.warn(unmatchedMessage(missing, selection?.select.size ?? 0));
   }
 
+  /**
+   * What the merge made of the sources, reported once at the end.
+   *
+   * Counters rather than lists, with a handful of near misses kept in full:
+   * on a guide of thousands the count is the alarm and the examples are what
+   * make it actionable, and keeping every one of them would be the one thing
+   * here that grows with the size of the guide.
+   */
+  let combined = 0;
+  let nearMiss = 0;
+  let containers = 0;
+  let clipped = 0;
+  const examples: { channelId: string; gapMs: number; title: string; nearby: string }[] = [];
+
   const listStrategy = channelStrategy === 'merge-programmes' ? programmeStrategy : 'concat';
   const match = resolveMatch(options.merge?.match);
   const {
@@ -485,6 +519,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
           };
         }
       } else if (clipOverlaps && start < nextStart && programme.stop.getTime() > nextStart) {
+        clipped += 1;
         result = { ...result, stop: xmltvDate(next.start) };
       }
     }
@@ -641,6 +676,31 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     let emitted = false;
     /** The offset to write a synthesized time in — the last real one seen. */
     let offset = 0;
+    /**
+     * What one channel's sources made of each other — see `merge:summary`.
+     *
+     * Built only for the lists after the first, which is where the question
+     * means anything: the first list of a day folds into yesterday's tail, and
+     * a programme joining *that* is one source's own broadcast continuing
+     * rather than two sources agreeing.
+     */
+    const watching = (channelId: string): MergeWatch => ({
+      combined: () => {
+        combined += 1;
+      },
+      nearMiss: (gapMs, programme, candidate) => {
+        nearMiss += 1;
+
+        if (examples.length < MAX_NEAR_MISSES) {
+          examples.push({
+            channelId,
+            gapMs,
+            title: titleOf(programme),
+            nearby: titleOf(candidate),
+          });
+        }
+      },
+    });
 
     for await (const { entry, day, lists } of readAhead(
       plan,
@@ -654,8 +714,8 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       options.signal?.throwIfAborted();
 
       if (listStrategy === 'merge') {
-        for (const list of lists) {
-          mergeInto(pending, list, match);
+        for (const [index, list] of lists.entries()) {
+          mergeInto(pending, list, match, index > 0 ? watching(entry.xmltvId) : undefined);
         }
       } else if (listStrategy === 'backfill') {
         // Across the sites of *this day* first, into an array of its own, and
@@ -712,6 +772,8 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
         // same hours at a coarser grain, and keeping both leaves the guide
         // genuinely overlapping.
         if (dropContainers && containedCount(programme, ready, index + 1, pending) >= 2) {
+          containers += 1;
+
           continue;
         }
 
@@ -781,6 +843,10 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     },
     outputOptions(options),
   );
+
+  // After the writing, because that is what pulls the generator above: until
+  // the last programme is out, none of these numbers are final.
+  emit({ type: 'merge:summary', combined, nearMiss, examples, containers, clipped });
 }
 
 /**

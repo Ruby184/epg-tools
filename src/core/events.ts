@@ -282,6 +282,38 @@ export type EpgEventInput =
   | { type: 'pacing:rateLimit'; site: string; waiting: boolean }
   // ── merging, and tidying up ──────────────────────────────────────────────
   | { type: 'merge:channel'; channelId: string }
+  /**
+   * What the merge made of the sources, once the whole guide is out.
+   *
+   * Apart from `merge:done`, which says where a file went: this says how well
+   * the sources agreed, and is emitted wherever a guide is built — `epg build`
+   * and a served guide included, neither of which writes a file the other
+   * event could name.
+   *
+   * It exists because two of this package's quietest failures look like
+   * success. A source whose starts are on a different grid merges into
+   * nothing, and the guide then carries every programme twice; a cleanup
+   * option dropping more than it should leaves a guide that is simply thinner.
+   * Both are invisible in a count of programmes and obvious in these.
+   */
+  | {
+      type: 'merge:summary';
+      /** Programmes a later source joined to one already there. */
+      combined: number;
+      /** Programmes that joined nothing, with something close by. */
+      nearMiss: number;
+      /** A few of them, in full — a count alone says nothing about why. */
+      examples: {
+        channelId: string;
+        gapMs: number;
+        title: string;
+        nearby: string;
+      }[];
+      /** Dropped as a container around programmes published beside it. */
+      containers: number;
+      /** Given an earlier `stop` because they ran into the next programme. */
+      clipped: number;
+    }
   | { type: 'merge:done'; output: string }
   /**
    * A `merge.transform` saying something, and the reason these two exist apart
@@ -369,6 +401,7 @@ export const EVENT_KINDS = {
   'pacing:recovered': { level: 'info', phase: 'grab' },
   'pacing:rateLimit': { level: 'debug', phase: 'grab' },
   'merge:channel': { level: 'debug', phase: 'merge' },
+  'merge:summary': { level: 'info', phase: 'merge' },
   'merge:done': { level: 'info', phase: 'merge' },
   'merge:note': { level: 'info', phase: 'merge' },
   'merge:warning': { level: 'warn', phase: 'merge' },

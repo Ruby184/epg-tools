@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { CacheStore, ChannelDayKey } from '../src/cache/types.js';
+import type { EpgEvent } from '../src/core/events.js';
 import type { GrabberChannel, SiteConfig } from '../src/grabber/types.js';
 import { mergeChannels } from '../src/merge/channel.js';
 import { mergeProgrammeLists, mergeProgrammes } from '../src/merge/programme.js';
@@ -1149,6 +1150,86 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     expect(only.match(/id=["']X["']/g)).toHaveLength(1);
     expect(only).toContain('Správy');
     expect(only).not.toContain('News');
+  });
+
+  it('says how much of the guide the sources agreed on', async () => {
+    const said: Extract<EpgEvent, { type: 'merge:summary' }>[] = [];
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: cacheForBothSites(),
+      days: 1,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:summary') {
+          said.push(event);
+        }
+      },
+    });
+
+    // The two sites describe the 10:00 broadcast; `Film` is site A's alone.
+    expect(said[0]).toMatchObject({ combined: 1, nearMiss: 0, examples: [] });
+  });
+
+  it('counts a source that merged into nothing, and says what it nearly met', async () => {
+    // The quiet failure this exists for: a source published on a different
+    // grid merges with nothing and the guide carries every programme twice,
+    // which no count of programmes can tell from a guide that is simply fuller.
+    const said: Extract<EpgEvent, { type: 'merge:summary' }>[] = [];
+    const output = await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'Správy', 'sk')],
+        // Seven minutes adrift, which is past the five-minute tolerance.
+        [`site-b.com|X|${DAY}`]: [prog('X', '2026-01-15T10:07:00Z', 'News', 'en')],
+      }),
+      days: 1,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:summary') {
+          said.push(event);
+        }
+      },
+    });
+
+    // Both are in the guide, which is the symptom.
+    expect(output).toContain('Správy');
+    expect(output).toContain('News');
+
+    expect(said[0]).toMatchObject({
+      combined: 0,
+      nearMiss: 1,
+      examples: [{ channelId: 'X', gapMs: 420_000, title: 'News', nearby: 'Správy' }],
+    });
+  });
+
+  it('keeps the near misses it reports to a handful, however many there are', async () => {
+    const said: Extract<EpgEvent, { type: 'merge:summary' }>[] = [];
+    const drifting = Array.from({ length: 12 }, (_, index) => index);
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        [`site-a.sk|X|${DAY}`]: drifting.map((hour) =>
+          prog('X', `2026-01-15T${String(hour).padStart(2, '0')}:00:00Z`, 'Správy', 'sk'),
+        ),
+        [`site-b.com|X|${DAY}`]: drifting.map((hour) =>
+          prog('X', `2026-01-15T${String(hour).padStart(2, '0')}:07:00Z`, 'News', 'en'),
+        ),
+      }),
+      days: 1,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:summary') {
+          said.push(event);
+        }
+      },
+    });
+
+    // Counted in full, reported five at a time: the count is the alarm, and
+    // the examples are only there to say whether it is one channel or all.
+    expect(said[0]?.nearMiss).toBe(12);
+    expect(said[0]?.examples).toHaveLength(5);
   });
 
   it('skips missing cache entries silently', async () => {

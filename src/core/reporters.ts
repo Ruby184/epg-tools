@@ -214,6 +214,27 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       // No site on either, so no prefix: a merge transform is the config's own
       // code, and there is nobody to attribute it to.
       return `${event.message}${said(event.data)}`;
+    case 'merge:summary': {
+      // Only what there is: a guide whose sources all line up says one number,
+      // and a run that dropped nothing does not report two noughts every night.
+      const said = [
+        `${count(event.combined, 'programme')} combined`,
+        ...(event.nearMiss > 0 ? [`${String(event.nearMiss)} nearly`] : []),
+        ...(event.containers > 0 ? [`${String(event.containers)} containers dropped`] : []),
+        ...(event.clipped > 0 ? [`${String(event.clipped)} clipped`] : []),
+      ].join(', ');
+      // The examples are the actionable half — a count of near misses says
+      // something is adrift, and these say by how much and on what.
+      const near = event.examples
+        .map(
+          (example) =>
+            `\n  ${example.channelId}: ${took(example.gapMs)} apart — ` +
+            `"${example.title}" / "${example.nearby}"`,
+        )
+        .join('');
+
+      return `Merge: ${said}${near}`;
+    }
     case 'merge:done':
       return `Guide written to ${event.output}`;
     case 'serve:started':
