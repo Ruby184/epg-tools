@@ -183,6 +183,30 @@ describe('createGuideHandler', () => {
     expect(await statusOf('http://[')).toBe(404);
   });
 
+  it('answers the health check as the object it is', async () => {
+    // What an app with a `/status` of its own needs: the state to put inside
+    // it, rather than the JSON of a response it asked itself for and then has
+    // to parse back.
+    const handler = await handlerFor(
+      configFor(['one']),
+      await cacheWith({ one: [programme('one', 6)] }),
+    );
+
+    const { status, headers, body } = await handler.answer({ headers: {}, route: 'health' });
+
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ ok: true, counts: { present: 1, expected: 1 } });
+    expect(headers['content-type']).toBe('application/json; charset=utf-8');
+    // The bytes are the sender's business, and so is their length, which is
+    // only knowable once they exist.
+    expect(headers['content-length']).toBeUndefined();
+
+    // Which every transport then supplies, each in its own way.
+    const overHttp = await handler.fetch('health')(new Request('https://pi.local/h'));
+
+    expect(await overHttp.json()).toEqual(body);
+  });
+
   it('answers a conditional poll out of the answer itself, with no transport in it', async () => {
     const handler = await handlerFor(
       configFor(['one']),

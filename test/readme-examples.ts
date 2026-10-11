@@ -900,11 +900,18 @@ export async function mountedOnAnAppOfMyOwn(): Promise<void> {
     encrypted: true,
   });
 
-  if (typeof answered.body === 'object') {
+  // Three shapes, told apart the way an adapter tells them apart.
+  if (typeof answered.body === 'object' && Symbol.asyncIterator in answered.body) {
     for await (const chunk of answered.body) {
       void chunk.byteLength;
     }
   }
+
+  // And the health check, which is data and says so in the type.
+  const { body: state } = await handler.answer({ headers: {}, route: 'health' });
+
+  void state?.ok;
+  void state?.counts.present;
 
   void (await asFetch(new Request('https://pi.local/epg.xml'))).status;
   void answered.status;

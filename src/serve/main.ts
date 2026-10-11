@@ -332,6 +332,7 @@ export type {
   GuideAnswer,
   GuideHandler,
   GuideHandlerOptions,
+  GuideHealth,
   GuideRequest,
   GuideRoute,
   Replying,

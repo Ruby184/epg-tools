@@ -202,6 +202,28 @@ export type NodeRequest = IncomingMessage | Http2ServerRequest;
 export type NodeResponse = ServerResponse | Http2ServerResponse;
 
 /**
+ * What a health check says, as an object rather than as the JSON of one.
+ *
+ * The same thing {@link GuideHandlerOptions.health} answers over HTTP, for an
+ * app with a `/status` of its own to put inside it — synthesising a request to
+ * read it back out of a response body is the sort of thing a seam exists to
+ * stop.
+ */
+export interface GuideHealth {
+  /** Whether anything at all is cached to serve. */
+  ok: boolean;
+  /** The newest `grabbedAt` in the window, or `null` with nothing cached. */
+  grabbedAt: string | null;
+  /** How old that is, in seconds — `null` for the same reason. */
+  ageSeconds: number | null;
+  window: { startDay: string; days: number };
+  /** The share of the grid that answered: what is worth alerting on. */
+  counts: { present: number; expected: number };
+  /** What shape of document this server is producing — see `outputFingerprint`. */
+  shape: string;
+}
+
+/**
  * Which of the two answers a request is for.
  *
  * Named because it travels: a route decided where an app mounted the guide is
@@ -282,19 +304,23 @@ export interface GuideRequest {
  * it, so a consumer that reads slowly is a merge that runs slowly rather than
  * a guide held in memory.
  */
-export interface GuideAnswer {
+export interface GuideAnswer<TBody = string | AsyncIterable<Uint8Array> | GuideHealth> {
   status: number;
   /** Ready to send as they are — lower-cased, single values. */
   headers: Record<string, string>;
   /**
    * Absent for a `304`, a `204` and every `HEAD`.
    *
-   * A string for the small answers — the health check, a 404 — and an async
-   * iterable for the guide, already compressed if `content-encoding` says so.
-   * Abandoning that iterable is allowed and is the cheap way to stop: it ends
-   * the merge and gives back the slot it was holding.
+   * Three shapes, and whoever sends it turns whichever it is into bytes. A
+   * string for the small answers, like a 404. An async iterable for the guide,
+   * already compressed if `content-encoding` says so — abandoning it is
+   * allowed and is the cheap way to stop, since it ends the merge and gives
+   * back the slot it was holding. And an object for the health check, which is
+   * data rather than a document: fastify serialises one better than this
+   * could, and an app putting it inside a `/status` of its own wants it least
+   * of all as text.
    */
-  body?: string | AsyncIterable<Uint8Array> | undefined;
+  body?: TBody | undefined;
 }
 
 /**
@@ -348,7 +374,12 @@ export interface GuideHandler {
    * Never rejects: a failure is a `500` with the reason already reported,
    * since a caller that has to decide what a thrown merge means is a caller
    * reimplementing this.
+   *
+   * Asked for the health check by name, it says so in the type: `body` is the
+   * state itself, which is what an app embedding it in a `/status` of its own
+   * wants and what it would otherwise have to narrow three ways to reach.
    */
+  answer(request: GuideRequest & { route: 'health' }): Promise<GuideAnswer<GuideHealth>>;
   answer(request: GuideRequest): Promise<GuideAnswer>;
   /**
    * Build a Node request handler — what express, fastify and `http` itself all
@@ -747,6 +778,31 @@ function requestBase(request: GuideRequest): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Whether this body is the guide — bytes arriving over time rather than a value.
+ *
+ * The one question every transport has to ask, asked the same way by all of
+ * them: a stream is piped, and everything else is a string it can end with.
+ */
+function streamed(body: GuideAnswer['body']): body is AsyncIterable<Uint8Array> {
+  return typeof body === 'object' && Symbol.asyncIterator in body;
+}
+
+/**
+ * The bytes of a body that is not the guide, or `undefined` where there is none.
+ *
+ * An object comes back indented and newline-terminated: the one answer shaped
+ * that way is a health check, and the one place a health check is read is a
+ * terminal.
+ */
+function textOf(body: string | GuideHealth | undefined): string | undefined {
+  if (body === undefined || typeof body === 'string') {
+    return body;
+  }
+
+  return `${JSON.stringify(body, undefined, 2)}\n`;
 }
 
 /**
@@ -1207,53 +1263,26 @@ export async function createGuideHandler(
       const now = options.now ?? new Date();
 
       if (route === 'health') {
-        // `current` rather than a stored snapshot: a server whose only traffic
-        // is its own health check would otherwise never take one and would
-        // report unhealthy for as long as it ran. It is throttled and
-        // single-flighted, and reads metadata only.
-        const { print } = await current(now);
-        const window = windowOf(now);
-        // The one unambiguous "cannot do its job": nothing at all is cached, so
-        // there is no guide to serve. How stale is too stale is the operator's
-        // judgement and not this server's, so age is reported and not ruled on.
-        const ok = print.present > 0;
-        const body = `${JSON.stringify(
-          {
-            ok,
-            // Not 1970: with nothing cached the newest `grabbedAt` is zero, and
-            // a date is a worse answer than saying there is none.
-            grabbedAt: ok ? print.lastModified.toISOString() : null,
-            ageSeconds: ok
-              ? Math.max(0, Math.round((now.getTime() - print.lastModified.getTime()) / 1000))
-              : null,
-            window: { startDay: window.startDay, days: window.days.length },
-            // Coverage, not a bare count — the share of the grid that answered
-            // is the thing worth alerting on, and the sweep has both numbers.
-            counts: { present: print.present, expected: print.expected },
-            // No site or channel names, which is the same line
-            // `DEFAULT_SERVE_HOST` draws. Aggregates only.
-            shape,
-          },
-          undefined,
-          2,
-        )}\n`;
+        const state = await healthOf(now);
 
-        done(ok ? 200 : 503);
+        done(state.ok ? 200 : 503);
 
         return {
-          status: ok ? 200 : 503,
+          status: state.ok ? 200 : 503,
           headers: {
             'content-type': 'application/json; charset=utf-8',
             // No etag and no compression: the body changes every second by
             // construction, so a validator would never match and a few hundred
             // bytes are not worth a compressor.
             'cache-control': 'no-store',
-            'content-length': String(Buffer.byteLength(body)),
             ...allowed,
           },
-          // HEAD reaches here too, the method gate being above the routing —
-          // and a body on one is a protocol error, not a waste.
-          ...(method === 'HEAD' ? {} : { body }),
+          // As the object it is, for whoever is sending it to turn into bytes
+          // — fastify serialises one better than this could, and an app
+          // embedding it in a `/status` of its own wants it least of all as
+          // text. HEAD reaches here too, the method gate being above the
+          // routing, and a body on one is a protocol error rather than a waste.
+          ...(method === 'HEAD' ? {} : { body: state }),
         };
       }
 
@@ -1338,6 +1367,40 @@ export async function createGuideHandler(
       };
     }
   };
+
+  /**
+   * Whether this server can do its job, and how well.
+   *
+   * `current` rather than a stored snapshot: a server whose only traffic is its
+   * own health check would otherwise never take one, and would report unhealthy
+   * for as long as it ran. It is throttled and single-flighted, and reads
+   * metadata only — so a container healthcheck costs what a poll's `304` costs.
+   */
+  async function healthOf(now: Date): Promise<GuideHealth> {
+    const { print } = await current(now);
+    const window = windowOf(now);
+    // The one unambiguous "cannot do its job": nothing at all is cached, so
+    // there is no guide to serve. How stale is too stale is the operator's
+    // judgement and not this server's, so age is reported and not ruled on.
+    const ok = print.present > 0;
+
+    return {
+      ok,
+      // Not 1970: with nothing cached the newest `grabbedAt` is zero, and a
+      // date is a worse answer than saying there is none.
+      grabbedAt: ok ? print.lastModified.toISOString() : null,
+      ageSeconds: ok
+        ? Math.max(0, Math.round((now.getTime() - print.lastModified.getTime()) / 1000))
+        : null,
+      window: { startDay: window.startDay, days: window.days.length },
+      // Coverage, not a bare count — the share of the grid that answered is the
+      // thing worth alerting on, and the sweep has both numbers.
+      counts: { present: print.present, expected: print.expected },
+      // No site or channel names, which is the same line `DEFAULT_SERVE_HOST`
+      // draws. Aggregates only.
+      shape,
+    };
+  }
 
   /**
    * Which answer a path asks for.
@@ -1636,22 +1699,34 @@ export async function createGuideHandler(
         encrypted: (request.socket as TLSSocket).encrypted === true,
       });
 
-      // One spelling, two unrelated declarations of it: HTTP/1 and HTTP/2's
-      // compatibility API both have `writeHead(status, headers)` and TypeScript
-      // will not call it across the union of their overloads.
-      (response as ServerResponse).writeHead(result.status, result.headers);
+      /**
+       * The status and headers, sent.
+       *
+       * A function of its own because `writeHead` has one spelling and two
+       * unrelated declarations of it: HTTP/1 and HTTP/2's compatibility API
+       * both have `writeHead(status, headers)`, and TypeScript will not call it
+       * across the union of their overloads.
+       */
+      const head = (status: number, headers: Record<string, string>): void => {
+        (response as ServerResponse).writeHead(status, headers);
+      };
 
-      if (result.body === undefined) {
-        response.end();
+      if (!streamed(result.body)) {
+        // Serialised here rather than in the answer, because how bytes are
+        // made is the transport's half of the question — and their length is
+        // knowable only once they are.
+        const text = textOf(result.body);
+
+        head(result.status, {
+          ...result.headers,
+          ...(text === undefined ? {} : { 'content-length': String(Buffer.byteLength(text)) }),
+        });
+        response.end(text);
 
         return;
       }
 
-      if (typeof result.body === 'string') {
-        response.end(result.body);
-
-        return;
-      }
+      head(result.status, result.headers);
 
       try {
         await pipeline(Readable.from(result.body), response, { signal: gone.signal });
@@ -1682,8 +1757,8 @@ export async function createGuideHandler(
         encrypted: url.protocol === 'https:',
       });
 
-      if (result.body === undefined || typeof result.body === 'string') {
-        return new Response(result.body ?? null, {
+      if (!streamed(result.body)) {
+        return new Response(textOf(result.body) ?? null, {
           status: result.status,
           headers: result.headers,
         });
@@ -1737,14 +1812,16 @@ export async function createGuideHandler(
 
       reply.status(result.status).headers(result.headers);
 
-      // A stream, so that the framework's own backpressure and its hooks both
-      // apply — and so that a reply abandoned half way ends the merge, which is
-      // what destroying the stream does to the generator behind it.
-      return reply.send(
-        result.body === undefined || typeof result.body === 'string'
-          ? result.body
-          : Readable.from(result.body),
-      );
+      // A stream for the guide, so that the framework's own backpressure and
+      // its hooks both apply — and so that a reply abandoned half way ends the
+      // merge, which is what destroying the stream does to the generator
+      // behind it. Anything else goes over as it is: fastify serialises an
+      // object itself, and better than this could, since a schema it was given
+      // compiles to a serialiser.
+      // Anything that is not the guide goes over as it is, an object included:
+      // fastify serialises one itself, and better than this could, since a
+      // schema it was given compiles to a serialiser.
+      return reply.send(streamed(result.body) ? Readable.from(result.body) : result.body);
     };
 
   options.reloadOn?.addEventListener('reload', onReload);
@@ -1761,7 +1838,12 @@ export async function createGuideHandler(
   }
 
   return {
-    answer,
+    // Cast because the overload is a promise TypeScript cannot check from one
+    // implementation: that the body is the health state exactly when the route
+    // asked for was `health`. The branch that makes it true is twenty lines up
+    // and reads plainly; a conditional return type would move the same claim
+    // into the signature and still not prove it.
+    answer: answer as GuideHandler['answer'],
     node,
     fetch,
     fastify,

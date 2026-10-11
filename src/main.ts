@@ -272,6 +272,7 @@ export type {
   GuideListening,
   GuideHandler,
   GuideHandlerOptions,
+  GuideHealth,
   GuideRequest,
   GuideRoute,
   GuideServer,

@@ -339,11 +339,23 @@ const { status, headers, body } = await handler.answer({
 });
 ```
 
-`body` is absent for a `304`, a `204` and every `HEAD`, a string for the small
-answers, and an async iterable of bytes for the guide — already compressed if
-`content-encoding` says so. Abandoning that iterable is the supported way to
-stop: it ends the merge and gives back the concurrency slot. `answer` never
-rejects; a failure is a `500` with the reason already reported.
+`body` is absent for a `304`, a `204` and every `HEAD`; a string for the small
+answers; an async iterable of bytes for the guide, already compressed if
+`content-encoding` says so; and **an object for the health check**, which is
+data rather than a document. Whoever sends it turns it into bytes — which is
+how fastify gets to serialise it itself, and how an app that reports its own
+status reads it:
+
+```ts
+const { body: health } = await handler.answer({ headers: {}, route: 'health' });
+
+reply.send({ ...mine, epg: health });   // { ok, grabbedAt, ageSeconds, window, counts, shape }
+```
+
+Asking for `health` by name says so in the type, so that body needs no
+narrowing. Abandoning the guide's iterable is the supported way to stop: it
+ends the merge and gives back the concurrency slot. `answer` never rejects; a
+failure is a `500` with the reason already reported.
 
 To keep the command instead of writing a program, `serve.server` hands
 `epg serve` a server of yours, returning the `http.Server` it is listening on
