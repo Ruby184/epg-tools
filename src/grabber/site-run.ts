@@ -164,6 +164,13 @@ export class SiteRun {
    * actually wants — "which of my six sources is the one that failed" has no
    * answer in a single total.
    */
+  /** Requests sent, which is slots taken — see {@link SiteRun.#sending}. */
+  #sent = 0;
+  /** How long they spent waiting on the source, pacing not included. */
+  #spent = 0;
+  /** When this site's turn began, for the wall clock the other two are not. */
+  #began = 0;
+
   readonly #counts: GrabCounts = {
     fetched: 0,
     empty: 0,
@@ -237,6 +244,41 @@ export class SiteRun {
     this.#pipelines = new PQueue({ concurrency: Math.max(1, config.concurrency ?? 1) });
   }
 
+  /**
+   * One request's worth of this site's queue, counted and timed as it goes.
+   *
+   * The queue is the one place every request passes through — the channel list,
+   * a batch, a stream's pass, and whatever a parse asks for through
+   * `ctx.paced`. Counting the `request:started` events instead would miss the
+   * last of those and report a streamed site as having made one request for a
+   * document it fetched a hundred times.
+   *
+   * Timed from inside the task rather than from the call, for the reason the
+   * `request:done` event is: what a site waited for a slot is pacing, not the
+   * source, and adding it in would make a site paced to one request a second
+   * look like a site answering in a second.
+   */
+  #sending<T>(
+    task: (options: { signal?: AbortSignal | undefined }) => Promise<T>,
+    options?: { priority?: number },
+  ): Promise<T> {
+    this.#sent += 1;
+
+    return this.#run.enqueue(
+      this.#requests,
+      async (slot) => {
+        const began = Date.now();
+
+        try {
+          return await task(slot);
+        } finally {
+          this.#spent += Date.now() - began;
+        }
+      },
+      options,
+    );
+  }
+
   /** Count one channel-day, for this site and for the run it is part of. */
   #count(field: keyof GrabCounts, delta = 1): void {
     this.#counts[field] += delta;
@@ -254,10 +296,10 @@ export class SiteRun {
    * had resolved.
    */
   async run(): Promise<void> {
-    const { enqueue } = this.#run;
+    this.#began = Date.now();
 
     try {
-      await this.#work(enqueue);
+      await this.#work();
     } catch (error) {
       // Counted and said here rather than left to the run, and that ordering is
       // load-bearing: p-queue rejects a cancelled task's promise while the task
@@ -278,12 +320,21 @@ export class SiteRun {
       await this.#state.save();
       // For a failed site too, where every count is nought — which is the truth,
       // and reads correctly beside the `site:failed` that says why.
-      this.#run.emit({ type: 'site:done', site: this.#site, ...this.#counts });
+      this.#run.emit({
+        type: 'site:done',
+        site: this.#site,
+        requests: this.#sent,
+        // Wall clock, which is the one a nightly run is long by — and nothing
+        // like the sum below once a site runs several requests at once.
+        ms: Date.now() - this.#began,
+        requestMs: this.#spent,
+        ...this.#counts,
+      });
     }
   }
 
   /** The work itself, so {@link run} is only about letting go of things. */
-  async #work(enqueue: Run['enqueue']): Promise<void> {
+  async #work(): Promise<void> {
     // Both groups at once, and before anything asks the source: a site's own code
     // expects its bag from the first request onwards, and what is stored about a
     // url decides what that request even looks like. Two small reads with nothing
@@ -304,7 +355,7 @@ export class SiteRun {
     // request after it, rather than the two landing back to back. The signal it
     // is handed is p-queue's, this task's own: what governs the slot governs the
     // work in it.
-    this.#channels = await enqueue(this.#requests, ({ signal }) =>
+    this.#channels = await this.#sending(({ signal }) =>
       resolveChannels(this.#config, {
         // The same pair its requests and parses get: a channel list that has to
         // be fetched is the first place a site has anything to say.
@@ -587,7 +638,7 @@ export class SiteRun {
             // A request of the parse's own goes through the site's queue, like
             // the request being parsed did — ahead of the planned ones, so a
             // channel-day in hand is finished rather than joined by another.
-            paced: (task) => enqueue(this.#requests, task, { priority: 1 }),
+            paced: (task) => this.#sending(task, { priority: 1 }),
           }),
         );
 
@@ -712,7 +763,7 @@ export class SiteRun {
     config: SiteConfig<any, BatchingOption, any>,
     request: Request,
   ): Promise<void> {
-    const { enqueue, signal } = this.#run;
+    const { signal } = this.#run;
 
     if (signal?.aborted) {
       return;
@@ -733,7 +784,7 @@ export class SiteRun {
       // work for the first request of a site and silently for none of the rest.
       // Around the site's call and nothing else, which is also what keeps a
       // request made later from inside `parseDay` out of it.
-      payload = await enqueue(this.#requests, ({ signal: taskSignal }) => {
+      payload = await this.#sending(({ signal: taskSignal }) => {
         // Timed from inside the task, so what is reported is the request rather
         // than the wait for a slot — a site paced to one request a second would
         // otherwise report every request as having taken a second.
@@ -804,7 +855,7 @@ export class SiteRun {
    * nothing is waiting behind that slot.
    */
   async #streamPipeline(config: StreamSiteConfig<any>, request: Request): Promise<void> {
-    const { emit, enqueue, localWork, signal } = this.#run;
+    const { emit, localWork, signal } = this.#run;
 
     if (signal?.aborted) {
       return;
@@ -850,7 +901,7 @@ export class SiteRun {
             ...this.#deps(signal),
             // As a parse's is, and ahead of the planned ones for the same
             // reason: a pass already under way is finished rather than joined.
-            paced: (task) => enqueue(this.#requests, task, { priority: 1 }),
+            paced: (task) => this.#sending(task, { priority: 1 }),
           }),
         )) {
           // Between emissions, which is as often as this has anything to say: a

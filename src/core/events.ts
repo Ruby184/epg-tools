@@ -196,7 +196,24 @@ export type EpgEventInput =
       entries: number;
       requests: number;
     }
-  | ({ type: 'site:done'; site: string } & GrabCounts)
+  /**
+   * The site is finished, with what it fetched and what it cost.
+   *
+   * The cost is three numbers because they answer three questions and are
+   * routinely confused: `requests` is how many times the source was asked —
+   * every slot the site's queue gave out, a `ctx.paced` fetch inside a parse
+   * included; `ms` is how long the site took, which is the one a nightly run is
+   * long by; and `requestMs` is how long those requests spent waiting on the
+   * source, which is less than `ms` where a site waits on its own pacing, and
+   * more than it where a site runs several at once.
+   */
+  | ({
+      type: 'site:done';
+      site: string;
+      requests: number;
+      ms: number;
+      requestMs: number;
+    } & GrabCounts)
   /** The site could not be read or run at all, so none of it was grabbed. */
   | { type: 'site:failed'; site: string; error: unknown }
   /** The site's own code, saying something — `ctx.log`. */

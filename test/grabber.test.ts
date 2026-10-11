@@ -1016,6 +1016,47 @@ describe('grab', () => {
     expect(seen?.signal?.aborted).toBe(true);
   });
 
+  it('counts what a site asked for, a parse’s own requests included', async () => {
+    // Counted at the queue rather than off the `request:*` events, which is the
+    // difference this asserts: a parse's fetch takes a slot and is a request to
+    // the same source, but no event names it — and a streamed site, which emits
+    // one pair per pass, would report a document fetched a hundred times as one
+    // request.
+    const cache = new MemoryCache();
+    const done: { requests: number; ms: number; requestMs: number }[] = [];
+
+    const config = makeConfig({
+      days: 2,
+      async request() {
+        return {};
+      },
+      async parseDay({ day, paced }) {
+        await paced(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        });
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    await grab([config], {
+      cache,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'site:done') {
+          done.push({ requests: event.requests, ms: event.ms, requestMs: event.requestMs });
+        }
+      },
+    });
+
+    // The channel list, two days, and the fetch each parse made.
+    expect(done[0]?.requests).toBe(5);
+    // Spent waiting on the source, which here is the two sleeps and nothing
+    // like the whole site.
+    expect(done[0]?.requestMs).toBeGreaterThanOrEqual(10);
+    expect(done[0]?.ms).toBeGreaterThanOrEqual(done[0]!.requestMs);
+  });
+
   it('paces a request a parse makes in the site queue, like any other', async () => {
     const cache = new MemoryCache();
     const at: string[] = [];

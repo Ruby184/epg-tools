@@ -185,6 +185,40 @@ describe('render', () => {
       '[a.tv] one 2026-09-01: answered in 412ms',
     ],
     [
+      {
+        type: 'site:done',
+        site: 'a.tv',
+        requests: 96,
+        ms: 42_000,
+        requestMs: 28_500,
+        fetched: 412,
+        empty: 0,
+        fromCache: 8,
+        unchanged: 0,
+        failed: 0,
+        sitesFailed: 0,
+      },
+      '[a.tv] 412 fetched, 8 from cache, 0 failed — 96 requests in 42s, 29s waiting',
+    ],
+    [
+      {
+        type: 'site:done',
+        site: 'b.tv',
+        requests: 1,
+        ms: 2543,
+        requestMs: 2100,
+        fetched: 0,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 0,
+        sitesFailed: 1,
+      },
+      // Below ten seconds it stays in milliseconds, which is where a single
+      // request lives; `1 request` rather than `1 requests`.
+      '[b.tv] 0 fetched, 0 from cache, 0 failed, 1 site answered nothing — 1 request in 2543ms, 2100ms waiting',
+    ],
+    [
       { type: 'pacing:rateLimit', site: 'a.tv', waiting: true },
       '[a.tv] rate limit reached, waiting for the window',
     ],

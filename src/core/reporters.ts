@@ -64,6 +64,33 @@ function count(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
+/**
+ * A duration, in the unit somebody reading a nightly run would use.
+ *
+ * Milliseconds below ten seconds, because that is where a request lives;
+ * seconds and minutes above it, because `2543871ms` is a number nobody
+ * subtracts in their head.
+ */
+function took(ms: number): string {
+  if (ms < 10_000) {
+    return `${String(ms)}ms`;
+  }
+
+  const seconds = Math.round(ms / 1000);
+
+  return seconds < 600
+    ? `${String(seconds)}s`
+    : `${String(Math.floor(seconds / 60))}m${String(seconds % 60).padStart(2, '0')}s`;
+}
+
+/** What a site cost the run, which is not what it fetched. */
+function cost(event: { requests: number; ms: number; requestMs: number }): string {
+  // The two times are kept apart rather than averaged into one: a site waiting
+  // on its own `rateLimit` and a site waiting on a slow source look identical
+  // in a total, and are the opposite problems.
+  return `${count(event.requests, 'request')} in ${took(event.ms)}, ${took(event.requestMs)} waiting`;
+}
+
 /** What a run or a site came to, in the one form both say it. */
 function counts({ fetched, empty, fromCache, unchanged, failed, sitesFailed }: GrabCounts): string {
   // A day that came back with nothing is not a failure — a channel with no
@@ -132,7 +159,7 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
         `${event.entries} to fetch in ${event.requests} request(s)`
       );
     case 'site:done':
-      return `${at(event.site, prefix)}${counts(event)}`;
+      return `${at(event.site, prefix)}${counts(event)} — ${cost(event)}`;
     case 'site:note':
     case 'site:warning':
       // The fields go on the end rather than being left to the JSON reporter:
