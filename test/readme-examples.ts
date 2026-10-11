@@ -10,6 +10,7 @@
  */
 
 import { createServer } from 'node:http';
+import ky, { HTTPError } from 'ky';
 import { createSecureServer } from 'node:http2';
 import { createServer as createHttpsServer } from 'node:https';
 import Fastify from 'fastify';
@@ -870,6 +871,63 @@ export const coveredPerChannel = defineConfig({
       return best ? [best] : offers.slice(0, 1);
     },
   },
+});
+
+// --- docs/site-config.md: A source that is not UTF-8 ----------------------
+export const notUtf8 = defineSiteConfig({
+  site: 'cp1250.example.tv',
+  channels: [{ xmltvId: 'one', siteId: '1' }],
+  async request({ channel, day, http }) {
+    const bytes = await http.get(`program/${channel.siteId}/${day}`).arrayBuffer();
+
+    return new TextDecoder('windows-1250').decode(bytes);
+  },
+  parseDay: () => [],
+});
+
+// --- docs/site-config.md: A token that expires part way through ------------
+const auth = ky.create({ prefix: 'https://api.example.tv' });
+
+let session: { token: string; until: number } | undefined;
+
+async function sessionToken(): Promise<string> {
+  if (session === undefined || Date.now() > session.until - 60_000) {
+    const fresh = await auth
+      .post('login', { json: { user: 'u' } })
+      .json<{ token: string; ttl: number }>();
+
+    session = { token: fresh.token, until: Date.now() + fresh.ttl * 1000 };
+  }
+
+  return session.token;
+}
+
+export const renewing = defineSiteConfig({
+  site: 'expiring.example.tv',
+  channels: [{ xmltvId: 'one', siteId: '1' }],
+  ky: {
+    prefix: 'https://api.example.tv',
+    hooks: {
+      beforeRequest: [
+        async ({ request }) => {
+          request.headers.set('authorization', `Bearer ${await sessionToken()}`);
+        },
+      ],
+      beforeRetry: [
+        async ({ request, error }) => {
+          if (error instanceof HTTPError && error.response.status === 401) {
+            session = undefined;
+            request.headers.set('authorization', `Bearer ${await sessionToken()}`);
+          }
+        },
+      ],
+    },
+    retry: { limit: 2, statusCodes: [401, 429, 500, 502, 503, 504] },
+  },
+  async request() {
+    return {};
+  },
+  parseDay: () => [],
 });
 
 // --- docs/api.md: On a server of your own ----------------------------------

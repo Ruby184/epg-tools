@@ -365,6 +365,94 @@ per-programme fan-out belongs here rather than there.
 How many responses a site holds while parsing them is its `concurrency`: one
 per unit, so a site set to fetch two at a time never has a third in memory.
 
+### A source that is not UTF-8
+
+`response.text()` is UTF-8 and nothing else — `fetch` has no way to be told
+otherwise, whatever the `Content-Type` says. A source in `windows-1250` or
+`iso-8859-2` read that way comes out with replacement characters in every
+accented word, which looks like a parsing bug and is not one.
+
+Read the bytes and decode them yourself:
+
+```ts
+async request({ channel, day, http }) {
+  const bytes = await http.get(`program/${channel.siteId}/${day}`).arrayBuffer();
+
+  return new TextDecoder('windows-1250').decode(bytes);
+},
+```
+
+`TextDecoder` is built into Node and knows every label the WHATWG encoding
+standard does, so `windows-1250`, `iso-8859-2` and `cp1251` all work.
+`parseM3uFile` takes a `charset` for the same reason, and does the same thing
+with it.
+
+### A token that expires part way through
+
+A session that lasts half an hour is shorter than a grab of fourteen days
+across several hundred channels, so the question is not whether it expires but
+what happens when it does. Two halves, and both are worth having:
+
+```ts
+import ky, { HTTPError } from 'ky';
+
+// A client of its own, and not the site's: logging in through the instance
+// whose `beforeRequest` asks for a token is a hook calling itself.
+const auth = ky.create({ prefix: 'https://api.example.tv' });
+
+let session: { token: string; until: number } | undefined;
+
+/** Renewed before it expires, with a minute to spare for a slow request. */
+async function token(): Promise<string> {
+  if (session === undefined || Date.now() > session.until - 60_000) {
+    const fresh = await auth.post('login', { json: { … } }).json<{ token: string; ttl: number }>();
+
+    session = { token: fresh.token, until: Date.now() + fresh.ttl * 1000 };
+  }
+
+  return session.token;
+}
+
+const example = defineSiteConfig({
+  site: 'example.tv',
+  ky: {
+    prefix: 'https://api.example.tv',
+    hooks: {
+      beforeRequest: [
+        // A state object rather than the request itself: ky 2 hands hooks
+        // `{ request, options, retryCount }`.
+        async ({ request }) => {
+          request.headers.set('authorization', `Bearer ${await token()}`);
+        },
+      ],
+      // The other half: what to do when it expired anyway. A clock a few
+      // seconds out, a source that revokes early, a request that waited behind
+      // a rate limit for longer than the token had left.
+      beforeRetry: [
+        async ({ request, error }) => {
+          if (error instanceof HTTPError && error.response.status === 401) {
+            session = undefined;
+            request.headers.set('authorization', `Bearer ${await token()}`);
+          }
+        },
+      ],
+    },
+    retry: { limit: 2, statusCodes: [401, 429, 500, 502, 503, 504] },
+  },
+  // …
+});
+```
+
+Renewing on a `401` **and** before expiry rather than either alone: renewing
+early keeps the grab from taking a failed request per expiry, and the retry is
+what covers the times the early renewal was not early enough. `401` has to be
+in `statusCodes` for ky to retry it at all — it is not there by default, since
+for most sources a `401` means the credentials are wrong rather than stale.
+
+Keep the session in module scope or in [the site's own
+state](#remembering-something-between-runs), not in a closure per request: the
+whole point is that one renewal serves every request that follows it.
+
 ### Fixing up one source
 
 `transform` is for what is wrong with a *particular source* rather than with the

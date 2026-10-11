@@ -112,13 +112,45 @@ the whole answer to "what does the default verbosity show?".
 | group | types |
 |---|---|
 | the run | `run:cancelled`, `grab:done` |
-| a site | `site:started`, `site:done`, `site:failed`, `site:note`, `site:warning` (the last two carrying whatever [fields the site attached](./site-config.md#saying-something)) |
+| a site | `site:started`, `site:done` (its counts plus what it cost: `requests`, `ms`, `requestMs`), `site:failed`, `site:note`, `site:warning` (the last two carrying whatever [fields the site attached](./site-config.md#saying-something)) |
 | one channel-day | `entry:cached`, `entry:fetched`, `entry:appended`, `entry:unchanged`, `entry:failed` |
 | one request | `request:started`, `request:done` (with `ms`), `request:failed` |
 | a whole-document source | `stream:gaps`, `stream:ignored` |
 | pacing | `pacing:held`, `pacing:slowed`, `pacing:recovered`, `pacing:rateLimit` |
-| merging, tidying | `merge:channel`, `merge:done`, `merge:note`, `merge:warning`, `prune:done` |
-| [serving](./configuration.md#serving-the-guide) | `serve:started` (with the `url`), `serve:response` (`method`, `path`, `status`, `ms`), `serve:disconnected`, `serve:failed`, `serve:stopped` |
+| merging, tidying | `merge:channel`, `merge:summary` (what the sources made of each other), `merge:done`, `merge:note`, `merge:warning`, `prune:done` |
+| [serving](./configuration.md#serving-the-guide) | `serve:started` (with the `url`), `serve:response` (`method`, `path`, `status`, `ms`), `serve:reloaded`, `serve:disconnected`, `serve:failed`, `serve:stopped` |
+
+### What a run cost, and what the merge made of it
+
+Two of these are worth knowing about before you need them, because they answer
+questions that are otherwise answered by hand.
+
+`site:done` says what the site **cost**, beside what it fetched. `requests` is
+how many times the source was asked — every slot the site's queue gave out, a
+`ctx.paced` fetch inside a parse included, which is why it is not the same as
+counting `request:done` events. `ms` is how long the site took; `requestMs` is
+how long its requests spent waiting on the source. A site whose `ms` is far
+above its `requestMs` is waiting on its own `rateLimit`; one where they are
+close is waiting on the source. That is the measurement to take before tuning
+either.
+
+`merge:summary` says what the sources made of each other, once the last
+programme is out:
+
+```
+Merge: 4821 programmes combined, 37 nearly, 112 containers dropped
+  sport.sk: 7m apart — "Správy" / "Správy TV"
+```
+
+`combined` is programmes a later source joined to one already there. `nearMiss`
+is programmes that joined nothing with something close by — the quiet failure
+that matters, because a source published on a different grid merges with
+nothing and the guide then carries every programme twice. A gap larger than
+`merge.match.startToleranceMs` means they failed on time; smaller means they
+failed on titles. Counted in full, with the first few reported whole, since on
+a guide of thousands the count is the alarm and the examples only have to say
+whether it is one channel or all of them. `containers` and `clipped` are what
+`dropContainers` and `clipOverlaps` took away.
 
 Two things about the shape are deliberate, and both are the difference between a
 structured sink and a string one. **A failed request is one event, not one per
@@ -141,6 +173,29 @@ are the same act:
 | `textReporter({ stream, errorStream?, level?, failures?, failureCap?, prefix? })` | lines of text — what a person reads and a CI log keeps |
 | `jsonReporter({ stream, level?, pretty? })` | one JSON object per line, for a pipeline |
 | `progressReporter({ stream, … })` | one line, rewritten in place — `textReporter`'s options, plus a cursor |
+| `loggerReporter({ logger, level?, prefix? })` | the same lines, to a logger you already have |
+
+`loggerReporter` is for a process that logs for itself — a server under a
+supervisor, where two log streams is one too many. The `logger` needs `info`,
+`warn` and `error` taking a message, which pino, bunyan, winston and `console`
+all have; `debug` is used where there is one. Failures go to `error` whole
+rather than being held back for a block at the end, since a logger has its own
+idea of how to group things.
+
+```ts
+serveGuide(config, { reporter: loggerReporter({ logger: pino() }) });
+```
+
+It is also where a supervisor's readiness ping belongs — this package sends
+none, because a library writing to an IPC channel nobody asked it to is a
+surprise rather than a feature:
+
+```ts
+reporter: (event) => {
+  if (event.type === 'serve:started') process.send?.('ready');   // pm2 wait_ready
+  log(event);
+},
+```
 
 ### Naming one in a config
 
