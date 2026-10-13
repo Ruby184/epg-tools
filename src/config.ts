@@ -18,7 +18,7 @@ import type { EpgServeConfig } from './serve/config.js';
 import type { AnySiteConfig } from './grabber/types.js';
 import type { DerivedChannels, GuideMeta, MergeOptions } from './merge/types.js';
 import type { SerializeOptions } from './xmltv/serialize.js';
-import type { ReporterFactory, ReporterName } from './core/reporters.js';
+import type { EpgEventSink, ReporterFactory, ReporterName } from './core/reporters.js';
 
 /**
  * What builds the driver a run keeps its cache in.
@@ -219,6 +219,27 @@ export interface EpgConfig {
    * function. See [reporting a run](../docs/api.md#reporting-what-a-run-is-doing).
    */
   reporter?: ReporterName | ReporterFactory;
+  /**
+   * An emitter of your own, told everything, whatever `--reporter` says.
+   *
+   * Apart from {@link reporter} because the two answer different questions.
+   * That one is how a run talks to whoever started it, which is an operator's
+   * preference and so a flag can overrule it. This is what the *program* does
+   * with what happens — a readiness ping, a reload, a metric — which nobody
+   * running `--reporter json` meant to turn off.
+   *
+   * ```ts
+   * const events = new EventEmitter<EpgEventMap>();
+   *
+   * events.on('serve:reloaded', () => void reloadMyOwnThings());
+   *
+   * export default defineConfig({ sites, output, events });
+   * ```
+   *
+   * Read by the CLI, since a library caller passes its own `reporter` and can
+   * put `emitterReporter` in it with `combineReporters`.
+   */
+  events?: EpgEventSink;
 }
 
 /** Builds the config from whatever answered the questions. */

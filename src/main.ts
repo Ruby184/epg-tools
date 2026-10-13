@@ -16,6 +16,7 @@ export type {
   Emit,
   EpgEvent,
   EpgEventInput,
+  EpgEventMap,
   EpgEventType,
   EventKind,
   EventLevel,
@@ -29,6 +30,8 @@ export type {
 export {
   DEFAULT_FAILURE_CAP,
   FAILURE_MODES,
+  combineReporters,
+  emitterReporter,
   isFailure,
   jsonReporter,
   loggerReporter,
@@ -41,6 +44,7 @@ export {
 } from './core/reporters.js';
 export type {
   FailureEvent,
+  EpgEventSink,
   FailureMode,
   JsonReporterOptions,
   LoggerReporterOptions,

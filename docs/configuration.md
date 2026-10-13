@@ -122,6 +122,7 @@ so it solves half a problem.
 | `serve` | `{ port?, host?, path?, compress?, cors?, baseUrl? }` | `8080`, `127.0.0.1`, `/guide.xml`, `gzip`, off, none | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). |
 | `allowMissing` | `number \| string` | none — anything missing fails | How much of the guide may be missing and the run still exit **0**: a number of channel-days, or a share like `'5%'` — see [allowing some of the guide to be missing](#allowing-some-of-the-guide-to-be-missing). |
 | `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'progress'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
+| `events` | an `EventEmitter` | none | An emitter of your own, told everything, **whatever `--reporter` says** — a readiness ping, a reload, a metric. Type it with `EpgEventMap` and each listener's argument is the event it asked for. See [an emitter, and several sinks at once](./api.md#an-emitter-and-several-sinks-at-once). |
 
 ### Root `<tv>` attributes
 

@@ -21,7 +21,13 @@ import { GrabberError } from '../core/error.js';
 import { OptionError, parseOptions } from '../core/options.js';
 import { dayToDate, toDayString } from '../core/days.js';
 import { silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
-import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
+import {
+  combineReporters,
+  emitterReporter,
+  FAILURE_MODES,
+  reporterFor,
+  REPORTER_NAMES,
+} from '../core/reporters.js';
 import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
 import { REPORT_FORMATS, type ReportFormat } from './format.js';
@@ -712,12 +718,19 @@ async function execute(
   // `progress` rather than `text` by default, and it is the text one on anything
   // that is not a terminal — a pipe, a file, a CI log — so what a script reads
   // is unchanged and only an interactive run gets the line.
-  const reporter = reporterFor(values.reporter ?? config.reporter ?? 'progress', {
+  const chosen = reporterFor(values.reporter ?? config.reporter ?? 'progress', {
     stdout,
     stderr,
     level,
     ...(values.failures ? { failures: values.failures } : {}),
   });
+  // Beside whatever was chosen rather than instead of it: `--reporter` says
+  // how the run talks to whoever ran it, and `events` is what the program
+  // itself does with what happens. A flag about output must not switch off a
+  // reload somebody's app depends on.
+  const reporter = config.events
+    ? combineReporters(chosen, emitterReporter(config.events))
+    : chosen;
   const emit = reporter ? stamped(reporter) : silent;
   const runOptions = {
     ...(reporter ? { reporter } : {}),

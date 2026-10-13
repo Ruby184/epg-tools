@@ -1,8 +1,11 @@
+import { EventEmitter } from 'node:events';
 import { Writable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import {
   atLevel,
   EVENT_KINDS,
+  combineReporters,
+  emitterReporter,
   jsonReporter,
   LEVELS,
   loggerReporter,
@@ -13,7 +16,14 @@ import {
   REPORTER_NAMES,
   textReporter,
 } from '../src/main.js';
-import type { EpgEvent, EpgEventInput, EventKind, EventLevel, Reporter } from '../src/main.js';
+import type {
+  EpgEvent,
+  EpgEventInput,
+  EpgEventMap,
+  EventKind,
+  EventLevel,
+  Reporter,
+} from '../src/main.js';
 import { silent, stamped, PHASES } from '../src/core/events.js';
 import { emitter } from '../src/core/events.js';
 
@@ -750,6 +760,49 @@ describe('loggerReporter', () => {
     );
 
     expect(log.lines).toEqual(['info merge: channel one done']);
+  });
+});
+
+describe('emitterReporter and combineReporters', () => {
+  it('re-emits each event under its own type, typed by its map', () => {
+    const events = new EventEmitter<EpgEventMap>();
+    const seen: string[] = [];
+
+    // The listener's argument is the event it asked for, which is what the
+    // map buys: `url` exists here and would not on a bare emitter.
+    events.on('serve:started', (event) => seen.push(`started ${event.url}`));
+    events.on('serve:reloaded', () => seen.push('reloaded'));
+
+    const report = emitterReporter(events);
+
+    report(event({ type: 'serve:started', url: 'http://127.0.0.1:8080/guide.xml' }));
+    report(event({ type: 'serve:reloaded' }));
+    // Nothing listens for this one, which is the cheapest sink there is.
+    report(event({ type: 'merge:channel', channelId: 'one' }));
+
+    expect(seen).toEqual(['started http://127.0.0.1:8080/guide.xml', 'reloaded']);
+  });
+
+  it('gives every event to each reporter, and skips the ones that are not there', () => {
+    const said: string[] = [];
+    const report = combineReporters(
+      undefined,
+      (given) => said.push(`first ${given.type}`),
+      undefined,
+      (given) => said.push(`second ${given.type}`),
+    );
+
+    report(event({ type: 'serve:reloaded' }));
+
+    expect(said).toEqual(['first serve:reloaded', 'second serve:reloaded']);
+  });
+
+  it('is the reporter itself when there is only one, and silent when there is none', () => {
+    const only: Reporter = () => {};
+
+    expect(combineReporters(only, undefined)).toBe(only);
+    // Nothing to call, and nothing that throws for being called.
+    expect(() => combineReporters()(event({ type: 'serve:reloaded' }))).not.toThrow();
   });
 });
 

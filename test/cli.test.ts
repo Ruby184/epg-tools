@@ -356,6 +356,43 @@ describe('epg', () => {
       expect(overridden.stdout).toContain('[example.tv] 1 channel(s)');
     });
 
+    it('keeps a config’s own emitter whatever --reporter says', async () => {
+      // The trap this exists to close: `--reporter` is an operator saying how
+      // they want to be talked to, and it must not switch off the reload or
+      // the readiness ping an app hung off these events.
+      const dir = await tempDir();
+      const seen = join(dir, 'seen.txt');
+      const config = await configFile(
+        dir,
+        `import { EventEmitter } from 'node:events';
+        import { appendFileSync } from 'node:fs';
+
+        const events = new EventEmitter();
+
+        events.on('grab:done', () => appendFileSync(${JSON.stringify(seen)}, 'done'));
+
+        export default {
+          sites: [${siteSource()}],
+          days: 1,
+          reporter: 'json',
+          events,
+          output: ${JSON.stringify(join(dir, 'guide.xml'))},
+          cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+        };`,
+      );
+
+      const asConfigured = await run(['grab', '--config', config]);
+      const overridden = await run(['grab', '--config', config, '--reporter', 'text']);
+
+      // The flag decided the output both times it was given one…
+      expect(JSON.parse(asConfigured.stdout.split('\n')[0]!)).toMatchObject({
+        type: 'site:started',
+      });
+      expect(overridden.stdout).toContain('[example.tv] 1 channel(s)');
+      // …and the emitter heard about both runs regardless.
+      expect(await readFile(seen, 'utf8')).toBe('donedone');
+    });
+
     it('says so when a reporter or a failure mode is not one it has', async () => {
       const config = await plainConfig(await tempDir());
 

@@ -186,15 +186,45 @@ idea of how to group things.
 serveGuide(config, { reporter: loggerReporter({ logger: pino() }) });
 ```
 
-It is also where a supervisor's readiness ping belongs — this package sends
-none, because a library writing to an IPC channel nobody asked it to is a
-surprise rather than a feature:
+### An emitter, and several sinks at once
+
+For a long-lived process where several things care about different events,
+`emitterReporter` re-emits each one on an `EventEmitter` under its own type.
+Typing the emitter with `EpgEventMap` makes each listener's argument the event
+it asked for:
 
 ```ts
-reporter: (event) => {
-  if (event.type === 'serve:started') process.send?.('ready');   // pm2 wait_ready
-  log(event);
-},
+import { EventEmitter } from 'node:events';
+
+const events = new EventEmitter<EpgEventMap>();
+
+events.on('serve:started', () => process.send?.('ready'));   // pm2 wait_ready
+events.on('serve:reloaded', () => void reloadMyOwnThings());
+events.on('site:done', (event) => metrics.timing(event.site, event.ms));
+```
+
+Each concern subscribes to the one it is about, instead of a `switch` in a
+reporter growing a case per concern. That is also where a supervisor's
+readiness ping belongs: this package sends none, because a library writing to
+an IPC channel nobody asked it to is a surprise rather than a feature.
+
+`combineReporters(...)` gives every event to several reporters in the order
+written, skipping any that are `undefined`:
+
+```ts
+serveGuide(config, {
+  reporter: combineReporters(loggerReporter({ logger }), emitterReporter(events)),
+});
+```
+
+**From a config file, use `events` rather than `reporter`.** The two answer
+different questions: `reporter` is how a run talks to whoever started it, which
+an operator can overrule with `--reporter`; `events` is what the *program* does
+with what happens, which nobody passing `--reporter json` meant to switch off.
+The CLI runs both.
+
+```ts
+export default defineConfig({ sites, output, events });   // the emitter itself
 ```
 
 ### Naming one in a config

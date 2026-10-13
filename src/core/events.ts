@@ -434,6 +434,23 @@ export const EVENT_KINDS = {
 export type EpgEvent = EpgEventInput & EventKind;
 
 /**
+ * Every event by name, for typing an `EventEmitter` a run reports into.
+ *
+ * ```ts
+ * const events = new EventEmitter<EpgEventMap>();
+ *
+ * events.on('serve:started', (event) => console.log(event.url));
+ * ```
+ *
+ * Node's `EventEmitter` takes a map like this as its type parameter, which is
+ * what makes a listener's argument the event it is for rather than `any` —
+ * see {@link emitterReporter}.
+ */
+export type EpgEventMap = {
+  [T in EpgEventType]: [event: Extract<EpgEvent, { type: T }>];
+};
+
+/**
  * Told what happened, as it happens.
  *
  * Synchronous on purpose, as the `logger` it replaces was: a grab must not wait
