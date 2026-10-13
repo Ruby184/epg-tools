@@ -44,6 +44,17 @@ import {
 
 const NOW = new Date('2026-07-17T12:00:00.000Z');
 
+/**
+ * A selection of a whole config, which is a selection of the two fields one
+ * reads — `derived` being a list here, where a config may also answer with a
+ * function of the channels a run resolved.
+ */
+const selectionOf = (config: EpgConfig) =>
+  channelSelection({
+    ...(config.channels ? { channels: config.channels } : {}),
+    ...(Array.isArray(config.derived) ? { derived: config.derived } : {}),
+  });
+
 /** Collects everything written, so stdout and stderr can be asserted on. */
 class Sink extends Writable {
   private chunks: string[] = [];
@@ -181,7 +192,7 @@ describe('applyChannelSelection', () => {
       output: 'x',
     };
 
-    const { select } = channelSelection(applyChannelSelection(epg, new Set(['one.example.tv'])))!;
+    const { select } = selectionOf(applyChannelSelection(epg, new Set(['one.example.tv'])))!;
 
     expect(await resolveChannels(epg.sites[0]!, { select })).toEqual([
       { xmltvId: 'one.example.tv', siteId: '1', name: 'Channel one.example.tv' },
@@ -208,7 +219,7 @@ describe('applyChannelSelection', () => {
     };
 
     const selected = applyChannelSelection(epg, new Set(['two.example.tv']));
-    const { select } = channelSelection(selected)!;
+    const { select } = selectionOf(selected)!;
 
     expect(calls).toBe(0);
 
@@ -232,7 +243,7 @@ describe('applyChannelSelection', () => {
     });
 
     const selecting = (config: EpgConfig, ids: string[]) =>
-      channelSelection(applyChannelSelection(config, new Set(ids)))!;
+      selectionOf(applyChannelSelection(config, new Set(ids)))!;
 
     it('keeps the source of a selected derivation, unasked for', () => {
       const selection = selecting(epg(), ['one.plus1.example.tv']);
@@ -288,9 +299,9 @@ describe('applyChannelSelection', () => {
     // has to give the same answer.
     it('is idempotent', () => {
       const once = applyChannelSelection(epg(), new Set(['one.plus1.example.tv']));
-      const twice = { ...once, channels: [...channelSelection(once)!.select] };
+      const twice = { ...once, channels: [...selectionOf(once)!.select] };
 
-      expect(channelSelection(twice)).toEqual(channelSelection(once));
+      expect(selectionOf(twice)).toEqual(selectionOf(once));
     });
 
     it('lists them among the ids a config can deliver', async () => {

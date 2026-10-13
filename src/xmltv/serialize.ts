@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { getDefaultHighWaterMark, Readable, Transform, type TransformCallback } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { GrabberError } from '../core/error.js';
 import { escapeXmlAttribute, escapeXmlText } from './escape.js';
 import { formatXmltvDate } from './date.js';
 import { pick, resolveProfile } from './profile.js';
@@ -98,6 +99,23 @@ export interface SerializeOptions {
    * that validates".
    */
   profile?: ProfileRef;
+  /**
+   * Resolve every relative url this document writes against this one.
+   *
+   * `<icon src>`, `<image>` and `<url>` alike, wherever they hang — a channel,
+   * a programme, a person. A relative url is relative to the document, and a
+   * guide is read somewhere other than where it was written: the cache holds
+   * `/logos/one.png`, and what goes out is `https://pi.local/logos/one.png`, so
+   * a consumer that has nothing but the file can still fetch it. One that
+   * already names where it is — `https://`, `//cdn`, a `data:` — comes through
+   * exactly as it came.
+   *
+   * A `URL` is taken as it is. A string must be an absolute url and **throws**
+   * if it is not, rather than quietly resolving nothing — the other way to find
+   * out is to read the guide. `epg serve` answers it per request, from the host
+   * that asked; see `serve.baseUrl`.
+   */
+  baseUrl?: string | URL;
 }
 
 /**
@@ -110,7 +128,10 @@ export interface SerializeOptions {
  * `--list-channels`). Spelling them out at each of those was how `serve` came
  * to be missing one.
  */
-export type GuideOutputOptions = Pick<SerializeOptions, 'indent' | 'extensions' | 'profile'>;
+export type GuideOutputOptions = Pick<
+  SerializeOptions,
+  'indent' | 'extensions' | 'profile' | 'baseUrl'
+>;
 
 /**
  * The output options a source actually set, ready to spread into a writer's.
@@ -125,11 +146,13 @@ export function outputOptions(from: {
   /** `null` is a negated flag — `--no-extensions` — and means `false`. */
   extensions?: SerializeOptions['extensions'] | null;
   profile?: SerializeOptions['profile'];
+  baseUrl?: string | URL | undefined;
 }): GuideOutputOptions {
   return {
     ...(from.indent !== undefined ? { indent: from.indent } : {}),
     ...(from.extensions !== undefined ? { extensions: from.extensions ?? false } : {}),
     ...(from.profile !== undefined ? { profile: from.profile } : {}),
+    ...(from.baseUrl !== undefined ? { baseUrl: from.baseUrl } : {}),
   };
 }
 
@@ -191,6 +214,11 @@ interface Fmt {
    * loop this package has.
    */
   profile: ResolvedProfile | undefined;
+  /**
+   * {@link SerializeOptions.baseUrl}, parsed once — and declared the same way
+   * `profile` is, for the same reason: one hidden class.
+   */
+  baseUrl: URL | undefined;
 }
 
 /** Shared, so nothing is allocated for an element that is absent or dropped. */
@@ -263,7 +291,111 @@ function makeFmt(options: SerializeOptions | undefined): Fmt {
     // `resolveProfile` caches, so this is a lookup rather than a compile per
     // element.
     profile: profile === undefined ? undefined : resolveProfile(profile),
+    baseUrl: resolvedBase(options?.baseUrl),
   };
+}
+
+/** As `resolveProfile` keeps its compiled profiles: once per base, not per element. */
+const BASES = new Map<string, URL>();
+
+/**
+ * How many parsed bases are kept.
+ *
+ * A guide has one base, and a process has a handful: this is a cache for the
+ * element loop, not a store. The cap is what keeps it one — `epg serve` with
+ * `baseUrl: true` hands over a `URL` precisely so that a `Host` header never
+ * reaches this, and a bound here means a caller who does pass strings from
+ * somewhere untrusted is wrong about the speed rather than about the memory.
+ */
+const MAX_BASES = 64;
+
+/**
+ * {@link SerializeOptions.baseUrl} as a `URL`.
+ *
+ * `makeFmt` runs once per element, so parsing the same base again for every
+ * channel and every programme of a guide would be a url parsed a hundred
+ * thousand times to arrive at the same answer — the reason the profile beside
+ * it is compiled once too.
+ *
+ * A base that is not an absolute url **throws**, and here rather than at the
+ * first picture: every other option shapes what a document says, while this one
+ * quietly fails to, and a typo that left every url relative would be found by
+ * reading the guide rather than by running it.
+ */
+function resolvedBase(value: string | URL | undefined): URL | undefined {
+  if (value === undefined || value instanceof URL) {
+    // Already one: a caller that built it — `epg serve`, from the host that
+    // asked — has nothing to parse and nothing to be wrong about.
+    return value;
+  }
+
+  let held = BASES.get(value);
+
+  if (held === undefined) {
+    try {
+      held = new URL(value);
+    } catch {
+      throw new GrabberError(
+        `baseUrl must be an absolute url — "${value}" is not one. A relative base cannot make a relative url absolute.`,
+      );
+    }
+
+    if (BASES.size >= MAX_BASES) {
+      // The oldest, which a `Map` hands over first. One guide's base is used
+      // for every element of it, so the one being evicted is never the one in
+      // use.
+      BASES.delete(BASES.keys().next().value!);
+    }
+
+    BASES.set(value, held);
+  }
+
+  return held;
+}
+
+/**
+ * A url that already says where it is — `https:`, `data:`, `mailto:`.
+ *
+ * Asked before `new URL` rather than left to it, which is the difference
+ * between a base costing nothing on a guide whose urls are already absolute and
+ * costing 1.6× on one: constructing a `URL` is the expense, and it is the same
+ * expense whether or not there turns out to be anything to resolve.
+ *
+ * It also keeps the promise this makes more exactly than parsing would. `new
+ * URL('https://cdn/x.png').href` normalises — a trailing slash on a bare
+ * origin, percent-encoding, a lower-cased host — and a source's own url is
+ * meant to come back as it came.
+ *
+ * A protocol-relative `//cdn/x.png` has no scheme, so it does not match and is
+ * resolved, which is what it needs.
+ */
+const ABSOLUTE = /^[a-z][\d+.a-z-]*:/i;
+
+/**
+ * A picture's url, resolved against {@link SerializeOptions.baseUrl}.
+ *
+ * `URL` is what decides relative from absolute, since that is exactly what it
+ * is for: `https://cdn/x.png` and a `data:` name where they are and come back
+ * untouched, while `/logos/one.png` lands on the base.
+ *
+ * A protocol-relative `//cdn/x.png` keeps its host and takes the base's scheme,
+ * which is what resolving it means — and the right answer for a document that
+ * is read somewhere other than over the connection it was served on, where
+ * "whatever scheme this page used" has no meaning at all.
+ */
+function absolute(f: Fmt, src: string): string {
+  if (f.baseUrl === undefined || ABSOLUTE.test(src)) {
+    return src;
+  }
+
+  try {
+    return new URL(src, f.baseUrl).href;
+  } catch {
+    // The source's own url, not an option somebody typed: a picture nothing can
+    // parse is left as it came, the way a programme nothing can read is skipped
+    // rather than thrown over.
+    return src;
+  }
 }
 
 type AttrValue = string | number | undefined;
@@ -462,7 +594,7 @@ function iconElements(f: Fmt, pad: string, path: DropRef, icons: XmltvIcon[] | u
 
   for (const icon of chosen(f, path, icons)) {
     out += element(f, pad, 'icon', [
-      ['src', icon.src],
+      ['src', absolute(f, icon.src)],
       ['width', icon.width],
       ['height', icon.height],
       ...extraAttrPairs(f, 'icon', icon.extraAttributes),
@@ -483,13 +615,13 @@ function urlElements(
   for (const url of chosen(f, path, urls)) {
     out +=
       typeof url === 'string'
-        ? element(f, pad, 'url', [], url)
+        ? element(f, pad, 'url', [], absolute(f, url))
         : element(
             f,
             pad,
             'url',
             [['system', url.system], ...extraAttrPairs(f, 'url', url.extraAttributes)],
-            url.value,
+            absolute(f, url.value),
           );
   }
 
@@ -504,13 +636,13 @@ function inlineImage(f: Fmt, image: XmltvImage): string {
     ['orient', image.orient],
     ['system', image.system],
     ...extraAttrPairs(f, 'image', image.extraAttributes),
-  ])}>${escapeXmlText(image.value)}</image>`;
+  ])}>${escapeXmlText(absolute(f, image.value))}</image>`;
 }
 
 function inlineUrl(f: Fmt, url: XmltvUrlValue): string {
   return typeof url === 'string'
-    ? `<url>${escapeXmlText(url)}</url>`
-    : `<url${attrs([['system', url.system], ...extraAttrPairs(f, 'url', url.extraAttributes)])}>${escapeXmlText(url.value)}</url>`;
+    ? `<url>${escapeXmlText(absolute(f, url))}</url>`
+    : `<url${attrs([['system', url.system], ...extraAttrPairs(f, 'url', url.extraAttributes)])}>${escapeXmlText(absolute(f, url.value))}</url>`;
 }
 
 const CREDIT_ORDER = [
@@ -873,7 +1005,7 @@ export function serializeProgramme(programme: XmltvProgramme, options?: Serializ
         ['system', image.system],
         ...extraAttrPairs(f, 'image', image.extraAttributes),
       ],
-      image.value,
+      absolute(f, image.value),
     );
   }
 

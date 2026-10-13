@@ -423,6 +423,7 @@ export function mergeInto(
   target: XmltvProgramme[],
   incoming: readonly XmltvProgramme[],
   match: ResolvedMatch,
+  watch?: MergeWatch,
 ): XmltvProgramme[] {
   // Every candidate is decided against `target` as it stands, and only then is
   // anything added to it. Otherwise a list's second programme could be paired
@@ -439,9 +440,18 @@ export function mergeInto(
 
     if (index === -1) {
       inserts.push(programme);
+
+      if (watch !== undefined) {
+        const near = nearest(target, programme, taken);
+
+        if (near !== undefined) {
+          watch.nearMiss(near.gapMs, programme, near.candidate);
+        }
+      }
     } else {
       taken.add(index);
       merges.push([index, programme]);
+      watch?.combined();
     }
   }
 
@@ -458,6 +468,72 @@ export function mergeInto(
   }
 
   return target;
+}
+
+/**
+ * How far apart two programmes may be and still be worth reporting as a pair
+ * that nearly matched.
+ *
+ * Half an hour, because the thing being looked for is a source published on a
+ * different grid — five past against on the hour, a schedule shifted by the
+ * adverts — and not two genuinely different programmes. Beyond this the
+ * question stops being "did these fail to merge" and starts being "what else
+ * is on tonight".
+ */
+export const NEAR_MISS_MS = 30 * 60_000;
+
+/**
+ * What a merge noticed, for a caller that wants to know how well two sources
+ * line up rather than only what came out.
+ *
+ * Given to {@link mergeInto} only where the answer means something — a site's
+ * list folding into what another site already contributed — so a guide of
+ * single-source channels pays nothing for it.
+ */
+export interface MergeWatch {
+  /** One of `incoming` joined a programme already in `target`. */
+  combined(): void;
+  /**
+   * One of `incoming` joined nothing, and something was close.
+   *
+   * `gapMs` is what the two starts are apart. Larger than the match tolerance
+   * means they failed on time; smaller means they failed on titles, which is
+   * the same news about a different cause.
+   */
+  nearMiss(gapMs: number, programme: XmltvProgramme, candidate: XmltvProgramme): void;
+}
+
+/**
+ * The unmatched programme nearest this one, where anything is near enough.
+ *
+ * Only asked after a match failed, and only when somebody is watching — a scan
+ * of its own, because {@link findMatch} deliberately never looks past the
+ * tolerance it was given.
+ */
+function nearest(
+  target: XmltvProgramme[],
+  programme: XmltvProgramme,
+  taken: ReadonlySet<number>,
+): { gapMs: number; candidate: XmltvProgramme } | undefined {
+  const start = programme.start.getTime();
+  let found: { gapMs: number; candidate: XmltvProgramme } | undefined;
+
+  for (let index = lowerBound(target, start - NEAR_MISS_MS); index < target.length; index++) {
+    const candidate = target[index]!;
+    const shift = candidate.start.getTime() - start;
+
+    if (shift > NEAR_MISS_MS) {
+      break;
+    }
+
+    const gapMs = Math.abs(shift);
+
+    if (!taken.has(index) && (found === undefined || gapMs < found.gapMs)) {
+      found = { gapMs, candidate };
+    }
+  }
+
+  return found;
 }
 
 /**

@@ -416,6 +416,159 @@ describe('a configuration that still needs its answers', () => {
   });
 });
 
+describe("cover: 'first'", () => {
+  /** A site whose channels are given, recording every (channel, day) it fetched. */
+  function covering(name: string, ids: string[], asked: string[]): SiteConfig<unknown> {
+    return {
+      site: name,
+      channels: ids.map((id) => ({ xmltvId: id, siteId: id, name: id })),
+      async request({ channel, day }) {
+        asked.push(`${name} ${channel.xmltvId} ${day}`);
+
+        return { day };
+      },
+      parseDay({ channel, day }): XmltvProgramme[] {
+        return [
+          {
+            channel: channel.xmltvId,
+            start: new Date(`${day}T06:00:00.000Z`),
+            title: [{ value: `${name}-${channel.xmltvId}` }],
+          },
+        ];
+      },
+    };
+  }
+
+  it('never asks a lower-priority site for a channel the first one covers', async () => {
+    const dir = await tempDir();
+    const asked: string[] = [];
+    const epg = config(dir, {
+      sites: [
+        covering('a.example', ['one', 'two'], asked),
+        covering('b.example', ['two', 'three'], asked),
+      ],
+      merge: { cover: 'first' },
+    });
+
+    await build(epg, { now: NOW });
+
+    // `two` is covered by both and grabbed once, from the site that comes first.
+    expect(asked.sort()).toEqual([
+      `a.example one ${TODAY}`,
+      `a.example two ${TODAY}`,
+      `b.example three ${TODAY}`,
+    ]);
+
+    const guide = await readFile(join(dir, 'guide.xml'), 'utf8');
+
+    expect(guide).toContain('<title>a.example-two</title>');
+    expect(guide).not.toContain('b.example-two');
+  });
+
+  it('applies to a grab on its own, which is where the requests are', async () => {
+    const dir = await tempDir();
+    const asked: string[] = [];
+    const epg = config(dir, {
+      sites: [covering('a.example', ['one'], asked), covering('b.example', ['one'], asked)],
+      merge: { cover: 'first' },
+    });
+
+    await runGrab(epg, { now: NOW });
+
+    expect(asked).toEqual([`a.example one ${TODAY}`]);
+  });
+
+  it('leaves both sites asked under the strategies that use both', async () => {
+    const dir = await tempDir();
+    const asked: string[] = [];
+    const epg = config(dir, {
+      sites: [covering('a.example', ['one'], asked), covering('b.example', ['one'], asked)],
+      merge: { channelStrategy: 'first-wins' },
+    });
+
+    await runGrab(epg, { now: NOW });
+
+    // What `first-wins` keeps: the lower site's copy is cached, so switching to
+    // a strategy that reads it costs no refetch.
+    expect(asked.sort()).toEqual([`a.example one ${TODAY}`, `b.example one ${TODAY}`]);
+  });
+
+  it('lets a rule decide per channel, lower site and all', async () => {
+    // The case `'first'` cannot express: the site that comes first is not the
+    // right answer for every channel, and which one is depends on what each
+    // offers. Here the second site wins `two`, which is the direction site
+    // order alone can never go.
+    const dir = await tempDir();
+    const asked: string[] = [];
+    const first = covering('a.example', ['one', 'two'], asked);
+    const second = covering('b.example', ['two', 'three'], asked);
+
+    // The first site has no picture for `two` and the second one does, which is
+    // the whole of what the rule decides on.
+    first.channels = [
+      { xmltvId: 'one', siteId: 'one', name: 'one', logo: 'https://a.example/one.png' },
+      { xmltvId: 'two', siteId: 'two', name: 'two' },
+    ];
+    second.channels = [
+      { xmltvId: 'two', siteId: 'two', name: 'two', logo: 'https://b.example/two.png' },
+      { xmltvId: 'three', siteId: 'three', name: 'three' },
+    ];
+
+    const seen: string[] = [];
+    const epg = config(dir, {
+      sites: [first, second],
+      merge: {
+        cover: ({ xmltvId, offers }) => {
+          seen.push(`${xmltvId}:${offers.map((offer) => offer.site).join('+')}`);
+
+          const best = offers.find((offer) => offer.channel.logo !== undefined);
+
+          return best === undefined ? offers.slice(0, 1) : [best];
+        },
+      },
+    });
+
+    await build(epg, { now: NOW });
+
+    // Asked only about what was contested: `one` and `three` have one site each.
+    expect(seen).toEqual(['two:a.example+b.example']);
+    expect(asked.sort()).toEqual([
+      `a.example one ${TODAY}`,
+      `b.example three ${TODAY}`,
+      `b.example two ${TODAY}`,
+    ]);
+
+    const guide = await readFile(join(dir, 'guide.xml'), 'utf8');
+
+    expect(guide).toContain('<title>b.example-two</title>');
+    expect(guide).not.toContain('a.example-two');
+  });
+
+  it('says so when a rule keeps a site that offered nothing', async () => {
+    const dir = await tempDir();
+    const asked: string[] = [];
+    const said: string[] = [];
+    const epg = config(dir, {
+      sites: [covering('a.example', ['one'], asked), covering('b.example', ['one'], asked)],
+      merge: { cover: () => ['c.example'] },
+    });
+
+    await runGrab(epg, {
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:warning') {
+          said.push(event.message);
+        }
+      },
+    });
+
+    // A misspelled site name reads exactly like a rule that decided against
+    // everybody, so it is said rather than left to look deliberate.
+    expect(said.join('\n')).toContain('c.example');
+    expect(asked).toEqual([]);
+  });
+});
+
 describe('the cache a config describes', () => {
   /** A driver that counts what a run asked of it, and whether it was let go of. */
   class CountingDriver extends FsNdjsonCacheDriver {

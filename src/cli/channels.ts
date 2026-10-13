@@ -20,7 +20,8 @@ import type { EpgConfig } from '../config.js';
 import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { derivedChannelList } from '../merge/derive.js';
-import { writeLines } from '../core/streams.js';
+import { configured } from '../merge/select.js';
+import { queueLine, writeLines } from '../core/streams.js';
 import type { ReportFormat } from './format.js';
 import { readChannelList } from './lists.js';
 import type { ChannelListFile, WantedChannel } from './lists.js';
@@ -169,6 +170,8 @@ export async function reportChannelsCommand(
   config: EpgConfig,
   options: ChannelsCommandOptions,
   stdout: Writable,
+  /** Where a `derived` function's warnings go — never into the report. */
+  stderr: Writable = process.stderr,
 ): Promise<number> {
   if (options.against === undefined) {
     throw new Error('epg channels needs --against <playlist.m3u | channels.xml | guide.xml>');
@@ -207,8 +210,22 @@ export async function reportChannelsCommand(
     }
   }
 
-  const derived = config.derived?.length
-    ? derivedChannelList(config.derived, named).map((channel) => ({
+  // A `derived` function is asked here too, against the lists just resolved —
+  // the same question a run asks, so the report answers for what a run would
+  // build rather than for what is written in the config.
+  const declarations = await configured(config.derived, {
+    channels: available,
+    now: new Date(),
+    log: () => {},
+    warn: (message) => {
+      // Not `stdout`: that is the report, and `--format json` means something
+      // is parsing it. A warning written into the middle of a document is a
+      // warning that breaks whoever it was meant to reach.
+      queueLine(stderr, message);
+    },
+  });
+  const derived = declarations?.length
+    ? derivedChannelList(declarations, named).map((channel) => ({
         ...channel,
         // No site produces it, so there is no id any site would know it by.
         siteId: '',

@@ -14,6 +14,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { Writable } from 'node:stream';
 import { guideBytes, writeOutput, type OutputTarget } from '../core/output.js';
+import { queueLine } from '../core/streams.js';
 import { parseXmltvStream } from '../xmltv/parse.js';
 import { outputOptions, XmltvSerializeStream } from '../xmltv/serialize.js';
 import type { SerializeOptions } from '../xmltv/serialize.js';
@@ -100,7 +101,9 @@ export async function filterGuide(file: string, options: FilterOptions): Promise
   // A foreign guide is exactly where these matter — it is the one document this
   // package did not write — so they are said rather than swallowed.
   serializer.on('warning', (warning: { line: number; message: string }) => {
-    options.stderr?.write(`guide line ${warning.line}: ${warning.message}\n`);
+    if (options.stderr) {
+      queueLine(options.stderr, `guide line ${warning.line}: ${warning.message}`);
+    }
   });
 
   // So `writeOutput` is handed text rather than buffers to re-decode.

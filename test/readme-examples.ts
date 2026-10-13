@@ -9,9 +9,16 @@
  * below name the page each group of examples comes from.
  */
 
+import { createServer } from 'node:http';
+import ky, { HTTPError } from 'ky';
+import { createSecureServer } from 'node:http2';
+import { createServer as createHttpsServer } from 'node:https';
+import Fastify from 'fastify';
 import {
   build,
   CacheDriverBase,
+  createGuideHandler,
+  grabEvery,
   defineConfig,
   defineCommandSite,
   defineSchedulesDirectSite,
@@ -601,6 +608,17 @@ export const configured = defineConfig({
   },
 });
 
+// --- docs/configuration.md: Root <tv> attributes, asked per run ------------
+export const namedAfterTheLineup = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  meta: ({ channels, now }) => ({
+    generatorInfoName: 'epg-tools',
+    sourceInfoName: `Example TV — ${String(channels.length)} channels`,
+    date: xmltvDate(now),
+  }),
+});
+
 // --- docs/api.md: A driver of your own -------------------------------------
 
 /**
@@ -840,3 +858,186 @@ export const zoned = (epochSeconds: number): Date[] => [
   // A source that gives an instant, where the guide should still read locally.
   setXmltvZone(new Date(epochSeconds * 1000), 'Europe/Bratislava'),
 ];
+
+// --- docs/configuration.md: Choosing per channel ---------------------------
+export const coveredPerChannel = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  merge: {
+    cover: ({ offers }) => {
+      // Whoever has a picture for it, and the first site otherwise.
+      const best = offers.find((offer) => offer.channel.logo !== undefined);
+
+      return best ? [best] : offers.slice(0, 1);
+    },
+  },
+});
+
+// --- docs/site-config.md: A source that is not UTF-8 ----------------------
+export const notUtf8 = defineSiteConfig({
+  site: 'cp1250.example.tv',
+  channels: [{ xmltvId: 'one', siteId: '1' }],
+  async request({ channel, day, http }) {
+    const bytes = await http.get(`program/${channel.siteId}/${day}`).arrayBuffer();
+
+    return new TextDecoder('windows-1250').decode(bytes);
+  },
+  parseDay: () => [],
+});
+
+// --- docs/site-config.md: A token that expires part way through ------------
+const auth = ky.create({ prefix: 'https://api.example.tv' });
+
+let session: { token: string; until: number } | undefined;
+
+async function sessionToken(): Promise<string> {
+  if (session === undefined || Date.now() > session.until - 60_000) {
+    const fresh = await auth
+      .post('login', { json: { user: 'u' } })
+      .json<{ token: string; ttl: number }>();
+
+    session = { token: fresh.token, until: Date.now() + fresh.ttl * 1000 };
+  }
+
+  return session.token;
+}
+
+export const renewing = defineSiteConfig({
+  site: 'expiring.example.tv',
+  channels: [{ xmltvId: 'one', siteId: '1' }],
+  ky: {
+    prefix: 'https://api.example.tv',
+    hooks: {
+      beforeRequest: [
+        async ({ request }) => {
+          request.headers.set('authorization', `Bearer ${await sessionToken()}`);
+        },
+      ],
+      beforeRetry: [
+        async ({ request, error }) => {
+          if (error instanceof HTTPError && error.response.status === 401) {
+            session = undefined;
+            request.headers.set('authorization', `Bearer ${await sessionToken()}`);
+          }
+        },
+      ],
+    },
+    retry: { limit: 2, statusCodes: [401, 429, 500, 502, 503, 504] },
+  },
+  async request() {
+    return {};
+  },
+  parseDay: () => [],
+});
+
+// --- docs/api.md: On a server of your own ----------------------------------
+/**
+ * Express and hono are not dependencies of this package, so what the docs show
+ * with them is shown here with `node:http` — the handler is the same object,
+ * and these are the calls that would break if it changed.
+ */
+export async function mountedOnAnAppOfMyOwn(): Promise<void> {
+  const handler = await createGuideHandler(configured, { grab: grabEvery('4h') });
+
+  // One answer, wherever it is mounted — `app.get(path, handler.node('guide'))`.
+  const guide = handler.node('guide');
+  const health = handler.node('health');
+  const asFetch = handler.fetch('guide');
+  // Or routing by itself, which is what makes it a whole server.
+  const server = createServer(handler.node());
+
+  server.on('request', (request, response) => {
+    void (request.url === handler.healthPath ? health : guide)(request, response);
+  });
+
+  const answered = await handler.answer({
+    method: 'GET',
+    url: handler.guidePath,
+    headers: { 'if-none-match': 'W/"nope"' },
+    route: 'guide',
+    encrypted: true,
+  });
+
+  // Three shapes, told apart the way an adapter tells them apart.
+  if (typeof answered.body === 'object' && Symbol.asyncIterator in answered.body) {
+    for await (const chunk of answered.body) {
+      void chunk.byteLength;
+    }
+  }
+
+  // And the health check, which is data and says so in the type.
+  const { body: state } = await handler.answer({ headers: {}, route: 'health' });
+
+  void state?.ok;
+  void state?.counts.present;
+
+  void (await asFetch(new Request('https://pi.local/epg.xml'))).status;
+  void answered.status;
+  void handler.config.days;
+
+  handler.reload();
+  await handler.close();
+}
+
+// --- docs/configuration.md: Keep the command, over TLS ---------------------
+export const servedOverTls = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  serve: {
+    server: ({ node }, { port, host }) =>
+      createHttpsServer({ key: 'KEY', cert: 'CERT' }, node()).listen(port, host),
+  },
+});
+
+// --- docs/configuration.md: Keep the command, over HTTP/2 ------------------
+export const servedOverHttp2 = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  serve: {
+    server: ({ node }, { port, host }) =>
+      createSecureServer({ key: 'KEY', cert: 'CERT' }, node()).listen(port, host),
+  },
+});
+
+// --- docs/configuration.md: Keep the command, on fastify -------------------
+/**
+ * Where `return app` is the claim worth checking: a fastify instance is a
+ * `server` and a `close()`, which is all `GuideListening` asks for — and
+ * `fastify('guide')` has to be a fastify route handler, which only fastify's
+ * own types can say.
+ */
+export const servedByFastify = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  serve: {
+    server: async ({ fastify: route, guidePath, healthPath }, { port, host }) => {
+      const app = Fastify({ forceCloseConnections: true });
+
+      app.get(guidePath, route('guide'));
+
+      if (healthPath !== false) {
+        app.get(healthPath, route('health'));
+      }
+
+      await app.listen({ port, host });
+
+      return app;
+    },
+  },
+});
+
+// --- docs/configuration.md: Keep the command, bring your own server --------
+export const servedByMyOwnApp = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  serve: {
+    server: ({ node, guidePath, healthPath }, { port, host }) => {
+      const guide = node('guide');
+      const health = healthPath === false ? undefined : node('health');
+
+      return createServer((request, response) => {
+        void (request.url === guidePath ? guide : (health ?? node()))(request, response);
+      }).listen(port, host);
+    },
+  },
+});

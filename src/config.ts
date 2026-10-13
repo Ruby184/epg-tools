@@ -16,10 +16,9 @@ import type { CompressionFormat, CompressionOptions } from './core/output.js';
 import type { MissingAllowance } from './grabber/missing.js';
 import type { EpgServeConfig } from './serve/config.js';
 import type { AnySiteConfig } from './grabber/types.js';
-import type { DerivedChannel, MergeOptions } from './merge/types.js';
+import type { DerivedChannels, GuideMeta, MergeOptions } from './merge/types.js';
 import type { SerializeOptions } from './xmltv/serialize.js';
-import type { XmltvDocumentMeta } from './xmltv/types.js';
-import type { ReporterFactory, ReporterName } from './core/reporters.js';
+import type { EpgEventSink, ReporterFactory, ReporterName } from './core/reporters.js';
 
 /**
  * What builds the driver a run keeps its cache in.
@@ -100,13 +99,18 @@ export interface EpgConfig {
   /**
    * Channels that are other channels shifted — a `+1` and its like. They cost
    * no requests: each reads its source's cached days again and moves every
-   * programme along. See {@link DerivedChannel}.
+   * programme along. See `DerivedChannel`.
    *
    * `epg channels` is what usually sends you here: shown a playlist wanting
    * `Sky One +1`, it refuses to map it onto `skyone.uk` and says it looks like
    * a shift of it instead.
+   *
+   * A **function** is asked once per run, with the channels the sites resolved
+   * to — for a lineup that is not written down here. A list cannot follow one
+   * that changes: `epg serve` reads this configuration once and goes on serving
+   * under it, so a channel added between grabs would never get its `+1`.
    */
-  derived?: DerivedChannel[];
+  derived?: DerivedChannels;
   /**
    * Keep only these channels, by `xmltvId`. Every one of them, by default.
    *
@@ -127,8 +131,11 @@ export interface EpgConfig {
    * `*.channels.xml`, a guide, or a plain list of ids — as well as ids.
    */
   channels?: readonly string[];
-  /** Attributes for the root `<tv>` element. */
-  meta?: XmltvDocumentMeta;
+  /**
+   * Attributes for the root `<tv>` element, or a function asked for them once
+   * the channel lists are known — see {@link GuideMeta}.
+   */
+  meta?: GuideMeta;
   /**
    * Pretty-print the generated guide with this indentation (a number of
    * spaces or a string like `'\t'`). Omit for compact output — the default.
@@ -148,6 +155,20 @@ export interface EpgConfig {
    * command line cannot pass a function.
    */
   extensions?: SerializeOptions['extensions'];
+  /**
+   * Resolve every relative url the guide writes against this one — an
+   * `<icon src>`, an `<image>`, a `<url>`.
+   *
+   * For a guide whose pictures are served alongside it: a channel list that
+   * says `/logos/one.png` goes out saying `https://pi.local/logos/one.png`, so
+   * a consumer with nothing but the document can fetch them. A url that already
+   * names where it is is left alone, and a base that is not absolute is refused
+   * rather than quietly resolving nothing.
+   *
+   * `serve.baseUrl` overrides it, and can answer per request — a box reachable
+   * at two names cannot write one base here and be right for both.
+   */
+  baseUrl?: string | URL;
   /**
    * Shape the guide for the consumer that will read it: which `<episode-num>`
    * systems go out and in what order, what a `<category>` is called, how many
@@ -198,6 +219,27 @@ export interface EpgConfig {
    * function. See [reporting a run](../docs/api.md#reporting-what-a-run-is-doing).
    */
   reporter?: ReporterName | ReporterFactory;
+  /**
+   * An emitter of your own, told everything, whatever `--reporter` says.
+   *
+   * Apart from {@link reporter} because the two answer different questions.
+   * That one is how a run talks to whoever started it, which is an operator's
+   * preference and so a flag can overrule it. This is what the *program* does
+   * with what happens — a readiness ping, a reload, a metric — which nobody
+   * running `--reporter json` meant to turn off.
+   *
+   * ```ts
+   * const events = new EventEmitter<EpgEventMap>();
+   *
+   * events.on('serve:reloaded', () => void reloadMyOwnThings());
+   *
+   * export default defineConfig({ sites, output, events });
+   * ```
+   *
+   * Read by the CLI, since a library caller passes its own `reporter` and can
+   * put `emitterReporter` in it with `combineReporters`.
+   */
+  events?: EpgEventSink;
 }
 
 /** Builds the config from whatever answered the questions. */

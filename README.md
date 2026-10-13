@@ -23,7 +23,7 @@ Memory-efficient EPG toolkit for building [XMLTV](https://github.com/XMLTV/xmltv
 - **Serve it and check it** — [`epg serve`](./docs/configuration.md#serving-the-guide) holds the guide behind HTTP for a consumer that polls, answering `304 Not Modified` from cache metadata rather than by merging again, and [`epg validate`](./docs/configuration.md#validating-a-guide) reads a guide back and reports what is wrong with it, grouped by rule so the report stays the same size whatever the guide's
 - **An XMLTV grabber, from the same config** — [`epg init-grabber`](./docs/tv-grab.md) turns it into a `tv_grab_*` executable that tvheadend and `tv_find_grabbers` can drive
 
-Requires Node.js >= 20.4 (Node >= 23.6 to load `epg.config.ts` directly via native type stripping).
+Requires Node.js >= 22 (Node >= 23.6 to load `epg.config.ts` directly via native type stripping).
 
 ## Install
 

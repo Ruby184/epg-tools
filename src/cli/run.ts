@@ -21,7 +21,13 @@ import { GrabberError } from '../core/error.js';
 import { OptionError, parseOptions } from '../core/options.js';
 import { dayToDate, toDayString } from '../core/days.js';
 import { silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
-import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
+import {
+  combineReporters,
+  emitterReporter,
+  FAILURE_MODES,
+  reporterFor,
+  REPORTER_NAMES,
+} from '../core/reporters.js';
 import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
 import { REPORT_FORMATS, type ReportFormat } from './format.js';
@@ -712,12 +718,19 @@ async function execute(
   // `progress` rather than `text` by default, and it is the text one on anything
   // that is not a terminal — a pipe, a file, a CI log — so what a script reads
   // is unchanged and only an interactive run gets the line.
-  const reporter = reporterFor(values.reporter ?? config.reporter ?? 'progress', {
+  const chosen = reporterFor(values.reporter ?? config.reporter ?? 'progress', {
     stdout,
     stderr,
     level,
     ...(values.failures ? { failures: values.failures } : {}),
   });
+  // Beside whatever was chosen rather than instead of it: `--reporter` says
+  // how the run talks to whoever ran it, and `events` is what the program
+  // itself does with what happens. A flag about output must not switch off a
+  // reload somebody's app depends on.
+  const reporter = config.events
+    ? combineReporters(chosen, emitterReporter(config.events))
+    : chosen;
   const emit = reporter ? stamped(reporter) : silent;
   const runOptions = {
     ...(reporter ? { reporter } : {}),
@@ -740,7 +753,18 @@ async function execute(
     // Only `build` narrows before it grabs — `runGrab` does not select at all,
     // so a report that applied `config.channels` to `grab --dry-run` would name
     // fewer requests than `epg grab` goes on to make.
-    const selection = command === 'build' ? channelSelection(config) : undefined;
+    // Only what is written down: a `derived` function is a function of the
+    // channel lists, and a report that is not going to fetch anything has no
+    // lists to ask it about. What that costs is a plan whose narrowing misses
+    // the sources a declared shift would have kept — visible only under
+    // `--channels` with a `derived` function, and a count either way.
+    const selection =
+      command === 'build'
+        ? channelSelection({
+            ...(config.channels ? { channels: config.channels } : {}),
+            ...(Array.isArray(config.derived) ? { derived: config.derived } : {}),
+          })
+        : undefined;
 
     try {
       const report = await planRun(config, cache, {
@@ -812,6 +836,7 @@ async function execute(
           ...(signal ? { signal } : {}),
         },
         stdout,
+        stderr,
       );
     }
     case 'serve': {

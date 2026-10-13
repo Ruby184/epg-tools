@@ -11,6 +11,64 @@ import type { GrabCounts, Reporter, Says } from '../core/events.js';
  *
  * `TData` is whatever the site keeps alongside it — see {@link data}.
  */
+/**
+ * One site's offer of a channel, as a coverage rule sees it.
+ *
+ * The site by name rather than by config: a rule decides between sites, and the
+ * name is what a config spells and a report prints.
+ */
+export interface ChannelOffer<TData = unknown> {
+  site: string;
+  /** What that site says the channel is — its logo, its `data`, all of it. */
+  channel: GrabberChannel<TData>;
+}
+
+/** What a {@link CoverageRule} is asked about. */
+export interface CoverageContext extends Says {
+  /** The id every offer here is for. */
+  xmltvId: string;
+  /** Every site offering it, in site order, which is priority order. */
+  offers: readonly ChannelOffer[];
+  now: Date;
+}
+
+/**
+ * Who grabs a channel that more than one site offers.
+ *
+ * The general form of `cover: 'first'`, which says the site highest in the
+ * config takes a contested channel whatever the rest know. That is the right
+ * answer until it is not — a provider with better pictures for half a lineup, a
+ * source that only carries a region's channels, one that is slow enough to be
+ * worth asking only for what nobody above it has.
+ *
+ * ```ts
+ * // Everyone, except that the slow one only fills gaps.
+ * cover: ({ offers }) => offers.filter((offer) => offer.site !== 'slow.example' || offers.length === 1),
+ * ```
+ *
+ * Asked once per channel, and only where there is something to decide — a
+ * channel one site offers is not a question. The answer is which offers to
+ * keep, by object or by site name; `undefined` keeps them all, and an empty
+ * answer means nobody grabs it at all.
+ *
+ * It is asked **before the grab**, against the channel lists the sites
+ * resolved, so a channel left to one site costs the others nothing. Which is
+ * also its limit: it knows what a site says about a channel, not what that
+ * site's listings turn out to contain. "Whoever has programme images for it" is
+ * a question only the merge can answer, and only after both were fetched.
+ *
+ * The order it answers in is not a priority: that stays the order of `sites`.
+ * Choosing one offer is how a lower site wins a channel. What it keeps is then
+ * combined by {@link ChannelStrategy}, which is the other half of the question
+ * and none of this one's.
+ */
+export type CoverageRule = (
+  context: CoverageContext,
+) =>
+  | readonly (ChannelOffer | string)[]
+  | undefined
+  | Promise<readonly (ChannelOffer | string)[] | undefined>;
+
 export interface GrabberChannel<TData = unknown> {
   /** Channel id used in the generated XMLTV output. */
   xmltvId: string;

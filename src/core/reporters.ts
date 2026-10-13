@@ -64,6 +64,33 @@ function count(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
 
+/**
+ * A duration, in the unit somebody reading a nightly run would use.
+ *
+ * Milliseconds below ten seconds, because that is where a request lives;
+ * seconds and minutes above it, because `2543871ms` is a number nobody
+ * subtracts in their head.
+ */
+function took(ms: number): string {
+  if (ms < 10_000) {
+    return `${String(ms)}ms`;
+  }
+
+  const seconds = Math.round(ms / 1000);
+
+  return seconds < 600
+    ? `${String(seconds)}s`
+    : `${String(Math.floor(seconds / 60))}m${String(seconds % 60).padStart(2, '0')}s`;
+}
+
+/** What a site cost the run, which is not what it fetched. */
+function cost(event: { requests: number; ms: number; requestMs: number }): string {
+  // The two times are kept apart rather than averaged into one: a site waiting
+  // on its own `rateLimit` and a site waiting on a slow source look identical
+  // in a total, and are the opposite problems.
+  return `${count(event.requests, 'request')} in ${took(event.ms)}, ${took(event.requestMs)} waiting`;
+}
+
 /** What a run or a site came to, in the one form both say it. */
 function counts({ fetched, empty, fromCache, unchanged, failed, sitesFailed }: GrabCounts): string {
   // A day that came back with nothing is not a failure — a channel with no
@@ -132,7 +159,7 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
         `${event.entries} to fetch in ${event.requests} request(s)`
       );
     case 'site:done':
-      return `${at(event.site, prefix)}${counts(event)}`;
+      return `${at(event.site, prefix)}${counts(event)} — ${cost(event)}`;
     case 'site:note':
     case 'site:warning':
       // The fields go on the end rather than being left to the JSON reporter:
@@ -187,6 +214,27 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       // No site on either, so no prefix: a merge transform is the config's own
       // code, and there is nobody to attribute it to.
       return `${event.message}${said(event.data)}`;
+    case 'merge:summary': {
+      // Only what there is: a guide whose sources all line up says one number,
+      // and a run that dropped nothing does not report two noughts every night.
+      const said = [
+        `${count(event.combined, 'programme')} combined`,
+        ...(event.nearMiss > 0 ? [`${String(event.nearMiss)} nearly`] : []),
+        ...(event.containers > 0 ? [`${String(event.containers)} containers dropped`] : []),
+        ...(event.clipped > 0 ? [`${String(event.clipped)} clipped`] : []),
+      ].join(', ');
+      // The examples are the actionable half — a count of near misses says
+      // something is adrift, and these say by how much and on what.
+      const near = event.examples
+        .map(
+          (example) =>
+            `\n  ${example.channelId}: ${took(example.gapMs)} apart — ` +
+            `"${example.title}" / "${example.nearby}"`,
+        )
+        .join('');
+
+      return `Merge: ${said}${near}`;
+    }
     case 'merge:done':
       return `Guide written to ${event.output}`;
     case 'serve:started':
@@ -205,6 +253,8 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       return `${event.path}: ${errorChain(event.error)}`;
     case 'serve:grabFailed':
       return `Scheduled grab failed: ${errorChain(event.error)}`;
+    case 'serve:reloaded':
+      return 'Reloading the channel lists on the next request';
     case 'serve:stopped':
       return 'Stopped serving';
     case 'prune:done':
@@ -295,6 +345,155 @@ export function renderFailure(event: FailureEvent, prefix = true, cause = false)
     default:
       return `FAILED ${where}site failed: ${said(event.error)}`;
   }
+}
+
+/**
+ * The three methods this needs of a logger — pino, bunyan, winston and
+ * `console` all have them, and so does anything written for the occasion.
+ *
+ * A message and nothing else: what a logger does with structure is its own
+ * business, and an event rendered twice — once as a line and once as fields —
+ * is the same news written two ways in one file.
+ */
+export interface ReporterLogger {
+  info(message: string): void;
+  warn(message: string): void;
+  error(message: string): void;
+  /** Where there is one; otherwise `info` takes the detail. */
+  debug?(message: string): void;
+}
+
+export interface LoggerReporterOptions {
+  logger: ReporterLogger;
+  /** How much to pass on. Defaults to `info`. */
+  level?: EventLevel;
+  /** Tag each line with the site it is about. On by default. */
+  prefix?: boolean;
+}
+
+/**
+ * Everything a run says, to a logger of your own.
+ *
+ * For a process that already has one — a server under a supervisor, where two
+ * log streams is one too many, and whatever the logger does about files,
+ * rotation and levels should happen to this too. The lines are the ones
+ * {@link textReporter} writes; where they *go* is the logger's business, which
+ * is the whole point.
+ *
+ * ```ts
+ * serveGuide(config, { reporter: loggerReporter({ logger: pino() }) });
+ * ```
+ *
+ * Failures go to `error` whole, rather than being held back for a block at the
+ * end as the text reporter holds them: a logger has its own idea of how to
+ * group things, and a reporter sitting on lines for minutes would be the
+ * wrong one.
+ */
+export function loggerReporter(options: LoggerReporterOptions): Reporter {
+  const { logger, level = 'info', prefix = true } = options;
+  const cause = atLevel('debug', level);
+
+  return (event) => {
+    if (isFailure(event)) {
+      logger.error(renderFailure(event, prefix, cause));
+
+      return;
+    }
+
+    if (!atLevel(event.level, level)) {
+      return;
+    }
+
+    const line = render(event, prefix);
+
+    if (line === undefined) {
+      return;
+    }
+
+    switch (event.level) {
+      case 'error': {
+        logger.error(line);
+        break;
+      }
+      case 'warn': {
+        logger.warn(line);
+        break;
+      }
+      case 'debug': {
+        (logger.debug ?? logger.info).call(logger, line);
+        break;
+      }
+      default: {
+        logger.info(line);
+      }
+    }
+  };
+}
+
+/**
+ * What {@link emitterReporter} needs of an emitter — Node's own fits, and so
+ * does anything with an `emit` taking a name and a value.
+ */
+export interface EpgEventSink {
+  emit(type: EpgEvent['type'], event: EpgEvent): unknown;
+}
+
+/**
+ * Every event, re-emitted on an `EventEmitter` under its own type.
+ *
+ * For a long-lived process where several things care about different events: a
+ * readiness ping, a reload, a metric. Each subscribes to the one it is about,
+ * instead of one `switch` in a reporter growing a case per concern.
+ *
+ * ```ts
+ * const events = new EventEmitter<EpgEventMap>();
+ *
+ * events.on('serve:started', () => process.send?.('ready'));
+ * events.on('serve:reloaded', () => void reloadMyOwnThings());
+ *
+ * serveGuide(config, { reporter: emitterReporter(events) });
+ * ```
+ *
+ * Typing the emitter with {@link EpgEventMap} is what makes each listener's
+ * argument the event it asked for. Nothing is filtered: an emitter with no
+ * listener for a type is the cheapest sink there is.
+ */
+export function emitterReporter(events: EpgEventSink): Reporter {
+  return (event) => {
+    events.emit(event.type, event);
+  };
+}
+
+/**
+ * Several reporters as one, each given every event in the order written.
+ *
+ * What a process with more than one interest reaches for — lines for a log and
+ * an emitter for the app, without writing the two-line function that calls
+ * both. `undefined` is skipped, so a caller's own optional reporter composes
+ * without a conditional:
+ *
+ * ```ts
+ * reporter: combineReporters(options.reporter, loggerReporter({ logger })),
+ * ```
+ *
+ * A reporter that throws is not caught here, as it is not caught anywhere
+ * else: a sink that cannot keep up with a run is a bug in the sink, and
+ * swallowing it would leave a run reporting into silence with nothing said.
+ */
+export function combineReporters(...reporters: (Reporter | undefined)[]): Reporter {
+  const listening = reporters.filter((reporter) => reporter !== undefined);
+
+  // The common cases without a wrapper: one reporter is itself, and none at
+  // all is the same silence `emitter` gives a run nobody is listening to.
+  if (listening.length === 1) {
+    return listening[0]!;
+  }
+
+  return (event) => {
+    for (const reporter of listening) {
+      reporter(event);
+    }
+  };
 }
 
 export interface TextReporterOptions {

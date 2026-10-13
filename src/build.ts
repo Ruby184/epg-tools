@@ -6,15 +6,15 @@ import {
   MemoryCacheDriver,
 } from './cache/main.js';
 import type { CacheDriver, CacheStore } from './cache/main.js';
-import { grab, resolveSites } from './grabber/main.js';
+import { covered, coverageOf, grab, resolveSites } from './grabber/main.js';
 import type { GrabberChannel, GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
-import { channelSelection, unmatched, unmatchedMessage } from './merge/select.js';
+import { channelSelection, configured, unmatched, unmatchedMessage } from './merge/select.js';
 import type { BuildGuideOptions } from './merge/types.js';
 import { outputOptions } from './xmltv/serialize.js';
 import { addDays, toDayString } from './core/days.js';
 import { GrabberError } from './core/error.js';
-import type { Reporter } from './core/events.js';
+import type { Emit, Reporter, Says } from './core/events.js';
 import { emitter } from './core/events.js';
 import {
   resolveConfigSource,
@@ -175,6 +175,34 @@ async function withCache<T>(
   }
 }
 
+/**
+ * Whether `cover` can take a channel away from a site.
+ *
+ * Read off the config rather than passed around: the grab has to know it as
+ * much as the merge does, and they have to read it the same way or a run
+ * fetches what the guide then leaves out. It also says whether the channel
+ * lists are worth resolving early — a coverage that takes nothing away gives a
+ * run nothing to compare them for.
+ */
+const narrowed = (config: EpgConfig): boolean => coverageOf(config.merge?.cover) !== undefined;
+
+/** Where a `cover` rule's own words go, which is where a merge's do. */
+const saysOf = (emit: Emit): Says => ({
+  log: (message, data) => emit({ type: 'merge:note', message, ...(data ? { data } : {}) }),
+  warn: (message, data) => emit({ type: 'merge:warning', message, ...(data ? { data } : {}) }),
+});
+
+/** Said once per site that lost channels to another, with how many. */
+const droppedBy =
+  (emit: Emit) =>
+  (site: string, count: number): void => {
+    emit({
+      type: 'site:note',
+      site,
+      message: `${String(count)} channel(s) left to another site by \`cover\``,
+    });
+  };
+
 /** First day of the window implied by `now` + `offset`. */
 function startDayOf(options: RunOptions, now: Date): string {
   const today = toDayString(now);
@@ -230,7 +258,29 @@ export async function runGrab(
   const startDay = startDayOf(options, now);
 
   return withCache(config, options, async (cache) => {
-    const summary = await grab(config.sites, {
+    const emit = emitter(options);
+    // Resolved here only to decide what not to ask for. Every site resolves its
+    // own list anyway — this is the same work, done early enough to compare the
+    // lists against each other, and a `cacheChannels` site answers from the
+    // cache both times.
+    const sites = narrowed(config)
+      ? await covered(
+          await resolveSites(config.sites, {
+            ...(config.siteConcurrency !== undefined
+              ? { concurrency: config.siteConcurrency }
+              : {}),
+            ...(options.signal ? { signal: options.signal } : {}),
+            ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
+            emit,
+            store: cache,
+            now,
+          }),
+          config.merge?.cover,
+          { now, ...saysOf(emit) },
+          droppedBy(emit),
+        )
+      : config.sites;
+    const summary = await grab(sites, {
       cache,
       startDay,
       ...(config.days !== undefined ? { days: config.days } : {}),
@@ -324,22 +374,53 @@ export async function build(source: ConfigSource, options: RunOptions = {}): Pro
     // that changed in between would leave the guide describing channels the grab
     // never went for.
     const emit = emitter(options);
-    const selection = channelSelection(config);
+    const sites = await resolveSites(config.sites, {
+      ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+      // What a site says while fetching its list, which happens here rather
+      // than inside either half — so without this it would be said nowhere.
+      emit,
+      store: cache,
+      // `--refresh` means ask the source, and a channel list is something the
+      // source says.
+      ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
+      now,
+    });
+
+    // After the lists, because a `derived` function is a function *of* them —
+    // and once, because the grab and the merge have to agree about what exists.
+    // The selection then narrows what was resolved, which is the same answer as
+    // narrowing on the way out of each site: what a site stores is its whole
+    // list either way.
+    const declarations = await configured(config.derived, {
+      channels: sites.flatMap((site) => site.channels as GrabberChannel[]),
+      now,
+      log: (message, data) => emit({ type: 'merge:note', message, ...(data ? { data } : {}) }),
+      warn: (message, data) => emit({ type: 'merge:warning', message, ...(data ? { data } : {}) }),
+    });
+    // Only the two fields a selection reads, so a `derived` that is still a
+    // function never reaches it.
+    const selection = channelSelection({
+      ...(config.channels ? { channels: config.channels } : {}),
+      ...(declarations ? { derived: declarations } : {}),
+    });
+    const selected = selection
+      ? sites.map((site) => ({
+          ...site,
+          channels: (site.channels as GrabberChannel[]).filter((channel) =>
+            selection.select.has(channel.xmltvId),
+          ),
+        }))
+      : sites;
     const resolved: EpgConfig = {
       ...config,
-      sites: await resolveSites(config.sites, {
-        ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
-        ...(options.signal ? { signal: options.signal } : {}),
-        // What a site says while fetching its list, which happens here rather
-        // than inside either half — so without this it would be said nowhere.
-        emit,
-        store: cache,
-        // `--refresh` means ask the source, and a channel list is something the
-        // source says.
-        ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
-        ...(selection ? { select: selection.select } : {}),
-        now,
-      }),
+      ...(declarations ? { derived: declarations } : {}),
+      // Before the grab, which is the whole of what `cover` is for: the merge
+      // below keeps what it chose either way, so a site it did not choose is
+      // never asked about that channel at all.
+      sites: narrowed(config)
+        ? await covered(selected, config.merge?.cover, { now, ...saysOf(emit) }, droppedBy(emit))
+        : selected,
     };
 
     // Here rather than only in the merge below, because here is before the

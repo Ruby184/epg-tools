@@ -141,6 +141,313 @@ describe('serveGuide', () => {
     expect(await (await fetch(server.url)).text()).toContain('<channel id="two">');
   });
 
+  it('derives a shift for a channel that arrived after it started', async () => {
+    // The reason `derived` takes a function: a server reads its configuration
+    // once, so a `+1` written out by hand can only ever describe the lineup as
+    // it was. Asked against the lists each snapshot resolves, it follows.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    let lineup = ['one'];
+    const config: EpgConfig = {
+      ...configFor([]),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: () => lineup.map((id) => ({ xmltvId: id, siteId: id, name: id })),
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+      derived: ({ channels }) =>
+        channels.map((channel) => ({
+          xmltvId: `${channel.xmltvId}.plus1`,
+          from: channel.xmltvId,
+          offset: 60,
+        })),
+    };
+
+    const server = await serve(config, cache, { revalidateMs: 0, sitesMaxAgeMs: 0 });
+    const first = await (await fetch(server.url)).text();
+
+    expect(first).toContain('<channel id="one.plus1">');
+    expect(first).not.toContain('<channel id="two.plus1">');
+
+    lineup = ['one', 'two'];
+    await cache.write({ site: 'example.tv', channelId: 'two', day: DAY }, [programme('two', 6)], {
+      grabbedAt: '2026-09-03T04:00:00.000Z',
+    });
+
+    expect(await (await fetch(server.url)).text()).toContain('<channel id="two.plus1">');
+  });
+
+  it('names the document after the lineup, once per snapshot rather than per request', async () => {
+    // `meta` is asked what `derived` is asked, at the pace the lists are
+    // re-read — a poll every few seconds is not a reason to ask again what the
+    // document should call itself.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    let asked = 0;
+    let lineup = ['one'];
+    const config: EpgConfig = {
+      ...configFor([]),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: () => lineup.map((id) => ({ xmltvId: id, siteId: id, name: id })),
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+      meta: ({ channels }) => {
+        asked += 1;
+
+        return { sourceInfoName: `${String(channels.length)} channels` };
+      },
+    };
+
+    const server = await serve(config, cache, { revalidateMs: 60_000, sitesMaxAgeMs: 60_000 });
+
+    expect(await (await fetch(server.url)).text()).toContain('source-info-name="1 channels"');
+    // The second request serves the snapshot the first took.
+    expect(await (await fetch(server.url)).text()).toContain('source-info-name="1 channels"');
+    expect(asked).toBe(1);
+
+    lineup = ['one', 'two'];
+    await cache.write({ site: 'example.tv', channelId: 'two', day: DAY }, [programme('two', 6)], {
+      grabbedAt: '2026-09-03T04:00:00.000Z',
+    });
+
+    const server2 = await serve(config, cache, { revalidateMs: 0, sitesMaxAgeMs: 0 });
+
+    expect(await (await fetch(server2.url)).text()).toContain('source-info-name="2 channels"');
+  });
+
+  it('writes urls for the host that asked, when told to', async () => {
+    // The case this exists for: a box reachable by two names, whose pictures
+    // are served by whatever is serving the guide.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const config: EpgConfig = {
+      ...configFor([]),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: [{ xmltvId: 'one', siteId: 'one', name: 'One', logo: '/logos/one.png' }],
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+      serve: { baseUrl: true },
+    };
+
+    const server = await serve(config, cache);
+    // Whatever this client addressed the server as. `fetch` sends the `Host`
+    // and will not let a test forge it, which is the real path anyway.
+    const direct = await fetch(server.url);
+    const host = new URL(server.url).host;
+
+    expect(await direct.text()).toContain(`<icon src="http://${host}/logos/one.png"/>`);
+    // A cache in between has to be told the document depends on who asked.
+    expect(direct.headers.get('vary')).toContain('Host');
+
+    // What something in front says it terminated is believed over the
+    // connection this server actually got.
+    const forwarded = await fetch(server.url, {
+      headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'epg.example' },
+    });
+
+    expect(await forwarded.text()).toContain('<icon src="https://epg.example/logos/one.png"/>');
+
+    // Another name for the same box is another document, and says so in the
+    // validator — a consumer polling with the first one's etag is not told 304.
+    expect(forwarded.headers.get('etag')).not.toBe(direct.headers.get('etag'));
+
+    const again = await fetch(server.url, {
+      headers: {
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'epg.example',
+        'if-none-match': forwarded.headers.get('etag') ?? '',
+      },
+    });
+
+    // The same host asking again with what it was given: nothing changed.
+    expect(again.status).toBe(304);
+  });
+
+  it('refuses to build a base out of a header that is not one', async () => {
+    // Both halves of it are somebody else's words. An empty or invented
+    // `X-Forwarded-Proto` used to go straight into the base — `://host/`, a url
+    // that throws where it is read, which is half way through a guide whose
+    // 200 has already gone out.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const config: EpgConfig = {
+      ...configFor([]),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: [{ xmltvId: 'one', siteId: 'one', name: 'One', logo: '/logos/one.png' }],
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+      serve: { baseUrl: true },
+    };
+
+    const report = collect();
+    const server = await serve(config, cache, { reporter: report.reporter });
+
+    for (const headers of [
+      { 'x-forwarded-proto': '' },
+      { 'x-forwarded-proto': 'nonsense' },
+      { 'x-forwarded-host': 'not a host' },
+    ]) {
+      const answered = await fetch(server.url, { headers });
+
+      expect(answered.status).toBe(200);
+
+      const body = await answered.text();
+
+      // Either the connection's own scheme and host, or the url left as it came
+      // — never a url built out of what the header said.
+      expect(body).toContain('<icon src=');
+      expect(body).not.toContain('://not a host/');
+      expect(body).not.toContain('"://');
+      expect(body).not.toContain('nonsense://');
+    }
+
+    // And nothing failed along the way, which is the point: this used to be a
+    // guide destroyed mid-send, once per request.
+    expect(report.of('serve:failed')).toHaveLength(0);
+  });
+
+  it('says the guide varies on who asked, even when an origin is allowed', async () => {
+    // `corsHeaders` names `Origin` for a named origin, and used to be spread
+    // over the `vary` that named the forwarded host. A shared cache reading
+    // that one would hand one host the guide written for another.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const server = await serve(
+      { ...configFor(['one']), serve: { baseUrl: true, cors: 'https://dash.example' } },
+      cache,
+    );
+    const answered = await fetch(server.url);
+    const vary = answered.headers.get('vary') ?? '';
+
+    expect(vary).toContain('Host');
+    expect(vary).toContain('X-Forwarded-Host');
+    expect(vary).toContain('Origin');
+    expect(vary).toContain('Accept-Encoding');
+  });
+
+  it('moves the validator when what the document says about itself changes', async () => {
+    // A changed `source-info-name` is a changed document that no cache entry
+    // knows anything about — the keys are the same, the grid is the same, and
+    // a poller holding the old tag would be told 304 until the next grab.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const tagFor = async (meta: EpgConfig['meta']): Promise<string> => {
+      const server = await serve({ ...configFor(['one']), ...(meta ? { meta } : {}) }, cache);
+      const answered = await fetch(server.url);
+
+      await answered.text();
+      await server.close();
+
+      return answered.headers.get('etag') ?? '';
+    };
+
+    const named = await tagFor({ sourceInfoName: 'Before' });
+
+    expect(named).not.toBe(await tagFor({ sourceInfoName: 'After' }));
+    expect(named).not.toBe(await tagFor(undefined));
+    // Same config, same answer: a restart must not invalidate every client for
+    // nothing, which is the other half of what a validator is for.
+    expect(named).toBe(await tagFor({ sourceInfoName: 'Before' }));
+
+    // A function is hashed by what it says rather than by what it answers —
+    // so changing its body moves the tag…
+    const counts = await tagFor(({ channels }) => ({
+      sourceInfoName: `${String(channels.length)} channels`,
+    }));
+
+    expect(counts).not.toBe(
+      await tagFor(({ channels }) => ({ sourceInfoName: `${String(channels.length)} ch` })),
+    );
+  });
+
+  it('keeps a poll cheap for a meta that answers differently every time', async () => {
+    // The reason the declaration is hashed and not the answer: `<tv date>` is
+    // the generation time by definition, and a validator that moved with it
+    // would turn every poll into a full merge — which is the whole thing this
+    // server exists not to do.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    let asked = 0;
+    const server = await serve(
+      {
+        ...configFor(['one']),
+        meta: () => {
+          asked += 1;
+
+          return { sourceInfoName: `run ${String(asked)}` };
+        },
+      },
+      cache,
+      // No held snapshot: every request asks again, which is the worst case.
+      { revalidateMs: 0, sitesMaxAgeMs: 0 },
+    );
+
+    const first = await fetch(server.url);
+
+    await first.text();
+
+    const again = await fetch(server.url, {
+      headers: { 'if-none-match': first.headers.get('etag')! },
+    });
+
+    expect(asked).toBeGreaterThan(1);
+    expect(again.status).toBe(304);
+  });
+
+  it('moves the validator for a derived channel nobody grabbed', async () => {
+    // A derived channel is written out of its source's entries and has none of
+    // its own, so declaring one adds a channel to the document that the cache
+    // sweep cannot see at all.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const tagFor = async (derived: EpgConfig['derived']): Promise<string> => {
+      const server = await serve({ ...configFor(['one']), ...(derived ? { derived } : {}) }, cache);
+      const answered = await fetch(server.url);
+
+      await answered.text();
+      await server.close();
+
+      return answered.headers.get('etag') ?? '';
+    };
+
+    const plain = await tagFor(undefined);
+    const shifted = await tagFor([{ xmltvId: 'one.plus1', from: 'one', offset: 60 }]);
+
+    expect(plain).not.toBe(shifted);
+    expect(shifted).not.toBe(await tagFor([{ xmltvId: 'one.plus1', from: 'one', offset: 120 }]));
+  });
+
   it('picks the channel up at once when told to reload, ceiling or no ceiling', async () => {
     // The ceiling is a guess at how long a new channel may stay invisible; this
     // is the operator saying they know. `sitesMaxAgeMs` is an hour here, so
@@ -683,6 +990,75 @@ describe('serveGuide', () => {
     expect(report.of('serve:response').map((event) => event.status)).toEqual([200, 304]);
   });
 
+  it('counts a guide that failed half way, rather than only naming it', async () => {
+    // The headers went out as a 200 and the socket is destroyed, so there is no
+    // status on the wire to count — which is exactly why it has to be said
+    // here. A reporter that sees every other request end and not this one
+    // under-counts by the ones worth knowing about.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    // Only the payload read, and only for the second channel: the metadata
+    // sweep behind the ETag has to get through, or this is a 500 decided before
+    // a byte went out, which is the other path entirely.
+    //
+    // A `Proxy` rather than an object over it, so that every call it passes
+    // through keeps `this` on the real store — `CacheManager` holds its driver
+    // in a private field, and a stand-in that is not one cannot read it.
+    const falling = new Proxy(cache, {
+      get(store, name) {
+        if (name === 'read') {
+          return async (key: Parameters<CacheStore['read']>[0]) => {
+            if (key.channelId === 'two') {
+              throw new Error('the cache went away mid-guide');
+            }
+
+            return store.read(key);
+          };
+        }
+
+        const held = Reflect.get(store, name, store) as unknown;
+
+        return typeof held === 'function' ? held.bind(store) : held;
+      },
+    }) as CacheStore;
+
+    const report = collect();
+    const server = await serve(configFor(['one', 'two']), falling, {
+      reporter: report.reporter,
+    });
+
+    // Destroyed part way through, which is what tells a consumer the document
+    // it received is not whole.
+    // Destroyed part way through, which is what tells a consumer the document
+    // it received is not whole.
+    await expect(fetch(server.url).then(async (answered) => answered.text())).rejects.toThrow();
+
+    expect(report.of('serve:failed')).toHaveLength(1);
+    expect(report.of('serve:response').map((event) => event.status)).toEqual([500]);
+  });
+
+  it('says it reloaded, so an app can reload what it keeps beside the guide', async () => {
+    // The point of saying it rather than only doing it: a consumer sharing
+    // this server's `SIGHUP` hears about the reload instead of adding a second
+    // handler for the same signal — and the same event is where a supervisor
+    // readiness ping belongs, which is why this package sends none itself.
+    const cache = cacheWith({ one: [programme('one', 6)] });
+
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    const report = collect();
+    const reloadOn = new EventTarget();
+
+    await serve(configFor(['one']), cache, { reporter: report.reporter, reloadOn });
+
+    reloadOn.dispatchEvent(new Event('reload', { cancelable: true }));
+
+    expect(report.of('serve:reloaded')).toHaveLength(1);
+    expect(report.messages).toContain('Reloading the channel lists on the next request');
+  });
+
   it('stops when its signal fires, and again is not an error', async () => {
     const cache = cacheWith({});
     const controller = new AbortController();
@@ -887,6 +1263,15 @@ describe('outputFingerprint', () => {
     expect(of({ extensions: ['lcn'] })).not.toBe(of({ extensions: ['uniqueID'] }));
     expect(of({ extensions: true })).not.toBe(of({ extensions: ['lcn'] }));
     expect(of({ extensions: true })).not.toBe(of({ extensions: false }));
+    // Where the urls point is part of the document too — a base changed in the
+    // config between two runs of the server would otherwise leave every poller
+    // on a validator that still matched.
+    expect(of({})).not.toBe(of({ baseUrl: 'https://pi.local/' }));
+    expect(of({ baseUrl: 'https://pi.local/' })).not.toBe(of({ baseUrl: 'https://box.lan/' }));
+    // However it was spelled: `URL` and string are the same base.
+    expect(of({ baseUrl: new URL('https://pi.local/') })).toBe(
+      of({ baseUrl: 'https://pi.local/' }),
+    );
   });
 
   it('notices a function’s body changing, which JSON cannot see at all', () => {

@@ -34,12 +34,70 @@ export default defineConfig({
 ```
 
 Node >= 23.6 loads `epg.config.ts` directly via native type stripping. On
-Node 20 or 22, use `epg.config.js` / `epg.config.mjs`, or compile the TS file
-first.
+Node 22, use `epg.config.js` / `epg.config.mjs`, or compile the TS file first.
 
 The factory form takes a context and is how a config gets answers it cannot
 hardcode — a username, a password, a region. See
 [Asking for more than channels](./tv-grab.md#asking-for-more-than-channels).
+
+### A config in a TypeScript project
+
+A config that is one file needs nothing more than the above. One that imports
+from the rest of a project — your sites, your constants — meets the one real
+trap, and it is worth knowing before it happens:
+
+```
+Cannot find module /app/src/sites/a.js imported from /app/src/epg.config.ts
+```
+
+Type stripping strips types. It does not resolve modules the way `tsc` does, so
+the `./sites/a.js` a TypeScript project is *supposed* to write — the specifier
+that points at what the build will emit — points at a file that does not exist
+yet. Three ways out, and the first is the one to reach for:
+
+**Write the real extension, and let `tsc` rewrite it.** Since TypeScript 5.7
+that is a supported pair of options rather than a hack:
+
+```jsonc
+// tsconfig.json
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,  // ./sites/a.ts → ./sites/a.js on the way out
+    "erasableSyntaxOnly": true                // see below
+  }
+}
+```
+
+```ts
+import { a } from './sites/a.ts';   // runs under `epg -c epg.config.ts`, builds to `.js`
+```
+
+Nothing to install, no flag to remember, and the same file serves the CLI and
+the build.
+
+**Or point the CLI at the built config** — `epg grab -c dist/epg.config.js` —
+which asks nothing of the config at all, as long as the build has run. Fine for
+a container, awkward in development, where `epg` then needs a build first.
+
+**Or load the TypeScript yourself**, with [tsx](https://tsx.is):
+`NODE_OPTIONS='--import tsx' epg grab -c epg.config.ts`. It resolves `.js` to
+`.ts` the way `tsc` does, so nothing in the project has to change — at the cost
+of a dependency and of a flag everyone has to remember.
+
+**The other half of the trap is syntax.** Type stripping erases types; it does
+not *transform* code, so a config that reaches anything built from `enum`,
+`namespace` or a constructor's parameter properties fails with:
+
+```
+TypeScript enum is not supported in strip-only mode
+```
+
+`erasableSyntaxOnly: true` is what turns that into a build error with a line
+number instead of a surprise at run time. Node's
+`--experimental-transform-types` handles the syntax half, but not the
+resolution half above — a `.js` specifier still does not find a `.ts` file —
+so it solves half a problem.
 
 ## `EpgConfig` reference
 
@@ -52,16 +110,18 @@ hardcode — a username, a password, a region. See
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
 | `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source. |
-| `merge` | `MergeOptions` | `{ channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true, dropContainers: true }` | How several sites covering one channel are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
-| `derived` | `DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. See [Derived channels](#derived-channels). |
+| `merge` | `MergeOptions` | `{ cover: 'all', channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true, dropContainers: true }` | Who grabs a channel several sites offer (`cover`) and how the ones that did are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
+| `derived` | `DerivedChannel[] \| (context) => DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. A function is asked per run, with the channels there turned out to be. See [Derived channels](#derived-channels). |
 | `channels` | `readonly string[]` | all of them | Keep only these channels, by `xmltvId` — see [keeping only some channels](#keeping-only-some-channels). `--channels` overrides it. |
-| `meta` | `XmltvDocumentMeta` | — | Attributes for the root `<tv>` element — see [below](#root-tv-attributes). |
+| `meta` | `XmltvDocumentMeta \| (context) => XmltvDocumentMeta` | — | Attributes for the root `<tv>` element. A function is asked per run, with the channels there turned out to be — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 | `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — all of them | Which provider extensions the guide carries — see [Provider extensions](#provider-extensions). `false` leaves every one out, which is what makes the guide valid against the DTD. |
 | `profile` | `'tvheadend' \| 'jellyfin' \| OutputProfile` | none | Shape the guide for the consumer that reads it — see [Output profiles](#output-profiles). Applies on the way out, so switching it refetches nothing. |
-| `serve` | `{ port?, host?, path?, compress?, cors? }` | `8080`, `127.0.0.1`, `/guide.xml`, `gzip`, off | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). |
+| `baseUrl` | `string \| URL` | none | Resolve every relative `<icon src>`, `<image>` and `<url>` the guide writes against this. See [serving the guide](#serving-the-guide). |
+| `serve` | `{ port?, host?, path?, compress?, cors?, baseUrl? }` | `8080`, `127.0.0.1`, `/guide.xml`, `gzip`, off, none | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). |
 | `allowMissing` | `number \| string` | none — anything missing fails | How much of the guide may be missing and the run still exit **0**: a number of channel-days, or a share like `'5%'` — see [allowing some of the guide to be missing](#allowing-some-of-the-guide-to-be-missing). |
 | `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'progress'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
+| `events` | an `EventEmitter` | none | An emitter of your own, told everything, **whatever `--reporter` says** — a readiness ping, a reload, a metric. Type it with `EpgEventMap` and each listener's argument is the event it asked for. See [an emitter, and several sinks at once](./api.md#an-emitter-and-several-sinks-at-once). |
 
 ### Root `<tv>` attributes
 
@@ -91,6 +151,34 @@ export default defineConfig({
 | `generatorInfoName` / `generatorInfoUrl` | `generator-info-name` / `generator-info-url` |
 
 Non-DTD attributes go in `extraAttributes` and are emitted verbatim.
+
+`meta` may also be a **function**, asked the same question [`derived`](#derived-channels)
+is and given the same context — the channels the sites resolved to, this run's
+`now`, and `log`/`warn`. It is for what cannot be written down ahead of a run
+that decides it:
+
+```ts
+export default defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  meta: ({ channels, now }) => ({
+    generatorInfoName: 'epg-tools',
+    sourceInfoName: `Example TV — ${String(channels.length)} channels`,
+    date: xmltvDate(now),
+  }),
+});
+```
+
+Under `epg serve` it is asked once per snapshot rather than once per request, at
+the pace the channel lists are re-read — so it follows a lineup that changes
+without costing a poll anything.
+
+The ETag covers `meta` **as written, not as answered**: a changed
+`source-info-name` moves every validator, and so does changing the body of the
+function, but a function that answers differently for reasons of its own does
+not. That is deliberate — `date` is the generation time by definition, and a
+validator that moved with it would turn every poll into a full merge. A `meta`
+that follows the lineup still moves the tag, because the lineup does.
 
 ## Cache reference
 
@@ -613,6 +701,37 @@ is what produces the intermittent `502` nobody can reproduce: the proxy sends a
 request down a pooled socket at the moment Node is tearing it down. Holding
 longer means the proxy is always the one to decide a connection is finished.
 
+**For pictures served beside the guide**, set a base url. A relative
+`<icon src>`, `<image>` or `<url>` is relative to the document, and a guide is
+read somewhere other than where it was written — so `baseUrl` on the
+configuration resolves every one of them on the way out:
+
+```ts
+baseUrl: 'https://pi.local/'    // /logos/one.png → https://pi.local/logos/one.png
+```
+
+A url that already says where it is — `https://`, a `data:` — is left exactly as
+it came, and is answered without parsing anything, so a base costs nothing on a
+guide whose pictures are already absolute. A protocol-relative `//cdn/x.png`
+keeps its host and takes the base's scheme, which is what resolving it means. A
+base that is not absolute is refused rather than quietly resolving nothing.
+
+`serve.baseUrl` overrides it, and can answer **per request**, which is what a
+box reachable by two names needs:
+
+```ts
+serve: { baseUrl: true }                                        // the host that asked
+serve: { baseUrl: ({ headers }) => bases[String(headers.host)] }  // or your own rule
+```
+
+`true` reads the forwarded protocol and host where something in front says so,
+falls back to the `Host` header, and treats the connection as `https` when the
+socket itself is TLS. A per-request base is folded into the `ETag` and the
+response says it varies on the headers it was read from, so a consumer is told
+the document changed when it did and a cache in between never hands one host
+another's guide. A fixed base adds neither, being the same document for
+everybody.
+
 **For a browser**, set `serve.cors` — `true` for any origin, or one origin to
 allow only it. It is off by default because loopback is not the boundary it
 looks like: a page open in a browser on this machine can reach `127.0.0.1`, so
@@ -639,6 +758,136 @@ with. `SIGHUP` reloads rather than stops, as [above](#serving-the-guide).
 
 `serveGuide(config, options)` is the same thing as a library, returning
 `{ url, port, reload, close, closed }` — see [the API reference](./api.md).
+
+#### On a server of your own
+
+The answering and the listening are separate, so the guide can be a route in an
+app you already have. Two ways in, depending on which process you want to be
+the one running.
+
+**Keep the command** — `serve.server` hands `epg serve` a server of yours, and
+everything the command does carries on around it: the reporter, `SIGHUP` to
+reload, a scheduled grab, and a stop that cuts the connections still open
+before it lets go of the cache.
+
+```ts
+import express from 'express';
+
+export default defineConfig({
+  sites: [example],
+  output: 'guide.xml',
+  serve: {
+    server: ({ node, guidePath, healthPath }, { port, host }) => {
+      const app = express();
+
+      app.get(guidePath, node('guide'));
+      app.get('/dashboard', mine);
+
+      if (healthPath !== false) {
+        app.get(healthPath, node('health'));
+      }
+
+      return app.listen(port, host);
+    },
+  },
+});
+```
+
+Return the server you are listening on — `app.listen()` gives you one, as does
+`fastify.server` — and `epg serve` waits for it to be bound before it reports a
+url. Mount the paths the handler gives you rather than writing your own, or
+`serve.path`, `serve.health` and `--path` stop meaning anything to whoever runs
+the command. `keepAliveMs` is not applied to a server this package did not
+make.
+
+**Where stopping is more than closing a socket**, return `{ server, close }`
+instead of the bare server — which a fastify instance already is, so there it
+is just `return app`. That is what fastify needs: `app.close()` runs its `onClose` hooks and
+lets its plugins put themselves away, and closing the socket underneath it
+would skip every one of them. It is awaited while the handler stops — after the
+scheduled grab is called off, before the cache is let go of — and whatever is
+still listening afterwards is closed and its connections cut anyway, so yours
+is free to be the graceful half.
+
+```ts
+serve: {
+  server: async ({ fastify: route, guidePath }, { port, host }) => {
+    const app = Fastify({ forceCloseConnections: true });
+
+    app.get(guidePath, route('guide'));
+    await app.listen({ port, host });
+
+    return app;      // already a `server` and a `close()`
+  },
+}
+```
+
+**Over TLS**, the same seam serves: return an `https.Server` and `epg serve`
+listens on it exactly as it would on its own.
+
+```ts
+serve: {
+  server: ({ node }, { port, host }) =>
+    createHttpsServer({ key, cert }, node()).listen(port, host),
+}
+```
+
+HTTP/2 works the same way, through Node's compatibility API:
+
+```ts
+serve: {
+  server: ({ node }, { port, host }) =>
+    createSecureServer({ key, cert }, node()).listen(port, host),   // node:http2
+}
+```
+
+What differs is stopping. HTTP/2 holds sessions rather than connections, and
+there is no `closeAllConnections` for them — Node closes an idle session itself
+but waits for one with a stream in flight, so `epg serve` keeps track of them
+and cuts them, exactly as it cuts connections for HTTP/1. A guide half sent is
+a guide nobody is waiting for by then.
+
+A guide written with `baseUrl: true` says `https://` there without being told:
+the scheme comes from the connection rather than from a header, which is the
+one thing `X-Forwarded-Proto` cannot be trusted about. The url `epg serve`
+reports is still written `http://`, since it does not know what you handed it —
+that is the one cost.
+
+`handler.fastify(route?)` is fastify's own adapter: it hands fastify the
+status, the headers and the body rather than writing around it, so `onSend` and
+`onResponse` hooks still see the guide — a `reply.hijack()` over `reply.raw`
+works too, but runs none of them, and a plugin that logs or counts responses
+goes blind. And a close that waits for every request in flight will wait for a
+guide for as long as its consumer takes to read one, so
+`forceCloseConnections: true` is the answer there rather than a longer timeout.
+
+**Own the process** — `createGuideHandler(config, options)` is `serveGuide`
+without the socket, for a program that has its own startup and shutdown:
+
+```ts
+const handler = await createGuideHandler(config, { grab: grabEvery('4h') });
+
+app.get('/epg.xml', handler.node('guide'));                      // express, koa, http
+fast.get('/epg.xml', handler.fastify('guide'));                  // fastify, hooks and all
+hono.get('/epg.xml', (c) => handler.fetch('guide')(c.req.raw));  // or fetch-style
+
+process.on('SIGINT', () => void handler.close());  // yours to close
+```
+
+`handler.node(route?)`, `handler.fastify(route?)` and `handler.fetch(route?)`
+build a handler for one answer — `'guide'` or `'health'` — wherever you mount
+it. With no route they
+route by path instead and answer anything else with a 404, which is what makes
+`createServer(handler.node())` a whole server and `app.use(handler.node())`
+wrong for an app with routes of its own. Underneath both is
+`handler.answer(request)`, which takes a method, a path, headers and a signal
+and returns `{ status, headers, body }` with nothing of any transport in it —
+that is the seam a framework nobody here has heard of is adapted at.
+
+A mounted handler is the whole of a served guide: the same ETags, the same
+snapshot of the channel lists, the same concurrency limit, and the scheduled
+grab if the config asks for one. Which means **`close()` is not optional** — it
+holds a cache, and with a schedule a timer that keeps the process alive.
 
 #### Is it healthy
 
@@ -1155,14 +1404,60 @@ runs Node's file operations (four threads by default).
 
 When several sites cover the same `xmltvId` (site order in `sites` = priority):
 
-- `channelStrategy`
+Two questions, and they are separate options because they are separate
+questions: **who grabs** the channel, and **how what was grabbed is combined**.
+
+- `cover` — who grabs it
+  - `all` (default) — everybody who has it
+  - `first` — the first covering site, and the others are **not grabbed**: the channel is taken off the lists of the sites below it before the run starts, so what the merge was going to discard is never fetched. For a lineup assembled from several providers in preference order, this is one request per channel instead of one per provider
+  - a **function** — the same decision per channel rather than once for all of them, given every site's offer of it; see [choosing per channel](#choosing-per-channel)
+- `channelStrategy` — how the ones that did grab it are combined
   - `merge-programmes` (default) — one `<channel>` with metadata merged from all covering sites (display names unioned by `(lang, value)`, icons by `src`, priority site first), programmes combined from all covering sites
-  - `first-wins` — one `<channel>`, programmes only from the first covering site
+  - `first-wins` — one `<channel>`, programmes only from the first covering site. The others are still grabbed, so switching to a strategy that uses them costs no refetch
   - `keep-all` — no deduplication
 - `programmeStrategy` (for `merge-programmes`)
   - `merge` (default) — programmes describing the same broadcast become one element; language-tagged fields (`title`, `desc`, `category`, …) are unioned by `(lang, value)` — grab the same channel from a Slovak and an English source and get both languages in one programme
   - `concat` — keep all programmes sorted by start
   - `backfill` — the first covering site contributes everything it has, and a lower-priority one only what falls in a hole it left; nothing is combined — see [filling the gaps](#filling-the-gaps)
+
+`cover` is read by the grab as well as by the merge, so `epg grab`, `epg build`
+and `epg serve`'s own grabs all stop asking — and each site says how many
+channels it left to another. What it costs is the other site's copy: where
+`first-wins` has it cached and switching strategy is free, here the days are not
+there, and asking for them later is a fetch.
+
+### Choosing per channel
+
+`cover: 'first'` says the site highest in the config takes every contested
+channel. A function says it per channel, against what each site offers:
+
+```ts
+merge: {
+  cover: ({ xmltvId, offers }) => {
+    // Whoever has a picture for it, and the first site otherwise.
+    const best = offers.find((offer) => offer.channel.logo !== undefined);
+
+    return best ? [best] : offers.slice(0, 1);
+  },
+}
+```
+
+It is asked **once per contested channel** — a channel one site offers is not a
+question — and **before the grab**, so a channel left to one site costs the
+others nothing. Each offer is `{ site, channel }`: the site's name as the config
+spells it, and that site's whole entry, `logo`, `siteId`, `data` and all.
+
+Return the offers to keep, as objects or as site names. `undefined` keeps every
+one of them, and `[]` means nobody grabs it. The returned *order* is not a
+priority — that stays the order of `sites` — so choosing a single offer is how
+a lower site wins a channel. What is kept is then combined by
+`channelStrategy`, which is the other half of the question.
+
+Two things it cannot do, both for the same reason. It sees what a site **says
+about a channel**, not what that site's listings turn out to hold, so "whoever
+has programme images for it" is a question only the merge can answer, and only
+after both were fetched. And a rule that keeps a site offering nothing is told
+so — a misspelled name reads exactly like a decision against everybody.
 
 ### What counts as the same broadcast
 
@@ -1400,6 +1695,28 @@ matches by name even before its `tvg-id` is set.
 `from` may name another derived channel. A chain is resolved to its root with
 the offsets summed, since a shift of a shift is one shift, and it takes its name
 from that root — so a `+2` reads as one.
+
+**A lineup nobody writes down takes a function instead of a list.** It is asked
+once per run, with the channels the sites resolved to — so a `+1` follows a
+lineup that a provider sync rewrites between grabs, which a list cannot:
+`epg serve` reads its configuration once and goes on serving under it.
+
+```ts
+derived: ({ channels, warn }) =>
+  channels
+    .filter((channel) => channel.data?.timeshift === true)
+    .map((channel) => ({
+      xmltvId: `${channel.xmltvId}.plus1`,
+      from: channel.xmltvId,
+      offset: 60,
+    })),
+```
+
+It is asked where the channel lists are — once for a `build`, so the grab and
+the merge agree about what exists, and once per snapshot under `epg serve`
+rather than once per request. `warn` and `log` go where a `merge.transform`'s
+do, which is the only place a declaration that decided *not* to shift something
+can say so.
 
 **What moves:** the start, the stop, and the PDC/VPS starts. Not `<date>`, which
 is the year the programme was made, and not `previously-shown`, which describes

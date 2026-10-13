@@ -48,8 +48,8 @@ export function tracked(bench: Bench, name: string, fn: BenchFn): BenchRegistrat
 }
 
 /** What `bench.compare()` resolves to: the arms of one comparison, by name. */
-interface Results {
-  get: (name: string) => BenchResult;
+interface Results<TName extends string> {
+  get: (name: TName) => BenchResult;
 }
 
 /**
@@ -62,11 +62,13 @@ interface Results {
  * `subject` is the arm the others are read against, and each ratio is stated
  * in whichever direction makes it a number above one.
  */
-export function speedup(
+export function speedup<TName extends string>(
   annotate: (message: string, type?: string) => Promise<unknown>,
-  results: Results,
-  subject: string,
-  others: string[],
+  // Named by whatever the comparison was named: Vitest types `compare` by the
+  // literal arms it was given, and a `string` here would refuse them all.
+  results: Results<TName>,
+  subject: NoInfer<TName>,
+  others: NoInfer<TName>[],
 ): Promise<unknown> {
   const mean = results.get(subject).latency.mean;
 

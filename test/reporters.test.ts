@@ -1,10 +1,14 @@
+import { EventEmitter } from 'node:events';
 import { Writable } from 'node:stream';
 import { describe, expect, it } from 'vitest';
 import {
   atLevel,
   EVENT_KINDS,
+  combineReporters,
+  emitterReporter,
   jsonReporter,
   LEVELS,
+  loggerReporter,
   progressReporter,
   render,
   renderFailure,
@@ -12,7 +16,14 @@ import {
   REPORTER_NAMES,
   textReporter,
 } from '../src/main.js';
-import type { EpgEvent, EpgEventInput, EventKind, EventLevel, Reporter } from '../src/main.js';
+import type {
+  EpgEvent,
+  EpgEventInput,
+  EpgEventMap,
+  EventKind,
+  EventLevel,
+  Reporter,
+} from '../src/main.js';
 import { silent, stamped, PHASES } from '../src/core/events.js';
 import { emitter } from '../src/core/events.js';
 
@@ -183,6 +194,40 @@ describe('render', () => {
     [
       { type: 'request:done', site: 'a.tv', channels: ['one'], days: ['2026-09-01'], ms: 412 },
       '[a.tv] one 2026-09-01: answered in 412ms',
+    ],
+    [
+      {
+        type: 'site:done',
+        site: 'a.tv',
+        requests: 96,
+        ms: 42_000,
+        requestMs: 28_500,
+        fetched: 412,
+        empty: 0,
+        fromCache: 8,
+        unchanged: 0,
+        failed: 0,
+        sitesFailed: 0,
+      },
+      '[a.tv] 412 fetched, 8 from cache, 0 failed — 96 requests in 42s, 29s waiting',
+    ],
+    [
+      {
+        type: 'site:done',
+        site: 'b.tv',
+        requests: 1,
+        ms: 2543,
+        requestMs: 2100,
+        fetched: 0,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 0,
+        sitesFailed: 1,
+      },
+      // Below ten seconds it stays in milliseconds, which is where a single
+      // request lives; `1 request` rather than `1 requests`.
+      '[b.tv] 0 fetched, 0 from cache, 0 failed, 1 site answered nothing — 1 request in 2543ms, 2100ms waiting',
     ],
     [
       { type: 'pacing:rateLimit', site: 'a.tv', waiting: true },
@@ -642,6 +687,122 @@ describe('progressReporter', () => {
     // At `debug` the per-channel-day lines are the point and a live line would
     // swallow them; below `info` there is no progress to show.
     expect(out.raw).not.toContain('\u001b[K');
+  });
+});
+
+describe('loggerReporter', () => {
+  /** A logger of the shape every logging library has. */
+  function logger(): {
+    lines: string[];
+    info: (m: string) => void;
+    warn: (m: string) => void;
+    error: (m: string) => void;
+  } {
+    const lines: string[] = [];
+
+    return {
+      lines,
+      info: (message) => lines.push(`info ${message}`),
+      warn: (message) => lines.push(`warn ${message}`),
+      error: (message) => lines.push(`error ${message}`),
+    };
+  }
+
+  it('sends each line to the method its level names', () => {
+    const log = logger();
+    const report = loggerReporter({ logger: log });
+
+    report(event({ type: 'serve:started', url: 'http://127.0.0.1:8080/guide.xml' }));
+    report(event({ type: 'site:warning', site: 'a.tv', message: 'odd' }));
+    report(
+      event({
+        type: 'site:failed',
+        site: 'a.tv',
+        error: new Error('no'),
+      }),
+    );
+
+    expect(log.lines).toEqual([
+      'info Serving the guide at http://127.0.0.1:8080/guide.xml',
+      'warn [a.tv] odd',
+      'error FAILED [a.tv] site failed: no',
+    ]);
+  });
+
+  it('passes on only what the level asks for', () => {
+    const log = logger();
+    const report = loggerReporter({ logger: log, level: 'warn' });
+
+    report(event({ type: 'serve:started', url: 'http://127.0.0.1:8080/guide.xml' }));
+    report(event({ type: 'site:warning', site: 'a.tv', message: 'odd' }));
+
+    // A failure is not filtered: it is the one thing a logger is for.
+    report(event({ type: 'site:failed', site: 'a.tv', error: new Error('no') }));
+
+    expect(log.lines).toEqual(['warn [a.tv] odd', 'error FAILED [a.tv] site failed: no']);
+  });
+
+  it('uses debug where the logger has one, and info where it does not', () => {
+    const log = logger();
+    const debugged: string[] = [];
+    const report = loggerReporter({
+      logger: { ...log, debug: (message) => debugged.push(message) },
+      level: 'debug',
+    });
+
+    report(event({ type: 'merge:channel', channelId: 'one' }));
+
+    expect(debugged).toEqual(['merge: channel one done']);
+    expect(log.lines).toEqual([]);
+
+    loggerReporter({ logger: log, level: 'debug' })(
+      event({ type: 'merge:channel', channelId: 'one' }),
+    );
+
+    expect(log.lines).toEqual(['info merge: channel one done']);
+  });
+});
+
+describe('emitterReporter and combineReporters', () => {
+  it('re-emits each event under its own type, typed by its map', () => {
+    const events = new EventEmitter<EpgEventMap>();
+    const seen: string[] = [];
+
+    // The listener's argument is the event it asked for, which is what the
+    // map buys: `url` exists here and would not on a bare emitter.
+    events.on('serve:started', (event) => seen.push(`started ${event.url}`));
+    events.on('serve:reloaded', () => seen.push('reloaded'));
+
+    const report = emitterReporter(events);
+
+    report(event({ type: 'serve:started', url: 'http://127.0.0.1:8080/guide.xml' }));
+    report(event({ type: 'serve:reloaded' }));
+    // Nothing listens for this one, which is the cheapest sink there is.
+    report(event({ type: 'merge:channel', channelId: 'one' }));
+
+    expect(seen).toEqual(['started http://127.0.0.1:8080/guide.xml', 'reloaded']);
+  });
+
+  it('gives every event to each reporter, and skips the ones that are not there', () => {
+    const said: string[] = [];
+    const report = combineReporters(
+      undefined,
+      (given) => said.push(`first ${given.type}`),
+      undefined,
+      (given) => said.push(`second ${given.type}`),
+    );
+
+    report(event({ type: 'serve:reloaded' }));
+
+    expect(said).toEqual(['first serve:reloaded', 'second serve:reloaded']);
+  });
+
+  it('is the reporter itself when there is only one, and silent when there is none', () => {
+    const only: Reporter = () => {};
+
+    expect(combineReporters(only, undefined)).toBe(only);
+    // Nothing to call, and nothing that throws for being called.
+    expect(() => combineReporters()(event({ type: 'serve:reloaded' }))).not.toThrow();
   });
 });
 

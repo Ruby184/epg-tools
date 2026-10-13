@@ -112,13 +112,45 @@ the whole answer to "what does the default verbosity show?".
 | group | types |
 |---|---|
 | the run | `run:cancelled`, `grab:done` |
-| a site | `site:started`, `site:done`, `site:failed`, `site:note`, `site:warning` (the last two carrying whatever [fields the site attached](./site-config.md#saying-something)) |
+| a site | `site:started`, `site:done` (its counts plus what it cost: `requests`, `ms`, `requestMs`), `site:failed`, `site:note`, `site:warning` (the last two carrying whatever [fields the site attached](./site-config.md#saying-something)) |
 | one channel-day | `entry:cached`, `entry:fetched`, `entry:appended`, `entry:unchanged`, `entry:failed` |
 | one request | `request:started`, `request:done` (with `ms`), `request:failed` |
 | a whole-document source | `stream:gaps`, `stream:ignored` |
 | pacing | `pacing:held`, `pacing:slowed`, `pacing:recovered`, `pacing:rateLimit` |
-| merging, tidying | `merge:channel`, `merge:done`, `merge:note`, `merge:warning`, `prune:done` |
-| [serving](./configuration.md#serving-the-guide) | `serve:started` (with the `url`), `serve:response` (`method`, `path`, `status`, `ms`), `serve:disconnected`, `serve:failed`, `serve:stopped` |
+| merging, tidying | `merge:channel`, `merge:summary` (what the sources made of each other), `merge:done`, `merge:note`, `merge:warning`, `prune:done` |
+| [serving](./configuration.md#serving-the-guide) | `serve:started` (with the `url`), `serve:response` (`method`, `path`, `status`, `ms`), `serve:reloaded`, `serve:disconnected`, `serve:failed`, `serve:stopped` |
+
+### What a run cost, and what the merge made of it
+
+Two of these are worth knowing about before you need them, because they answer
+questions that are otherwise answered by hand.
+
+`site:done` says what the site **cost**, beside what it fetched. `requests` is
+how many times the source was asked — every slot the site's queue gave out, a
+`ctx.paced` fetch inside a parse included, which is why it is not the same as
+counting `request:done` events. `ms` is how long the site took; `requestMs` is
+how long its requests spent waiting on the source. A site whose `ms` is far
+above its `requestMs` is waiting on its own `rateLimit`; one where they are
+close is waiting on the source. That is the measurement to take before tuning
+either.
+
+`merge:summary` says what the sources made of each other, once the last
+programme is out:
+
+```
+Merge: 4821 programmes combined, 37 nearly, 112 containers dropped
+  sport.sk: 7m apart — "Správy" / "Správy TV"
+```
+
+`combined` is programmes a later source joined to one already there. `nearMiss`
+is programmes that joined nothing with something close by — the quiet failure
+that matters, because a source published on a different grid merges with
+nothing and the guide then carries every programme twice. A gap larger than
+`merge.match.startToleranceMs` means they failed on time; smaller means they
+failed on titles. Counted in full, with the first few reported whole, since on
+a guide of thousands the count is the alarm and the examples only have to say
+whether it is one channel or all of them. `containers` and `clipped` are what
+`dropContainers` and `clipOverlaps` took away.
 
 Two things about the shape are deliberate, and both are the difference between a
 structured sink and a string one. **A failed request is one event, not one per
@@ -141,6 +173,59 @@ are the same act:
 | `textReporter({ stream, errorStream?, level?, failures?, failureCap?, prefix? })` | lines of text — what a person reads and a CI log keeps |
 | `jsonReporter({ stream, level?, pretty? })` | one JSON object per line, for a pipeline |
 | `progressReporter({ stream, … })` | one line, rewritten in place — `textReporter`'s options, plus a cursor |
+| `loggerReporter({ logger, level?, prefix? })` | the same lines, to a logger you already have |
+
+`loggerReporter` is for a process that logs for itself — a server under a
+supervisor, where two log streams is one too many. The `logger` needs `info`,
+`warn` and `error` taking a message, which pino, bunyan, winston and `console`
+all have; `debug` is used where there is one. Failures go to `error` whole
+rather than being held back for a block at the end, since a logger has its own
+idea of how to group things.
+
+```ts
+serveGuide(config, { reporter: loggerReporter({ logger: pino() }) });
+```
+
+### An emitter, and several sinks at once
+
+For a long-lived process where several things care about different events,
+`emitterReporter` re-emits each one on an `EventEmitter` under its own type.
+Typing the emitter with `EpgEventMap` makes each listener's argument the event
+it asked for:
+
+```ts
+import { EventEmitter } from 'node:events';
+
+const events = new EventEmitter<EpgEventMap>();
+
+events.on('serve:started', () => process.send?.('ready'));   // pm2 wait_ready
+events.on('serve:reloaded', () => void reloadMyOwnThings());
+events.on('site:done', (event) => metrics.timing(event.site, event.ms));
+```
+
+Each concern subscribes to the one it is about, instead of a `switch` in a
+reporter growing a case per concern. That is also where a supervisor's
+readiness ping belongs: this package sends none, because a library writing to
+an IPC channel nobody asked it to is a surprise rather than a feature.
+
+`combineReporters(...)` gives every event to several reporters in the order
+written, skipping any that are `undefined`:
+
+```ts
+serveGuide(config, {
+  reporter: combineReporters(loggerReporter({ logger }), emitterReporter(events)),
+});
+```
+
+**From a config file, use `events` rather than `reporter`.** The two answer
+different questions: `reporter` is how a run talks to whoever started it, which
+an operator can overrule with `--reporter`; `events` is what the *program* does
+with what happens, which nobody passing `--reporter json` meant to switch off.
+The CLI runs both.
+
+```ts
+export default defineConfig({ sites, output, events });   // the emitter itself
+```
 
 ### Naming one in a config
 
@@ -292,6 +377,75 @@ which is re-resolved when the fingerprint moves and at least every
 `sitesMaxAgeMs` (ten minutes), so that a grab which only adds a channel is not
 invisible until midnight. See [serving the
 guide](./configuration.md#serving-the-guide) for what that costs and saves.
+
+### On a server of your own
+
+`createGuideHandler(config, options)` is that answer without the listening, for
+an app that already has a port of its own:
+
+```ts
+import { createGuideHandler } from 'epg-tools/serve';
+
+const handler = await createGuideHandler(config, { grab: grabEvery('4h') });
+
+app.get(handler.guidePath, handler.node('guide'));              // express, koa, http
+fast.get('/epg.xml', handler.fastify('guide'));                 // fastify, hooks and all
+hono.get('/epg.xml', (c) => handler.fetch('guide')(c.req.raw)); // or fetch-style
+
+await handler.close();                                          // yours to close
+```
+
+It gives back `{ answer, node, fastify, fetch, guidePath, healthPath, config, reload, close }`
+and takes everything `serveGuide` does except `port`, `host` and `keepAliveMs`,
+plus `shutdown` — a hook run while stopping, after the scheduled grab has been
+called off and before the cache is let go of, which is where ending the
+requests still in flight belongs. `serveGuide` is this plus a socket, and
+passes its own shutdown there.
+
+`node(route?)`, `fastify(route?)` and `fetch(route?)` build a handler for one
+answer — `'guide'` or `'health'` — wherever it is mounted; a builder rather
+than a method because a framework calls what it is given with whatever
+arguments it likes, and express's third is `next`. The fastify one writes
+through the reply rather than around it, so that its `onSend` and `onResponse`
+hooks still see the guide; `reply.hijack()` over `node()` runs none of them. With no route they route by path instead, answering
+`guidePath`, `healthPath` and then 404, which is what makes
+`createServer(handler.node())` a whole server.
+
+Underneath both is `answer(request)`, which has no transport in it at all:
+
+```ts
+const { status, headers, body } = await handler.answer({
+  method: 'GET',
+  url: '/guide.xml',            // or a whole url; only its path is read
+  headers: { 'if-none-match': tag },
+  route: 'guide',
+  signal,                       // the consumer going away stops the merge
+  encrypted: true,              // for `serve.baseUrl`, which no header can say
+});
+```
+
+`body` is absent for a `304`, a `204` and every `HEAD`; a string for the small
+answers; an async iterable of bytes for the guide, already compressed if
+`content-encoding` says so; and **an object for the health check**, which is
+data rather than a document. Whoever sends it turns it into bytes — which is
+how fastify gets to serialise it itself, and how an app that reports its own
+status reads it:
+
+```ts
+const { body: health } = await handler.answer({ headers: {}, route: 'health' });
+
+reply.send({ ...mine, epg: health });   // { ok, grabbedAt, ageSeconds, window, counts, shape }
+```
+
+Asking for `health` by name says so in the type, so that body needs no
+narrowing. Abandoning the guide's iterable is the supported way to stop: it
+ends the merge and gives back the concurrency slot. `answer` never rejects; a
+failure is a `500` with the reason already reported.
+
+To keep the command instead of writing a program, `serve.server` hands
+`epg serve` a server of yours, returning the `http.Server` it is listening on
+or `{ server, close }` where stopping is more than closing a socket — see [on a
+server of your own](./configuration.md#on-a-server-of-your-own).
 
 `reload()` resolves the channel lists again on the next poll, whatever those
 clocks say — the ceiling is a guess, and this is the caller saying they know. It
@@ -745,8 +899,9 @@ channels](./configuration.md#derived-channels).
 
 ### `epg-tools/serve`
 
-`serveGuide` and the `GuideServer` / `ServeOptions` / `EpgServeConfig` types,
-with `DEFAULT_SERVE_PORT`, `DEFAULT_SERVE_HOST`, `DEFAULT_SERVE_PATH`,
+`serveGuide` and `createGuideHandler`, the `GuideServer` / `ServeOptions` /
+`EpgServeConfig` / `GuideHandler` / `GuideHandlerOptions` / `GuideRequest` /
+`GuideAnswer` types, with `DEFAULT_SERVE_PORT`, `DEFAULT_SERVE_HOST`, `DEFAULT_SERVE_PATH`,
 `DEFAULT_REVALIDATE_MS`, `DEFAULT_KEEP_ALIVE_MS` and `DEFAULT_SITES_MAX_AGE_MS`. Loaded only when named, so nothing else pulls in
 `node:http`.
 

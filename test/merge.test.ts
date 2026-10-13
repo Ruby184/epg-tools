@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { CacheStore, ChannelDayKey } from '../src/cache/types.js';
+import type { EpgEvent } from '../src/core/events.js';
 import type { GrabberChannel, SiteConfig } from '../src/grabber/types.js';
 import { mergeChannels } from '../src/merge/channel.js';
 import { mergeProgrammeLists, mergeProgrammes } from '../src/merge/programme.js';
@@ -1138,6 +1139,99 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     expect(output).not.toContain('News');
   });
 
+  it("cover: 'first' builds the same guide as 'first-wins'", async () => {
+    // The difference between them is what a *grab* asks for; a merge handed the
+    // same cache has to answer identically, since a merge run on its own
+    // resolves the lists itself and nothing has narrowed them.
+    const options = { sites: [siteA, siteB], cache: cacheForBothSites(), days: 1, now: NOW };
+    const only = await generate({ ...options, merge: { cover: 'first' } });
+
+    expect(only).toBe(await generate({ ...options, merge: { channelStrategy: 'first-wins' } }));
+    expect(only.match(/id=["']X["']/g)).toHaveLength(1);
+    expect(only).toContain('Správy');
+    expect(only).not.toContain('News');
+  });
+
+  it('says how much of the guide the sources agreed on', async () => {
+    const said: Extract<EpgEvent, { type: 'merge:summary' }>[] = [];
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: cacheForBothSites(),
+      days: 1,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:summary') {
+          said.push(event);
+        }
+      },
+    });
+
+    // The two sites describe the 10:00 broadcast; `Film` is site A's alone.
+    expect(said[0]).toMatchObject({ combined: 1, nearMiss: 0, examples: [] });
+  });
+
+  it('counts a source that merged into nothing, and says what it nearly met', async () => {
+    // The quiet failure this exists for: a source published on a different
+    // grid merges with nothing and the guide carries every programme twice,
+    // which no count of programmes can tell from a guide that is simply fuller.
+    const said: Extract<EpgEvent, { type: 'merge:summary' }>[] = [];
+    const output = await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'Správy', 'sk')],
+        // Seven minutes adrift, which is past the five-minute tolerance.
+        [`site-b.com|X|${DAY}`]: [prog('X', '2026-01-15T10:07:00Z', 'News', 'en')],
+      }),
+      days: 1,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:summary') {
+          said.push(event);
+        }
+      },
+    });
+
+    // Both are in the guide, which is the symptom.
+    expect(output).toContain('Správy');
+    expect(output).toContain('News');
+
+    expect(said[0]).toMatchObject({
+      combined: 0,
+      nearMiss: 1,
+      examples: [{ channelId: 'X', gapMs: 420_000, title: 'News', nearby: 'Správy' }],
+    });
+  });
+
+  it('keeps the near misses it reports to a handful, however many there are', async () => {
+    const said: Extract<EpgEvent, { type: 'merge:summary' }>[] = [];
+    const drifting = Array.from({ length: 12 }, (_, index) => index);
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        [`site-a.sk|X|${DAY}`]: drifting.map((hour) =>
+          prog('X', `2026-01-15T${String(hour).padStart(2, '0')}:00:00Z`, 'Správy', 'sk'),
+        ),
+        [`site-b.com|X|${DAY}`]: drifting.map((hour) =>
+          prog('X', `2026-01-15T${String(hour).padStart(2, '0')}:07:00Z`, 'News', 'en'),
+        ),
+      }),
+      days: 1,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:summary') {
+          said.push(event);
+        }
+      },
+    });
+
+    // Counted in full, reported five at a time: the count is the alarm, and
+    // the examples are only there to say whether it is one channel or all.
+    expect(said[0]?.nearMiss).toBe(12);
+    expect(said[0]?.examples).toHaveLength(5);
+  });
+
   it('skips missing cache entries silently', async () => {
     const siteY = makeSite('site-a.sk', [
       { xmltvId: 'X', siteId: 'a-x' },
@@ -1577,6 +1671,46 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     });
   });
 
+  describe('document meta', () => {
+    const site = makeSite('site-a.sk', [{ xmltvId: 'X', siteId: 'a-x', name: 'Sky One' }]);
+
+    it('asks a function for the root attributes, against the channels there are', async () => {
+      // The same question `derived` is asked, for the same reason: what the
+      // document calls itself can depend on which channels turned up.
+      const seen: { ids: string[]; now: Date }[] = [];
+      const output = await generate({
+        sites: [site],
+        cache: createFakeCache({
+          [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'A')],
+        }),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        meta: ({ channels, now }) => {
+          seen.push({ ids: channels.map((channel) => channel.xmltvId), now });
+
+          return { sourceInfoName: `${String(channels.length)} channels` };
+        },
+      });
+
+      expect(seen).toEqual([{ ids: ['X'], now: NOW }]);
+      expect(output).toContain('source-info-name="1 channels"');
+    });
+
+    it('takes a plain object as it always did', async () => {
+      const output = await generate({
+        sites: [site],
+        cache: createFakeCache({ [`site-a.sk|X|${DAY}`]: [] }),
+        days: 1,
+        startDay: DAY,
+        now: NOW,
+        meta: { sourceInfoName: 'written down' },
+      });
+
+      expect(output).toContain('source-info-name="written down"');
+    });
+  });
+
   describe('derived channels', () => {
     const site = makeSite('site-a.sk', [{ xmltvId: 'X', siteId: 'a-x', name: 'Sky One' }]);
     const DAY2 = '2026-01-16';
@@ -1608,6 +1742,69 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
         ...(derived ? { derived } : {}),
         ...options,
       });
+
+    it('asks a function what to derive, against the channels there are', async () => {
+      // The form that exists for a lineup nobody writes down: a provider sync
+      // adds a channel, and its `+1` has to follow without the config changing.
+      const seen: string[][] = [];
+      const output = await guide(
+        ({ channels }) => {
+          seen.push(channels.map((channel) => channel.xmltvId));
+
+          return channels.map((channel) => ({
+            xmltvId: `${channel.xmltvId}.plus1`,
+            from: channel.xmltvId,
+            offset: 60,
+          }));
+        },
+        withDays({ [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'A')] }),
+      );
+
+      // The channels the sites resolved to, which is what makes it answerable.
+      expect(seen).toEqual([['X']]);
+      expect(output).toContain('<channel id="X.plus1">');
+      expect(aired(output)).toEqual(['X 20260115100000', 'X.plus1 20260115110000']);
+    });
+
+    it('lets a function say why it derived nothing', async () => {
+      const said: string[] = [];
+      const output = await guide(
+        ({ channels, warn }) => {
+          warn(`no shift for ${String(channels.length)} channel(s)`);
+
+          return [];
+        },
+        withDays({ [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'A')] }),
+        {
+          reporter: (event) =>
+            said.push(`${event.type}:${'message' in event ? event.message : ''}`),
+        },
+      );
+
+      expect(said).toContain('merge:warning:no shift for 1 channel(s)');
+      expect(aired(output)).toEqual(['X 20260115100000']);
+    });
+
+    it('keeps the source a function-declared shift needs, under a selection', async () => {
+      // `channels` selects only the derived id; the source it shifts has to
+      // survive the narrowing, which is the thing a plain filter gets wrong.
+      const output = await guide(
+        ({ channels }) =>
+          channels.map((channel) => ({
+            xmltvId: `${channel.xmltvId}.plus1`,
+            from: channel.xmltvId,
+            offset: 60,
+          })),
+        withDays({ [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'A')] }),
+        { channels: ['X.plus1'] },
+      );
+
+      // The source is kept and published with it — what a selection of a shift
+      // means, and the thing a plain filter on the sites gets wrong.
+      expect(output).toContain('<channel id="X.plus1">');
+      expect(output).toContain('<channel id="X">');
+      expect(aired(output)).toEqual(['X 20260115100000', 'X.plus1 20260115110000']);
+    });
 
     it('publishes a channel of its own, with every programme under its id', async () => {
       const output = await guide(

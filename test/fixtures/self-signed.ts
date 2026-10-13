@@ -1,0 +1,58 @@
+/**
+ * A self-signed certificate for `localhost`, for the one test that needs TLS.
+ *
+ * Generated once with `openssl req -x509 -newkey rsa:2048 -nodes -days 36500
+ * -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1`, and
+ * good for a century so that nobody ever has to work out why the suite started
+ * failing on a Tuesday. It secures nothing: it exists so that a request can be
+ * made over TLS at all, and the client that makes it is told not to check.
+ */
+
+export const KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQDV4OBG2orvYfyr
+zjbcDtndO3PRDPqjI5cKxFEzTo5VfV/IXa70J34Ktacz5vBerI6hEVAItWeLNb5h
+82zTRsM1pEy3TZq2d/yy6xVjjtembaEgE9UsGIyz9Qwi/k/rcR8qFu5tyep8feZp
+/vtvc+TeFeD5QVQ7tfgK31z5QK9G6r4l3Doyl3I0nu8V4aAb9icWp0WO66VP4BKI
+TrEQO3R/BlDGuwbGZvpNxrX56+4ekwqdoIN4By0vAzdZ607Gt3pgI36auZxKDhyP
+82uYriZdVvIiQ5Mh03+OHntF3v08u+vmaVZP20tqkL+SJp5EQadIrURcIAY33Kqz
+I+DfoIhdAgMBAAECggEBAISKH9IounKQUYmSeDK0zVQo9KO3HFcexgo5EGzwIIpf
+8Ix1aecJ1jUCz0P9uDWjT5wG44cSC8GcI4gF1wmyz2QdliD96YNsJeAmiJGywnbz
+dycuwyrZZ9BZahUBbjtkVcC6hzToLPTK/I/xIJW3xzvNaSZt0qpSIQ1zz+TyrewO
+iBlkgdyLe3f5P8ubmJdamSzC0oPfthvVu1w6RfYEPLyFAbix9f9cuzwBNoNtuPu/
+TYVCqjPAQe1O+/31aOwqQALZTEj0GvpDrDoXRZYgVOpG4HTkQYaSyt8qhTB6s+4C
+UtZPQ+Xi77Vqcbq0GdGQNY3RhGEGi2UcsRnAxKVyak0CgYEA9/Dr2e9AWyceT9A8
+fxmdxk/dCjoPbP0No1O1Fdpnao0MXnswCGYiyDQkdyketUCvGDx3rCsdWiiqsda5
+i0sN0YmAzrjpHDHCsG457XHNL8jx4FHa5Qv6GllzHgOkYRCqYdOWDguu6TNG5P2s
+YyXItGzL7pB5ojQfooEBhLJaMRsCgYEA3NSGTp6XpKFreCqp/NP1EiiC+FdCqbl8
+iwQt+xiEJq8XtAtqBcL3fGGNgQDrmhf/6c2opvNju+6OrBIb3ciVAI5Qi+0INDZV
+IGQ9wLT7rtyu+ofiQEZe6t6ehAZNnlei0jMI+S00b4bK1UWHSDAnP+Ljnz1DT6nA
+IcdOFZCXO+cCgYEAwL9mWrIIEdTDV8DGhvhfE0Aa0kx4mX3QEFyOtkJniwnDx990
+Y9MizwjaIFizKqzycaDwV8Pcua5LpJ0M+SCLyY1fuVU+w1BbzdSi69hAbxmED6MS
+zGUXNUy8lWS3cU4HZq2aRakHfPsD7hjW3u0Mrla14uwl4tcqkKZBi+sq+mkCgYEA
+t3Omj7GYcJ/Y0989kFfVA9y70OtM6gq5uBMkz7AyOKDEpEHHNjodtyqjj0Pgdgby
+Bp1fOjJ/7CPmSnRQyhJUFj4kE9o6MoXgeiRMWMcBPub+RgqUnqjXOW7vaOaDnMNY
+9B6Jmdc/9FaaMkqsc//s21n1ltgiDxAKGQWljKyttokCgYBYd9lBleoGZWZLPuq3
+Dip11AUp3BBPPxHpvqczDKPPgIzSGYOQ4FuJ6/JfdrmfkPURQYQxjPU84/zWjmNd
+RzskB1uq0Mqa8qD3lwWc1m6aBHbHLeeC+CxidwfODkt134M8Y6qf+2920c15yJwH
+0Z28yzjN4laUNuUzNlRiKWWq6w==
+-----END PRIVATE KEY-----`;
+
+export const CERT = `-----BEGIN CERTIFICATE-----
+MIIDJzCCAg+gAwIBAgIUUWq/9HzgTHfFONhI1Epg46+oH+AwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MTAwNTAyMzE1MVoYDzIxMjYw
+OTExMDIzMTUxWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQDV4OBG2orvYfyrzjbcDtndO3PRDPqjI5cKxFEzTo5V
+fV/IXa70J34Ktacz5vBerI6hEVAItWeLNb5h82zTRsM1pEy3TZq2d/yy6xVjjtem
+baEgE9UsGIyz9Qwi/k/rcR8qFu5tyep8feZp/vtvc+TeFeD5QVQ7tfgK31z5QK9G
+6r4l3Doyl3I0nu8V4aAb9icWp0WO66VP4BKITrEQO3R/BlDGuwbGZvpNxrX56+4e
+kwqdoIN4By0vAzdZ607Gt3pgI36auZxKDhyP82uYriZdVvIiQ5Mh03+OHntF3v08
+u+vmaVZP20tqkL+SJp5EQadIrURcIAY33KqzI+DfoIhdAgMBAAGjbzBtMB0GA1Ud
+DgQWBBSHYD8tCQkBunBk3kFdrx9mqm2c9jAfBgNVHSMEGDAWgBSHYD8tCQkBunBk
+3kFdrx9mqm2c9jAPBgNVHRMBAf8EBTADAQH/MBoGA1UdEQQTMBGCCWxvY2FsaG9z
+dIcEfwAAATANBgkqhkiG9w0BAQsFAAOCAQEAJU9cfd6pkgw7DkIU/Hqs7UDhZBD8
+T5tZ5TjTshibCQQTtPIRQeERanTND4v2vMSk6b/AabyHrrg+Tv1dT8Sq8s4f8I+/
+ADXX/8gsnHy0NF9tKC3QiRsvGSIDtUoavXLBITYaJqbsw1igCnY5nSv232T4AqfQ
+3ab8EmYS+zTuUXc/vnZhQJZHqBQHWjpFocMEAJ9oLb+IqeKlkCvMGXotDz00O5aj
+3Wzvi9BhMJ/dOWQF0PVBGzvDK624lAeyjfpR8AmXefZ11OsdlSoADPVIO7E+KjFe
+DNIskE4za8cnDZ/eiGNtd6avQxd9G46RB9bjGZbkRDo07CCXv/+EU2DgAA==
+-----END CERTIFICATE-----`;

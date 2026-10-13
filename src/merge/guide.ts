@@ -3,17 +3,23 @@ import { GrabberError } from '../core/error.js';
 import { writeOutput, type OutputOptions, type OutputTarget } from '../core/output.js';
 import { emitter } from '../core/events.js';
 import type { Says } from '../core/events.js';
-import { channelElement, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
+import { channelElement, covered, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
 import type { GrabberChannel } from '../grabber/types.js';
 import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
 import { outputOptions } from '../xmltv/serialize.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import { mergeChannels } from './channel.js';
 import { derivedChannelElement, resolveDerived, shiftProgrammes } from './derive.js';
-import { backfillInto, DEFAULT_FILL_STOP_MS, mergeInto, resolveMatch } from './programme.js';
+import {
+  backfillInto,
+  DEFAULT_FILL_STOP_MS,
+  mergeInto,
+  resolveMatch,
+  type MergeWatch,
+} from './programme.js';
 import type { ChannelSource, RegistryEntry } from './registry.js';
-import { channelSelection, unmatched, unmatchedMessage } from './select.js';
-import type { BuildGuideOptions, FillGapsContext, FillGapsOptions } from './types.js';
+import { channelSelection, configured, unmatched, unmatchedMessage } from './select.js';
+import type { BuildGuideOptions, FillGapsContext, FillGapsOptions, GuideContext } from './types.js';
 
 /**
  * How many channel-days are read from the cache ahead of the writer when
@@ -241,6 +247,20 @@ function* blocks(
  * waits a fold longer to be emitted. One day plus the largest offset declared,
  * which is why an offset is held under a day.
  */
+/**
+ * How many near misses are reported in full.
+ *
+ * Enough to see whether they are one channel or all of them, which is the
+ * question a count cannot answer, and few enough that a guide of thousands
+ * carries the same handful as a guide of ten.
+ */
+const MAX_NEAR_MISSES = 5;
+
+/** A programme's title, for saying which one nearly matched which. */
+function titleOf(programme: XmltvProgramme): string {
+  return programme.title[0]?.value ?? '';
+}
+
 export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator<string> {
   const now = options.now ?? new Date();
   const days = [...dayRange(options.startDay ?? toDayString(now), options.days ?? 7)];
@@ -266,20 +286,51 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   // The cache goes with it: a site that keeps its channel list there has one the
   // grab just wrote, and a merge asking the source again could only disagree
   // with what it is about to read.
+  // `cover` here as well as before the grab, for the reason the lists are
+  // resolved here at all: a merge run on its own has no grab to have narrowed
+  // them, and the two have to produce the same guide either way. Over lists a
+  // grab already narrowed it changes nothing — a channel one site is left with
+  // is a channel nobody is asked about.
+  const sites = (
+    await covered(
+      await resolveSites(options.sites, {
+        emit,
+        ...(options.siteConcurrency !== undefined ? { concurrency: options.siteConcurrency } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+        store: cache,
+        now,
+      }),
+      options.merge?.cover,
+      { now, ...mergeSays },
+    )
+  ).map((config) => ({ config, channels: config.channels as GrabberChannel[] }));
+
   // What `channels` selects, with the sources a derived channel needs added to
   // it — asked here rather than passed in, since the answer is the same however
   // the caller arrived and this is where the lists are fetched.
-  const selection = channelSelection(options);
-  const resolved = (
-    await resolveSites(options.sites, {
-      emit,
-      ...(options.siteConcurrency !== undefined ? { concurrency: options.siteConcurrency } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
-      ...(selection ? { select: selection.select } : {}),
-      store: cache,
-      now,
-    })
-  ).map((config) => ({ config, channels: config.channels as GrabberChannel[] }));
+  //
+  // After the lists rather than before them, because a `derived` function is a
+  // function *of* them: what it declares cannot be known until there are
+  // channels to declare it about. The selection then narrows what was resolved,
+  // which is the same answer as narrowing on the way out of each site — what a
+  // site stores is its whole list either way.
+  const guideContext: GuideContext = {
+    channels: sites.flatMap((site) => site.channels),
+    now,
+    ...mergeSays,
+  };
+  const declarations = await configured(options.derived, guideContext);
+  const selection = channelSelection({
+    ...(options.channels ? { channels: options.channels } : {}),
+    ...(declarations ? { derived: declarations } : {}),
+  });
+  const resolved =
+    selection === undefined
+      ? sites
+      : sites.map((site) => ({
+          ...site,
+          channels: site.channels.filter((channel) => selection.select.has(channel.xmltvId)),
+        }));
 
   const registry: RegistryEntry[] = [];
 
@@ -317,7 +368,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   // right, warned about for a source that merely is not here today.
   // The selection's own, where there is one: a declaration whose source was not
   // selected has been flattened past it, and one nobody selected is gone.
-  const declared = selection?.derived ?? options.derived;
+  const declared = selection?.derived ?? declarations;
   const derived = declared?.length ? resolveDerived(declared, registry, mergeSays) : [];
 
   const channels: XmltvChannel[] = [];
@@ -377,6 +428,20 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   if (missing.length > 0) {
     mergeSays.warn(unmatchedMessage(missing, selection?.select.size ?? 0));
   }
+
+  /**
+   * What the merge made of the sources, reported once at the end.
+   *
+   * Counters rather than lists, with a handful of near misses kept in full:
+   * on a guide of thousands the count is the alarm and the examples are what
+   * make it actionable, and keeping every one of them would be the one thing
+   * here that grows with the size of the guide.
+   */
+  let combined = 0;
+  let nearMiss = 0;
+  let containers = 0;
+  let clipped = 0;
+  const examples: { channelId: string; gapMs: number; title: string; nearby: string }[] = [];
 
   const listStrategy = channelStrategy === 'merge-programmes' ? programmeStrategy : 'concat';
   const match = resolveMatch(options.merge?.match);
@@ -454,6 +519,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
           };
         }
       } else if (clipOverlaps && start < nextStart && programme.stop.getTime() > nextStart) {
+        clipped += 1;
         result = { ...result, stop: xmltvDate(next.start) };
       }
     }
@@ -610,6 +676,31 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     let emitted = false;
     /** The offset to write a synthesized time in — the last real one seen. */
     let offset = 0;
+    /**
+     * What one channel's sources made of each other — see `merge:summary`.
+     *
+     * Built only for the lists after the first, which is where the question
+     * means anything: the first list of a day folds into yesterday's tail, and
+     * a programme joining *that* is one source's own broadcast continuing
+     * rather than two sources agreeing.
+     */
+    const watching = (channelId: string): MergeWatch => ({
+      combined: () => {
+        combined += 1;
+      },
+      nearMiss: (gapMs, programme, candidate) => {
+        nearMiss += 1;
+
+        if (examples.length < MAX_NEAR_MISSES) {
+          examples.push({
+            channelId,
+            gapMs,
+            title: titleOf(programme),
+            nearby: titleOf(candidate),
+          });
+        }
+      },
+    });
 
     for await (const { entry, day, lists } of readAhead(
       plan,
@@ -623,8 +714,8 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       options.signal?.throwIfAborted();
 
       if (listStrategy === 'merge') {
-        for (const list of lists) {
-          mergeInto(pending, list, match);
+        for (const [index, list] of lists.entries()) {
+          mergeInto(pending, list, match, index > 0 ? watching(entry.xmltvId) : undefined);
         }
       } else if (listStrategy === 'backfill') {
         // Across the sites of *this day* first, into an array of its own, and
@@ -681,6 +772,8 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
         // same hours at a coarser grain, and keeping both leaves the guide
         // genuinely overlapping.
         if (dropContainers && containedCount(programme, ready, index + 1, pending) >= 2) {
+          containers += 1;
+
           continue;
         }
 
@@ -738,14 +831,22 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     }
   }
 
+  // Asked the same thing `derived` was, and here rather than up there because
+  // nothing between the two needs it — the writer is the only reader of it.
+  const meta = await configured(options.meta, guideContext);
+
   yield* writeXmltvStream(
     {
-      ...(options.meta ? { meta: options.meta } : {}),
+      ...(meta ? { meta } : {}),
       channels,
       programmes: programmes(),
     },
     outputOptions(options),
   );
+
+  // After the writing, because that is what pulls the generator above: until
+  // the last programme is out, none of these numbers are final.
+  emit({ type: 'merge:summary', combined, nearMiss, examples, containers, clipped });
 }
 
 /**

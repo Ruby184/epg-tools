@@ -17,14 +17,18 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          # Whatever LTS is current, which is what a maintainer runs and what
+          # this job is for: formatting, lint and the bundle are the same on
+          # every version, so the one to check them on is the one in hand. What
+          # the package actually promises is the matrix below, which is pinned.
+          node-version: lts/*
           cache: npm
       - run: npm ci
       - run: npm run format:check
       - run: npm run lint
-      # tsdown needs Node >= 22.18, above this package's own floor, so the
-      # bundle is built here rather than on each leg of the matrix. The output
-      # targets Node 20 either way.
+      # tsdown needs Node >= 22.18, a little above this package's own floor, so
+      # the bundle is built here rather than on each leg of the matrix. The
+      # output targets Node 22 either way.
       - run: npm run build
       # The hooks are bypassable with --no-verify, so the messages are checked
       # here too. On a PR that is every commit it contributes; on a push to
@@ -43,12 +47,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 20 is this package's own floor. Vitest 5 declares >= 22.12 and `npm
-        # ci` says so, but it runs the suite on 20 today — the leg is here to
-        # prove the sources work on the version the package promises, so if a
-        # future Vitest actually stops running there, run the suite on 22 and
-        # 24 and give 20 a smoke test of the bundle instead of dropping it.
-        node: [20, 22, 24]
+        # 22 is this package's own floor, and what `ky` and `p-queue` declare.
+        # 24 was the active LTS until October 2026 and 26 takes over from it,
+        # so the three legs are the floor, the version most people are on, and
+        # the one they are moving to.
+        node: [22, 24, 26]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

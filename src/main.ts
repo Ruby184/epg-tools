@@ -16,6 +16,7 @@ export type {
   Emit,
   EpgEvent,
   EpgEventInput,
+  EpgEventMap,
   EpgEventType,
   EventKind,
   EventLevel,
@@ -29,8 +30,11 @@ export type {
 export {
   DEFAULT_FAILURE_CAP,
   FAILURE_MODES,
+  combineReporters,
+  emitterReporter,
   isFailure,
   jsonReporter,
+  loggerReporter,
   progressReporter,
   render,
   renderFailure,
@@ -40,9 +44,12 @@ export {
 } from './core/reporters.js';
 export type {
   FailureEvent,
+  EpgEventSink,
   FailureMode,
   JsonReporterOptions,
+  LoggerReporterOptions,
   ProgressReporterOptions,
+  ReporterLogger,
   ReporterFactory,
   ReporterName,
   ReporterRuntime,
@@ -264,11 +271,20 @@ export type {
 } from './grabber/main.js';
 export type * from './grabber/types.js';
 
-export { grabEvery, serveGuide } from './serve/main.js';
+export { createGuideHandler, grabEvery, serveGuide } from './serve/main.js';
 export type {
   EpgServeConfig,
   GrabEveryOptions,
+  GuideAnswer,
+  GuideListening,
+  GuideHandler,
+  GuideHandlerOptions,
+  GuideHealth,
+  GuideRequest,
+  GuideRoute,
   GuideServer,
+  Replying,
+  ReplyingRequest,
   NextGrab,
   ServeOptions,
 } from './serve/main.js';

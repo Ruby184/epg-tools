@@ -92,11 +92,11 @@ export interface ShimOptions {
  * The executable's source.
  *
  * Written with no top-level `import`/`export` and no `require`, which is what
- * makes one file work everywhere: an extensionless file is CommonJS on Node 20
- * and 21, is an ES module where Node detects module syntax, and follows the
- * nearest `package.json` in between — a dynamic import is the one form all
- * three agree on. It also resolves relative to this file rather than the
- * caller, so the grabber still finds its config through a symlink on `PATH`.
+ * makes one file work everywhere: an extensionless file is an ES module where
+ * Node detects module syntax and follows the nearest `package.json` otherwise,
+ * and a dynamic import is the one form both readings agree on. It also
+ * resolves relative to this file rather than the caller, so the grabber still
+ * finds its config through a symlink on `PATH`.
  */
 export function grabberShim(options: ShimOptions): string {
   return `#!/usr/bin/env node

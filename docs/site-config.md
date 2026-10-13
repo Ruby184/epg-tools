@@ -365,6 +365,94 @@ per-programme fan-out belongs here rather than there.
 How many responses a site holds while parsing them is its `concurrency`: one
 per unit, so a site set to fetch two at a time never has a third in memory.
 
+### A source that is not UTF-8
+
+`response.text()` is UTF-8 and nothing else — `fetch` has no way to be told
+otherwise, whatever the `Content-Type` says. A source in `windows-1250` or
+`iso-8859-2` read that way comes out with replacement characters in every
+accented word, which looks like a parsing bug and is not one.
+
+Read the bytes and decode them yourself:
+
+```ts
+async request({ channel, day, http }) {
+  const bytes = await http.get(`program/${channel.siteId}/${day}`).arrayBuffer();
+
+  return new TextDecoder('windows-1250').decode(bytes);
+},
+```
+
+`TextDecoder` is built into Node and knows every label the WHATWG encoding
+standard does, so `windows-1250`, `iso-8859-2` and `cp1251` all work.
+`parseM3uFile` takes a `charset` for the same reason, and does the same thing
+with it.
+
+### A token that expires part way through
+
+A session that lasts half an hour is shorter than a grab of fourteen days
+across several hundred channels, so the question is not whether it expires but
+what happens when it does. Two halves, and both are worth having:
+
+```ts
+import ky, { HTTPError } from 'ky';
+
+// A client of its own, and not the site's: logging in through the instance
+// whose `beforeRequest` asks for a token is a hook calling itself.
+const auth = ky.create({ prefix: 'https://api.example.tv' });
+
+let session: { token: string; until: number } | undefined;
+
+/** Renewed before it expires, with a minute to spare for a slow request. */
+async function token(): Promise<string> {
+  if (session === undefined || Date.now() > session.until - 60_000) {
+    const fresh = await auth.post('login', { json: { … } }).json<{ token: string; ttl: number }>();
+
+    session = { token: fresh.token, until: Date.now() + fresh.ttl * 1000 };
+  }
+
+  return session.token;
+}
+
+const example = defineSiteConfig({
+  site: 'example.tv',
+  ky: {
+    prefix: 'https://api.example.tv',
+    hooks: {
+      beforeRequest: [
+        // A state object rather than the request itself: ky 2 hands hooks
+        // `{ request, options, retryCount }`.
+        async ({ request }) => {
+          request.headers.set('authorization', `Bearer ${await token()}`);
+        },
+      ],
+      // The other half: what to do when it expired anyway. A clock a few
+      // seconds out, a source that revokes early, a request that waited behind
+      // a rate limit for longer than the token had left.
+      beforeRetry: [
+        async ({ request, error }) => {
+          if (error instanceof HTTPError && error.response.status === 401) {
+            session = undefined;
+            request.headers.set('authorization', `Bearer ${await token()}`);
+          }
+        },
+      ],
+    },
+    retry: { limit: 2, statusCodes: [401, 429, 500, 502, 503, 504] },
+  },
+  // …
+});
+```
+
+Renewing on a `401` **and** before expiry rather than either alone: renewing
+early keeps the grab from taking a failed request per expiry, and the retry is
+what covers the times the early renewal was not early enough. `401` has to be
+in `statusCodes` for ky to retry it at all — it is not there by default, since
+for most sources a `401` means the credentials are wrong rather than stale.
+
+Keep the session in module scope or in [the site's own
+state](#remembering-something-between-runs), not in a closure per request: the
+whole point is that one renewal serves every request that follows it.
+
 ### Fixing up one source
 
 `transform` is for what is wrong with a *particular source* rather than with the
@@ -1242,6 +1330,54 @@ Only that site is tunnelled; the others go out directly. Three things to know:
 
 Node 24 also understands `NODE_USE_ENV_PROXY=1` with `HTTP_PROXY`/`HTTPS_PROXY`
 /`NO_PROXY`, but that applies to the whole process — every site or none.
+
+### A source whose TLS is older than Node
+
+The same seam answers the other common cliff: a site that fails the handshake
+outright, before any of this gets a chance to parse anything.
+
+```
+ERR_SSL_DH_KEY_TOO_SMALL
+```
+
+That is OpenSSL 3 refusing a server, not a bug in the site or in this package.
+Its default security level is 2, which requires a 2048-bit key exchange; a
+server still offering a 1024-bit Diffie-Hellman group — `tvprogram.cz` is a
+real example, TLS 1.2 with `DHE-RSA-AES256-GCM-SHA384` and a 1024-bit group —
+is refused before a byte of HTTP is sent. `fetch` has no way to say "that is
+fine for this one host", because the TLS options live on the connection rather
+than on the request. The dispatcher is where the connection is made:
+
+```ts
+import { Agent } from 'undici';
+
+const oldTls = defineSiteConfig({
+  site: 'tvprogram.cz',
+  ky: {
+    prefix: 'https://www.tvprogram.cz',
+    // Only this site's connections; everything else keeps Node's defaults.
+    dispatcher: new Agent({ connect: { ciphers: 'DEFAULT:@SECLEVEL=0' } }),
+  },
+  // …
+});
+```
+
+Two things that look like the fix and are not:
+
+- **`rejectUnauthorized: false` does nothing here.** It turns off certificate
+  *verification*, and this is not a trust problem — the certificate is a
+  perfectly good Let's Encrypt one. The handshake fails over the key exchange,
+  which happens whether or not anyone is checking the certificate.
+- **`@SECLEVEL=1` is not enough**, though it is the gentler-looking option: it
+  swaps `ERR_SSL_DH_KEY_TOO_SMALL` for `ERR_SSL_WRONG_SIGNATURE_TYPE`. Level 0
+  is what gets through, and it is per site.
+
+What it costs is worth saying plainly: that site's connections drop to
+pre-2015 cryptography, and a guide is not worth pretending otherwise about. It
+is a listings site serving public television schedules over a connection
+somebody could in principle tamper with — judge it as that, rather than as a
+flag that makes a red message go away. Everything else in the run is unaffected,
+which is the whole reason this belongs on a site and not on the process.
 
 ## Rate limits and backoff
 

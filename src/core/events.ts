@@ -196,7 +196,24 @@ export type EpgEventInput =
       entries: number;
       requests: number;
     }
-  | ({ type: 'site:done'; site: string } & GrabCounts)
+  /**
+   * The site is finished, with what it fetched and what it cost.
+   *
+   * The cost is three numbers because they answer three questions and are
+   * routinely confused: `requests` is how many times the source was asked —
+   * every slot the site's queue gave out, a `ctx.paced` fetch inside a parse
+   * included; `ms` is how long the site took, which is the one a nightly run is
+   * long by; and `requestMs` is how long those requests spent waiting on the
+   * source, which is less than `ms` where a site waits on its own pacing, and
+   * more than it where a site runs several at once.
+   */
+  | ({
+      type: 'site:done';
+      site: string;
+      requests: number;
+      ms: number;
+      requestMs: number;
+    } & GrabCounts)
   /** The site could not be read or run at all, so none of it was grabbed. */
   | { type: 'site:failed'; site: string; error: unknown }
   /** The site's own code, saying something — `ctx.log`. */
@@ -265,6 +282,38 @@ export type EpgEventInput =
   | { type: 'pacing:rateLimit'; site: string; waiting: boolean }
   // ── merging, and tidying up ──────────────────────────────────────────────
   | { type: 'merge:channel'; channelId: string }
+  /**
+   * What the merge made of the sources, once the whole guide is out.
+   *
+   * Apart from `merge:done`, which says where a file went: this says how well
+   * the sources agreed, and is emitted wherever a guide is built — `epg build`
+   * and a served guide included, neither of which writes a file the other
+   * event could name.
+   *
+   * It exists because two of this package's quietest failures look like
+   * success. A source whose starts are on a different grid merges into
+   * nothing, and the guide then carries every programme twice; a cleanup
+   * option dropping more than it should leaves a guide that is simply thinner.
+   * Both are invisible in a count of programmes and obvious in these.
+   */
+  | {
+      type: 'merge:summary';
+      /** Programmes a later source joined to one already there. */
+      combined: number;
+      /** Programmes that joined nothing, with something close by. */
+      nearMiss: number;
+      /** A few of them, in full — a count alone says nothing about why. */
+      examples: {
+        channelId: string;
+        gapMs: number;
+        title: string;
+        nearby: string;
+      }[];
+      /** Dropped as a container around programmes published beside it. */
+      containers: number;
+      /** Given an earlier `stop` because they ran into the next programme. */
+      clipped: number;
+    }
   | { type: 'merge:done'; output: string }
   /**
    * A `merge.transform` saying something, and the reason these two exist apart
@@ -306,6 +355,16 @@ export type EpgEventInput =
    * failures as counts and returns normally.
    */
   | { type: 'serve:grabFailed'; error: unknown }
+  /**
+   * The channel lists will be resolved again on the next request.
+   *
+   * Said rather than done, because that is what `reload` does — it marks, and
+   * the next request pays. Its use to a consumer is as a signal of its own: an
+   * app sharing this server's `SIGHUP` reloads whatever it keeps beside the
+   * guide when this arrives, instead of adding a second handler for the same
+   * signal.
+   */
+  | { type: 'serve:reloaded' }
   | { type: 'serve:stopped' };
 
 export type EpgEventType = EpgEventInput['type'];
@@ -352,6 +411,7 @@ export const EVENT_KINDS = {
   'pacing:recovered': { level: 'info', phase: 'grab' },
   'pacing:rateLimit': { level: 'debug', phase: 'grab' },
   'merge:channel': { level: 'debug', phase: 'merge' },
+  'merge:summary': { level: 'info', phase: 'merge' },
   'merge:done': { level: 'info', phase: 'merge' },
   'merge:note': { level: 'info', phase: 'merge' },
   'merge:warning': { level: 'warn', phase: 'merge' },
@@ -361,6 +421,7 @@ export const EVENT_KINDS = {
   'serve:disconnected': { level: 'debug', phase: 'serve' },
   'serve:failed': { level: 'error', phase: 'serve' },
   'serve:grabFailed': { level: 'error', phase: 'serve' },
+  'serve:reloaded': { level: 'info', phase: 'serve' },
   'serve:stopped': { level: 'info', phase: 'serve' },
 } as const satisfies Record<EpgEventType, EventKind>;
 
@@ -371,6 +432,23 @@ export const EVENT_KINDS = {
  * member gains the two stamped fields without any of them saying so.
  */
 export type EpgEvent = EpgEventInput & EventKind;
+
+/**
+ * Every event by name, for typing an `EventEmitter` a run reports into.
+ *
+ * ```ts
+ * const events = new EventEmitter<EpgEventMap>();
+ *
+ * events.on('serve:started', (event) => console.log(event.url));
+ * ```
+ *
+ * Node's `EventEmitter` takes a map like this as its type parameter, which is
+ * what makes a listener's argument the event it is for rather than `any` —
+ * see {@link emitterReporter}.
+ */
+export type EpgEventMap = {
+  [T in EpgEventType]: [event: Extract<EpgEvent, { type: T }>];
+};
 
 /**
  * Told what happened, as it happens.
