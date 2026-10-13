@@ -1,3 +1,4 @@
+import { writeLines } from '../../core/streams.js';
 import { defineCapability } from '../capability.js';
 
 /**
@@ -21,12 +22,15 @@ export function preferredMethodCapability(method = 'allatonce') {
       },
     },
     usage: { info: ['preferredmethod'] },
-    run(ctx) {
+    async run(ctx) {
       if (!ctx.values.preferredmethod) {
         return;
       }
 
-      ctx.stdout.write(`${method}\n`);
+      // Flushed rather than queued: the answer is the whole of what this call
+      // produces, and the process exits as soon as it has one.
+      await writeLines(ctx.stdout, method);
+
       return 0;
     },
   });

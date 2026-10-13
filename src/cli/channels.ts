@@ -21,7 +21,7 @@ import { resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { derivedChannelList } from '../merge/derive.js';
 import { configured } from '../merge/select.js';
-import { writeLines } from '../core/streams.js';
+import { queueLine, writeLines } from '../core/streams.js';
 import type { ReportFormat } from './format.js';
 import { readChannelList } from './lists.js';
 import type { ChannelListFile, WantedChannel } from './lists.js';
@@ -221,7 +221,7 @@ export async function reportChannelsCommand(
       // Not `stdout`: that is the report, and `--format json` means something
       // is parsing it. A warning written into the middle of a document is a
       // warning that breaks whoever it was meant to reach.
-      stderr.write(`${message}\n`);
+      queueLine(stderr, message);
     },
   });
   const derived = declarations?.length
