@@ -102,28 +102,28 @@
     "prepare": "husky"
   },
   "dependencies": {
-    "ky": "^2.1.0",
-    "p-queue": "^9.3.0"
+    "ky": "^2.2.0",
+    "p-queue": "^9.3.5"
   },
   "devDependencies": {
-    "@commitlint/cli": "^21.2.2",
-    "@commitlint/config-conventional": "^21.2.2",
+    "@commitlint/cli": "^21.2.3",
+    "@commitlint/config-conventional": "^21.2.3",
     "@conventional-commits/parser": "^0.4.1",
     "@iptv/playlist": "^1.2.1",
     "@iptv/xmltv": "^1.0.1",
-    "@types/node": "^26.5.1",
+    "@types/node": "^26.6.5",
     "epg-parser": "^0.5.0",
-    "fast-xml-parser": "^5.11.1",
+    "fast-xml-parser": "^5.11.2",
     "fastify": "^5.12.5",
     "husky": "^9.1.7",
     "iptv-playlist-parser": "^0.15.2",
-    "lint-staged": "^17.5.1",
+    "lint-staged": "^17.6.0",
     "m3u-parser-generator": "^5.0.2",
     "oxfmt": "0.67.0",
-    "oxlint": "^1.82.0",
-    "tsdown": "^0.23.0",
+    "oxlint": "^1.87.0",
+    "tsdown": "^0.23.1",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.4"
   },
   "lint-staged": {
     "*.{ts,mts,cts,js,mjs,cjs,json}": "oxfmt",
