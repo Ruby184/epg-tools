@@ -11,6 +11,53 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.6.0](https://github.com/Ruby184/epg-tools/compare/v0.5.0...v0.6.0) (2026-10-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* p-queue 10, Node 22 and up
+
+### Features
+
+* **core:** a run's events, to a logger of your own ([c65c8b6](https://github.com/Ruby184/epg-tools/commit/c65c8b67d8d5b78d27306660c0519cc86e12f2d8))
+* **core:** an emitter to report into, and reporters that compose ([7425907](https://github.com/Ruby184/epg-tools/commit/7425907583c56f2fccd73071ffa2f8a4803cd918))
+* everything a real consumer asked for — a mountable guide, config that depends on the run, and numbers to tune by ([ae73a83](https://github.com/Ruby184/epg-tools/commit/ae73a836f8d88707623f669258d9d0c0ac45d45f))
+* **grabber:** what a site cost, not only what it fetched ([af0da16](https://github.com/Ruby184/epg-tools/commit/af0da1646f455c5d8fd88443e571e137ad1ad8fb))
+* **merge:** a channelStrategy that does not grab what it will discard ([90034ed](https://github.com/Ruby184/epg-tools/commit/90034edb77fb2a7d70813765d7dbdc65438ab090))
+* **merge:** derive channels from the lineup there turned out to be ([2a8d44b](https://github.com/Ruby184/epg-tools/commit/2a8d44beb209da36a7bb642f1d0927bc6e2c9d41))
+* **merge:** meta as a function of the run that writes the guide ([c622831](https://github.com/Ruby184/epg-tools/commit/c622831a441bdae7063c3b10549a7f4dd4ba2b29))
+* **merge:** what the merge made of the sources ([ca5461d](https://github.com/Ruby184/epg-tools/commit/ca5461d48f10979ffb48c17a40a3d2d586cd5d72))
+* **merge:** who grabs a channel, as its own question ([49091bb](https://github.com/Ruby184/epg-tools/commit/49091bb3c25c7e1a951cec5058ad725bfa3d2d14))
+* p-queue 10, Node 22 and up ([12b79fc](https://github.com/Ruby184/epg-tools/commit/12b79fc516157727afd95394fbbdc227dbf0dfff))
+* **serve:** fastify's own handler, a close of its own, and TLS ([66985f1](https://github.com/Ruby184/epg-tools/commit/66985f130ed58b4721538df833681f28a0b35401))
+* **serve:** the guide as a handler, for a server of your own ([83edad5](https://github.com/Ruby184/epg-tools/commit/83edad55c993454e624358a7167ede820d8778c7))
+* **serve:** the health check as the object it is ([7035649](https://github.com/Ruby184/epg-tools/commit/7035649e9892d0183ef50dcd26ab56f22b4db33c))
+* **xmltv:** resolve a guide's relative urls against a base ([f3afa02](https://github.com/Ruby184/epg-tools/commit/f3afa02a7d11ce14fe16411f218a2b1e9ffc0835))
+
+
+### Bug Fixes
+
+* **build:** say in the types that they need the disposable lib ([91d864b](https://github.com/Ruby184/epg-tools/commit/91d864b258d939fb40574cb55fca40624e0b9057))
+* **serve:** a validator that covers what the config says, not only what it caches ([5e86d96](https://github.com/Ruby184/epg-tools/commit/5e86d9695a890ca9a3334f2a5b75a3362c978320))
+* **serve:** what a header says is not what a guide says ([d594115](https://github.com/Ruby184/epg-tools/commit/d594115ec3a070a71499e77975d9c4e1f6833416))
+
+
+### Performance
+
+* **xmltv:** a base that costs nothing where there is nothing to resolve ([1ed60d4](https://github.com/Ruby184/epg-tools/commit/1ed60d493220a5ae9577d99df11b0978fa571e2b))
+
+
+### Refactoring
+
+* **cli:** line writing through the helper that exists for it ([7263303](https://github.com/Ruby184/epg-tools/commit/72633039d0c473a427cb41e9d7a8b14a93719e40))
+
+
+### Documentation
+
+* the two cliffs a consumer meets on the first day ([e37e9af](https://github.com/Ruby184/epg-tools/commit/e37e9af21baf82ea935665e4214ae53937b48990))
+* two things a custom site meets, and what a run now says about itself ([dc45a71](https://github.com/Ruby184/epg-tools/commit/dc45a7168b88ace8385540f531da1252b04eda8c))
+
 ## [0.5.0](https://github.com/Ruby184/epg-tools/compare/v0.4.0...v0.5.0) (2026-10-04)
 
 
