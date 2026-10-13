@@ -354,6 +354,24 @@ function resolvedBase(value: string | URL | undefined): URL | undefined {
 }
 
 /**
+ * A url that already says where it is — `https:`, `data:`, `mailto:`.
+ *
+ * Asked before `new URL` rather than left to it, which is the difference
+ * between a base costing nothing on a guide whose urls are already absolute and
+ * costing 1.6× on one: constructing a `URL` is the expense, and it is the same
+ * expense whether or not there turns out to be anything to resolve.
+ *
+ * It also keeps the promise this makes more exactly than parsing would. `new
+ * URL('https://cdn/x.png').href` normalises — a trailing slash on a bare
+ * origin, percent-encoding, a lower-cased host — and a source's own url is
+ * meant to come back as it came.
+ *
+ * A protocol-relative `//cdn/x.png` has no scheme, so it does not match and is
+ * resolved, which is what it needs.
+ */
+const ABSOLUTE = /^[a-z][\d+.a-z-]*:/i;
+
+/**
  * A picture's url, resolved against {@link SerializeOptions.baseUrl}.
  *
  * `URL` is what decides relative from absolute, since that is exactly what it
@@ -366,7 +384,7 @@ function resolvedBase(value: string | URL | undefined): URL | undefined {
  * "whatever scheme this page used" has no meaning at all.
  */
 function absolute(f: Fmt, src: string): string {
-  if (f.baseUrl === undefined) {
+  if (f.baseUrl === undefined || ABSOLUTE.test(src)) {
     return src;
   }
 

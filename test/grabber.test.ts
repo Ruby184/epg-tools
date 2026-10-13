@@ -1052,8 +1052,10 @@ describe('grab', () => {
     // The channel list, two days, and the fetch each parse made.
     expect(done[0]?.requests).toBe(5);
     // Spent waiting on the source, which here is the two sleeps and nothing
-    // like the whole site.
-    expect(done[0]?.requestMs).toBeGreaterThanOrEqual(10);
+    // like the whole site. Not their sum: `Date.now()` rounds down and a timer
+    // may fire a touch early, so two five-millisecond sleeps can measure nine
+    // — the claim is that the waiting was recorded, not that it was exact.
+    expect(done[0]?.requestMs).toBeGreaterThanOrEqual(5);
     expect(done[0]?.ms).toBeGreaterThanOrEqual(done[0]!.requestMs);
   });
 

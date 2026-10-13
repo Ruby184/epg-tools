@@ -387,6 +387,24 @@ describe('serialize', () => {
       );
     });
 
+    it('leaves an absolute url exactly as it came, rather than as a URL would rewrite it', () => {
+      // Both halves of one decision: an already-absolute url is answered
+      // without constructing a `URL` at all, which is what keeps a base from
+      // costing anything on a guide whose pictures are already absolute — and
+      // what keeps `new URL`'s normalising off somebody else's url.
+      const xml = serializeChannel(
+        {
+          ...relative,
+          icon: [{ src: 'https://CDN.example/x.png?a=b c' }],
+          url: ['HTTPS://cdn.example'],
+        },
+        { baseUrl: 'https://pi.local/' },
+      );
+
+      expect(xml).toContain('<icon src="https://CDN.example/x.png?a=b c"/>');
+      expect(xml).toContain('<url>HTTPS://cdn.example</url>');
+    });
+
     it('gives a protocol-relative url the base’s scheme, and a data: nothing', () => {
       const xml = serializeChannel(
         {

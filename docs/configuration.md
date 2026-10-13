@@ -711,9 +711,11 @@ configuration resolves every one of them on the way out:
 baseUrl: 'https://pi.local/'    // /logos/one.png → https://pi.local/logos/one.png
 ```
 
-A url that already says where it is — `https://`, `//cdn`, a `data:` — is left
-exactly as it came, and a base that is not absolute is refused rather than
-quietly resolving nothing.
+A url that already says where it is — `https://`, a `data:` — is left exactly as
+it came, and is answered without parsing anything, so a base costs nothing on a
+guide whose pictures are already absolute. A protocol-relative `//cdn/x.png`
+keeps its host and takes the base's scheme, which is what resolving it means. A
+base that is not absolute is refused rather than quietly resolving nothing.
 
 `serve.baseUrl` overrides it, and can answer **per request**, which is what a
 box reachable by two names needs:
