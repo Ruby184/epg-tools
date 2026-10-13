@@ -275,6 +275,69 @@ describe('createGuideHandler', () => {
     expect(handler.guidePath).toBe('/guide.xml');
   });
 
+  it('stops cleanly with a guide still waiting for a slot', async () => {
+    // p-queue 10 rejects what `clear()` drops rather than leaving it pending
+    // for ever, so a body that never got a slot now hears about it. Closing
+    // must still resolve, and the rejection must not escape as an unhandled
+    // one — which is what this asserts by failing the run if it does.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => void unhandled.push(reason);
+
+    process.on('unhandledRejection', onUnhandled);
+
+    const cache = await cacheWith({ one: [programme('one', 6)] });
+    /** Holds the first guide's slot until the test lets go. */
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow = new Proxy(cache, {
+      get(store, name) {
+        if (name === 'read') {
+          return async (key: Parameters<CacheStore['read']>[0]) => {
+            await held;
+
+            return store.read(key);
+          };
+        }
+
+        const found = Reflect.get(store, name, store) as unknown;
+
+        return typeof found === 'function' ? found.bind(store) : found;
+      },
+    }) as CacheStore;
+
+    // One guide at a time, so the second request's body waits in the queue.
+    const handler = await createGuideHandler(configFor(['one']), {
+      now: NOW,
+      cache: slow,
+      concurrency: 1,
+    });
+    const url = await mount(handler, ({ node }) => createServer(node()));
+
+    try {
+      const guide = `${url}${handler.guidePath}`;
+      const first = fetch(guide).then(async (answered) => answered.text());
+      const second = fetch(guide).then(async (answered) => answered.text());
+
+      // Both are answered — the headers cost nothing — and both bodies are
+      // then waiting: the first on the cache, the second on the slot.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      await handler.close();
+
+      // Neither finishes, which is the point of cutting them off.
+      await expect(Promise.all([first, second])).rejects.toThrow();
+    } finally {
+      release();
+      process.off('unhandledRejection', onUnhandled);
+    }
+
+    // The one assertion this test exists for.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(unhandled).toEqual([]);
+  });
+
   it('stops once, however many ways the stopping arrives', async () => {
     // The shape that caught this: `shutdown` is where a server of one's own
     // stops listening, and what it stops may abort the very signal this

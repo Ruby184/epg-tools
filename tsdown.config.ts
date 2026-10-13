@@ -59,7 +59,7 @@ export default defineConfig({
   platform: 'node',
   // The floor in `engines`, so nothing newer than the oldest Node this runs on
   // is left untranspiled.
-  target: 'node20',
+  target: 'node22',
   // Spelled out rather than inferred: rolldown-plugin-dts picks its generator
   // from what is installed, and having TypeScript 7 in devDependencies is
   // enough to move declaration emit from `tsc` to the Go compiler. That is the

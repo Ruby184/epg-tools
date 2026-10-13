@@ -53,24 +53,27 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
    *
    * p-queue drops a waiting task and rejects it with the abort reason when the
    * signal it was given fires, which is exactly the wanted behaviour: a
-   * cancelled run stops instead of dequeuing thousands of tasks only for each to
-   * notice and record a failure. What it cannot be given is the run's own
-   * signal, once per task — it registers two abort listeners for each, and
-   * `addEventListener` scans the listeners already there to reject a duplicate,
-   * so a shared signal costs with the square of what is queued at once.
+   * cancelled run stops instead of dequeuing thousands of tasks only for each
+   * to notice and record a failure.
    *
-   * A signal of the task's own, following the run's, is that same behaviour for
-   * nothing: each list holds only its own task's listeners, and aborting the run
-   * aborts every one of them. Filling and draining 8000 tasks costs what passing
-   * no signal at all costs.
+   * The run's own signal, handed to every task. That used to be the expensive
+   * way round — p-queue 9 registered two abort listeners per task on whatever
+   * signal it was given, and `addEventListener` scans the listeners already
+   * there to reject a duplicate, so a shared signal cost with the square of
+   * what was queued. The way round it was a fresh `AbortSignal.any([signal])`
+   * per task, whose listener list held only its own.
+   *
+   * p-queue 10 keeps its own bookkeeping instead, and the wrapper is now the
+   * slower half of the trade: over 8000 tasks a shared signal fills in 59ms and
+   * aborts in 27ms, against 128ms and 64ms for a signal derived per task.
+   *
+   * `clear()` is not the cheaper answer it looks like, though version 10 made
+   * it a usable one by rejecting what it drops rather than leaving it pending.
+   * It drops what is *waiting*; the signal is also what p-queue hands the task
+   * it starts, and that is how a request already in flight learns to stop.
    */
   const enqueue: Run['enqueue'] = (queue, task, taskOptions = {}) =>
-    queue.add(task, {
-      ...taskOptions,
-      // Not `[signal]` for the sake of a copy: `any` is what makes the listeners
-      // land on a list of this task's own.
-      ...(signal ? { signal: AbortSignal.any([signal]) } : {}),
-    });
+    queue.add(task, { ...taskOptions, ...(signal ? { signal } : {}) });
 
   const run: Run = {
     defaults: {

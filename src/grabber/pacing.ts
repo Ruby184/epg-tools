@@ -210,19 +210,23 @@ export function sitePacing(
         });
 
   // Only ever fires for a site that is paced, and it is the one thing a
-  // `rateLimit` gives no other sign of.
-  queue.on('rateLimit', () => emit({ type: 'pacing:rateLimit', site: config.site, waiting: true }));
-  queue.on('rateLimitCleared', () =>
+  // `rateLimit` gives no other sign of. `addEventListener` rather than `on`:
+  // p-queue 10 is an `EventTarget`.
+  queue.addEventListener('rateLimit', () =>
+    emit({ type: 'pacing:rateLimit', site: config.site, waiting: true }),
+  );
+  queue.addEventListener('rateLimitCleared', () =>
     emit({ type: 'pacing:rateLimit', site: config.site, waiting: false }),
   );
 
   // A cancelled run must not sit out the rest of a hold — the timer is not
   // unref'd, so it would hold the process open — and must not resume either.
-  // Resuming would *send* what the cancel is dropping: a listener on the run's
-  // signal is called before the task signals derived from it are aborted, so
-  // starting the queue here hands out tasks that are about to be removed. The
-  // hold is dropped and the queue left paused; each task takes itself out of it,
-  // and an emptied queue reaches idle whether it is paused or not.
+  // Resuming would *send* what the cancel is dropping: this listener is
+  // registered when the site is set up and p-queue's are registered as each
+  // task is added, so this one runs first and starting the queue here would
+  // hand out tasks that are about to be removed. The hold is dropped and the
+  // queue left paused; each task takes itself out of it, and an emptied queue
+  // reaches idle whether it is paused or not.
   options.signal?.addEventListener(
     'abort',
     () => {

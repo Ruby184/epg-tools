@@ -34,8 +34,7 @@ export default defineConfig({
 ```
 
 Node >= 23.6 loads `epg.config.ts` directly via native type stripping. On
-Node 20 or 22, use `epg.config.js` / `epg.config.mjs`, or compile the TS file
-first.
+Node 22, use `epg.config.js` / `epg.config.mjs`, or compile the TS file first.
 
 The factory form takes a context and is how a config gets answers it cannot
 hardcode — a username, a password, a region. See

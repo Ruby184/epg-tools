@@ -103,7 +103,7 @@
   },
   "dependencies": {
     "ky": "^2.2.0",
-    "p-queue": "^9.3.5"
+    "p-queue": "^10.0.0"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.2.3",
@@ -130,6 +130,6 @@
     "*.{ts,mts,cts,js,mjs,cjs}": "oxlint --fix"
   },
   "engines": {
-    "node": ">=20.4"
+    "node": ">=22"
   }
 }

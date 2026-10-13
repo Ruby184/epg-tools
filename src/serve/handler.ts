@@ -1658,6 +1658,11 @@ export async function createGuideHandler(
       // Aborted above, awaited here: a grab still unwinding would otherwise be
       // reading a store that `cache.close()` is about to take away.
       await running;
+      // p-queue 10 rejects what this drops rather than leaving it pending for
+      // ever, which is why the `add` above is caught: a body that never got a
+      // slot ends as a thrown guide rather than as a request that hangs until
+      // the socket is cut. By here the socket is cut anyway — `shutdown` did
+      // it — so what this clears is a queue nobody is waiting on.
       guides.clear();
       // A target is the caller's and may outlive this handler — one left
       // listening would hold the whole closure, cache and all.
