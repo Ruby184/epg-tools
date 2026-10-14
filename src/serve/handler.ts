@@ -25,7 +25,7 @@ import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../confi
 import { createCacheStore } from '../build.js';
 import type { CacheEntryMeta, CacheStore, ChannelDayKey } from '../cache/types.js';
 import { dayRange, toDayString, addDays } from '../core/days.js';
-import { emitter, type Reporter, type Says } from '../core/events.js';
+import { emitter, reportingTo, type Reporter, type Says } from '../core/events.js';
 import { compressor, type CompressionFormat } from '../core/output.js';
 import { covered, resolveSites } from '../grabber/channels.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
@@ -900,9 +900,12 @@ function encodingFor(
  */
 export async function createGuideHandler(
   source: ConfigSource,
-  options: GuideHandlerOptions = {},
+  given: GuideHandlerOptions = {},
 ): Promise<GuideHandler> {
   const config = await resolveConfigSource(source);
+  // What the config asked to be told, beside whatever the caller passes — a
+  // server mounted on an app of its own reads the same field `epg serve` does.
+  const options = reportingTo(given, config.events);
   const emit = emitter(options);
   const path = options.path ?? config.serve?.path ?? DEFAULT_SERVE_PATH;
   const health = options.health ?? config.serve?.health ?? DEFAULT_HEALTH_PATH;

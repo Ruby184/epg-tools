@@ -236,8 +236,10 @@ export interface EpgConfig {
    * export default defineConfig({ sites, output, events });
    * ```
    *
-   * Read by the CLI, since a library caller passes its own `reporter` and can
-   * put `emitterReporter` in it with `combineReporters`.
+   * Honoured wherever a run is started from this config — `epg serve` and
+   * `epg grab`, and `build`, `runGrab`, `runMerge` and `createGuideHandler`
+   * just the same. A library caller's own `reporter` is kept beside it rather
+   * than replaced.
    */
   events?: EpgEventSink;
 }

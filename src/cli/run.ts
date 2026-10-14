@@ -20,14 +20,8 @@ import type { MissingAllowance } from '../grabber/main.js';
 import { GrabberError } from '../core/error.js';
 import { OptionError, parseOptions } from '../core/options.js';
 import { dayToDate, toDayString } from '../core/days.js';
-import { silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
-import {
-  combineReporters,
-  emitterReporter,
-  FAILURE_MODES,
-  reporterFor,
-  REPORTER_NAMES,
-} from '../core/reporters.js';
+import { reportingTo, silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
+import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
 import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
 import { REPORT_FORMATS, type ReportFormat } from './format.js';
@@ -724,16 +718,14 @@ async function execute(
     level,
     ...(values.failures ? { failures: values.failures } : {}),
   });
-  // Beside whatever was chosen rather than instead of it: `--reporter` says
-  // how the run talks to whoever ran it, and `events` is what the program
-  // itself does with what happens. A flag about output must not switch off a
-  // reload somebody's app depends on.
-  const reporter = config.events
-    ? combineReporters(chosen, emitterReporter(config.events))
-    : chosen;
-  const emit = reporter ? stamped(reporter) : silent;
+  // `config.events` is added here only for what this file says itself — the
+  // library entries below add it to what *they* say, and adding it twice would
+  // have an emitter hear every run's events twice over. The two sets are
+  // disjoint: `merge:done` is the command's, everything inside a run is not.
+  const { reporter: said } = reportingTo(chosen ? { reporter: chosen } : {}, config.events);
+  const emit = said ? stamped(said) : silent;
   const runOptions = {
-    ...(reporter ? { reporter } : {}),
+    ...(chosen ? { reporter: chosen } : {}),
     ...(values.offset !== undefined ? { offset: values.offset } : {}),
     ...(signal ? { signal } : {}),
   };

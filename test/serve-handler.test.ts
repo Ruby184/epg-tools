@@ -7,6 +7,7 @@
  * holding a cache.
  */
 
+import { EventEmitter } from 'node:events';
 import { createServer, type Server } from 'node:http';
 import { connect, constants, createSecureServer } from 'node:http2';
 import { createServer as createHttpsServer, get as httpsGet } from 'node:https';
@@ -16,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/types.js';
 import type { EpgConfig } from '../src/config.js';
+import type { EpgEventMap } from '../src/core/events.js';
 import { createGuideHandler, serveGuide, type GuideHandler } from '../src/serve/main.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 import { CERT, KEY } from './fixtures/self-signed.js';
@@ -336,6 +338,26 @@ describe('createGuideHandler', () => {
     // The one assertion this test exists for.
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(unhandled).toEqual([]);
+  });
+
+  it('tells the config’s own emitter, not only the command', async () => {
+    // The field is in the config because that is where a program says what it
+    // wants told, so every way of starting a run honours it — not only the
+    // command that happens to read the config file.
+    const heard: string[] = [];
+    const events = new EventEmitter<EpgEventMap>();
+
+    events.on('serve:reloaded', () => heard.push('reloaded'));
+
+    const handler = await createGuideHandler(
+      { ...configFor(['one']), events },
+      { now: NOW, cache: await cacheWith({ one: [programme('one', 6)] }) },
+    );
+
+    handlers.push(handler);
+    handler.reload();
+
+    expect(heard).toEqual(['reloaded']);
   });
 
   it('stops once, however many ways the stopping arrives', async () => {

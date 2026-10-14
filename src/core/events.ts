@@ -496,6 +496,92 @@ export function emitter(options: ReportedOptions): Emit {
 }
 
 /**
+ * The options a run reports through, with the config's own emitter added.
+ *
+ * `reporter` is how a run talks to whoever started it, and a library caller
+ * passes its own. `events` is what the *program* asked to be told, and it is
+ * in the config because that is where a program says it — so every way of
+ * starting a run honours it, not only the command that happens to read the
+ * config file.
+ */
+export function reportingTo<T extends ReportedOptions>(
+  options: T,
+  events: EpgEventSink | undefined,
+): T {
+  if (events === undefined) {
+    return options;
+  }
+
+  return { ...options, reporter: combineReporters(options.reporter, emitterReporter(events)) };
+}
+
+/**
+ * What {@link emitterReporter} needs of an emitter — Node's own fits, and so
+ * does anything with an `emit` taking a name and a value.
+ */
+export interface EpgEventSink {
+  emit(type: EpgEvent['type'], event: EpgEvent): unknown;
+}
+
+/**
+ * Every event, re-emitted on an `EventEmitter` under its own type.
+ *
+ * For a long-lived process where several things care about different events: a
+ * readiness ping, a reload, a metric. Each subscribes to the one it is about,
+ * instead of one `switch` in a reporter growing a case per concern.
+ *
+ * ```ts
+ * const events = new EventEmitter<EpgEventMap>();
+ *
+ * events.on('serve:started', () => process.send?.('ready'));
+ * events.on('serve:reloaded', () => void reloadMyOwnThings());
+ *
+ * serveGuide(config, { reporter: emitterReporter(events) });
+ * ```
+ *
+ * Typing the emitter with {@link EpgEventMap} is what makes each listener's
+ * argument the event it asked for. Nothing is filtered: an emitter with no
+ * listener for a type is the cheapest sink there is.
+ */
+export function emitterReporter(events: EpgEventSink): Reporter {
+  return (event) => {
+    events.emit(event.type, event);
+  };
+}
+
+/**
+ * Several reporters as one, each given every event in the order written.
+ *
+ * What a process with more than one interest reaches for — lines for a log and
+ * an emitter for the app, without writing the two-line function that calls
+ * both. `undefined` is skipped, so a caller's own optional reporter composes
+ * without a conditional:
+ *
+ * ```ts
+ * reporter: combineReporters(options.reporter, loggerReporter({ logger })),
+ * ```
+ *
+ * A reporter that throws is not caught here, as it is not caught anywhere
+ * else: a sink that cannot keep up with a run is a bug in the sink, and
+ * swallowing it would leave a run reporting into silence with nothing said.
+ */
+export function combineReporters(...reporters: (Reporter | undefined)[]): Reporter {
+  const listening = reporters.filter((reporter) => reporter !== undefined);
+
+  // The common cases without a wrapper: one reporter is itself, and none at
+  // all is the same silence `emitter` gives a run nobody is listening to.
+  if (listening.length === 1) {
+    return listening[0]!;
+  }
+
+  return (event) => {
+    for (const reporter of listening) {
+      reporter(event);
+    }
+  };
+}
+
+/**
  * Whether an event at `level` is worth showing to someone asking for `threshold`.
  *
  * Filtering is a *reporter's* job and happens nowhere else: a sink of one's own

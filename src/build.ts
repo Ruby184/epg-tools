@@ -15,7 +15,7 @@ import { outputOptions } from './xmltv/serialize.js';
 import { addDays, toDayString } from './core/days.js';
 import { GrabberError } from './core/error.js';
 import type { Emit, Reporter, Says } from './core/events.js';
-import { emitter } from './core/events.js';
+import { emitter, reportingTo } from './core/events.js';
 import {
   resolveConfigSource,
   type ConfigSource,
@@ -249,11 +249,9 @@ function reported(options: RunOptions): Pick<RunOptions, 'reporter'> {
 }
 
 /** Grab all sites into the cache (only stale/missing channel-days are fetched). */
-export async function runGrab(
-  source: ConfigSource,
-  options: RunOptions = {},
-): Promise<GrabSummary> {
+export async function runGrab(source: ConfigSource, given: RunOptions = {}): Promise<GrabSummary> {
   const config = await resolveConfigSource(source);
+  const options = reportingTo(given, config.events);
   const now = options.now ?? new Date();
   const startDay = startDayOf(options, now);
 
@@ -314,8 +312,9 @@ export async function runGrab(
 }
 
 /** Generate the merged XMLTV guide from the cache, without grabbing. */
-export async function runMerge(source: ConfigSource, options: RunOptions = {}): Promise<void> {
+export async function runMerge(source: ConfigSource, given: RunOptions = {}): Promise<void> {
   const config = await resolveConfigSource(source);
+  const options = reportingTo(given, config.events);
 
   await withCache(config, options, async (cache) =>
     writeGuide({
@@ -332,9 +331,10 @@ export async function runMerge(source: ConfigSource, options: RunOptions = {}): 
  */
 export async function* guideStream(
   source: ConfigSource,
-  options: RunOptions = {},
+  given: RunOptions = {},
 ): AsyncGenerator<string> {
   const config = await resolveConfigSource(source);
+  const options = reportingTo(given, config.events);
   const { cache, release } = await cacheFor(config, options);
 
   try {
@@ -355,10 +355,11 @@ export async function* guideStream(
  * should be replaced with, and the next run continues from what this one
  * cached.
  */
-export async function build(source: ConfigSource, options: RunOptions = {}): Promise<GrabSummary> {
+export async function build(source: ConfigSource, given: RunOptions = {}): Promise<GrabSummary> {
   // Resolved once and passed on: a factory may read the environment or fetch,
   // and the grab and the merge that follows it must agree on one answer.
   const config = await resolveConfigSource(source);
+  const options = reportingTo(given, config.events);
   const now = options.now ?? new Date();
 
   // One cache for both halves, rather than each of them asking the config for

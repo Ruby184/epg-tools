@@ -221,7 +221,8 @@ serveGuide(config, {
 different questions: `reporter` is how a run talks to whoever started it, which
 an operator can overrule with `--reporter`; `events` is what the *program* does
 with what happens, which nobody passing `--reporter json` meant to switch off.
-The CLI runs both.
+Both run, and `events` is honoured by every entry point that reads a config —
+`build`, `runGrab`, `runMerge` and `createGuideHandler` as much as the command.
 
 ```ts
 export default defineConfig({ sites, output, events });   // the emitter itself
