@@ -1470,6 +1470,7 @@ leave two elements per programme, which is the one thing merging is for — so
 |---|---|---|
 | `startToleranceMs` | `300_000` | How far apart two starts may be and still be one broadcast. `0` matches the instant exactly. |
 | `titles` | `'when-shifted'` | When titles must agree: only for starts that differ (`when-shifted`), for every pair (`always`), or never (`never`). Titles are compared case- and accent-insensitively, with whitespace collapsed; nothing a programme carries is rewritten. |
+| `normalizeTitle` | the above | How a title is reduced before two are compared. For what a *provider* adds rather than how it spells things — `Správy` against `Správy TV`, `Film: Casablanca` against `Casablanca`. |
 
 A five-minute window is safe because a shifted pair has two more hurdles: it
 must agree on its title, and — when both sides say where they end — the shift
@@ -1479,13 +1480,37 @@ last rule is what keeps two same-titled three-minute clips apart however wide
 the tolerance is.
 
 Inside one source's own list none of this applies: two entries in a schedule are
-two broadcasts, and only entries naming the identical instant are pooled. For a
-source pair no option describes, pass a predicate instead:
+two broadcasts, and only entries naming the identical instant are pooled.
+
+**A title rule is the cheap fix.** Where two sources describe the same
+broadcast but one prefixes or suffixes its titles, `normalizeTitle` says so in
+a line and everything else — the tolerance, the duration guard — keeps working:
 
 ```ts
 merge: {
-  match: (a, b) => a.episodeNum?.[0]?.value === b.episodeNum?.[0]?.value,
+  match: { normalizeTitle: (title) => title.replace(/^film:\s*/i, '').toLowerCase() },
 }
+```
+
+For a source pair no option describes, pass a predicate — **with the window it
+needs**:
+
+```ts
+merge: {
+  match: {
+    windowMs: 600_000,
+    matches: (a, b) => a.episodeNum?.[0]?.value === b.episodeNum?.[0]?.value,
+  },
+}
+```
+
+A bare function still works and is asked about *every* programme on the
+channel, because a function that never said how far it looks might look
+anywhere. On a fortnight of listings that is every pair, which is where a
+custom matcher stops being quick — the window is what keeps the walk short.
+
+```ts
+merge: { match: (a, b) => … }   // correct, and linear in nothing
 ```
 
 ### Cleaning up the output
