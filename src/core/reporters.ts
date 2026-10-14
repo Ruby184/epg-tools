@@ -152,7 +152,15 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
         ? 'Cancelled.'
         : `Cancelled. ${event.fetched} channel-day(s) reached the cache; no guide was written.`;
     case 'grab:done':
-      return `Grab done: ${counts(event)}`;
+      return (
+        `Grab done: ${counts(event)}` +
+        // Only when it is enough to have mattered. A parse that held the loop
+        // for seconds is why the sources look slow, and saying so here is the
+        // difference between tuning a `rateLimit` and fixing a parse.
+        (event.loopMaxMs >= 1000
+          ? ` — the event loop was blocked for up to ${took(event.loopMaxMs)} by this run's own parsing`
+          : '')
+      );
     case 'site:started':
       return (
         `${at(event.site, prefix)}${event.channels} channel(s) × ${event.days} day(s): ` +

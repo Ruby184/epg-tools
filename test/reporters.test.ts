@@ -244,6 +244,7 @@ describe('render', () => {
     [
       {
         type: 'grab:done',
+        loopMaxMs: 0,
         fetched: 1,
         empty: 0,
         fromCache: 0,
@@ -256,6 +257,7 @@ describe('render', () => {
     [
       {
         type: 'grab:done',
+        loopMaxMs: 0,
         fetched: 1,
         empty: 1,
         fromCache: 0,
@@ -406,6 +408,7 @@ describe('textReporter', () => {
       failure,
       {
         type: 'grab:done',
+        loopMaxMs: 0,
         fetched: 0,
         empty: 0,
         fromCache: 0,
@@ -428,6 +431,7 @@ describe('textReporter', () => {
       failure,
       {
         type: 'grab:done',
+        loopMaxMs: 0,
         fetched: 0,
         empty: 0,
         fromCache: 0,
@@ -470,6 +474,7 @@ describe('textReporter', () => {
       })),
       {
         type: 'grab:done',
+        loopMaxMs: 0,
         fetched: 0,
         empty: 0,
         fromCache: 0,
@@ -493,6 +498,7 @@ describe('textReporter', () => {
       failure,
       {
         type: 'grab:done',
+        loopMaxMs: 0,
         fetched: 0,
         empty: 0,
         fromCache: 0,
@@ -587,6 +593,7 @@ describe('progressReporter', () => {
       started,
       {
         type: 'grab:done',
+        loopMaxMs: 0,
         fetched: 6,
         empty: 0,
         fromCache: 0,
@@ -620,6 +627,7 @@ describe('progressReporter', () => {
       started,
       {
         type: 'grab:done',
+        loopMaxMs: 0,
         fetched: 6,
         empty: 0,
         fromCache: 0,

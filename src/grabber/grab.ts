@@ -9,7 +9,7 @@
 
 import PQueue from 'p-queue';
 import { toDayString } from '../core/days.js';
-import { emitter, type GrabCounts } from '../core/events.js';
+import { emitter, type GrabCounts, watchEventLoop } from '../core/events.js';
 import { SiteRun, type Run } from './site-run.js';
 import type { AnySiteConfig, GrabOptions, GrabSummary } from './types.js';
 
@@ -47,6 +47,10 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
   const localWork = new PQueue({
     concurrency: Math.max(1, options.localConcurrency ?? DEFAULT_LOCAL_CONCURRENCY),
   });
+
+  // Watched for the whole run, because the number it produces is the one that
+  // explains the others — see `grab:done`.
+  const loop = watchEventLoop();
 
   /**
    * Queue one task, cancellable without paying for the privilege.
@@ -122,11 +126,15 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
   // whoever is listening: `grab:done` is what a reporter treats as "this is
   // what the run came to", while a cancel says the opposite — most of what
   // failed was dropped by the cancel itself.
+  const loopMaxMs = await loop.worst();
+
   emit(
     signal?.aborted
       ? { type: 'run:cancelled', fetched: tally.fetched }
-      : { type: 'grab:done', ...tally },
+      : { type: 'grab:done', loopMaxMs, ...tally },
   );
+
+  loop.stop();
 
   return tally;
 }

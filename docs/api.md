@@ -125,6 +125,15 @@ the whole answer to "what does the default verbosity show?".
 Two of these are worth knowing about before you need them, because they answer
 questions that are otherwise answered by hand.
 
+**Before reading any of it, look at `loopMaxMs` on `grab:done`.** A `parseDay`
+is the site's own code on the main thread: while it works through a big
+document nothing else runs, including the reads that finish *other* sites'
+requests. Measured here, a CPU-bound parse beside a network-bound site inflated
+that site's request times 15× on the mean and 115× at the worst. A run whose
+worst figure is seconds is a run whose request times are describing its own
+parsing, and the text reporter says so under the summary rather than leaving
+every source looking slow at once.
+
 `site:done` says what the site **cost**, beside what it fetched. `requests` is
 how many times the source was asked — every slot the site's queue gave out, a
 `ctx.paced` fetch inside a parse included, which is why it is not the same as

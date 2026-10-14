@@ -1073,6 +1073,56 @@ describe('grab', () => {
     expect(seen?.signal?.aborted).toBe(true);
   });
 
+  it('says when a run’s own parsing is why every source looked slow', async () => {
+    // The failure this exists to end: `parseDay` is the site's own code on the
+    // main thread, so while it works through a big document nothing else runs
+    // — including the reads that finish *other* sites' requests. Every source
+    // is then measured as slow at once, which reads as a network problem and
+    // is not one.
+    const cache = new MemoryCache();
+    let loopMaxMs = -1;
+
+    const config = makeConfig({
+      days: 1,
+      // Some real loop time before the block, as any run has: the monitor
+      // samples at 10ms and cannot report a stretch it never ran inside of.
+      async request() {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+
+        return {};
+      },
+      parseDay({ channel, day, programme }) {
+        const until = Date.now() + 1200;
+
+        while (Date.now() < until) {
+          // A parse that never yields, as a synchronous one does not.
+        }
+
+        return [programme(new Date(`${day}T06:00:00.000Z`), channel.xmltvId)];
+      },
+    });
+
+    const report = collect();
+
+    await grab([config], {
+      cache,
+      now: NOW,
+      reporter: (event) => {
+        report.reporter(event);
+
+        if (event.type === 'grab:done') {
+          loopMaxMs = event.loopMaxMs;
+        }
+      },
+    });
+
+    // The parse held the loop for over a second, and the summary says so in
+    // the one place somebody reading request times will see it.
+    expect(loopMaxMs).toBeGreaterThanOrEqual(1000);
+    expect(report.messages.at(-1)).toContain('blocked for up to');
+    expect(report.messages.at(-1)).toContain("this run's own parsing");
+  });
+
   it('counts what a site asked for, a parse’s own requests included', async () => {
     // Counted at the queue rather than off the `request:*` events, which is the
     // difference this asserts: a parse's fetch takes a slot and is a request to

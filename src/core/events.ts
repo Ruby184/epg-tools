@@ -23,6 +23,8 @@
  *   decides for itself how, and a single-site grabber can leave it out.
  */
 
+import { monitorEventLoopDelay } from 'node:perf_hooks';
+
 /**
  * How much a reporter is being told, in the order a threshold reads them.
  *
@@ -174,7 +176,18 @@ export type EpgEventInput =
    */
   | { type: 'run:cancelled'; fetched?: number }
   // ── grabbing ─────────────────────────────────────────────────────────────
-  | ({ type: 'grab:done' } & GrabCounts)
+  /**
+   * The run is over, with what it fetched and how busy the loop was.
+   *
+   * `loopMaxMs` is the longest the event loop went unserved. It is here
+   * because of what it explains: `parseDay` is the site's own code running on
+   * the main thread, and while a big document is being parsed nothing else can
+   * read a socket — so *every other site's* requests are measured as slow, and
+   * the numbers point at the sources rather than at the parse. A run whose
+   * worst figure is seconds is a run whose request times mean something else
+   * than they appear to.
+   */
+  | ({ type: 'grab:done'; loopMaxMs: number } & GrabCounts)
   /**
    * What this site is about to do, which the planner has just worked out.
    *
@@ -473,6 +486,52 @@ export type Emit = (event: EpgEventInput) => void;
  */
 export function stamped(reporter: Reporter): Emit {
   return (event) => reporter({ ...event, ...EVENT_KINDS[event.type] } as EpgEvent);
+}
+
+/** How often the loop is sampled — see {@link watchEventLoop}. */
+const RESOLUTION_MS = 10;
+
+/**
+ * How long the event loop went unserved, watched for the length of a run.
+ *
+ * A `parseDay` is the site's own code on the main thread: while it works
+ * through a big document nothing else runs, including the reads that finish
+ * other sites' requests. Without this the only sign is every source looking
+ * slow at once, which reads as a network problem and is not one.
+ *
+ * `monitorEventLoopDelay` is a libuv timer at 10ms resolution — cheap enough
+ * to leave on, and the only way to tell "the sources were slow" from "we never
+ * got round to listening".
+ */
+export function watchEventLoop(): { worst: () => Promise<number>; stop: () => void } {
+  const histogram = monitorEventLoopDelay({ resolution: RESOLUTION_MS });
+
+  histogram.enable();
+
+  return {
+    /**
+     * The longest delay seen, in milliseconds — the histogram counts in
+     * nanoseconds and nobody reads one.
+     *
+     * After a timer rather than an immediate, which is the difference between
+     * reading the block and missing it: the monitor is a libuv timer, timers
+     * run before the check phase an immediate belongs to, and a caller asking
+     * straight after a long block would be asking before the monitor had had
+     * its turn. Twice the resolution is one sample's worth of waiting at the
+     * end of a run that took minutes.
+     *
+     * `0` on a run too short to have been sampled at all, which is honest:
+     * nothing was kept waiting.
+     */
+    worst: async () => {
+      await new Promise((resolve) => {
+        setTimeout(resolve, RESOLUTION_MS * 2);
+      });
+
+      return Math.round(histogram.max / 1e6);
+    },
+    stop: () => histogram.disable(),
+  };
 }
 
 /** A run nobody is listening to. */
