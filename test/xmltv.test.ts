@@ -232,6 +232,27 @@ describe('xmltv dates', () => {
     expect(formatXmltvDate(parseXmltvDate('20260717'), { offset: false })).toBe('20260717');
   });
 
+  it('reads a short number as the calendar date it plainly is', () => {
+    // What a source hands over as `{ year: 2025 }`, and what used to arrive as
+    // half past midnight on the 1st of January 1970.
+    expect(formatXmltvDate(xmltvDate(2025), { offset: false })).toBe('2025');
+    expect(formatXmltvDate(xmltvDate(202_503), { offset: false })).toBe('202503');
+    expect(formatXmltvDate(xmltvDate(20_250_102), { offset: false })).toBe('20250102');
+
+    // The same answer the string gives, which is the whole rule.
+    expect(xmltvDate(2025).getTime()).toBe(xmltvDate('2025').getTime());
+    expect(getXmltvPrecision(xmltvDate(2025))).toBe(4);
+
+    // And ten digits and up are still what they have always been: a real
+    // timestamp begins there, and a calendar reading of one would be absurd.
+    expect(xmltvDate(1_216_081_800).getTime()).toBe(1_216_081_800_000);
+    // Nine digits is neither an XMLTV date form nor a plausible calendar
+    // reading, so it stays a timestamp too.
+    expect(xmltvDate(123_456_789).getTime()).toBe(123_456_789_000);
+    // A month nobody has: refused rather than quietly read as seconds.
+    expect(() => xmltvDate(20_261_345)).toThrow();
+  });
+
   it('xmltvDate factory accepts unix seconds, strings, and flag options', () => {
     expect(xmltvDate(1_216_081_800).getTime()).toBe(1_216_081_800_000);
     expect(xmltvDate('20260717203000 +0200').getTime()).toBe(Date.UTC(2026, 6, 17, 18, 30));

@@ -106,12 +106,26 @@ export interface XmltvDateOptions {
 }
 
 /**
+ * A number that is a calendar date rather than a count of seconds.
+ *
+ * Four, six or eight digits — `2025`, `202503`, `20250102` — which are the
+ * XMLTV date forms coarser than an hour, and the ones a source hands over as
+ * numbers. Ten digits and up stay timestamps, where a real one begins.
+ */
+const CALENDAR = /^(?:\d{4}|\d{6}|\d{8})$/;
+
+/**
  * Create a Date carrying XMLTV {@link XMLTV_OFFSET offset} and
  * {@link XMLTV_PRECISION precision} flags in one call — the convenience
  * alternative to `new Date()` followed by {@link setXmltvOffset} /
  * {@link setXmltvPrecision}. `value` is coerced per {@link DateInput}; any
  * flags already on a `Date` value (or parsed from a string) are preserved
  * unless overridden by `options`.
+ *
+ * A number is a unix timestamp in seconds, **except** at four, six or eight
+ * digits: `2025` is the year, as `'2025'` is. That is what a source means when
+ * its JSON says `{ year: 2025 }`, and no source means half past midnight on
+ * the 1st of January 1970.
  */
 export function xmltvDate(value: DateInput, options: XmltvDateOptions = {}): XmltvDate {
   let date: Date;
@@ -124,6 +138,14 @@ export function xmltvDate(value: DateInput, options: XmltvDateOptions = {}): Xml
 
     const precision = (value as WithXmltvPrecision)[XMLTV_PRECISION];
     if (precision !== undefined) setXmltvPrecision(date, precision);
+  } else if (typeof value === 'number' && CALENDAR.test(String(value))) {
+    // A year, a year-month or a year-month-day, written as a number because
+    // that is how JSON hands one over. `2025` means what `'2025'` means, which
+    // is the only reading anybody intends: as a unix timestamp it would be
+    // half past midnight on the 1st of January 1970, and the widest of these
+    // three — `99999999` — is still March 1973. Nothing real is in that range,
+    // so nothing real is being taken away.
+    date = parseXmltvDate(String(value));
   } else if (typeof value === 'number') {
     date = new Date(value * 1000);
   } else {

@@ -438,8 +438,23 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     return this;
   }
 
+  /**
+   * A country, as a code.
+   *
+   * The one text element here that does **not** take the builder's default
+   * language: `<country lang="sk">US</country>` says a code is Slovak prose,
+   * which it is not — the channel's language describes the titles and
+   * descriptions, not an ISO 3166 code that reads the same in every one of
+   * them. A `lang` given here explicitly is still written, for a source that
+   * really does say "Spojené štáty".
+   */
   country(value: string, lang?: string, extraAttributes?: ExtraAttributes): this {
-    (this.#programme.country ??= []).push(this.text(value, lang, extraAttributes));
+    // `lang` falsy rather than undefined, as everywhere else here: `''` is how
+    // a caller says "no language" to the elements that do take the default.
+    const country: XmltvTextValue = lang ? { value, lang } : { value };
+
+    (this.#programme.country ??= []).push(this.extraAttrs(country, extraAttributes));
+
     return this;
   }
 

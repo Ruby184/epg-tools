@@ -1092,7 +1092,7 @@ export function buildProgramme(
     // No language on it: `USA` is an ISO code, and tagging it `en` claims it is
     // a word in English. An empty `lang` is how the builder is told to leave the
     // attribute off entirely.
-    element.country(country, '');
+    element.country(country);
   }
 
   for (const url of programme.urls) {

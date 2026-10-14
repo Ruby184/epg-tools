@@ -393,6 +393,7 @@ describe('grab', () => {
             .stop(new Date(`${day}T07:00:00.000Z`))
             .desc('Prehľad dňa')
             .category('news')
+            .country('US')
             .episode(3, 2),
           programme(new Date(`${day}T20:00:00.000Z`), 'Film', { lang: 'en' }).new(),
         ];
@@ -412,6 +413,10 @@ describe('grab', () => {
     expect(written[0]!.title).toEqual([{ value: 'Ranné správy', lang: 'sk' }]);
     expect(written[0]!.desc).toEqual([{ value: 'Prehľad dňa', lang: 'sk' }]);
     expect(written[0]!.category).toEqual([{ value: 'news', lang: 'sk' }]);
+    // Not the channel's language: a country is a code, and `lang="sk"` on one
+    // claims `US` is Slovak prose. The elements that carry words take the
+    // default; the one that carries a code does not.
+    expect(written[0]!.country).toEqual([{ value: 'US' }]);
     expect(written[0]!.stop?.toISOString()).toBe(`${TODAY}T07:00:00.000Z`);
     // `.episode(3, 2)` is episode 3 of season 2, in both systems the builder emits.
     expect(written[0]!.episodeNum).toEqual([
