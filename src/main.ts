@@ -270,6 +270,7 @@ export type {
   ResolvedAllowance,
 } from './grabber/main.js';
 export type * from './grabber/types.js';
+export type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from './xmltv/builder.js';
 
 export { createGuideHandler, grabEvery, serveGuide } from './serve/main.js';
 export type {

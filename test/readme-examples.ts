@@ -60,6 +60,10 @@ import {
   ProgrammeBuilder,
   XmltvDocumentBuilder,
 } from '../src/xmltv/main.js';
+import type {
+  ParseContext,
+  ProgrammeBuilder as GrabberProgrammeBuilder,
+} from '../src/grabber/main.js';
 import {
   defineCapability,
   defineStages,
@@ -845,6 +849,25 @@ export const localStart = (
   programme: (start: Date, title: string) => ProgrammeBuilder,
   item: { start: string; title: string },
 ): ProgrammeBuilder => programme(zonedXmltvDate(item.start, 'Europe/Bratislava'), item.title);
+
+// --- docs/site-config.md: a parse helper of a site's own --------------------
+/**
+ * Split out of a `parseDay`, and written in the types that parse was handed —
+ * all from the entry point the site already imports, which is the part that
+ * did not work: `ParseContext` was on `epg-tools/grabber` while the builder it
+ * hands over was only on `epg-tools/xmltv`.
+ */
+export function withDetail(
+  programme: GrabberProgrammeBuilder,
+  detail: { desc: string; year: number },
+  warn: ParseContext<unknown>['warn'],
+): GrabberProgrammeBuilder {
+  if (detail.desc === '') {
+    warn('the detail payload has no description');
+  }
+
+  return programme.desc(detail.desc).date(detail.year);
+}
 
 // --- docs/xmltv.md: Named zones ---------------------------------------------
 export const zoned = (epochSeconds: number): Date[] => [
