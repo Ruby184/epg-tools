@@ -1,6 +1,6 @@
 import { Readable } from 'node:stream';
 import { xmltvDate } from './date.js';
-import type { DateInput, XmltvDateOptions } from './date.js';
+import type { DateInput, XmltvDate, XmltvDateOptions } from './date.js';
 import { formatOnscreenEpisodeNum, formatXmltvNsEpisodeNum } from './episode-num.js';
 import type { EpisodeNumbers } from './episode-num.js';
 import {
@@ -101,6 +101,16 @@ export interface ProgrammeBuilderBase {
   title: string | [string, TextOptions];
   /** Default `lang` applied by every method below unless it's given its own. */
   lang?: string;
+  /**
+   * Where a value this cannot use is reported.
+   *
+   * With one, a bad *optional* field — a `date` of `'20'` — is left out and
+   * said; without one it throws, since a field that vanishes with nothing said
+   * is worse than one that stops the run. A parse is given the site's `warn`,
+   * so a site reaching for `ctx.programme` gets the first behaviour and a
+   * caller building a guide by hand gets the second.
+   */
+  warn?: (message: string) => void;
 }
 
 /** The optional {@link ProgrammeBuilderBase} fields — the trailing arg of the positional constructor. */
@@ -225,10 +235,43 @@ abstract class ExtraAttributesBuilder {
  */
 abstract class XmltvElementBuilder extends ExtraAttributesBuilder {
   protected readonly lang: string | undefined;
+  /** Where a value this cannot use is reported — see {@link dated}. */
+  protected readonly warn: ((message: string) => void) | undefined;
 
-  constructor(lang: string | undefined) {
+  constructor(lang: string | undefined, warn?: (message: string) => void) {
     super();
     this.lang = lang;
+    this.warn = warn;
+  }
+
+  /**
+   * A date for a field the element can do without.
+   *
+   * A source that gives a usable programme and an unusable `date` has given a
+   * usable programme, and losing the whole thing over the one field it could
+   * have been written without is the wrong trade — a guide short a `<date>` is
+   * a guide; a guide short a programme is a hole in the listings.
+   *
+   * Only where there is somewhere to say so. Without a `warn` this throws as
+   * it always did: a field that vanishes with nothing said is worse than one
+   * that stops the run, and a builder used on its own has no reporter to tell.
+   */
+  protected dated(
+    field: string,
+    value: DateInput,
+    options?: XmltvDateOptions,
+  ): XmltvDate | undefined {
+    if (this.warn === undefined) {
+      return xmltvDate(value, options);
+    }
+
+    try {
+      return xmltvDate(value, options);
+    } catch (error) {
+      this.warn(`${field}: ${error instanceof Error ? error.message : String(error)} — left out`);
+
+      return undefined;
+    }
   }
 
   /** Copies non-standard attributes onto a freshly built element. */
@@ -320,7 +363,7 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
   }
 
   constructor(base: ProgrammeBuilderBase) {
-    super(base.lang);
+    super(base.lang, base.warn);
 
     this.#programme = {
       channel: base.channel,
@@ -338,19 +381,34 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
 
   /** Sets the `stop` time (end of the programme). */
   stop(value: DateInput, options?: XmltvDateOptions): this {
-    this.#programme.stop = xmltvDate(value, options);
+    const stop = this.dated('stop', value, options);
+
+    if (stop !== undefined) {
+      this.#programme.stop = stop;
+    }
+
     return this;
   }
 
   /** Sets the `pdc-start` (Programme Delivery Control) time. */
   pdcStart(value: DateInput, options?: XmltvDateOptions): this {
-    this.#programme.pdcStart = xmltvDate(value, options);
+    const pdcStart = this.dated('pdc-start', value, options);
+
+    if (pdcStart !== undefined) {
+      this.#programme.pdcStart = pdcStart;
+    }
+
     return this;
   }
 
   /** Sets the `vps-start` (Video Programme System) time. */
   vpsStart(value: DateInput, options?: XmltvDateOptions): this {
-    this.#programme.vpsStart = xmltvDate(value, options);
+    const vpsStart = this.dated('vps-start', value, options);
+
+    if (vpsStart !== undefined) {
+      this.#programme.vpsStart = vpsStart;
+    }
+
     return this;
   }
 
@@ -395,7 +453,12 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
    * no timezone, so any offset is ignored on serialization.
    */
   date(value: DateInput, options?: XmltvDateOptions): this {
-    this.#programme.date = xmltvDate(value, options);
+    const date = this.dated('date', value, options);
+
+    if (date !== undefined) {
+      this.#programme.date = date;
+    }
+
     return this;
   }
 
@@ -512,7 +575,13 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
   previouslyShown(opts: PreviouslyShownOptions, extraAttributes?: ExtraAttributes): this {
     this.#programme.previouslyShown = this.extraAttrs<XmltvPreviouslyShown>(
       {
-        ...(opts.start !== undefined ? { start: xmltvDate(opts.start) } : {}),
+        ...(opts.start === undefined
+          ? {}
+          : (() => {
+              const start = this.dated('previously-shown start', opts.start);
+
+              return start === undefined ? {} : { start };
+            })()),
         ...(opts.channel ? { channel: opts.channel } : {}),
       },
       extraAttributes,
@@ -929,6 +998,8 @@ export class XmltvDocumentBuilder extends ExtraAttributesBuilder {
 
   /** Sets the `date` attribute (the guide's generation time). */
   date(value: DateInput, options?: XmltvDateOptions): this {
+    // Not `dated`: this is the document's own generation time, set by whoever
+    // is building the document, and there is nobody else to tell.
     return this.meta({ date: xmltvDate(value, options) });
   }
 

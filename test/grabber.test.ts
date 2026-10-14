@@ -381,6 +381,58 @@ describe('grab', () => {
     expect(written!.meta.grabbedAt).toBe(NOW.toISOString());
   });
 
+  it('keeps a programme whose optional field it could not read, and says so', async () => {
+    // A source that gives a usable programme and an unusable `date` has given
+    // a usable programme. Losing the listing over the one field it could have
+    // been written without is the wrong trade — and the field going quietly
+    // would be worse than either.
+    const cache = new MemoryCache();
+    const said: string[] = [];
+
+    const config = makeConfig({
+      parseDay({ programme, day }) {
+        return [
+          programme(new Date(`${day}T06:00:00.000Z`), 'Ranné správy')
+            .date('20')
+            .stop('nope')
+            .desc('Prehľad dňa'),
+        ];
+      },
+    });
+
+    const summary = await grab([config], {
+      cache,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'site:warning') {
+          said.push(event.message);
+        }
+      },
+    });
+
+    expect(summary.fetched).toBe(1);
+    expect(summary.failed).toBe(0);
+
+    const written = cache.get({
+      site: 'example.com',
+      channelId: 'one.example',
+      day: TODAY,
+    })!.programmes;
+
+    // The programme is there, with everything that could be read.
+    expect(written).toHaveLength(1);
+    expect(written[0]!.title).toEqual([{ value: 'Ranné správy' }]);
+    expect(written[0]!.desc).toEqual([{ value: 'Prehľad dňa' }]);
+    expect(written[0]!.date).toBeUndefined();
+    expect(written[0]!.stop).toBeUndefined();
+
+    // And both omissions were said, naming the channel-day and the field.
+    expect(said).toHaveLength(2);
+    expect(said[0]).toContain(`one.example ${TODAY}: date:`);
+    expect(said[0]).toContain('left out');
+    expect(said[1]).toContain('stop:');
+  });
+
   it('parses with a builder bound to the channel and its language', async () => {
     const cache = new MemoryCache();
 
