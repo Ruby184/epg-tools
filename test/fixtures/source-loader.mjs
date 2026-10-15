@@ -5,10 +5,10 @@
  * A worker loads its files with Node itself, not with the test runner, so it
  * gets none of what the runner does for the source: the `.js` specifiers the
  * source writes are mapped to the `.ts` files they stand for here, and the two
- * constants the build bakes in are defined. Node's own `--experimental-
- * transform-types`, beside this in the same project's `execArgv`, does the
- * rest — including the enum and the parameter properties type stripping alone
- * refuses. Workers inherit both from the test process that starts them.
+ * constants the build bakes in are defined. Node strips the types itself —
+ * which is all it does from Node 26 on, and why the source is held to
+ * `erasableSyntaxOnly`. Workers inherit this from the test process that starts
+ * them, through the project's `execArgv`.
  */
 
 import { existsSync, readFileSync } from 'node:fs';

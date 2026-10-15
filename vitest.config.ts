@@ -38,13 +38,13 @@ export default defineConfig({
           include: [THREADS],
           // Inherited by every worker a test starts, which is the point.
           execArgv: [
-            '--experimental-transform-types',
             '--disable-warning=ExperimentalWarning',
             '--import',
             fileURLToPath(new URL('./test/fixtures/source-loader.mjs', import.meta.url)),
           ],
-          // The benchmarks are the other project's to run, once.
-          benchmark: { include: [] },
+          // The benchmarks are the other project's to run, once — an empty
+          // `include` reads as unset, so this one shuts them out instead.
+          benchmark: { exclude: ['**'] },
         },
       },
     ],

@@ -24,14 +24,22 @@ import type { AnySiteConfig, GrabberChannel } from './types.js';
  * `SITE` is stored as `state` because that is what it is to anyone looking at a
  * cache directory — the site's own — while the rest is bookkeeping done for it.
  */
-export enum StateKey {
+export const StateKey = {
   /** A channel list `resolveChannels` fetched. */
-  CHANNELS = 'channels',
+  CHANNELS: 'channels',
   /** What each url last answered with — see `revalidate.ts`. */
-  VALIDATORS = 'validators',
+  VALIDATORS: 'validators',
   /** Whatever the site itself put there. */
-  SITE = 'state',
-}
+  SITE: 'state',
+} as const;
+
+/**
+ * One of the {@link StateKey} groups.
+ *
+ * An object and a type rather than an `enum`, which is the one thing here Node
+ * cannot run by stripping the types out — see `erasableSyntaxOnly`.
+ */
+export type StateKey = (typeof StateKey)[keyof typeof StateKey];
 
 /**
  * How long a cached channel list stays fresh when a site asks for one without
@@ -321,10 +329,10 @@ class BagGroup<V> implements StateGroup {
     );
   }
 
-  constructor(
-    readonly key: string,
-    entries: Array<[string, V]>,
-  ) {
+  readonly key: string;
+
+  constructor(key: string, entries: Array<[string, V]>) {
+    this.key = key;
     this.map = new TrackedMap(entries);
   }
 

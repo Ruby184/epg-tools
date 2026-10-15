@@ -180,7 +180,11 @@ class Findings {
     { count: number; kinds: Map<string, number>; more: boolean }
   >();
 
-  constructor(private readonly maxExamples: number) {}
+  readonly #maxExamples: number;
+
+  constructor(maxExamples: number) {
+    this.#maxExamples = maxExamples;
+  }
 
   add(code: FindingCode, example: string, occurrences = 1): void {
     let entry = this.#byCode.get(code);
@@ -221,7 +225,7 @@ class Findings {
         examples: [...kinds]
           .map(([value, times]) => ({ value, count: times }))
           .sort((a, b) => b.count - a.count)
-          .slice(0, this.maxExamples),
+          .slice(0, this.#maxExamples),
         kinds: kinds.size,
         ...(more ? { more: true as const } : {}),
       }))

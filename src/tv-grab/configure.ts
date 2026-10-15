@@ -32,14 +32,16 @@ export interface Prompter {
  */
 class MutableOutput extends Writable {
   muted = false;
+  readonly #target: Writable;
 
-  constructor(private readonly target: Writable) {
+  constructor(target: Writable) {
     super();
+    this.#target = target;
   }
 
   override _write(chunk: Buffer | string, _encoding: string, done: () => void): void {
     if (!this.muted) {
-      this.target.write(chunk);
+      this.#target.write(chunk);
     }
 
     done();
