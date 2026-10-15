@@ -965,7 +965,11 @@ Together the next run is the earliest `at + n × every` still ahead of now, so
 With **no** `at`, the first run is at startup — which is what "every six hours"
 means for something long-running, and what stops a fresh deployment serving an
 empty cache until the first interval is up. Naming an `at` is saying when you
-want it, so startup is not a run.
+want it, so startup is not a run — **unless there is nothing cached**, which a
+deployment at three in the afternoon of a server that grabs at four in the
+morning otherwise answers for thirteen hours by serving nothing. It cannot
+duplicate work, the condition for it being that the cache is empty, and
+`whenEmpty: false` turns it off.
 
 The grab shares this server's cache rather than opening one of its own, so what
 it writes is what the very next request is served. It is the same run `epg grab`
@@ -975,7 +979,11 @@ performs, reported through the same events, interleaved with the server's own.
 whole contract is to say when the next run is due:
 
 ```ts
-type NextGrab = (from: Date, runs: number) => Date | number | undefined;
+type NextGrab = (context: {
+  from: Date;
+  runs: number;
+  cached(): Promise<{ present: number; expected: number; grabbedAt?: Date }>;
+}) => Date | number | undefined | Promise<Date | number | undefined>;
 ```
 
 Called once at startup and again after each grab **finishes** — after, so a grab
@@ -983,6 +991,14 @@ that overruns its own interval can never stack another behind itself. Return a
 `Date` or an epoch millisecond count; return something at or before `from` to
 run as soon as possible, and `undefined` to stop scheduling and carry on
 serving. `runs` is how many have already finished, `0` at startup.
+
+`cached()` is the one thing a schedule cannot find out for itself: the cache
+*file* exists from the moment the server opens it, so whether there is anything
+to **serve** is not a question that can be answered by looking from outside.
+It sweeps the window — which means resolving every site's channel list — so it
+is a function rather than a value, and a schedule that does not ask pays
+nothing. An answer may be a promise, which is what lets a schedule ask before
+it decides.
 
 Which is how a cron expression gets in without this package carrying a cron
 parser — the next timestamp is exactly what a cron library already hands out:
@@ -992,7 +1008,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 export default defineConfig({
   serve: {
-    grab: (from) =>
+    grab: ({ from }) =>
       CronExpressionParser.parse('0 4 * * *', { currentDate: from }).next().toDate(),
   },
 });

@@ -15,7 +15,7 @@
  * import { CronExpressionParser } from 'cron-parser';
  *
  * serve: {
- *   grab: (from) =>
+ *   grab: ({ from }) =>
  *     CronExpressionParser.parse('0 4 * * *', { currentDate: from }).next().toDate(),
  * }
  * ```
@@ -24,8 +24,49 @@
 import { GrabberError } from '../core/error.js';
 
 /**
- * When the next grab is due, given the moment to schedule from and how many
- * grabs this server has already finished — `0` while it is starting up.
+ * What the cache holds for the window this server serves.
+ *
+ * The thing a schedule cannot find out for itself: the cache *file* exists from
+ * the moment the server opens it, so "is there anything to serve?" is not a
+ * question that can be answered from outside by looking.
+ */
+export interface GuideCached {
+  /** Channel-days the cache holds for the window. `0` is nothing to serve. */
+  present: number;
+  /** How many it would hold if every site had answered for every day. */
+  expected: number;
+  /** The newest `grabbedAt` among them, or `undefined` with nothing cached. */
+  grabbedAt?: Date;
+}
+
+/** What a schedule is asked with. See {@link NextGrab}. */
+export interface GrabScheduleContext {
+  /**
+   * The moment to schedule from: when the server started, or when the grab
+   * before it finished.
+   */
+  from: Date;
+  /**
+   * How many grabs this server has already finished — `0` while it is starting
+   * up.
+   *
+   * Passed rather than left to the schedule to remember, so one schedule can be
+   * handed to two servers without the first consuming it.
+   */
+  runs: number;
+  /**
+   * What is cached, swept now.
+   *
+   * A function rather than a value because answering costs something: every
+   * site's channel list has to be resolved before the grid can be counted, and
+   * a schedule that does not care should not pay for it. The answer is the
+   * server's own snapshot, so asking again in the same breath costs nothing.
+   */
+  cached(): Promise<GuideCached>;
+}
+
+/**
+ * When the next grab is due.
  *
  * Called once when the server starts and again after each grab finishes —
  * after, not before, so a grab that overruns its own interval cannot queue
@@ -34,12 +75,13 @@ import { GrabberError } from '../core/error.js';
  * Return the time the next run should happen, as a `Date` or an epoch
  * millisecond count. A time at or before `from` runs as soon as possible, which
  * is how a schedule asks to run at startup. Return `undefined` to stop
- * scheduling: nothing further is planned and the server carries on serving.
- *
- * `runs` is passed rather than left to the schedule to remember, so one
- * schedule can be handed to two servers without the first consuming it.
+ * scheduling: nothing further is planned and the server carries on serving. A
+ * promise is awaited, so a schedule may ask {@link GrabScheduleContext.cached}
+ * what there is to serve before it decides.
  */
-export type NextGrab = (from: Date, runs: number) => Date | number | undefined;
+export type NextGrab = (
+  context: GrabScheduleContext,
+) => Date | number | undefined | Promise<Date | number | undefined>;
 
 /** How a {@link grabEvery} schedule is anchored. See {@link grabEvery}. */
 export interface GrabEveryOptions {
@@ -53,8 +95,22 @@ export interface GrabEveryOptions {
    * serving an empty cache until the first interval elapses.
    *
    * With one, startup is not a run: naming a time is saying when you want it.
+   * Except with nothing cached — see {@link whenEmpty}.
    */
   at?: string;
+  /**
+   * Grab at startup anyway when there is nothing to serve. On by default, and
+   * only relevant with {@link at}.
+   *
+   * A fresh deployment at three in the afternoon of a server that grabs at four
+   * in the morning serves nothing at all for thirteen hours, which is nobody's
+   * idea of "nightly at four". And it cannot duplicate work: the condition for
+   * running early is that the cache is empty.
+   *
+   * Only at startup. A cache still empty after a grab has *failed*, and how
+   * soon to try again is a retry policy rather than a schedule.
+   */
+  whenEmpty?: boolean;
 }
 
 /** `HH:MM`, and a real time of day rather than merely the shape of one. */
@@ -140,12 +196,20 @@ export function grabEvery(interval: number | string, options: GrabEveryOptions =
   // worth refusing while somebody is still looking at the config.
   const every = resolveInterval(interval, 'grab.every');
   const at = options.at === undefined ? undefined : resolveTimeOfDay(options.at, 'grab.at');
+  const whenEmpty = options.whenEmpty ?? true;
 
-  return (from, runs) => {
+  return async ({ from, runs, cached }) => {
     if (at === undefined) {
       // Unanchored: at startup, now — and after that, spaced from each finish,
       // which drifts by however long a grab takes but can never pile up.
       return runs === 0 ? from : from.getTime() + every;
+    }
+
+    // Asked on the one tick where the answer can change anything, and after
+    // the unanchored branch, which runs at startup regardless and would be
+    // paying for a sweep to learn nothing.
+    if (runs === 0 && whenEmpty && (await cached()).present === 0) {
+      return from;
     }
 
     // Midnight local on the day `from` falls in, so the anchor follows the

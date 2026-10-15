@@ -1,15 +1,35 @@
 import { describe, expect, it } from 'vitest';
-import { grabEvery, resolveInterval, type NextGrab } from '../src/serve/schedule.js';
+import {
+  grabEvery,
+  resolveInterval,
+  type GuideCached,
+  type NextGrab,
+} from '../src/serve/schedule.js';
 
 /** A local wall-clock time, since that is what an anchored schedule works in. */
 function at(day: string, time: string): Date {
   return new Date(`${day}T${time}`);
 }
 
+/** A cache with something in it, which is the uninteresting case. */
+function holding(present = 100): () => Promise<GuideCached> {
+  return async () => ({ present, expected: 100 });
+}
+
+/** What a schedule answers, whichever of the forms it answers in. */
+async function next(
+  schedule: NextGrab,
+  from: Date,
+  runs = 1,
+  cached = holding(),
+): Promise<Date | number | undefined> {
+  return schedule({ from, runs, cached });
+}
+
 /** What a schedule says next, as a local `HH:MM` on whichever day it lands. */
-function nextAt(schedule: NextGrab, from: Date, runs = 1): string {
-  const next = schedule(from, runs);
-  const when = new Date(typeof next === 'number' ? next : (next as Date));
+async function nextAt(schedule: NextGrab, from: Date, runs = 1): Promise<string> {
+  const answer = await next(schedule, from, runs);
+  const when = new Date(typeof answer === 'number' ? answer : (answer as Date));
 
   return `${when.getDate()} ${String(when.getHours()).padStart(2, '0')}:${String(
     when.getMinutes(),
@@ -46,17 +66,17 @@ describe('grabEvery with no anchor', () => {
   const schedule = grabEvery('6h');
   const start = at('2026-09-10', '15:20');
 
-  it('runs at startup, so a fresh deployment does not wait', () => {
+  it('runs at startup, so a fresh deployment does not wait', async () => {
     // `runs` is zero only while starting up, and returning `from` is how a
     // schedule says "now".
-    expect(schedule(start, 0)).toBe(start);
+    await expect(next(schedule, start, 0)).resolves.toBe(start);
   });
 
-  it('spaces the rest from each finish rather than running again at once', () => {
+  it('spaces the rest from each finish rather than running again at once', async () => {
     // The bug this shape exists to avoid: `next` is asked again *after* every
     // grab, so answering `from` every time would grab in a loop.
-    expect(schedule(start, 1)).toBe(start.getTime() + 6 * 3_600_000);
-    expect(schedule(start, 9)).toBe(start.getTime() + 6 * 3_600_000);
+    await expect(next(schedule, start, 1)).resolves.toBe(start.getTime() + 6 * 3_600_000);
+    await expect(next(schedule, start, 9)).resolves.toBe(start.getTime() + 6 * 3_600_000);
   });
 });
 
@@ -64,42 +84,86 @@ describe('grabEvery anchored to a time of day', () => {
   const nightly = grabEvery('1d', { at: '04:00' });
   const sixHourly = grabEvery('6h', { at: '04:00' });
 
-  it('does not run at startup, because a time was named', () => {
+  /** A sweep that counts the calls, since not asking is half of the contract. */
+  function empty(): (() => Promise<GuideCached>) & { calls: number } {
+    const cached: (() => Promise<GuideCached>) & { calls: number } = Object.assign(
+      async () => {
+        cached.calls++;
+
+        return { present: 0, expected: 336 };
+      },
+      { calls: 0 },
+    );
+
+    return cached;
+  }
+
+  it('does not run at startup, because a time was named', async () => {
     const start = at('2026-09-10', '15:20');
 
-    expect(nextAt(nightly, start, 0)).toBe('11 04:00');
+    expect(await nextAt(nightly, start, 0)).toBe('11 04:00');
   });
 
-  it('waits for today’s anchor when it is still ahead', () => {
-    expect(nextAt(nightly, at('2026-09-10', '01:30'))).toBe('10 04:00');
-    expect(nextAt(sixHourly, at('2026-09-10', '01:30'))).toBe('10 04:00');
+  it('runs at startup anyway when there is nothing to serve', async () => {
+    const start = at('2026-09-10', '15:20');
+
+    // Thirteen hours of serving nothing is nobody's idea of "nightly at four".
+    await expect(next(nightly, start, 0, empty())).resolves.toBe(start);
   });
 
-  it('takes tomorrow’s once today’s has passed', () => {
-    expect(nextAt(nightly, at('2026-09-10', '04:30'))).toBe('11 04:00');
-    expect(nextAt(nightly, at('2026-09-10', '23:59'))).toBe('11 04:00');
+  it('keeps to the anchor with nothing cached when told to', async () => {
+    const start = at('2026-09-10', '15:20');
+    const keeping = grabEvery('1d', { at: '04:00', whenEmpty: false });
+    const cached = empty();
+
+    expect(await nextAt(keeping, start, 0)).toBe('11 04:00');
+    await expect(next(keeping, start, 0, cached)).resolves.toBeTypeOf('number');
+    // And it did not pay for a sweep to ignore the answer.
+    expect(cached.calls).toBe(0);
   });
 
-  it('steps through the day for an interval shorter than one', () => {
-    expect(nextAt(sixHourly, at('2026-09-10', '04:30'))).toBe('10 10:00');
-    expect(nextAt(sixHourly, at('2026-09-10', '10:00'))).toBe('10 16:00');
-    expect(nextAt(sixHourly, at('2026-09-10', '16:01'))).toBe('10 22:00');
-    expect(nextAt(sixHourly, at('2026-09-10', '22:01'))).toBe('11 04:00');
+  it('asks only where the answer could change anything', async () => {
+    const cached = empty();
+
+    // After the first run: an empty cache then is a grab that failed, and how
+    // soon to try again is not this schedule's business.
+    await next(nightly, at('2026-09-10', '15:20'), 1, cached);
+    // And with no anchor at all, startup is already a run.
+    await next(grabEvery('6h'), at('2026-09-10', '15:20'), 0, cached);
+
+    expect(cached.calls).toBe(0);
   });
 
-  it('moves on from an anchor it has landed exactly on', () => {
+  it('waits for today’s anchor when it is still ahead', async () => {
+    expect(await nextAt(nightly, at('2026-09-10', '01:30'))).toBe('10 04:00');
+    expect(await nextAt(sixHourly, at('2026-09-10', '01:30'))).toBe('10 04:00');
+  });
+
+  it('takes tomorrow’s once today’s has passed', async () => {
+    expect(await nextAt(nightly, at('2026-09-10', '04:30'))).toBe('11 04:00');
+    expect(await nextAt(nightly, at('2026-09-10', '23:59'))).toBe('11 04:00');
+  });
+
+  it('steps through the day for an interval shorter than one', async () => {
+    expect(await nextAt(sixHourly, at('2026-09-10', '04:30'))).toBe('10 10:00');
+    expect(await nextAt(sixHourly, at('2026-09-10', '10:00'))).toBe('10 16:00');
+    expect(await nextAt(sixHourly, at('2026-09-10', '16:01'))).toBe('10 22:00');
+    expect(await nextAt(sixHourly, at('2026-09-10', '22:01'))).toBe('11 04:00');
+  });
+
+  it('moves on from an anchor it has landed exactly on', async () => {
     // Asked at exactly 04:00, the 04:00 run is the one that just happened.
-    expect(nextAt(sixHourly, at('2026-09-10', '04:00'))).toBe('10 10:00');
+    expect(await nextAt(sixHourly, at('2026-09-10', '04:00'))).toBe('10 10:00');
   });
 
-  it('handles an interval that does not divide a day', () => {
+  it('handles an interval that does not divide a day', async () => {
     // 7h from 04:00 is 11:00, 18:00, then 01:00 — which belongs to the next
     // day's anchor arithmetic, not this one's.
     const sevenHourly = grabEvery('7h', { at: '04:00' });
 
-    expect(nextAt(sevenHourly, at('2026-09-10', '05:00'))).toBe('10 11:00');
-    expect(nextAt(sevenHourly, at('2026-09-10', '12:00'))).toBe('10 18:00');
-    expect(nextAt(sevenHourly, at('2026-09-10', '19:00'))).toBe('11 01:00');
+    expect(await nextAt(sevenHourly, at('2026-09-10', '05:00'))).toBe('10 11:00');
+    expect(await nextAt(sevenHourly, at('2026-09-10', '12:00'))).toBe('10 18:00');
+    expect(await nextAt(sevenHourly, at('2026-09-10', '19:00'))).toBe('11 01:00');
   });
 
   it('refuses a time of day that is not one', () => {

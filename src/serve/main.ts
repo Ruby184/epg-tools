@@ -340,4 +340,4 @@ export type {
 } from './handler.js';
 export type { EpgServeConfig, GuideListening } from './config.js';
 export { grabEvery } from './schedule.js';
-export type { GrabEveryOptions, NextGrab } from './schedule.js';
+export type { GrabEveryOptions, GrabScheduleContext, GuideCached, NextGrab } from './schedule.js';

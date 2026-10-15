@@ -9,7 +9,7 @@ import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/types.js';
 import type { EpgConfig } from '../src/config.js';
 import { outputFingerprint, serveGuide, type GuideServer } from '../src/serve/main.js';
-import type { NextGrab } from '../src/serve/schedule.js';
+import type { GuideCached, NextGrab } from '../src/serve/schedule.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 import { toDayString } from '../src/core/days.js';
 import { collect } from './reporting.js';
@@ -1468,7 +1468,7 @@ describe('serveGuide grabbing on a schedule', () => {
   }
 
   /** A schedule that runs once, at startup, and then stops. */
-  const once: NextGrab = (from, runs) => (runs === 0 ? from : undefined);
+  const once: NextGrab = ({ from, runs }) => (runs === 0 ? from : undefined);
 
   /**
    * On the wall clock, unlike every other test here.
@@ -1516,11 +1516,36 @@ describe('serveGuide grabbing on a schedule', () => {
     await vi.waitFor(() => expect(log.of('grab:done')).toHaveLength(1));
   });
 
+  it('tells the schedule what is cached, which it cannot see from outside', async () => {
+    // The cache *file* exists from the moment the server opens it, so this is
+    // the only way to ask "is there anything to serve?".
+    const cache = cacheWith({});
+    const log = collect();
+    const seen: GuideCached[] = [];
+    const grab: NextGrab = async ({ from, runs, cached }) => {
+      seen.push(await cached());
+
+      return runs === 0 ? from : undefined;
+    };
+
+    await serveNow(grabbable(), cache, { grab, reporter: log.reporter });
+
+    await vi.waitFor(() => expect(seen).toHaveLength(2));
+
+    expect(seen[0]).toMatchObject({ present: 0 });
+    expect(seen[0]!.expected).toBeGreaterThan(0);
+    expect(seen[0]!.grabbedAt).toBeUndefined();
+    // And after the run it reports what that run wrote, so a schedule can tell
+    // a cold start from a failed grab.
+    expect(seen[1]!.present).toBeGreaterThan(0);
+    expect(seen[1]!.grabbedAt).toBeInstanceOf(Date);
+  });
+
   it('asks again after each run, with the count of those already finished', async () => {
     const cache = cacheWith({});
     const log = collect();
     const seen: number[] = [];
-    const grab: NextGrab = (from, runs) => {
+    const grab: NextGrab = ({ from, runs }) => {
       seen.push(runs);
 
       // A tiny interval rather than fake timers, as `pacing.test.ts` does.
@@ -1574,7 +1599,7 @@ describe('serveGuide grabbing on a schedule', () => {
     const cache = cacheWith({});
     const log = collect();
     const server = await serveNow(grabbable(), cache, {
-      grab: (from) => from.getTime() + 5,
+      grab: ({ from }) => from.getTime() + 5,
       reporter: log.reporter,
     });
 

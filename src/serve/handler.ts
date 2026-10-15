@@ -35,7 +35,7 @@ import type { BuildGuideOptions, DerivedChannel, GuideContext } from '../merge/t
 import type { XmltvDocumentMeta } from '../xmltv/types.js';
 import { outputOptions } from '../xmltv/serialize.js';
 import type { GuideOutputOptions } from '../xmltv/serialize.js';
-import type { NextGrab } from './schedule.js';
+import type { GuideCached, NextGrab } from './schedule.js';
 
 /** Where the guide is served from when nothing says otherwise. */
 export const DEFAULT_SERVE_PATH = '/guide.xml';
@@ -1601,23 +1601,63 @@ export async function createGuideHandler(
       return;
     }
 
-    const next = schedule(from, runs);
+    // The answer may be awaited — a schedule is allowed to ask what is cached
+    // before deciding, and that is a sweep. Nothing waits on this: the server
+    // is already answering requests, and all that is pending is a timer.
+    void (async () => {
+      let next: Date | number | undefined;
 
-    if (next === undefined) {
-      return;
-    }
+      try {
+        next = await schedule({ from, runs, cached: () => cachedFor(from) });
+      } catch (error) {
+        // A schedule that threw has said nothing about when to run again, and
+        // guessing on its behalf would be the wrong hour forever. Reported
+        // rather than thrown: the process must not end over it, and a server
+        // that cannot plan is still a server that can serve.
+        if (!stopped) {
+          emit({ type: 'serve:grabFailed', error });
+        }
 
-    const at = typeof next === 'number' ? next : next.getTime();
-    const delay = Math.max(runs === 0 ? 0 : MIN_GRAB_GAP_MS, at - from.getTime());
+        return;
+      }
 
-    // Not `unref`'d: a server whose only remaining work is the next grab is
-    // still a server that should be running.
-    timer = setTimeout(() => {
-      running = grabNow().finally(() => {
-        running = undefined;
-        planNext(new Date());
-      });
-    }, delay);
+      // `close` may have happened while it was deciding, and a timer set after
+      // that is one nobody will clear.
+      if (next === undefined || stopped) {
+        return;
+      }
+
+      const at = typeof next === 'number' ? next : next.getTime();
+      const delay = Math.max(runs === 0 ? 0 : MIN_GRAB_GAP_MS, at - from.getTime());
+
+      // Not `unref`'d: a server whose only remaining work is the next grab is
+      // still a server that should be running.
+      timer = setTimeout(() => {
+        running = grabNow().finally(() => {
+          running = undefined;
+          planNext(new Date());
+        });
+      }, delay);
+    })();
+  };
+
+  /**
+   * What the cache holds for the window, for a schedule that asks.
+   *
+   * Through `current`, so it is the same sweep a request would do and the same
+   * snapshot it would leave behind — a server starting with an empty cache
+   * resolves its sites once here rather than once more on the first request.
+   */
+  const cachedFor = async (now: Date): Promise<GuideCached> => {
+    const { print } = await current(now);
+
+    return {
+      present: print.present,
+      expected: print.expected,
+      // Not the epoch: with nothing cached the newest `grabbedAt` is zero, and
+      // a date from 1970 reads like a fact rather than like an absence.
+      ...(print.present > 0 ? { grabbedAt: print.lastModified } : {}),
+    };
   };
 
   planNext(options.now ?? new Date());

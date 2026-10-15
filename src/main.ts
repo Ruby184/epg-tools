@@ -288,6 +288,8 @@ export type {
   GuideServer,
   Replying,
   ReplyingRequest,
+  GrabScheduleContext,
+  GuideCached,
   NextGrab,
   ServeOptions,
 } from './serve/main.js';
