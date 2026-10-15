@@ -49,7 +49,9 @@ async function grabbed(
   const events: EpgEventInput[] = [];
   const stop = new AbortController();
   const summary = await grab(sites(...names), {
-    cache: store,
+    // The manager itself, so a thread encodes for its store; a store wrapped
+    // to save slowly is not one, and is sent lines — both ways are covered.
+    cache: options.savingMs === undefined ? cache : store,
     now: NOW,
     startDay: DAY,
     days: 1,

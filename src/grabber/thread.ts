@@ -16,13 +16,16 @@
  *
  * - **the cache**, answered on the main thread: one store for every site, which
  *   is the one writer a database wants and the only place a memory cache or a
- *   driver of the config's own exists. Programmes cross in the form a store
- *   keeps them in, as text, because a `Date` copied to another thread loses
- *   the offset and the precision this package keeps on it. That is not free:
- *   the main thread reads the text back into programmes before the store
- *   writes them, which measured about as much again as the write itself —
- *   16.7ms on top of 14.6ms for 3,500 programmes — against the parsing that
- *   moved off it.
+ *   driver of the config's own exists. The thread encodes a channel-day with
+ *   the codec its store keeps entries with — see `cache/codec.ts` —
+ *   as UTF-8 bytes it transfers rather than copies, and the main thread only
+ *   stamps and saves them: measured for 3,500 programmes of Slovak text, about
+ *   1ms of the main thread's time, against 12 for the same bytes sent as a
+ *   string, which the main thread copies and a file write encodes again. A store that keeps
+ *   something no thread can make is sent lines — each programme's record as
+ *   JSON, because a `Date` copied to another thread loses the offset and the
+ *   precision this package keeps on it — and handed programmes read back from
+ *   them.
  * - **events**, said on the main thread, where the reporter is — an error made
  *   plain on the way, since copying one keeps neither its name nor anything a
  *   library hung on it.
@@ -39,8 +42,9 @@ import { availableParallelism } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { MessageChannel, Worker } from 'node:worker_threads';
 import PQueue from 'p-queue';
-import { CacheDriverBase } from '../cache/driver.js';
-import type { CacheStore, ChannelDayKey, StoredProgramme } from '../cache/types.js';
+import { CacheManager } from '../cache/manager.js';
+import { CODECS, fromLine, toLine, type CodecName } from '../cache/codec.js';
+import type { CacheStore, ChannelDayKey } from '../cache/types.js';
 import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../config.js';
 import { MAX_CAUSE_DEPTH } from '../core/error.js';
 import type { EpgEventInput, GrabCounts } from '../core/events.js';
@@ -64,17 +68,20 @@ export interface SiteThreadData {
   startDay: string;
   defaults: Run['defaults'];
   localConcurrency: number;
+  /** The codec the run's store keeps its entries with, when a thread has it — see `CacheManager.codecName`. */
+  codec?: CodecName;
 }
 
 /** Either end of the conversation: a worker, its `parentPort`, or a channel's port. */
 export interface SitePort {
-  postMessage(value: unknown): void;
+  /** With what it hands over rather than copies — none, as often as not. */
+  postMessage(value: unknown, transfer: ArrayBuffer[]): void;
   on(event: 'message', listener: (value: any) => void): unknown;
   off(event: 'message', listener: (value: any) => void): unknown;
 }
 
 /** The cache's methods, which is all the worker's store asks the main thread. */
-type CacheOp = Exclude<keyof CacheStore, 'close'>;
+type CacheOp = Exclude<keyof CacheStore, 'close'> | 'writeEncoded';
 
 type ToHost =
   | { kind: 'event'; event: EpgEventInput }
@@ -152,18 +159,6 @@ function plainEvent(event: EpgEventInput): EpgEventInput {
 }
 
 /**
- * What a store keeps a programme as, which is what crosses: dates in their
- * XMLTV form, where the offset and the precision survive.
- */
-const records = new (class extends CacheDriverBase {})();
-
-const packed = (programmes: XmltvProgramme[]): string =>
-  JSON.stringify(programmes.map((programme) => records.toStored(programme)));
-
-const unpacked = (text: string): XmltvProgramme[] =>
-  (JSON.parse(text) as StoredProgramme[]).map((record) => records.fromStored(record));
-
-/**
  * Send something to the other side, whatever a site put in it.
  *
  * A site's `log` and `warn` take fields of its own, which may hold something no
@@ -172,9 +167,9 @@ const unpacked = (text: string): XmltvProgramme[] =>
  * its value (see `SaidFields`) — never a throw into the site's own code, where
  * a log line would fail the channel-day it was about.
  */
-function send(port: SitePort, message: ToHost | ToWorker): void {
+function send(port: SitePort, message: ToHost | ToWorker, transfer: ArrayBuffer[] = []): void {
   try {
-    port.postMessage(message);
+    port.postMessage(message, transfer);
   } catch (error) {
     if (message.kind !== 'event' || !('data' in message.event)) {
       throw error;
@@ -188,7 +183,7 @@ function send(port: SitePort, message: ToHost | ToWorker): void {
       data = '[unserializable]';
     }
 
-    port.postMessage({ ...message, event: { ...message.event, data } });
+    port.postMessage({ ...message, event: { ...message.event, data } }, []);
   }
 }
 
@@ -373,6 +368,9 @@ export class SiteThreads {
       startDay: run.startDay,
       defaults: run.defaults,
       localConcurrency: run.localWork.concurrency,
+      ...(run.cache instanceof CacheManager && run.cache.codecName !== undefined
+        ? { codec: run.cache.codecName }
+        : {}),
     };
     const { port1, port2 } = new MessageChannel();
     const pooled = this.#pick();
@@ -541,18 +539,36 @@ export function hostSite(port: SitePort, run: Run): Promise<void> {
   });
 }
 
-/** One cache call the worker made, made here — programmes as text both ways. */
+/**
+ * One cache call the worker made, made here: a channel-day already encoded for
+ * the store, or programmes as lines for one that keeps something else.
+ */
 async function answer(cache: CacheStore, op: CacheOp, args: unknown[]): Promise<unknown> {
   switch (op) {
-    case 'write': {
-      const [key, text, meta] = args as [ChannelDayKey, string, Parameters<CacheStore['write']>[2]];
+    case 'writeEncoded': {
+      const [key, body, programmeCount, meta] = args as [
+        ChannelDayKey,
+        Uint8Array,
+        number,
+        Parameters<CacheStore['write']>[2],
+      ];
 
-      return cache.write(key, unpacked(text), meta);
+      // Only ever asked of the store whose codec the thread was handed.
+      return (cache as CacheManager).writeEncoded(key, body, programmeCount, meta);
+    }
+    case 'write': {
+      const [key, lines, meta] = args as [
+        ChannelDayKey,
+        string[],
+        Parameters<CacheStore['write']>[2],
+      ];
+
+      return cache.write(key, lines.map(fromLine), meta);
     }
     case 'read': {
       const found = await cache.read(args[0] as ChannelDayKey);
 
-      return found === undefined ? undefined : packed(found);
+      return found?.map(toLine);
     }
     default:
       return (cache[op] as (...given: unknown[]) => Promise<unknown>).apply(cache, args);
@@ -564,14 +580,17 @@ async function answer(cache: CacheStore, op: CacheOp, args: unknown[]): Promise<
 /** The run's cache, as the main thread answers it. */
 class RemoteCache implements CacheStore {
   readonly #port: SitePort;
+  /** The codec the run's store keeps its entries with, run here when there is one. */
+  readonly #codec: CodecName | undefined;
   readonly #waiting = new Map<
     number,
     { resolve(value: unknown): void; reject(error: unknown): void }
   >();
   #next = 0;
 
-  constructor(port: SitePort) {
+  constructor(port: SitePort, codec: CodecName | undefined) {
     this.#port = port;
+    this.#codec = codec;
     port.on('message', (message: ToWorker) => {
       if (message.kind !== 'answer') {
         return;
@@ -589,47 +608,60 @@ class RemoteCache implements CacheStore {
     });
   }
 
-  #ask(op: CacheOp, ...args: unknown[]): Promise<any> {
+  /** One cache call, answered by the main thread — and the buffers it hands over rather than copies. */
+  #ask(op: CacheOp, args: unknown[], transfer: ArrayBuffer[] = []): Promise<any> {
     const id = this.#next++;
 
     return new Promise((resolve, reject) => {
       this.#waiting.set(id, { resolve, reject });
-      send(this.#port, { kind: 'cache', id, op, args });
+      send(this.#port, { kind: 'cache', id, op, args }, transfer);
     });
   }
 
   getMeta(key: ChannelDayKey): ReturnType<CacheStore['getMeta']> {
-    return this.#ask('getMeta', key);
+    return this.#ask('getMeta', [key]);
   }
 
   getMetas(keys: readonly ChannelDayKey[]): ReturnType<CacheStore['getMetas']> {
-    return this.#ask('getMetas', keys);
+    return this.#ask('getMetas', [keys]);
   }
 
   async read(key: ChannelDayKey): Promise<XmltvProgramme[] | undefined> {
-    const text = (await this.#ask('read', key)) as string | undefined;
+    const lines = (await this.#ask('read', [key])) as string[] | undefined;
 
-    return text === undefined ? undefined : unpacked(text);
+    return lines?.map(fromLine);
   }
 
   write(...[key, programmes, meta]: Parameters<CacheStore['write']>): Promise<void> {
-    return this.#ask('write', key, packed(programmes), meta);
+    if (this.#codec === undefined) {
+      return this.#ask('write', [key, programmes.map(toLine), meta]);
+    }
+
+    // Transferred, not copied: the bytes are the store's, and this thread is
+    // done with them.
+    const body = CODECS[this.#codec].encode(programmes);
+
+    return this.#ask(
+      'writeEncoded',
+      [key, body, programmes.length, meta],
+      [body.buffer as ArrayBuffer],
+    );
   }
 
   delete(key: ChannelDayKey): Promise<void> {
-    return this.#ask('delete', key);
+    return this.#ask('delete', [key]);
   }
 
   prune(options: { before: string }): Promise<number> {
-    return this.#ask('prune', options);
+    return this.#ask('prune', [options]);
   }
 
   getState(...args: Parameters<CacheStore['getState']>): ReturnType<CacheStore['getState']> {
-    return this.#ask('getState', ...args);
+    return this.#ask('getState', args);
   }
 
   setState(...args: Parameters<CacheStore['setState']>): Promise<void> {
-    return this.#ask('setState', ...args);
+    return this.#ask('setState', args);
   }
 
   /** The main thread's store, which is the main thread's to close. */
@@ -691,7 +723,7 @@ export async function workSite(
 
     const run: Run = {
       defaults: data.defaults,
-      cache: new RemoteCache(port),
+      cache: new RemoteCache(port, data.codec),
       now: new Date(data.now),
       grabbedAt: data.grabbedAt,
       startDay: data.startDay,

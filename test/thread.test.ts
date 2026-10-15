@@ -105,6 +105,20 @@ describe('a site in a thread', () => {
     });
   });
 
+  it('sends a channel-day encoded for a store that names its codec', async () => {
+    const cache = new CacheManager({ driver: new MemoryCacheDriver() });
+    const { run } = hosting(cache);
+
+    await converse(run, started('offset.example', { codec: 'json' }));
+
+    const [programme] = (await cache.read({ site: 'offset.example', channelId: 'one', day: DAY }))!;
+
+    expect(getXmltvOffset(programme!.start)).toBe(120);
+    expect(
+      (await cache.getMeta({ site: 'offset.example', channelId: 'one', day: DAY }))?.programmeCount,
+    ).toBe(1);
+  });
+
   it('grabs the channels the run settled rather than its own', async () => {
     const cache = new CacheManager({ driver: new MemoryCacheDriver() });
     const { run } = hosting(cache);

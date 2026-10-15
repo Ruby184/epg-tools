@@ -525,7 +525,7 @@ names live only on a subpath (marked below).
 | XMLTV | `escapeXml`, `escapeXmlText`, `escapeXmlAttribute`, `serializeChannel`, `serializeProgramme`, `writeXmltvStream`, `writeXmltvToFile`, `parseXmltvStream`, `parseXmltvFile`, every [date helper](./xmltv.md#dates) and the [zone helpers](./xmltv.md#named-zones) |
 | M3U | `parseM3uStream`, `parseM3uFile`, `parseM3uString`, `serializeM3uEntry`, `serializeM3uHeader`, `writeM3uStream`, `writeM3uToFile`, `M3uParseStream`, `M3uSerializeStream` |
 | Channels | `parseChannelsXml`, `serializeChannelsXml`, `serializeChannelsXmlEntry`, `matchChannels`, `timeshiftOf`, `timeshiftName` |
-| Cache | `CacheManager`, `CACHE_SCHEMA`, `CacheDriverBase`, `FsCacheDriver`, `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`, `MemoryCacheDriver`, `NoCacheDriver`, `isStale`, `DEFAULT_STALENESS` |
+| Cache | `CacheManager`, `CACHE_SCHEMA`, `CODECS`, `FsCacheDriver`, `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`, `MemoryCacheDriver`, `NoCacheDriver`, `isStale`, `DEFAULT_STALENESS` |
 | Grabber | `grab`, `defineSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `defineXtreamSite`, `defineSchedulesDirectSite`, `schedulesDirectAccount`, `defineCommandSite`, `defineTvGrabCommandSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`, `xtreamChannelExtras`, `xtreamProgrammeExtras`, `schedulesDirectChannelExtras`, `schedulesDirectProgrammeExtras`, `channelElement`, `siteHttp`, `kyWith`, `sitePacing`, `retryAfterMs` |
 | Selection | `channelSelection`, `unmatched` — what `channels` means once `derived` is taken into account, and what it asked for that nothing produced |
 | Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `backfillInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
@@ -579,12 +579,13 @@ M3U one above.
 ### `epg-tools/cache`
 
 `CacheManager`, the drivers `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`,
-`MemoryCacheDriver` and `NoCacheDriver` with the abstract `FsCacheDriver` and
-`CacheDriverBase` they build on, `CACHE_SCHEMA`, `STATE_SCHEMA`, `isStale`,
+`MemoryCacheDriver` and `NoCacheDriver` with the abstract `FsCacheDriver` the
+file ones build on, the codecs a driver names in `CODECS` and the `toRecord` /
+`fromRecord` pair they build on, `CACHE_SCHEMA`, `STATE_SCHEMA`, `isStale`,
 `DEFAULT_STALENESS`, `CACHE_DRIVER_NAMES`, and the `CacheStore` / `CacheDriver` /
-`ChannelDayKey` / `CacheEntryMeta` / `StoredEntryMeta` / `StoredProgramme` /
-`StateEntry` / `StoredStateMeta` / `FoundState` /
-`StalenessPolicy` / `CacheDriverName` types.
+`CacheCodec` / `CodecName` / `ChannelDayKey` / `CacheEntryMeta` /
+`StoredEntryMeta` / `StoredProgramme` / `StateEntry` / `StoredStateMeta` /
+`FoundState` / `StalenessPolicy` / `CacheDriverName` types.
 
 A cache is two pieces. A **driver** answers for one store — a directory of
 files, a database, a bucket — and holds no policy of its own. The
@@ -598,16 +599,16 @@ itself — it goes, so the day reads as never grabbed and the next run fetches i
 const cache = new CacheManager({ driver: new FsNdjsonCacheDriver({ dir }) });
 ```
 
-A driver is a small thing to write: `readMeta`, `read`, `write`, `delete`,
-`prune`, `toStored` / `fromStored`, the three that keep [a site's
+A driver is a small thing to write: `codec`, `readMeta`, `read`, `write`,
+`delete`, `prune`, the three that keep [a site's
 state](#what-a-site-remembers-between-runs) — `readState`, `writeState`,
-`deleteState` — and, if it has them to offer, `readMetas` and `close`. It reads
-and writes programmes in whatever form it keeps them —
-`TStored`, which only it knows about — and the manager is what calls `toStored` /
-`fromStored`, at the two moments a programme crosses into the store and back, so
-no driver has to remember to. `read` and `readMeta` return `undefined` when there
-is no entry, and `{ meta }` — possibly an undefined meta — when there is one that
-says nothing readable; the manager tells those apart and only removes the second.
+`deleteState` — and, if it has them to offer, `readMetas` and `close`. It keeps
+an entry as **bytes** beside its meta and never sees a programme: `codec` says
+what the bytes are, and the manager encodes on the way in and decodes on the
+way out, so no driver has to remember to. `read` and `readMeta` return
+`undefined` when there is no entry, and `{ meta }` — possibly an undefined meta —
+when there is one that says nothing readable; the manager tells those apart and
+only removes the second.
 
 `readMetas(keys)` is the optional one worth knowing about. A grab asks about
 every channel-day of its window before fetching anything, a channel's window at
@@ -658,13 +659,38 @@ so state outlives every listing a site has. `SqliteCacheDriver` keeps a row per
 group. `MemoryCacheDriver` copies in and out, as it does with programmes.
 `NoCacheDriver` remembers nothing, which is the honest answer rather than a gap.
 
-Start from **`CacheDriverBase`** and the storing is already answered. It offers
-two overridable pairs, because they are two questions:
+What an entry's bytes are is the driver's **`codec`**, and naming one of
+`CODECS` is the usual answer:
 
-| pair | default | override to |
+| codec | the bytes | named by |
 |---|---|---|
-| `toRecord` / `fromRecord` | a plain object whose dates are XMLTV strings, so neither the offset the source wrote them in nor how precise it was is lost through `JSON.stringify` | keep fewer fields, or ones of your own |
-| `toStored` / `fromStored` | that record | say what the store actually holds — the ndjson driver makes it a line of JSON, the xmltv driver hands the programme through untouched, since a document already carries the offset and precision a record has to spell out |
+| `'ndjson'` | one record of JSON per line | `FsNdjsonCacheDriver`, after its meta line |
+| `'json'` | the records' array, as JSON | `SqliteCacheDriver`, `MemoryCacheDriver`, `NoCacheDriver` |
+| `'xmltv'` | `<programme>` elements, indented | `FsXmltvCacheDriver`, inside its document |
+
+A record is a programme as a plain object whose dates are XMLTV strings, so
+neither the offset the source wrote them in nor how precise it was is lost
+through `JSON.stringify`. A name is also what a site in a [thread of its
+own](./configuration.md#sites-in-threads-of-their-own) can be handed: the
+thread encodes its channel-day with the same codec and sends the bytes over,
+and the main thread only stamps and saves them.
+
+A driver that keeps something none of these make — fewer fields, a format of
+its own — brings a **`CacheCodec`** instead, an object with `encode(programmes)`
+and `decode(body)`; `toRecord` and `fromRecord` are there to build one on. It
+runs on the main thread only, since a thread cannot be handed code: a site in a
+thread sends its programmes, and the manager encodes them there.
+
+What `write` is handed may be a view into a larger buffer — a codec allocates
+for the worst case rather than measuring first — so a driver that holds on to
+the bytes, rather than writing them out, keeps a copy of the view:
+`new Uint8Array(body)`.
+
+Before 0.7.0 a driver said what it keeps by extending `CacheDriverBase` and
+overriding `toStored` / `fromStored`, with `toRecord` / `fromRecord` beneath
+them, and its `read` and `write` passed whatever those made. All four are gone,
+and `toRecord` / `fromRecord` are plain functions now: a driver keeps bytes, and
+its codec says what they are.
 
 ### What an entry says about itself
 
@@ -699,9 +725,9 @@ already refused never reaches it.
 ### Drivers that need no store
 
 Two drivers need no store at all. **`MemoryCacheDriver`** keeps entries for the
-life of the process — for a test, or a run with nowhere to write. It converts to
-records like any JSON-shaped driver, not to preserve anything (nothing here is
-serialized) but so that `read` hands back a copy: every other driver returns
+life of the process — for a test, or a run with nowhere to write. It keeps the
+`json` codec's bytes as sqlite does, not because anything here outlives the
+process but so that `read` hands back a copy: every other driver returns
 something parsed out of a file or a row, and a driver holding your own objects
 would let a `transform` edit the cache in place. **`NoCacheDriver`** keeps nothing,
 so every day reads as never grabbed; it is for `epg grab`, whose summary is the
@@ -780,13 +806,20 @@ nothing loads the module until something asks for it. `cache: { driver:
 directory; `new SqliteCacheDriver({ dir, file?, signal? })` is the long way, where
 `file` names the database yourself (`':memory:'` included).
 
-One row per channel-day: the meta columns, and the programmes as JSON. A rowid
-table with a covering index over the meta, so the staleness sweep — the thing a
-run does for every channel-day — is answered without touching the payload beside
-it: 7,000 of them cost 80ms rather than 310ms, and reading 7,000 whole entries
-670ms rather than 880ms. WAL, so a merge reading is not held up by a grab
+One row per channel-day: the meta columns, and the programmes as the `json`
+codec's bytes, a BLOB — bound as bytes, which is 0.55ms for 1.45 MiB where
+binding the same JSON as text was 4.4, since SQLite has nothing to convert. A
+rowid table with a covering index over the meta, so the staleness sweep — the
+thing a run does for every channel-day — is answered without touching the
+payload beside it: 7,000 of them cost 80ms rather than 310ms, and reading 7,000
+whole entries 670ms rather than 880ms. WAL, so a merge reading is not held up by a grab
 writing, and `synchronous = NORMAL`, because a day lost to a power cut is a day
 grabbed again.
+
+The programmes became bytes in 0.7.0, and a column's type is not something a
+row can be read past, so the first run of 0.7.0 empties a database an older
+version made — its listings and what its sites remember — and the run fills it
+again.
 
 ### `epg-tools/grabber`
 

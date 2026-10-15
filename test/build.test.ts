@@ -593,11 +593,11 @@ describe('the cache a config describes', () => {
 
     override async write(
       key: ChannelDayKey,
-      programmes: string[],
+      body: Uint8Array,
       meta: StoredEntryMeta,
     ): Promise<void> {
       this.writes++;
-      await super.write(key, programmes, meta);
+      await super.write(key, body, meta);
     }
 
     async close(): Promise<void> {

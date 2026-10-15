@@ -1,65 +1,66 @@
 /**
- * A cache of ndjson entries: one JSON programme per line.
+ * A cache of ndjson entries: a meta line, then one JSON programme per line.
  *
  * The driver a run wants unless it has a reason otherwise — a line is parsed
  * straight into the programme it stands for, with none of a document's structure
- * to walk. A line is also what it keeps each programme *as*, which is the one
- * thing it changes about the record codec it inherits.
+ * to walk. The lines are the `ndjson` codec's; this driver only puts its meta
+ * in front of them, so a channel-day a site's thread encoded is written out as
+ * it came.
  */
 
-import type { XmltvProgramme } from '../xmltv/types.js';
 import { FsCacheDriver } from './fs-driver.js';
-import type { FoundEntry, StoredEntryMeta, StoredProgramme } from './types.js';
+import type { CacheCodec, CodecName } from './codec.js';
+import type { FoundEntry, StoredEntryMeta } from './types.js';
 
-export class FsNdjsonCacheDriver extends FsCacheDriver<string> {
+/** Where a meta line ends and the programmes begin. */
+const NEWLINE = 0x0a;
+
+export class FsNdjsonCacheDriver extends FsCacheDriver {
+  readonly codec: CodecName | CacheCodec = 'ndjson';
+
   protected override get extension(): string {
     return 'ndjson';
   }
 
-  override toStored(programme: XmltvProgramme): string {
-    return JSON.stringify(this.toRecord(programme));
-  }
-
-  override fromStored(line: string): XmltvProgramme {
-    return this.fromRecord(JSON.parse(line) as StoredProgramme);
-  }
-
   /**
-   * The meta on the first line, then one programme per line after it. The
-   * newline belongs to the meta rather than to the join: a day with nothing on
-   * is an entry of meta alone, and it still has to be a whole line to read.
+   * The meta on the first line, then the programmes' lines as the codec wrote
+   * them. The newline belongs to the meta rather than to the body: a day with
+   * nothing on is an entry of meta alone, and it still has to be a whole line
+   * to read.
    */
-  protected override entryData(lines: string[], meta: StoredEntryMeta): string {
-    return `${JSON.stringify(meta)}\n${lines.join('\n')}`;
+  protected override entry(body: Uint8Array, meta: StoredEntryMeta): Uint8Array[] {
+    return [Buffer.from(`${JSON.stringify(meta)}\n`), body];
   }
 
-  protected override parseEntry(content: string): FoundEntry<string> {
-    const [head, ...rest] = content.split('\n');
+  protected override parseEntry(content: Buffer): FoundEntry {
+    const end = content.indexOf(NEWLINE);
 
-    return {
-      meta: this.#meta(head ?? ''),
-      // Lines, not programmes: turning one into the other is `fromStored`'s, and
-      // a blank line is what the end of a file looks like.
-      programmes: rest.filter((line) => line.trim() !== ''),
-    };
+    return end === -1
+      ? { meta: this.#meta(content.toString('utf8')), body: new Uint8Array(0) }
+      : { meta: this.#meta(content.toString('utf8', 0, end)), body: content.subarray(end + 1) };
   }
 
   protected override async parseMeta(
-    chunks: AsyncIterable<string>,
+    chunks: AsyncIterable<Uint8Array>,
   ): Promise<Partial<StoredEntryMeta> | undefined> {
-    let head = '';
+    const head: Uint8Array[] = [];
 
     for await (const chunk of chunks) {
-      head += chunk;
-
-      const end = head.indexOf('\n');
+      const end = chunk.indexOf(NEWLINE);
 
       // The first line as soon as there is a whole one, however many chunks it
       // took — and no chunk after it, which is what taking them one at a time
-      // is for. An entry with nothing after its meta still ends in one.
+      // is for. An entry with nothing after its meta still ends in one. Found
+      // in the bytes and decoded once, joined, so a character the reads split
+      // comes back whole.
       if (end !== -1) {
-        return this.#meta(head.slice(0, end));
+        head.push(chunk.subarray(0, end));
+
+        return this.#meta(Buffer.concat(head).toString('utf8'));
       }
+
+      // Kept past the next read, which goes into the buffer under this one.
+      head.push(Buffer.from(chunk));
     }
   }
 

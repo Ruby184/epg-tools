@@ -6,21 +6,14 @@
  * read-only filesystem, a one-shot build in a lambda, a guide served from
  * memory.
  *
- * It keeps records, the ordinary stored form, rather than the programmes it was
- * handed — and unlike the xmltv driver, which overrides that pair away, this one
- * has a reason to pay for it. Nothing here is serialized, so nothing needs
- * preserving: what the conversion buys is a *copy*. A driver that stored the
- * caller's own objects would hand the same ones back to every reader, so a
- * `transform` that edits a programme in place, or anything holding what `read`
- * returned, would be editing the cache — and only ever under this driver. Every
- * other one gives back something parsed out of a file or a row, which is a copy
- * by construction; going through records is how this one says the same.
- *
- * It is not a test of whether a programme would survive real storage, though.
- * The record pair converts the date fields it knows, and no `JSON.stringify`
- * happens here — so a `Date` hiding somewhere the pair does not look survives as
- * a `Date`, where a file would have made it an ISO string. For that, test
- * against a driver that serializes.
+ * It keeps the bytes every other driver keeps — the `json` codec's — rather
+ * than the programmes it was handed, and that is what makes it behave like the
+ * others. A driver that kept the caller's own objects would hand the same ones
+ * back to every reader, so a `transform` that edits a programme in place, or
+ * anything holding what `read` returned, would be editing the cache — and only
+ * ever under this driver. Every read here decodes, so what comes back is a copy
+ * by construction, as it is from a file or a row; and a programme survives
+ * exactly what it would survive in one.
  *
  * Note what per-process means for `build`: its grab and its merge each ask the
  * config for a cache, so a driver made fresh by each of them remembers nothing
@@ -34,7 +27,7 @@
  * ```
  */
 
-import { CacheDriverBase } from './driver.js';
+import type { CacheCodec, CodecName } from './codec.js';
 import type {
   CacheDriver,
   ChannelDayKey,
@@ -42,16 +35,18 @@ import type {
   FoundMeta,
   FoundState,
   StoredEntryMeta,
-  StoredProgramme,
   StoredStateMeta,
 } from './types.js';
 
 interface MemoryEntry {
   meta: StoredEntryMeta;
-  programmes: StoredProgramme[];
+  body: Uint8Array;
 }
 
-export class MemoryCacheDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
+export class MemoryCacheDriver implements CacheDriver {
+  /** The records' array, as JSON, as sqlite keeps it. */
+  readonly codec: CodecName | CacheCodec = 'json';
+
   /**
    * Site to channel to day, the same shape the filesystem driver gives a cache
    * for the same reasons: a prune reads the days it is deciding about instead of
@@ -96,15 +91,11 @@ export class MemoryCacheDriver extends CacheDriverBase implements CacheDriver<St
     return entry && { meta: entry.meta };
   }
 
-  async read(key: ChannelDayKey): Promise<FoundEntry<StoredProgramme> | undefined> {
+  async read(key: ChannelDayKey): Promise<FoundEntry | undefined> {
     return this.#days(key)?.get(key.day);
   }
 
-  async write(
-    key: ChannelDayKey,
-    programmes: StoredProgramme[],
-    meta: StoredEntryMeta,
-  ): Promise<void> {
+  async write(key: ChannelDayKey, body: Uint8Array, meta: StoredEntryMeta): Promise<void> {
     let channels = this.#sites.get(key.site);
 
     if (channels === undefined) {
@@ -119,7 +110,9 @@ export class MemoryCacheDriver extends CacheDriverBase implements CacheDriver<St
       channels.set(key.channelId, days);
     }
 
-    days.set(key.day, { meta, programmes });
+    // A copy of the view, and only of the view: an encoder's buffer has room for
+    // the worst case, and what a caller handed over is theirs to change.
+    days.set(key.day, { meta, body: new Uint8Array(body) });
   }
 
   async delete(key: ChannelDayKey): Promise<void> {
@@ -154,8 +147,8 @@ export class MemoryCacheDriver extends CacheDriverBase implements CacheDriver<St
   }
 
   /**
-   * A copy, on the way in and again on the way out — the same care the record
-   * pair takes with programmes, for the same reason.
+   * A copy, on the way in and again on the way out — the same care the entries
+   * get, for the same reason.
    *
    * Every other driver serializes, so what a caller wrote and what a later read
    * hands back are already separate objects. A caller that kept hold of what it

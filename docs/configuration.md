@@ -1490,11 +1490,16 @@ What it costs:
   copy of an instance of a class arrives without its methods, and a date
   without the offset kept on it, so a site whose channel data holds one is
   refused with a message rather than failing in every parse.
-- **Writes cost the main thread more.** A thread's programmes come back as the
-  text a store keeps them in, and the main thread reads them back before the
-  store writes them. That is about as much again as the write itself (16.7ms on
-  top of 14.6ms for 3,500 programmes), which is small beside the parsing that
-  moved off it, but it is there.
+- **Writes cost the main thread less, not more.** A thread encodes each
+  channel-day with the codec its store names and sends the bytes over, and the
+  main thread only stamps and saves them: 3.5ms for 3,500 programmes (2.6 MiB)
+  with the ndjson cache, the default, against 41 for the same write without
+  threads, and about the same for xmltv and memory. Sqlite saves less, 24ms
+  against 59. SQLite writes the bytes on the thread that holds the database,
+  once into its log and again when it checkpoints. A driver with a [codec of
+  its own](./api.md#epg-toolscache) is sent the programmes instead, since a
+  thread cannot be handed code, and the main thread encodes them itself:
+  half as much again as the same write without threads.
 
 What stays on the main thread: the cache, which every site's worker writes
 through, so there is still one writer and any driver works. Also the reporter,

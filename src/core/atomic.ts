@@ -39,7 +39,7 @@ export function tempName(file: string): string {
  */
 export async function writeFileAtomic(
   file: string,
-  data: string,
+  data: string | Iterable<Uint8Array>,
   signal?: AbortSignal,
 ): Promise<void> {
   const tmp = tempName(file);

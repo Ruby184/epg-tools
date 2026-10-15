@@ -13,15 +13,18 @@
  * before the merge has read it.
  */
 
-import { CacheDriverBase } from './driver.js';
-import type { CacheDriver, FoundEntry, FoundMeta, FoundState, StoredProgramme } from './types.js';
+import type { CacheCodec, CodecName } from './codec.js';
+import type { CacheDriver, FoundEntry, FoundMeta, FoundState } from './types.js';
 
-export class NoCacheDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
+export class NoCacheDriver implements CacheDriver {
+  /** Never asked to make or read anything, and named so it is a codec a thread has. */
+  readonly codec: CodecName | CacheCodec = 'json';
+
   async readMeta(): Promise<FoundMeta | undefined> {
     return;
   }
 
-  async read(): Promise<FoundEntry<StoredProgramme> | undefined> {
+  async read(): Promise<FoundEntry | undefined> {
     return;
   }
 

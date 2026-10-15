@@ -7,41 +7,18 @@
  * by a person. Which is also why it is written indented, and why an entry is a
  * document that validates against the DTD like any other.
  *
- * It takes programmes rather than records, since XMLTV is where a date's offset
- * and precision came from in the first place: converting them to strings on the
- * way in and back on the way out would be two passes over every date to arrive
- * where it started.
+ * The `<programme>` elements are the `xmltv` codec's; this driver puts the
+ * document around them, its meta in an instruction inside the root.
  */
 
+import { XMLTV_ENTRY, type CacheCodec, type CodecName } from './codec.js';
 import {
   parseXmltvStream,
-  parseXmltvString,
   serializeDocumentFooter,
   serializeDocumentHeader,
-  serializeProgramme,
 } from '../xmltv/main.js';
-import type { SerializeOptions } from '../xmltv/main.js';
-import type { XmltvProgramme } from '../xmltv/types.js';
 import { FsCacheDriver } from './fs-driver.js';
 import type { FoundEntry, StoredEntryMeta } from './types.js';
-
-/**
- * How a cache entry is written — and deliberately a constant, not anything a
- * caller can reach.
- *
- * The invariant is that the cache holds what a **source said**, not what some
- * consumer wanted to read. Let an output profile in here and the shaping
- * becomes permanent and invisible: `isStale` knows nothing about the form an
- * entry was written in, so a profiled entry stays "fresh" for its whole
- * `maxAgeDays`, and by the time anyone notices the dropped `<image>` the
- * source's own window has rolled past it. Nothing but `--refetch-all` would
- * recover it.
- *
- * So: no `profile`, and no `extensions` either. If cache formatting ever does
- * become configurable, it must stay a separate setting from the one that shapes
- * output — see the test that asserts an entry is unchanged with a profile set.
- */
-const FORMATTING: SerializeOptions = { indent: 2 };
 
 /**
  * The processing instruction an entry carries its own meta in.
@@ -59,43 +36,37 @@ const FORMATTING: SerializeOptions = { indent: 2 };
  */
 const META_TARGET = 'epg-cache';
 
-export class FsXmltvCacheDriver extends FsCacheDriver<XmltvProgramme> {
+/** How much of an entry's head is handed over at a time while looking for its meta. */
+const HEAD_CHUNK = 2048;
+
+export class FsXmltvCacheDriver extends FsCacheDriver {
+  readonly codec: CodecName | CacheCodec = 'xmltv';
+
   protected override get extension(): string {
     return 'xml';
   }
 
-  /**
-   * Programmes, kept as they are. A document already says everything one of
-   * them does — an offset, a precision — so there is nothing for the record
-   * codec to preserve that XMLTV does not.
-   */
-  override toStored(programme: XmltvProgramme): XmltvProgramme {
-    return programme;
-  }
-
-  override fromStored(stored: XmltvProgramme): XmltvProgramme {
-    return stored;
-  }
-
-  protected override entryData(programmes: XmltvProgramme[], meta: StoredEntryMeta): string {
+  protected override entry(body: Uint8Array, meta: StoredEntryMeta): Uint8Array[] {
     // The same pieces `writeXmltvStream` puts a whole guide together from, which
     // is what makes an entry a document the rest of the package — and anything
     // else pointed at it — can read. The header places the instruction: `root`
     // puts it just inside the element, where a reader that does not know the
     // target passes over it, and where `parseMeta` requires it to be.
     return [
-      serializeDocumentHeader(
-        { date: new Date(meta.grabbedAt) },
-        {
-          ...FORMATTING,
-          processingInstructions: [
-            { target: META_TARGET, data: this.#encodeMeta(meta), position: 'root' },
-          ],
-        },
+      Buffer.from(
+        serializeDocumentHeader(
+          { date: new Date(meta.grabbedAt) },
+          {
+            ...XMLTV_ENTRY,
+            processingInstructions: [
+              { target: META_TARGET, data: this.#encodeMeta(meta), position: 'root' },
+            ],
+          },
+        ),
       ),
-      ...programmes.map((programme) => serializeProgramme(programme, FORMATTING)),
-      serializeDocumentFooter(FORMATTING),
-    ].join('');
+      body,
+      Buffer.from(serializeDocumentFooter(XMLTV_ENTRY)),
+    ];
   }
 
   /**
@@ -116,25 +87,36 @@ export class FsXmltvCacheDriver extends FsCacheDriver<XmltvProgramme> {
     return JSON.stringify(meta).replaceAll('>', '\\u003e');
   }
 
-  protected override parseEntry(content: string): FoundEntry<XmltvProgramme> {
-    // Whole-document rather than streaming: an entry is one channel-day, and
-    // the machinery a stream needs costs more per file than the file holds. The
-    // instructions come back with the programmes, so the meta is already here.
-    const { programmes, processingInstructions } = parseXmltvString(content);
-    const held = processingInstructions.find(
-      (instruction) => instruction.position === 'root' && instruction.target === META_TARGET,
-    );
+  /**
+   * The meta from the head of the document, and the whole document for the
+   * codec, which reads it as one. The instruction precedes every programme, so
+   * finding it reads a chunk of the head and stops — the document is parsed
+   * once, by the codec, rather than once for its meta and again for its
+   * programmes.
+   */
+  protected override async parseEntry(content: Buffer): Promise<FoundEntry> {
+    return { meta: await this.parseMeta(this.#head(content)), body: content };
+  }
 
-    return { meta: held && this.#meta(held.data), programmes };
+  /**
+   * An entry's bytes a slice at a time, as a file is read. Slices rather than
+   * the whole, since the parser decodes as far as it is handed: all of a 24 KB
+   * entry, to find the few hundred bytes of meta at its front, costs 39µs, and
+   * a slice 16.
+   */
+  async *#head(content: Buffer): AsyncGenerator<Uint8Array> {
+    for (let at = 0; at < content.length; at += HEAD_CHUNK) {
+      yield content.subarray(at, at + HEAD_CHUNK);
+    }
   }
 
   protected override async parseMeta(
-    chunks: AsyncIterable<string>,
+    chunks: AsyncIterable<Uint8Array>,
   ): Promise<Partial<StoredEntryMeta> | undefined> {
     try {
-      // The parser over the chunks, which is what it is for. The instruction
-      // precedes every programme, so this reads a couple of events and stops —
-      // and stopping is what stops the reading.
+      // The parser over the chunks, which is what it is for — decoding them
+      // included. The instruction precedes every programme, so this reads a
+      // couple of events and stops — and stopping is what stops the reading.
       for await (const event of parseXmltvStream(chunks)) {
         if (event.type === 'processing-instruction') {
           // Inside the root, and nowhere else. A prolog instruction is parsed

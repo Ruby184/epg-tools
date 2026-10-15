@@ -16,7 +16,6 @@ import { createServer as createHttpsServer } from 'node:https';
 import Fastify from 'fastify';
 import {
   build,
-  CacheDriverBase,
   createGuideHandler,
   grabEvery,
   defineConfig,
@@ -43,7 +42,6 @@ import type {
   FoundMeta,
   FoundState,
   StoredEntryMeta,
-  StoredProgramme,
   StoredStateMeta,
 } from '../src/main.js';
 import { envReader } from '../src/core/answers.js';
@@ -665,14 +663,17 @@ export const namedAfterTheLineup = defineConfig({
  * Postgres, a bucket — and stands in here as a `Map`, since what the
  * documentation is promising is the shape of the driver rather than the client.
  */
-const rows = new Map<string, { meta: StoredEntryMeta; programmes: StoredProgramme[] }>();
+const rows = new Map<string, { meta: StoredEntryMeta; body: Uint8Array }>();
 const groups = new Map<string, { meta: StoredStateMeta; data: unknown }>();
 
-class KeyValueCacheDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
+class KeyValueCacheDriver implements CacheDriver {
+  // What an entry's bytes are: the records' array, as JSON. A site in a thread
+  // of its own makes them itself, and the main thread only hands them to `write`.
+  readonly codec = 'json';
+
   readonly #prefix: string;
 
   constructor(options: { prefix: string; signal?: AbortSignal | undefined }) {
-    super();
     this.#prefix = options.prefix;
   }
 
@@ -686,16 +687,13 @@ class KeyValueCacheDriver extends CacheDriverBase implements CacheDriver<StoredP
     return row && { meta: row.meta };
   }
 
-  async read(key: ChannelDayKey): Promise<FoundEntry<StoredProgramme> | undefined> {
+  async read(key: ChannelDayKey): Promise<FoundEntry | undefined> {
     return rows.get(this.#id(key));
   }
 
-  async write(
-    key: ChannelDayKey,
-    programmes: StoredProgramme[],
-    meta: StoredEntryMeta,
-  ): Promise<void> {
-    rows.set(this.#id(key), { meta, programmes });
+  // A copy of the view: the bytes may sit in a buffer with room to spare.
+  async write(key: ChannelDayKey, body: Uint8Array, meta: StoredEntryMeta): Promise<void> {
+    rows.set(this.#id(key), { meta, body: new Uint8Array(body) });
   }
 
   async delete(key: ChannelDayKey): Promise<void> {
