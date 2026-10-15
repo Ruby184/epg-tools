@@ -11,6 +11,47 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.7.0](https://github.com/Ruby184/epg-tools/compare/v0.6.0...v0.7.0) (2026-10-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cache:** a cache driver now stores bytes. `read` returns them in `body`, `write` takes them, and a `codec` property names one of `CODECS` or is a `CacheCodec`. `CacheDriverBase`, `toStored` and `fromStored` are removed, and `toRecord` and `fromRecord` are plain functions for a codec to build on. An `FsCacheDriver` subclass now writes an entry through `entry` and is handed byte chunks by `parseMeta`. The sqlite cache keeps its programmes in a BLOB column, table version 3, so the first run empties a database an older version made, its listings and what its sites remember alike, and fetches them again.
+* **serve:** `NextGrab` takes one context object instead of `(from, runs)`. A custom `serve.grab` becomes `({ from, runs }) => …`.
+
+### Features
+
+* **core:** say when a run's own parsing is why the sources look slow ([f9d6162](https://github.com/Ruby184/epg-tools/commit/f9d6162be46811ea4dab6ccb9bde49a368041634))
+* **grabber:** a site's connection, and a client it may bring with it ([399da13](https://github.com/Ruby184/epg-tools/commit/399da13a052bda415180a24c400e68aa40b102be))
+* **grabber:** sites in worker threads, as many as you allow ([2fd273a](https://github.com/Ruby184/epg-tools/commit/2fd273a9d22d74267b18218c41fe7c45c6adfdaa))
+* **merge:** a matcher that says how far it looks, and a title rule that is not one ([94c2278](https://github.com/Ruby184/epg-tools/commit/94c22783c945ae12dcdf4c3186a58cc6889b4ca5))
+* **serve:** a schedule can ask what there is to serve ([18f6728](https://github.com/Ruby184/epg-tools/commit/18f6728074b8c08c0f7030793cb27cfaff9c8153))
+* **xmltv:** a field it cannot read need not take the programme with it ([d0608f7](https://github.com/Ruby184/epg-tools/commit/d0608f7e8b81f0c17d26cb5759e1bf5f890a33be))
+* **xmltv:** a parse can be told which channels it is for ([fcd8e4e](https://github.com/Ruby184/epg-tools/commit/fcd8e4ed8238a58987e46eab7548074297404d31))
+
+
+### Bug Fixes
+
+* **core:** `loopMaxMs` sees a block at the very start of a run ([3c252f3](https://github.com/Ruby184/epg-tools/commit/3c252f3ca4ade57d29d3b834661044239ce8713f))
+* **core:** events, wherever the run is started from ([89a1a19](https://github.com/Ruby184/epg-tools/commit/89a1a199201050e3bdfa2418e0d54d5438529c46))
+* **grabber:** a batching with no mode is refused, not read as none ([e4d6684](https://github.com/Ruby184/epg-tools/commit/e4d6684d1bb92a5f29efdcbe456870b975378967))
+* **grabber:** a parse waiting on its own request gives its slot up ([eb8d966](https://github.com/Ruby184/epg-tools/commit/eb8d966833f847992236dac589580047a117ddad))
+* **grabber:** the types a parse is handed, where a parse can reach them ([8394a80](https://github.com/Ruby184/epg-tools/commit/8394a80635b086f524eae985d3167612bf64b5bb))
+* **grabber:** threads that wind down, recover and count as a run of one does ([38d1660](https://github.com/Ruby184/epg-tools/commit/38d166059e82171e556392a1dea5b7b4624f5153))
+* **serve:** a probe reports what is held, and asks no source anything ([53db995](https://github.com/Ruby184/epg-tools/commit/53db995a44e764c2ffe09d74fd3db98bcaa72c34))
+* **xmltv:** a year is a year, and a country code is not prose ([5d8d592](https://github.com/Ruby184/epg-tools/commit/5d8d5928be7bb255e9bab6f4fe677e68d42099b0))
+
+
+### Refactoring
+
+* **cache:** a driver keeps bytes, and names the codec that makes them ([d898c1b](https://github.com/Ruby184/epg-tools/commit/d898c1b6d257fdaa2115b9b50b374f373886054d))
+* erasable TypeScript only, so a thread runs the source on Node 26 ([4d744bf](https://github.com/Ruby184/epg-tools/commit/4d744bf78b7dc3ce685e614b0ea3af5f66d8115f))
+
+
+### Documentation
+
+* **core:** `loopMaxMs` reports a stall, not a load ([764864c](https://github.com/Ruby184/epg-tools/commit/764864cb065b07219d234f823aabf091cd12765a))
+
 ## [0.6.0](https://github.com/Ruby184/epg-tools/compare/v0.5.0...v0.6.0) (2026-10-13)
 
 
