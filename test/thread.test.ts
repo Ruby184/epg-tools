@@ -5,15 +5,22 @@ import { describe, expect, it } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/types.js';
 import type { EpgEventInput } from '../src/core/events.js';
+import { build } from '../src/build.js';
 import { grab, StateKey } from '../src/grabber/main.js';
 import type { Run } from '../src/grabber/site-run.js';
-import { hostSite, threadCount, workSite, type SiteThreadData } from '../src/grabber/thread.js';
+import {
+  hostSite,
+  SiteThreads,
+  threadCount,
+  workSite,
+  type SiteThreadData,
+} from '../src/grabber/thread.js';
 import { getXmltvOffset } from '../src/xmltv/main.js';
 
 // Both halves of a site in a thread, talking over a `MessageChannel` in this
-// one: everything a worker adds is only that it runs somewhere else. A worker
-// itself runs the built file, so starting one is checked against `dist`, not
-// here.
+// one: everything a worker adds is only that it runs somewhere else. Starting
+// real ones — a pool, a cancel, a thread that dies — is `threads.test.ts`,
+// which runs under the flags a worker needs to load the source.
 
 const NOW = new Date('2026-07-17T12:00:00.000Z');
 const DAY = '2026-07-17';
@@ -166,18 +173,103 @@ describe('a site in a thread', () => {
   });
 
   it('sizes the pool from what `threads` says', () => {
-    expect(threadCount(undefined)).toBe(0);
-    expect(threadCount(false)).toBe(0);
-    expect(threadCount(0)).toBe(0);
-    expect(threadCount(3)).toBe(3);
-    expect(threadCount(true)).toBe(availableParallelism());
-    expect(() => threadCount(1.5)).toThrow('whole number of threads');
-    expect(() => threadCount(-1)).toThrow('whole number of threads');
+    expect(threadCount(undefined, CONFIG)).toBe(0);
+    expect(threadCount(false, CONFIG)).toBe(0);
+    expect(threadCount(0, CONFIG)).toBe(0);
+    expect(threadCount(3, CONFIG)).toBe(3);
+    expect(threadCount(true, CONFIG)).toBe(availableParallelism());
+    expect(() => threadCount(1.5, CONFIG)).toThrow('whole number of threads');
+    expect(() => threadCount(-1, CONFIG)).toThrow('whole number of threads');
+    // Nothing to start, so nothing to start them on.
+    expect(threadCount(false, undefined)).toBe(0);
+    expect(() => threadCount(2, undefined)).toThrow('pass configModule');
   });
 
   it('refuses threads it has no module to start them on', async () => {
     const cache = new CacheManager({ driver: new MemoryCacheDriver() });
 
     await expect(grab([], { cache, threads: true })).rejects.toThrow('pass configModule');
+  });
+
+  it('refuses them before a build asks any site for its channels', async () => {
+    let asked = 0;
+    const config = {
+      output: 'guide.xml',
+      threads: 2,
+      sites: [
+        {
+          site: 'listed.example',
+          channels: () => {
+            asked++;
+
+            return [{ xmltvId: 'one', siteId: '1' }];
+          },
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+    };
+
+    await expect(
+      build(config, { cache: new CacheManager({ driver: new MemoryCacheDriver() }) }),
+    ).rejects.toThrow('pass configModule');
+    // Said first, rather than after every site's list had been fetched.
+    expect(asked).toBe(0);
+  });
+
+  it('names what a note held that could not cross, rather than failing the parse', async () => {
+    const cache = new CacheManager({ driver: new MemoryCacheDriver() });
+    const { run, events } = hosting(cache);
+
+    await converse(run, started('circular.example'));
+
+    // As the JSON reporter would have it: in place of its value, not a throw
+    // into the site's own `parseDay` that would fail the channel-day.
+    expect(run.tally).toMatchObject({ fetched: 1, failed: 0 });
+    expect(events.find((event) => event.type === 'site:note')).toMatchObject({
+      message: 'circular',
+      data: '[unserializable]',
+    });
+  });
+
+  it('counts as it goes, so a site that never says it is done has still counted', async () => {
+    const cache = new CacheManager({ driver: new MemoryCacheDriver() });
+    const { run, events } = hosting(cache);
+    const counted: number[] = [];
+
+    run.emit = (event) => {
+      events.push(event);
+
+      if (event.type === 'entry:fetched') {
+        counted.push(run.tally.fetched);
+      }
+    };
+
+    await converse(run, started('offset.example'));
+
+    // Already counted when the entry was said, rather than on `site:done`.
+    expect(counted).toEqual([1]);
+  });
+
+  it('refuses a channel list a thread would be handed as something else', async () => {
+    class Zone {
+      offset(): number {
+        return 60;
+      }
+    }
+
+    const cache = new CacheManager({ driver: new MemoryCacheDriver() });
+    const { run } = hosting(cache);
+    const pool = SiteThreads.for(1, CONFIG);
+    const site = {
+      site: 'offset.example',
+      channels: [{ xmltvId: 'one', siteId: '1', data: { zone: new Zone() } }],
+      request: async () => ({}),
+      parseDay: () => [],
+    };
+
+    // Before a thread is asked for: in one, the zone would arrive as `{}` and
+    // every parse calling `offset()` would fail without saying why.
+    await expect(pool.run(site, run)).rejects.toThrow('an instance of Zone');
   });
 });

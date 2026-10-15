@@ -7,6 +7,7 @@ import {
 } from './cache/main.js';
 import type { CacheDriver, CacheStore } from './cache/main.js';
 import { covered, coverageOf, grab, resolveSites } from './grabber/main.js';
+import { threadCount } from './grabber/thread.js';
 import type { GrabberChannel, GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
 import { channelSelection, configured, unmatched, unmatchedMessage } from './merge/select.js';
@@ -260,6 +261,10 @@ function reported(options: RunOptions): Pick<RunOptions, 'reporter'> {
 export async function runGrab(source: ConfigSource, given: RunOptions = {}): Promise<GrabSummary> {
   const config = await resolveConfigSource(source);
   const options = reportingTo(given, config.events);
+
+  // Before a channel list is fetched: a run that cannot start its threads says
+  // so first, rather than after every site has been asked for one.
+  threadCount(config.threads, options.configModule);
   const now = options.now ?? new Date();
   const startDay = startDayOf(options, now);
 
@@ -371,6 +376,9 @@ export async function build(source: ConfigSource, given: RunOptions = {}): Promi
   const config = await resolveConfigSource(source);
   const options = reportingTo(given, config.events);
   const now = options.now ?? new Date();
+
+  // As `runGrab` does, and for the same reason: before the lists below.
+  threadCount(config.threads, options.configModule);
 
   // One cache for both halves, rather than each of them asking the config for
   // its own: a driver that opens a database opens it once, and one that keeps

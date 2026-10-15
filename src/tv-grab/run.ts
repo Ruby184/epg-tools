@@ -280,7 +280,11 @@ async function execute(
     selection,
   });
 
-  const selected = applyChannelSelection(config, selection);
+  // In this thread, whatever the config says about threads. A shim resolves its
+  // config with the answers in its own `.conf`, which a thread importing the
+  // module again would not have — so the sites a thread found could differ from
+  // the ones selected here, and it has no module to import besides.
+  const selected = { ...applyChannelSelection(config, selection), threads: false };
 
   // The selection itself, not the sites: a selection no longer filters them
   // lexically — `resolveChannels` applies it, after the cache — so an empty one

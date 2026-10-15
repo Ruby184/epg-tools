@@ -207,18 +207,17 @@ function poolSize(raw: string, flag: string): true | number {
     return true;
   }
 
-  const count = Number(raw);
-
-  // A word that is not a count is refused rather than taken: an optional value
-  // claims the word after it, so `epg --threads build` would otherwise read the
-  // command as how many threads.
-  if (!Number.isInteger(count) || count < 0) {
+  // Digits and nothing else. A word that is not a count is refused rather than
+  // taken: an optional value claims the word after it, so `epg --threads build`
+  // would otherwise read the command as how many threads — and `--threads=`,
+  // from an unset `$N`, is not a quiet way of saying none.
+  if (!/^\d+$/.test(raw)) {
     throw new OptionError(
       `Invalid ${flag} value: ${raw} (expected a number of threads, or nothing for one per core)`,
     );
   }
 
-  return count;
+  return Number(raw);
 }
 
 /** `--indent`: spaces if it is a number, the string itself otherwise. */

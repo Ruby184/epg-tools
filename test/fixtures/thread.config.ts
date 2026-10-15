@@ -53,14 +53,49 @@ const sites: SiteConfig<unknown>[] = [
     parseDay: () => [],
   },
   {
-    // A request that waits until the run is cancelled.
+    // A request that remembers being asked, then waits until the run is
+    // cancelled — what a cancelled site has to save on its way out.
     site: 'slow.example',
     channels: one,
-    request: ({ signal }) =>
-      new Promise((_resolve, reject) => {
+    request: ({ signal, state }) => {
+      state.set('asked', true);
+
+      return new Promise((_resolve, reject) => {
         signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
-      }),
+      });
+    },
     parseDay: () => [],
+  },
+  {
+    // Something of the site's own goes wrong outside anything awaited, and
+    // takes its thread with it.
+    site: 'crashing.example',
+    channels: one,
+    request: () => {
+      setTimeout(() => {
+        throw new Error('stray timer');
+      }, 0);
+
+      return new Promise(() => {});
+    },
+    parseDay: () => [],
+  },
+  {
+    // A note whose fields no thread can be handed, nor JSON written: a cycle,
+    // and a function inside it.
+    site: 'circular.example',
+    channels: one,
+    async request() {
+      return {};
+    },
+    parseDay({ day, programme, log }) {
+      const fields: Record<string, unknown> = { format: () => 'a function' };
+
+      fields.self = fields;
+      log('circular', fields);
+
+      return [programme(new Date(`${day}T06:00:00.000Z`), 'Morning')];
+    },
   },
 ];
 

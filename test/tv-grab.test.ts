@@ -1377,6 +1377,24 @@ describe('configuration', () => {
     expect(stdout).toContain('two.example.tv');
     expect(stdout).not.toContain('one.example.tv');
   });
+
+  it('grabs in its own thread, whatever the shared config says about threads', async () => {
+    // The config the `epg` command runs with threads is the one a shim runs
+    // too, and a shim has no module for a thread to import — nor the answers
+    // in its `.conf` that the config was resolved with.
+    const dir = await tempDir();
+    const configFile = await configured(dir);
+
+    const { code, stdout, stderr } = await run(config(dir, { threads: true }), [
+      '--config-file',
+      configFile,
+      '--quiet',
+    ]);
+
+    expect(stderr).toBe('');
+    expect(code).toBe(0);
+    expect(stdout).toContain('one.example.tv');
+  });
 });
 
 const CREDENTIAL_STAGES: ConfigStage[] = [

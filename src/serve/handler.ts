@@ -28,6 +28,7 @@ import { dayRange, toDayString, addDays } from '../core/days.js';
 import { emitter, reportingTo, type Reporter, type Says } from '../core/events.js';
 import { compressor, type CompressionFormat } from '../core/output.js';
 import { covered, resolveSites } from '../grabber/channels.js';
+import { threadCount } from '../grabber/thread.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { generateGuide } from '../merge/guide.js';
 import { channelSelection, configured } from '../merge/select.js';
@@ -913,6 +914,10 @@ export async function createGuideHandler(
   const options = reportingTo(given, config.events);
   const emit = emitter(options);
   const path = options.path ?? config.serve?.path ?? DEFAULT_SERVE_PATH;
+
+  // When the server starts, rather than at its first scheduled grab — which
+  // may be hours later, and would fail every night from then on.
+  threadCount(config.threads, options.configModule);
   const health = options.health ?? config.serve?.health ?? DEFAULT_HEALTH_PATH;
   const compress = options.compress ?? config.serve?.compress ?? 'gzip';
   const revalidateMs = options.revalidateMs ?? DEFAULT_REVALIDATE_MS;

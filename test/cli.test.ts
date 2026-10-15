@@ -479,6 +479,12 @@ describe('epg', () => {
 
     expect(before.code).toBe(2);
     expect(before.stderr).toContain('Invalid --threads value: build');
+
+    // An unset `$N` is not a quiet way of saying none.
+    const empty = await run(['build', '--config', config, '--threads=']);
+
+    expect(empty.code).toBe(2);
+    expect(empty.stderr).toContain('Invalid --threads value: ');
   });
 
   it('serves the guide until it is told to stop', async () => {

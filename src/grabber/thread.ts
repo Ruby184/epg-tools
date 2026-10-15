@@ -17,30 +17,27 @@
  * - **the cache**, answered on the main thread: one store for every site, which
  *   is the one writer a database wants and the only place a memory cache or a
  *   driver of the config's own exists. Programmes cross in the form a store
- *   keeps them in, and as text: a `Date` copied to another thread loses the
- *   offset and the precision this package keeps on it, and the main thread
- *   pays a twentieth for a string of what it pays for the objects.
+ *   keeps them in, as text, because a `Date` copied to another thread loses
+ *   the offset and the precision this package keeps on it. That is not free:
+ *   the main thread reads the text back into programmes before the store
+ *   writes them, which measured about as much again as the write itself —
+ *   16.7ms on top of 14.6ms for 3,500 programmes — against the parsing that
+ *   moved off it.
  * - **events**, said on the main thread, where the reporter is — an error made
  *   plain on the way, since copying one keeps neither its name nor anything a
  *   library hung on it.
  * - **cancelling**, as a message the worker turns back into an abort.
- * - **the counts**, which arrive on `site:done` and are added to the run's.
+ * - **the counts**, as they are counted, so a site that never finishes has
+ *   still said what it did.
  *
- * Both halves are here, so a worker is started on this module's own file —
- * which is why it is an entry of the build of its own, whatever the bundler
- * makes of the rest.
+ * What a worker runs is `thread-worker.ts`, a file of its own and an entry of
+ * the build of its own: started by its URL, so it runs that and nothing a
+ * bundler happened to put beside the code that starts it.
  */
 
 import { availableParallelism } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import {
-  isMainThread,
-  MessageChannel,
-  parentPort,
-  Worker,
-  workerData,
-  type MessagePort,
-} from 'node:worker_threads';
+import { MessageChannel, Worker } from 'node:worker_threads';
 import PQueue from 'p-queue';
 import { CacheDriverBase } from '../cache/driver.js';
 import type { CacheStore, ChannelDayKey, StoredProgramme } from '../cache/types.js';
@@ -50,9 +47,6 @@ import type { EpgEventInput, GrabCounts } from '../core/events.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import { SiteRun, type Enqueue, type Run } from './site-run.js';
 import type { AnySiteConfig, GrabberChannel } from './types.js';
-
-/** The `workerData` key a site's worker is started with. */
-const SITE_THREAD = 'epg-tools/site-thread';
 
 /** What a site is handed to a worker with: everything a run lends it, as data. */
 export interface SiteThreadData {
@@ -85,6 +79,7 @@ type CacheOp = Exclude<keyof CacheStore, 'close'>;
 type ToHost =
   | { kind: 'event'; event: EpgEventInput }
   | { kind: 'cache'; id: number; op: CacheOp; args: unknown[] }
+  | { kind: 'count'; field: keyof GrabCounts; delta: number }
   | { kind: 'done' }
   | { kind: 'failed'; error: unknown };
 
@@ -171,15 +166,29 @@ const unpacked = (text: string): XmltvProgramme[] =>
 /**
  * Send something to the other side, whatever a site put in it.
  *
- * A site's `log` and `warn` take data of its own, which may hold something no
- * thread can be handed — a function, a socket. Rather than lose the event, it
- * goes as JSON, which says what it can of it.
+ * A site's `log` and `warn` take fields of its own, which may hold something no
+ * thread can be handed — a function, a socket. As the JSON reporter does with
+ * them: what survives JSON goes as JSON, and what does not is named in place of
+ * its value (see `SaidFields`) — never a throw into the site's own code, where
+ * a log line would fail the channel-day it was about.
  */
 function send(port: SitePort, message: ToHost | ToWorker): void {
   try {
     port.postMessage(message);
-  } catch {
-    port.postMessage(JSON.parse(JSON.stringify(message)));
+  } catch (error) {
+    if (message.kind !== 'event' || !('data' in message.event)) {
+      throw error;
+    }
+
+    let data: unknown;
+
+    try {
+      data = JSON.parse(JSON.stringify(message.event.data)) as unknown;
+    } catch {
+      data = '[unserializable]';
+    }
+
+    port.postMessage({ ...message, event: { ...message.event, data } });
   }
 }
 
@@ -188,24 +197,95 @@ function send(port: SitePort, message: ToHost | ToWorker): void {
 /**
  * How many threads `threads` asks for: none when it is off, one per core for
  * `true`, and otherwise the number it names — `0` being off too.
+ *
+ * And whether they can be had, which is the other half of the same question:
+ * threads need the module the config came from. Asked where a run starts, as
+ * well as by `grab`, so a run that cannot start them says so before it has
+ * fetched a single channel list.
  */
-export function threadCount(threads: boolean | number | undefined): number {
+export function threadCount(
+  threads: boolean | number | undefined,
+  configModule: string | URL | undefined,
+): number {
   if (threads === undefined || threads === false) {
     return 0;
   }
 
-  if (threads === true) {
-    return availableParallelism();
-  }
+  const count = threads === true ? availableParallelism() : threads;
 
-  if (!Number.isInteger(threads) || threads < 0) {
+  if (!Number.isInteger(count) || count < 0) {
     throw new TypeError(
       `threads is true, false or a whole number of threads (got ${String(threads)})`,
     );
   }
 
-  return threads;
+  if (count > 0 && configModule === undefined) {
+    throw new TypeError(
+      'threads needs the module the config came from: pass configModule, ' +
+        'or run it with the epg command',
+    );
+  }
+
+  return count;
 }
+
+/**
+ * The first thing in a channel list that a thread would be handed as something
+ * else, named — or `undefined` when all of it crosses as it is.
+ *
+ * A copy keeps plain objects, arrays, maps, sets and dates. A function cannot
+ * be copied at all; an instance of a class arrives as a plain object with none
+ * of its methods, and a `Date` without the offset this package keeps on it —
+ * neither of which says so, and a site's parse would only find out by failing.
+ */
+function altered(value: unknown, seen = new Set<object>()): string | undefined {
+  if (typeof value === 'function' || typeof value === 'symbol') {
+    return `a ${typeof value}`;
+  }
+
+  if (typeof value !== 'object' || value === null || seen.has(value)) {
+    return undefined;
+  }
+
+  seen.add(value);
+
+  if (value instanceof Date) {
+    return Object.getOwnPropertySymbols(value).length > 0 ? 'a date carrying an offset' : undefined;
+  }
+
+  const prototype: unknown = Object.getPrototypeOf(value);
+  const inner =
+    value instanceof Map || value instanceof Set
+      ? [...value].flat()
+      : prototype === Object.prototype || prototype === null || Array.isArray(value)
+        ? Object.values(value)
+        : undefined;
+
+  if (inner === undefined) {
+    return value instanceof RegExp || ArrayBuffer.isView(value) || value instanceof ArrayBuffer
+      ? undefined
+      : `an instance of ${(value as { constructor?: { name?: string } }).constructor?.name ?? 'a class'}`;
+  }
+
+  for (const item of inner) {
+    const found = altered(item, seen);
+
+    if (found !== undefined) {
+      return found;
+    }
+  }
+
+  return undefined;
+}
+
+/** Where a pool's workers start: the source beside this one, or the built file beside its chunk. */
+const WORKER = new URL(
+  import.meta.url.endsWith('.ts') ? './thread-worker.ts' : './thread-worker.js',
+  import.meta.url,
+);
+
+/** This process's pools, by config module — see {@link SiteThreads.for}. */
+const pools = new Map<string, SiteThreads>();
 
 /** One worker of a run's pool, and how many sites it is running now. */
 interface PooledWorker {
@@ -219,8 +299,8 @@ interface PooledWorker {
 }
 
 /**
- * A run's threads: at most `size` of them, each running every site it is
- * handed at once.
+ * The threads sites run in: at most `size` of them, each running every site it
+ * is handed at once.
  *
  * At once, whatever the size, because most of what a site does is wait — a
  * pool smaller than the sites shares threads between them rather than queueing
@@ -230,15 +310,36 @@ interface PooledWorker {
  *
  * Each site is handed over with a port of its own, so a worker of several
  * sites holds the same conversation for each as a worker of one.
+ *
+ * One pool per config module for the life of the process, and its workers kept
+ * between runs. A worker reads the config module once, when its first site
+ * arrives — as the main thread read it once — so a server grabbing every night
+ * grabs with the code it started with, rather than with whatever the file says
+ * by then while its channel lists and its merge are still the old one's. Kept
+ * without holding the process open: a worker running nothing does not keep it.
  */
 export class SiteThreads {
-  readonly #size: number;
+  #size = 0;
   readonly #module: string;
   readonly #workers: PooledWorker[] = [];
 
-  constructor(size: number, configModule: string | URL) {
-    this.#size = size;
-    this.#module = moduleUrl(configModule);
+  private constructor(module: string) {
+    this.#module = module;
+  }
+
+  /** The pool for this config module, at most `size` threads from now on. */
+  static for(size: number, configModule: string | URL): SiteThreads {
+    const module = moduleUrl(configModule);
+    let pool = pools.get(module);
+
+    if (pool === undefined) {
+      pool = new SiteThreads(module);
+      pools.set(module, pool);
+    }
+
+    pool.#size = size;
+
+    return pool;
   }
 
   /**
@@ -246,10 +347,21 @@ export class SiteThreads {
    *
    * Resolves when the site is done, as `new SiteRun(config, run).run()` would;
    * rejects when it never got going — its config could not be imported, did
-   * not have it, or did not resolve — which the run reports as a site that
-   * failed.
+   * not have it, or did not resolve, or it has a channel list no thread can be
+   * handed as it is — which the run reports as a site that failed.
    */
   async run(config: AnySiteConfig, run: Run): Promise<void> {
+    const odd = Array.isArray(config.channels) ? altered(config.channels) : undefined;
+
+    // Before a worker is asked for, so a site that cannot go starts nothing.
+    if (odd !== undefined) {
+      throw new TypeError(
+        `Site "${config.site}" cannot run in a thread: its channel list holds ${odd}, which a ` +
+          `thread would be handed without what makes it one. Keep a channel's data to plain ` +
+          `values, or run without threads`,
+      );
+    }
+
     const data: SiteThreadData = {
       module: this.#module,
       site: config.site,
@@ -271,15 +383,7 @@ export class SiteThreads {
       port1.close();
       port2.close();
 
-      if (!(error instanceof Error) || error.name !== 'DataCloneError') {
-        throw error;
-      }
-
-      throw new TypeError(
-        `Site "${config.site}" cannot run in a thread: its channel list holds something a ` +
-          `thread cannot be handed, such as a function in a channel's data`,
-        { cause: error },
-      );
+      throw error;
     }
 
     pooled.sites++;
@@ -290,11 +394,6 @@ export class SiteThreads {
       pooled.sites--;
       port1.close();
     }
-  }
-
-  /** Let every worker go, once the run has no more sites for them. */
-  async close(): Promise<void> {
-    await Promise.all(this.#workers.map(({ worker }) => worker.terminate()));
   }
 
   /** The worker running fewest sites — a new one, while there is room and none is idle. */
@@ -308,20 +407,41 @@ export class SiteThreads {
       return idlest;
     }
 
-    const worker = new Worker(new URL(import.meta.url), { workerData: { [SITE_THREAD]: true } });
-    const lost = new Promise<never>((_resolve, reject) => {
-      worker.once('error', reject);
-      worker.once('exit', (code) => {
-        reject(new Error(`A site's thread stopped (exit code ${code})`));
-      });
+    const worker = new Worker(WORKER);
+    let stopped: (error: unknown) => void = () => {};
+    const pooled: PooledWorker = {
+      worker,
+      sites: 0,
+      lost: new Promise<never>((_resolve, reject) => {
+        stopped = reject;
+      }),
+    };
+
+    /**
+     * Fail what it was running, and leave the pool — at the first sign, since
+     * `exit` follows `error` a turn later, and a site started in between must
+     * not be handed a thread that is going: a dead one runs nothing, and would
+     * be the idlest of them for ever.
+     */
+    const gone = (error: unknown): void => {
+      stopped(error);
+
+      const at = this.#workers.indexOf(pooled);
+
+      if (at !== -1) {
+        this.#workers.splice(at, 1);
+      }
+    };
+
+    // Heard by the sites racing it, if there are any when it happens.
+    pooled.lost.catch(() => {});
+    worker.once('error', gone);
+    worker.once('exit', (code) => {
+      gone(new Error(`A site's thread stopped (exit code ${code})`));
     });
-
-    // Heard by the sites racing it, if there are any when it happens — and the
-    // exit `close` causes, when there are none, is nobody's business.
-    lost.catch(() => {});
-
-    const pooled = { worker, sites: 0, lost };
-
+    // Kept between runs without keeping the process: while a site runs, its
+    // port is what holds the process open.
+    worker.unref();
     this.#workers.push(pooled);
 
     return pooled;
@@ -344,11 +464,17 @@ function moduleUrl(configModule: string | URL): string {
  * This side of the conversation: answer the worker's cache, say what it says,
  * count what it counted, and tell it when the run is cancelled.
  *
- * The worker's cache work goes through the run's `localWork`, so every site's
- * reads and writes together keep to the bound one thread's would have.
+ * The worker's cache work goes through the run's `localWork`, so every
+ * thread's reads and writes together keep to the bound one thread's would
+ * have — a write ahead of a sweep, as in a run of one. Without the run's
+ * signal, though: what is waiting in a worker is cancelled by the worker's own
+ * queue, and what reaches this side is answered, as a store in the same thread
+ * would be. A site cancelled part way still finishes the write it started and
+ * saves its state, and a site's state is read and saved straight through, as
+ * it is in-process.
  */
 export function hostSite(port: SitePort, run: Run): Promise<void> {
-  const { cache, emit, enqueue, localWork, signal, tally } = run;
+  const { cache, emit, localWork, signal, tally } = run;
 
   return new Promise<void>((resolve, reject) => {
     const abort = (): void => {
@@ -364,21 +490,22 @@ export function hostSite(port: SitePort, run: Run): Promise<void> {
             (event as { error: unknown }).error = revived(event.error);
           }
 
-          if (event.type === 'site:done') {
-            // The site's own counts, which is what its thread added to a run
-            // of its own: the run this side is reporting is where they belong.
-            for (const field of COUNTS) {
-              tally[field] += event[field];
-            }
-          }
-
           emit(event);
           break;
         }
+        case 'count':
+          tally[message.field] += message.delta;
+          break;
         case 'cache': {
           const { id, op, args } = message;
+          const answering =
+            op === 'getState' || op === 'setState'
+              ? answer(cache, op, args)
+              : localWork.add(() => answer(cache, op, args), {
+                  priority: op === 'write' || op === 'read' ? 1 : 0,
+                });
 
-          void enqueue(localWork, () => answer(cache, op, args)).then(
+          void answering.then(
             (value) => {
               send(port, { kind: 'answer', id, value });
             },
@@ -413,16 +540,6 @@ export function hostSite(port: SitePort, run: Run): Promise<void> {
     }
   });
 }
-
-/** What `site:done` carries that the run adds up. */
-const COUNTS: ReadonlyArray<keyof GrabCounts> = [
-  'fetched',
-  'empty',
-  'fromCache',
-  'unchanged',
-  'failed',
-  'sitesFailed',
-];
 
 /** One cache call the worker made, made here — programmes as text both ways. */
 async function answer(cache: CacheStore, op: CacheOp, args: unknown[]): Promise<unknown> {
@@ -522,10 +639,18 @@ class RemoteCache implements CacheStore {
 /**
  * Run one site in this thread, saying everything to `port`.
  *
+ * `localWork` is the thread's, shared by every site it runs as a run's is by
+ * every site in it — so with threads, `localConcurrency` bounds each thread's
+ * parsing rather than the whole run's.
+ *
  * Exported so the conversation can be held over a `MessageChannel` in one
  * thread: what a worker adds to it is only that it runs somewhere else.
  */
-export async function workSite(port: SitePort, data: SiteThreadData): Promise<void> {
+export async function workSite(
+  port: SitePort,
+  data: SiteThreadData,
+  localWork = new PQueue({ concurrency: data.localConcurrency }),
+): Promise<void> {
   const stop = new AbortController();
 
   port.on('message', (message: ToWorker) => {
@@ -574,9 +699,22 @@ export async function workSite(port: SitePort, data: SiteThreadData): Promise<vo
         send(port, { kind: 'event', event: plainEvent(event) });
       },
       signal: stop.signal,
-      localWork: new PQueue({ concurrency: data.localConcurrency }),
+      localWork,
       enqueue,
-      tally: { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0, sitesFailed: 0 },
+      // Each count sent as it is counted, as `SiteRun` counts into the run's
+      // tally in-process: a site whose thread dies, or that is cancelled
+      // before it can say `site:done`, has still said what it did.
+      tally: new Proxy<GrabCounts>(
+        { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0, sitesFailed: 0 },
+        {
+          set(counts, field: keyof GrabCounts, value: number) {
+            send(port, { kind: 'count', field, delta: value - counts[field] });
+            counts[field] = value;
+
+            return true;
+          },
+        },
+      ),
     };
 
     await new SiteRun(
@@ -592,14 +730,3 @@ export async function workSite(port: SitePort, data: SiteThreadData): Promise<vo
 
 /** Each config module this thread has read, resolved — see {@link workSite}. */
 const configs = new Map<string, Promise<EpgConfig>>();
-
-// A worker of a run's pool: run each site it is handed, on the port it came
-// with. The main thread closes that port when the site is done, and lets the
-// worker go when the run is.
-if (!isMainThread && parentPort !== null) {
-  if ((workerData as Record<string, unknown> | null)?.[SITE_THREAD] === true) {
-    parentPort.on('message', ({ data, port }: { data: SiteThreadData; port: MessagePort }) => {
-      void workSite(port, data);
-    });
-  }
-}

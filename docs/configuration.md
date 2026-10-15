@@ -1472,18 +1472,41 @@ What it costs:
   more per thread. A config function runs again, so one that fetches a token
   fetches it again. And anything two sites share at the top of the module, such
   as one token or one rate limit, is no longer shared between threads.
+- **Threads are kept for the life of the process.** A thread reads the config
+  module once, when its first site arrives, and is reused by later runs, so
+  `epg serve` grabs every night with the code it started with, as it does
+  without threads. Edit the config, and restart it. A thread running nothing
+  does not keep a process from exiting.
 - **Only a config run from a file.** The `epg` command knows which file it
   loaded. A program calling `build`, `runGrab` or `serveGuide` itself passes
   `configModule`: a path or URL whose default export is the config. It must be
   a module of its own, since every worker would otherwise run the calling
-  program again. `threads: true` without one fails before any site starts.
+  program again. `threads` without one fails before any site is asked for its
+  channels. A `tv_grab_*` shim runs its sites in one thread whatever the config
+  says, since a thread importing the config would not have the answers in the
+  shim's `.conf`.
+- **A channel's `data` must be plain values.** The channel lists settled before
+  the grab (by `--channels`, `cover` or `build`) are copied to the threads. A
+  copy of an instance of a class arrives without its methods, and a date
+  without the offset kept on it, so a site whose channel data holds one is
+  refused with a message rather than failing in every parse.
+- **Writes cost the main thread more.** A thread's programmes come back as the
+  text a store keeps them in, and the main thread reads them back before the
+  store writes them. That is about as much again as the write itself (16.7ms on
+  top of 14.6ms for 3,500 programmes), which is small beside the parsing that
+  moved off it, but it is there.
 
 What stays on the main thread: the cache, which every site's worker writes
 through, so there is still one writer and any driver works. Also the reporter,
 which hears each site's events as they happen; the channel lists, `cover` and
 `--channels` (settled before the sites start, and handed to each worker); and
-the merge. `loopMaxMs` is the main thread's, so with threads it no longer
-counts what the sites' parsing costs.
+the merge. `localConcurrency` bounds the parsing in each thread, and the cache
+work of all of them together. `loopMaxMs` is the main thread's, so with threads
+it no longer counts what the sites' parsing costs.
+
+Cancelling a run with threads waits for each site to wind down — to finish the
+write it started, save its state and say what it did — so the summary it
+answers with is the whole of what reached the cache.
 
 ## Merge strategies
 
