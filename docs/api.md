@@ -125,23 +125,31 @@ the whole answer to "what does the default verbosity show?".
 Two of these are worth knowing about before you need them, because they answer
 questions that are otherwise answered by hand.
 
-**Before reading any of it, look at `loopMaxMs` on `grab:done`.** A `parseDay`
-is the site's own code on the main thread: while it works through a big
-document nothing else runs, including the reads that finish *other* sites'
-requests. Measured here, a CPU-bound parse beside a network-bound site inflated
-that site's request times 15× on the mean and 115× at the worst. A run whose
-worst figure is seconds is a run whose request times are describing its own
-parsing, and the text reporter says so under the summary rather than leaving
-every source looking slow at once.
+**Before reading any of it, look at `loopMaxMs` on `grab:done`.** It is the
+longest the event loop went unserved. A `parseDay` is the site's own code on
+the main thread, and one that does a big piece of work in a single synchronous
+call stops everything else until it returns, including the reads that finish
+*other* sites' requests. Measured here, a parse holding the thread like that
+beside a network-bound site inflated that site's request times 15× on the mean
+and 115× at the worst. A run whose worst figure is seconds is a run whose
+request times are describing its own parsing, and the text reporter says so
+under the summary rather than leaving every source looking slow at once.
+
+It reports a *stall*, not how busy the thread was. A whole-document source parses
+as the document arrives and yields between chunks, so it keeps `loopMaxMs` in the
+tens of milliseconds however long it runs. Measured here, an 82 MiB guide kept
+the worst stall at 41ms while the thread was busy 93% of the time. Its cost shows
+as every other site slowing while it runs, not as a large `loopMaxMs`.
 
 `site:done` says what the site **cost**, beside what it fetched. `requests` is
 how many times the source was asked — every slot the site's queue gave out, a
 `ctx.paced` fetch inside a parse included, which is why it is not the same as
 counting `request:done` events. `ms` is how long the site took; `requestMs` is
-how long its requests spent waiting on the source. A site whose `ms` is far
-above its `requestMs` is waiting on its own `rateLimit`; one where they are
-close is waiting on the source. That is the measurement to take before tuning
-either.
+how long its requests spent waiting on the source. A site whose `ms` is close
+to its `requestMs` is waiting on the source. One whose `ms` is far above it is
+waiting on something of its own: its `rateLimit`, or the parsing and writing
+that follow each response, which share [`localConcurrency`](./configuration.md#how-caching-works)
+with every other site. That is the measurement to take before tuning either.
 
 `merge:summary` says what the sources made of each other, once the last
 programme is out:

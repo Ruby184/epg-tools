@@ -181,11 +181,15 @@ export type EpgEventInput =
    *
    * `loopMaxMs` is the longest the event loop went unserved. It is here
    * because of what it explains: `parseDay` is the site's own code running on
-   * the main thread, and while a big document is being parsed nothing else can
-   * read a socket — so *every other site's* requests are measured as slow, and
-   * the numbers point at the sources rather than at the parse. A run whose
-   * worst figure is seconds is a run whose request times mean something else
-   * than they appear to.
+   * the main thread, and while one works through a big document in a single
+   * synchronous call nothing else can read a socket — so *every other site's*
+   * requests are measured as slow, and the numbers point at the sources rather
+   * than at the parse. A run whose worst figure is seconds is a run whose
+   * request times mean something else than they appear to.
+   *
+   * A stall, not a load: a document parsed as it streams yields between
+   * chunks, and keeps this in the tens of milliseconds however busy it keeps
+   * the thread.
    */
   | ({ type: 'grab:done'; loopMaxMs: number } & GrabCounts)
   /**
@@ -494,10 +498,10 @@ const RESOLUTION_MS = 10;
 /**
  * How long the event loop went unserved, watched for the length of a run.
  *
- * A `parseDay` is the site's own code on the main thread: while it works
- * through a big document nothing else runs, including the reads that finish
- * other sites' requests. Without this the only sign is every source looking
- * slow at once, which reads as a network problem and is not one.
+ * A `parseDay` is the site's own code on the main thread: while one works
+ * through a big document without yielding, nothing else runs, including the
+ * reads that finish other sites' requests. Without this the only sign is every
+ * source looking slow at once, which reads as a network problem and is not one.
  *
  * `monitorEventLoopDelay` is a libuv timer at 10ms resolution — cheap enough
  * to leave on, and the only way to tell "the sources were slow" from "we never
