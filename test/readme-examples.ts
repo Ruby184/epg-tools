@@ -16,7 +16,6 @@ import { createServer as createHttpsServer } from 'node:https';
 import Fastify from 'fastify';
 import {
   build,
-  CacheDriverBase,
   createGuideHandler,
   grabEvery,
   defineConfig,
@@ -43,7 +42,6 @@ import type {
   FoundMeta,
   FoundState,
   StoredEntryMeta,
-  StoredProgramme,
   StoredStateMeta,
 } from '../src/main.js';
 import { envReader } from '../src/core/answers.js';
@@ -60,6 +58,10 @@ import {
   ProgrammeBuilder,
   XmltvDocumentBuilder,
 } from '../src/xmltv/main.js';
+import type {
+  ParseContext,
+  ProgrammeBuilder as GrabberProgrammeBuilder,
+} from '../src/grabber/main.js';
 import {
   defineCapability,
   defineStages,
@@ -200,6 +202,41 @@ export const paced = defineSiteConfig({
   channels: [{ xmltvId: 'one.example.tv', siteId: '101' }],
   rateLimit: { requests: 20, perMs: 60_000 },
   backoff: { statuses: [429, 503], fallbackMs: 5_000, maxMs: 60_000, adapt: true },
+  async request() {
+    return {};
+  },
+  parseDay: () => [],
+});
+
+// --- docs/site-config.md: HTTP settings and proxies -------------------------
+const authenticated = ky.create({ prefix: 'https://api.a.example.tv' });
+
+export const broughtClient = defineSiteConfig({
+  site: 'a.example.tv',
+  ky: authenticated,
+  channels: [],
+  async request() {
+    return {};
+  },
+  parseDay: () => [],
+});
+
+export const behindProxy = defineSiteConfig({
+  site: 'a.example.tv',
+  ky: { prefix: 'https://api.a.example.tv' },
+  connection: { proxy: 'http://user:pass@proxy.local:3128' },
+  channels: [],
+  async request() {
+    return {};
+  },
+  parseDay: () => [],
+});
+
+export const oldTls = defineSiteConfig({
+  site: 'tvprogram.cz',
+  ky: { prefix: 'https://www.tvprogram.cz' },
+  connection: { tls: { ciphers: 'DEFAULT:@SECLEVEL=0' } },
+  channels: [],
   async request() {
     return {};
   },
@@ -626,14 +663,17 @@ export const namedAfterTheLineup = defineConfig({
  * Postgres, a bucket — and stands in here as a `Map`, since what the
  * documentation is promising is the shape of the driver rather than the client.
  */
-const rows = new Map<string, { meta: StoredEntryMeta; programmes: StoredProgramme[] }>();
+const rows = new Map<string, { meta: StoredEntryMeta; body: Uint8Array }>();
 const groups = new Map<string, { meta: StoredStateMeta; data: unknown }>();
 
-class KeyValueCacheDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
+class KeyValueCacheDriver implements CacheDriver {
+  // What an entry's bytes are: the records' array, as JSON. A site in a thread
+  // of its own makes them itself, and the main thread only hands them to `write`.
+  readonly codec = 'json';
+
   readonly #prefix: string;
 
   constructor(options: { prefix: string; signal?: AbortSignal | undefined }) {
-    super();
     this.#prefix = options.prefix;
   }
 
@@ -647,16 +687,13 @@ class KeyValueCacheDriver extends CacheDriverBase implements CacheDriver<StoredP
     return row && { meta: row.meta };
   }
 
-  async read(key: ChannelDayKey): Promise<FoundEntry<StoredProgramme> | undefined> {
+  async read(key: ChannelDayKey): Promise<FoundEntry | undefined> {
     return rows.get(this.#id(key));
   }
 
-  async write(
-    key: ChannelDayKey,
-    programmes: StoredProgramme[],
-    meta: StoredEntryMeta,
-  ): Promise<void> {
-    rows.set(this.#id(key), { meta, programmes });
+  // A copy of the view: the bytes may sit in a buffer with room to spare.
+  async write(key: ChannelDayKey, body: Uint8Array, meta: StoredEntryMeta): Promise<void> {
+    rows.set(this.#id(key), { meta, body: new Uint8Array(body) });
   }
 
   async delete(key: ChannelDayKey): Promise<void> {
@@ -845,6 +882,25 @@ export const localStart = (
   programme: (start: Date, title: string) => ProgrammeBuilder,
   item: { start: string; title: string },
 ): ProgrammeBuilder => programme(zonedXmltvDate(item.start, 'Europe/Bratislava'), item.title);
+
+// --- docs/site-config.md: a parse helper of a site's own --------------------
+/**
+ * Split out of a `parseDay`, and written in the types that parse was handed —
+ * all from the entry point the site already imports, which is the part that
+ * did not work: `ParseContext` was on `epg-tools/grabber` while the builder it
+ * hands over was only on `epg-tools/xmltv`.
+ */
+export function withDetail(
+  programme: GrabberProgrammeBuilder,
+  detail: { desc: string; year: number },
+  warn: ParseContext<unknown>['warn'],
+): GrabberProgrammeBuilder {
+  if (detail.desc === '') {
+    warn('the detail payload has no description');
+  }
+
+  return programme.desc(detail.desc).date(detail.year);
+}
 
 // --- docs/xmltv.md: Named zones ---------------------------------------------
 export const zoned = (epochSeconds: number): Date[] => [

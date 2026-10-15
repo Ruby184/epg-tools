@@ -20,14 +20,8 @@ import type { MissingAllowance } from '../grabber/main.js';
 import { GrabberError } from '../core/error.js';
 import { OptionError, parseOptions } from '../core/options.js';
 import { dayToDate, toDayString } from '../core/days.js';
-import { silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
-import {
-  combineReporters,
-  emitterReporter,
-  FAILURE_MODES,
-  reporterFor,
-  REPORTER_NAMES,
-} from '../core/reporters.js';
+import { reportingTo, silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
+import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
 import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
 import { REPORT_FORMATS, type ReportFormat } from './format.js';
@@ -61,6 +55,10 @@ Options:
       --cache-driver <name>  Override where cached days are kept: ndjson, xmltv,
                         sqlite or memory
       --refresh         Refetch every day in the window, ignoring what is cached
+      --threads[=n]     Run the sites in worker threads, so one site's parsing
+                        cannot hold up another's: one per core, or at most n.
+                        build/grab/serve. --no-threads runs them in one,
+                        whatever the config says
       --allow-missing <n>   Exit 0 with up to this much of the guide missing:
                         a number of channel-days, or a share like 5%
       --dry-run         grab/build only: say what a run would fetch, and stop.
@@ -201,6 +199,25 @@ const SELECTABLE = ['build', 'grab', 'merge', 'serve'];
 /** `2 channels`, `1 channel` — a count is read, so it should read. */
 function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+/** `--threads`: bare for one per core, or how many at most. */
+function poolSize(raw: string, flag: string): true | number {
+  if (raw === 'true') {
+    return true;
+  }
+
+  // Digits and nothing else. A word that is not a count is refused rather than
+  // taken: an optional value claims the word after it, so `epg --threads build`
+  // would otherwise read the command as how many threads — and `--threads=`,
+  // from an unset `$N`, is not a quiet way of saying none.
+  if (!/^\d+$/.test(raw)) {
+    throw new OptionError(
+      `Invalid ${flag} value: ${raw} (expected a number of threads, or nothing for one per core)`,
+    );
+  }
+
+  return Number(raw);
 }
 
 /** `--indent`: spaces if it is a number, the string itself otherwise. */
@@ -519,6 +536,9 @@ async function execute(
       // can do.
       'cache-driver': { type: 'string', choices: CACHE_DRIVER_NAMES },
       refresh: { type: 'boolean' },
+      // A count, or bare for one per core. Negatable, because a config can turn
+      // them on: `--no-threads` is how a run says otherwise without editing it.
+      threads: { type: 'string', optionalValue: 'true', negatable: true, transform: poolSize },
       'dry-run': { type: 'boolean' },
       'allow-missing': { type: 'string', transform: allowance },
       port: { type: 'number', min: 0, max: 65_535 },
@@ -710,6 +730,11 @@ async function execute(
     };
   }
 
+  if (values.threads !== undefined) {
+    // `null` is `--no-threads`.
+    config = { ...config, threads: values.threads ?? false };
+  }
+
   // `--log-level` is the explicit answer and wins; between the two shorthands
   // the quieter one does, so `-qv` in a script cannot turn silence into fourteen
   // thousand lines.
@@ -724,18 +749,22 @@ async function execute(
     level,
     ...(values.failures ? { failures: values.failures } : {}),
   });
-  // Beside whatever was chosen rather than instead of it: `--reporter` says
-  // how the run talks to whoever ran it, and `events` is what the program
-  // itself does with what happens. A flag about output must not switch off a
-  // reload somebody's app depends on.
-  const reporter = config.events
-    ? combineReporters(chosen, emitterReporter(config.events))
-    : chosen;
-  const emit = reporter ? stamped(reporter) : silent;
+  // `config.events` is added here only for what this file says itself — the
+  // library entries below add it to what *they* say, and adding it twice would
+  // have an emitter hear every run's events twice over. The two sets are
+  // disjoint: `merge:done` is the command's, everything inside a run is not.
+  const { reporter: said } = reportingTo(chosen ? { reporter: chosen } : {}, config.events);
+  const emit = said ? stamped(said) : silent;
   const runOptions = {
-    ...(reporter ? { reporter } : {}),
+    ...(chosen ? { reporter: chosen } : {}),
     ...(values.offset !== undefined ? { offset: values.offset } : {}),
     ...(signal ? { signal } : {}),
+    // The file this loaded, which is what a site's thread imports to find its
+    // site. What the flags above changed stays here, and reaches a thread as
+    // the run does — the cache it answers, the window and staleness it is
+    // handed, the channels already settled — so nothing is lost by its
+    // reading the file as written.
+    configModule: pathToFileURL(configFile).href,
   };
 
   if (values['dry-run']) {

@@ -7,6 +7,7 @@ import {
 } from './cache/main.js';
 import type { CacheDriver, CacheStore } from './cache/main.js';
 import { covered, coverageOf, grab, resolveSites } from './grabber/main.js';
+import { threadCount } from './grabber/thread.js';
 import type { GrabberChannel, GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
 import { channelSelection, configured, unmatched, unmatchedMessage } from './merge/select.js';
@@ -15,7 +16,7 @@ import { outputOptions } from './xmltv/serialize.js';
 import { addDays, toDayString } from './core/days.js';
 import { GrabberError } from './core/error.js';
 import type { Emit, Reporter, Says } from './core/events.js';
-import { emitter } from './core/events.js';
+import { emitter, reportingTo } from './core/events.js';
 import {
   resolveConfigSource,
   type ConfigSource,
@@ -62,6 +63,14 @@ export interface RunOptions {
    * are the ones this package ships.
    */
   reporter?: Reporter;
+  /**
+   * The module the config came from — a path or a URL whose default export is
+   * it — which a config with `threads: true` needs: each site's worker imports
+   * it to find that site. The `epg` command fills it in with the file it
+   * loaded. A module of its own, never the program calling this, which every
+   * worker would otherwise run again.
+   */
+  configModule?: string | URL;
 }
 
 /**
@@ -249,11 +258,13 @@ function reported(options: RunOptions): Pick<RunOptions, 'reporter'> {
 }
 
 /** Grab all sites into the cache (only stale/missing channel-days are fetched). */
-export async function runGrab(
-  source: ConfigSource,
-  options: RunOptions = {},
-): Promise<GrabSummary> {
+export async function runGrab(source: ConfigSource, given: RunOptions = {}): Promise<GrabSummary> {
   const config = await resolveConfigSource(source);
+  const options = reportingTo(given, config.events);
+
+  // Before a channel list is fetched: a run that cannot start its threads says
+  // so first, rather than after every site has been asked for one.
+  threadCount(config.threads, options.configModule);
   const now = options.now ?? new Date();
   const startDay = startDayOf(options, now);
 
@@ -292,6 +303,8 @@ export async function runGrab(
       now,
       ...reported(options),
       ...(options.signal ? { signal: options.signal } : {}),
+      ...(config.threads === undefined ? {} : { threads: config.threads }),
+      ...(options.configModule === undefined ? {} : { configModule: options.configModule }),
     });
 
     // Nothing more is asked of the cache once the run is off: pruning a window
@@ -314,8 +327,9 @@ export async function runGrab(
 }
 
 /** Generate the merged XMLTV guide from the cache, without grabbing. */
-export async function runMerge(source: ConfigSource, options: RunOptions = {}): Promise<void> {
+export async function runMerge(source: ConfigSource, given: RunOptions = {}): Promise<void> {
   const config = await resolveConfigSource(source);
+  const options = reportingTo(given, config.events);
 
   await withCache(config, options, async (cache) =>
     writeGuide({
@@ -332,9 +346,10 @@ export async function runMerge(source: ConfigSource, options: RunOptions = {}): 
  */
 export async function* guideStream(
   source: ConfigSource,
-  options: RunOptions = {},
+  given: RunOptions = {},
 ): AsyncGenerator<string> {
   const config = await resolveConfigSource(source);
+  const options = reportingTo(given, config.events);
   const { cache, release } = await cacheFor(config, options);
 
   try {
@@ -355,11 +370,15 @@ export async function* guideStream(
  * should be replaced with, and the next run continues from what this one
  * cached.
  */
-export async function build(source: ConfigSource, options: RunOptions = {}): Promise<GrabSummary> {
+export async function build(source: ConfigSource, given: RunOptions = {}): Promise<GrabSummary> {
   // Resolved once and passed on: a factory may read the environment or fetch,
   // and the grab and the merge that follows it must agree on one answer.
   const config = await resolveConfigSource(source);
+  const options = reportingTo(given, config.events);
   const now = options.now ?? new Date();
+
+  // As `runGrab` does, and for the same reason: before the lists below.
+  threadCount(config.threads, options.configModule);
 
   // One cache for both halves, rather than each of them asking the config for
   // its own: a driver that opens a database opens it once, and one that keeps

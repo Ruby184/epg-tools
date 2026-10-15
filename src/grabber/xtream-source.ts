@@ -37,6 +37,7 @@ import { xmltvDate } from '../xmltv/date.js';
 import { xmltvZoneOffset } from '../xmltv/zone.js';
 import type { XmltvDate } from '../xmltv/date.js';
 import type { ChannelBuilder, ProgrammeBuilder } from '../xmltv/builder.js';
+import { kyWith } from './channels.js';
 import { dayOf, type XmltvDayZone } from './xmltv-document.js';
 import { defineSiteConfig } from './types.js';
 import type { ChannelElement, GrabberChannel, SiteConfig } from './types.js';
@@ -410,29 +411,29 @@ export function defineXtreamSite(
 
   return defineSiteConfig<XtreamProgramme[], 'days', XtreamChannel>({
     ...site,
-    ky: {
-      ...site.ky,
+    ky: kyWith(site.ky, (existing) => ({
+      ...existing,
       prefix: url,
       // Merged rather than replaced by ky, so every call carries these without
       // a call site having to remember them.
       // Spread only where the caller gave an object; ky also accepts a string
       // or a `URLSearchParams`, neither of which spreads into one.
       searchParams: {
-        ...(typeof site.ky?.searchParams === 'object' && !Array.isArray(site.ky.searchParams)
-          ? (site.ky.searchParams as Record<string, string>)
+        ...(typeof existing?.searchParams === 'object' && !Array.isArray(existing.searchParams)
+          ? (existing.searchParams as Record<string, string>)
           : {}),
         username,
         password,
       },
       hooks: {
-        ...site.ky?.hooks,
+        ...existing?.hooks,
         // The credentials are query parameters because that is the only place
         // this API takes them — which means ky's own error message would carry
         // the password into `request:failed`, into the text reporter's stderr,
         // and into the JSON reporter's `stack` and `cause`. Rewritten here so
         // it covers retries and anything added later, rather than per call.
         beforeError: [
-          ...(site.ky?.hooks?.beforeError ?? []),
+          ...(existing?.hooks?.beforeError ?? []),
           ({ error }) => {
             error.message = withoutQuery(error.message);
 
@@ -440,7 +441,7 @@ export function defineXtreamSite(
           },
         ],
       },
-    },
+    })),
     batching: 'days',
 
     async channels({ http, warn, state }) {

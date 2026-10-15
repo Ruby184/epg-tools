@@ -9,8 +9,9 @@
 
 import PQueue from 'p-queue';
 import { toDayString } from '../core/days.js';
-import { emitter, type GrabCounts } from '../core/events.js';
+import { emitter, type GrabCounts, watchEventLoop } from '../core/events.js';
 import { SiteRun, type Run } from './site-run.js';
+import { SiteThreads, threadCount } from './thread.js';
 import type { AnySiteConfig, GrabOptions, GrabSummary } from './types.js';
 
 /**
@@ -22,6 +23,14 @@ import type { AnySiteConfig, GrabOptions, GrabSummary } from './types.js';
 const DEFAULT_LOCAL_CONCURRENCY = 16;
 
 export async function grab(configs: AnySiteConfig[], options: GrabOptions): Promise<GrabSummary> {
+  // Before anything starts, rather than once per site that then cannot — it
+  // throws when there are threads to start and no module to start them on.
+  const threadsWanted = threadCount(options.threads, options.configModule);
+  const threads =
+    threadsWanted === 0 ? undefined : SiteThreads.for(threadsWanted, options.configModule!);
+  /** Every site running in a thread, so a cancelled run can wait for them — see below. */
+  const inThreads: Promise<void>[] = [];
+
   const now = options.now ?? new Date();
   const emit = emitter(options);
   const { cache, signal } = options;
@@ -47,6 +56,10 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
   const localWork = new PQueue({
     concurrency: Math.max(1, options.localConcurrency ?? DEFAULT_LOCAL_CONCURRENCY),
   });
+
+  // Watched for the whole run, because the number it produces is the one that
+  // explains the others — see `grab:done`.
+  const loop = await watchEventLoop();
 
   /**
    * Queue one task, cancellable without paying for the privilege.
@@ -98,8 +111,16 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
       enqueue(sites, async () => {
         try {
           // A site that cannot be resolved throws in the constructor, before it
-          // has a queue or a client to let go of.
-          await new SiteRun(config, run).run();
+          // has a queue or a client to let go of — and one in a thread rejects
+          // the same way, for that or for a config its thread could not read.
+          if (threads === undefined) {
+            await new SiteRun(config, run).run();
+          } else {
+            const site = threads.run(config, run);
+
+            inThreads.push(site);
+            await site;
+          }
         } catch (error) {
           // Only what the constructor threw reaches here: a site that could not
           // be *read* — a missing `site`, `channels`, `request` or `parseDay` —
@@ -118,15 +139,26 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     ),
   );
 
+  // A cancel lets go of every site at once, and a site in its own thread is
+  // still winding down over there — finishing the write it started, saving its
+  // state, counting what it did. Waited for, so all of that lands in this
+  // run's summary rather than after it; a site on this thread goes on the same
+  // way, but has counted as it went.
+  await Promise.allSettled(inThreads);
+
   // A cancelled run is not a finished one, and the difference matters to
   // whoever is listening: `grab:done` is what a reporter treats as "this is
   // what the run came to", while a cancel says the opposite — most of what
   // failed was dropped by the cancel itself.
+  const loopMaxMs = await loop.worst();
+
   emit(
     signal?.aborted
       ? { type: 'run:cancelled', fetched: tally.fetched }
-      : { type: 'grab:done', ...tally },
+      : { type: 'grab:done', loopMaxMs, ...tally },
   );
+
+  loop.stop();
 
   return tally;
 }

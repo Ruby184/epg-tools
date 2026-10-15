@@ -32,7 +32,7 @@ import { resolveConfigSource, type ConfigSource } from '../config.js';
 import { toDayString } from '../core/days.js';
 import { GrabberError } from '../core/error.js';
 import { writeFlushed } from '../core/streams.js';
-import { resolveChannels, siteHttp } from '../grabber/channels.js';
+import { kyWith, resolveChannels, siteHttp } from '../grabber/channels.js';
 import { parseContext, requestContext, streamContext } from '../grabber/context.js';
 import { planRequests } from '../grabber/planner.js';
 import { resolveSite } from '../grabber/site.js';
@@ -334,7 +334,13 @@ export async function tryChannelDay(
 
   const calls: Call[] = [];
   const http: KyInstance = siteHttp(
-    { ...site, ky: { ...site.ky, hooks: recordingHooks(site.ky?.hooks, calls) } },
+    {
+      ...site,
+      ky: kyWith(site.ky, (existing) => ({
+        ...existing,
+        hooks: recordingHooks(existing?.hooks, calls),
+      })),
+    },
     options.signal,
   );
 

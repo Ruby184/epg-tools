@@ -66,3 +66,30 @@ test(
     await speedup(annotate, results, STREAM, COMPARATORS);
   },
 );
+
+// A published guide read for a few of its channels — iptvx.one is 4,337 of
+// them, seven kept — where nearly every programme is built only to be dropped.
+const wide = makeGuide(100, 3, 24); // 100 channels × 3 days × 24 = 7,200 programmes
+const wideXml = await guideToXml(wide);
+const wideMiB = (Buffer.byteLength(wideXml) / 1_048_576).toFixed(1);
+const ONE = new Set(['channel-0.example.tv']);
+
+const SKIP = 'epg-tools parseXmltvString, one channel of 100 (channels)';
+const EVERY = 'epg-tools parseXmltvString, every channel';
+
+test(
+  `keep one channel of a wide guide (${wideMiB} MiB, ${wide.programmes.length} programmes)`,
+  { timeout: TIMEOUT },
+  async ({ annotate, bench }) => {
+    const results = await bench.compare(
+      ...tracked(bench, SKIP, () => {
+        parseXmltvString(wideXml, { channels: ONE });
+      }),
+      bench(EVERY, () => {
+        parseXmltvString(wideXml);
+      }),
+    );
+
+    await speedup(annotate, results, SKIP, [EVERY]);
+  },
+);

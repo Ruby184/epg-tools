@@ -181,6 +181,7 @@ into place, so a reader never sees half a guide.
 | `--cache-dir <dir>` | override the cache directory |
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
+| `--threads[=n]` | `build`/`grab`/`serve`: run the sites in [worker threads](./docs/configuration.md#sites-in-threads-of-their-own), one per core or at most `n`; `--no-threads` overrides a config that asks for them |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
 | `-v, --verbose` | same as `--log-level debug`; `-q, --quiet` is `--log-level error` |

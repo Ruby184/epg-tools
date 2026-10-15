@@ -66,6 +66,30 @@ export type ProgrammeStrategy = 'merge' | 'concat' | 'backfill';
 export type ProgrammeMatcher = (a: XmltvProgramme, b: XmltvProgramme) => boolean;
 
 /**
+ * A matcher of your own, with the window it needs to be asked about.
+ *
+ * The window is what keeps a merge linear. The candidates for a programme are
+ * found by walking the list from the first start within `windowMs` of it, so a
+ * matcher that declares one is asked about a handful; a bare
+ * {@link ProgrammeMatcher} is asked about *everything*, because a function
+ * that never said how far it looks might look anywhere — and on a channel with
+ * a fortnight of listings that is every pair, which is where a custom matcher
+ * stops being quick.
+ *
+ * ```ts
+ * match: {
+ *   windowMs: 600_000,
+ *   matches: (a, b) => idOf(a) === idOf(b),
+ * }
+ * ```
+ */
+export interface WindowedMatcher {
+  /** How far apart two starts may be and still be worth asking about. */
+  windowMs: number;
+  matches: ProgrammeMatcher;
+}
+
+/**
  * When two programmes from different sources count as the same broadcast.
  *
  * Sources rarely agree to the second — one publishes the schedule on a
@@ -99,6 +123,26 @@ export interface ProgrammeMatch {
    * - `never` — the instant and the duration decide alone.
    */
   titles?: 'when-shifted' | 'always' | 'never';
+  /**
+   * How a title is reduced before two are compared.
+   *
+   * The default strips accents, case and repeated spaces, which catches the
+   * ways one source writes what another writes differently. It does not catch
+   * what a *provider* adds: `Správy` against `Správy TV`, `Film: Casablanca`
+   * against `Casablanca`. A source pair that differs that way needs a rule
+   * only you can write, and this is the cheap place to put it — a function
+   * over one title, rather than a whole matcher that then has to rediscover
+   * the tolerance and the duration rule.
+   *
+   * ```ts
+   * match: { normalizeTitle: (title) => title.replace(/^film: /i, '').trim() }
+   * ```
+   *
+   * Called with each title as it comes; the result is compared with `===`, so
+   * lower-case it if case is not to matter. {@link normalizeTitle} is the
+   * default and is exported, for a rule that wants to run before it.
+   */
+  normalizeTitle?: (title: string) => string;
 }
 
 /** What a guide-wide {@link MergeOptions.transform} is told about a programme. */
@@ -216,7 +260,7 @@ export interface MergeOptions {
    * {@link ProgrammeMatcher} of your own for a source pair the options cannot
    * describe.
    */
-  match?: ProgrammeMatch | ProgrammeMatcher;
+  match?: ProgrammeMatch | ProgrammeMatcher | WindowedMatcher;
   /**
    * Give a programme with no `stop` the next one's start, capped at
    * {@link FillStopOptions.maxMs} (six hours). On by default.

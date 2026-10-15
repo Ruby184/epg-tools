@@ -27,9 +27,11 @@ import type { TrackedMap } from './state.js';
  */
 export class UnchangedError extends Error {
   override readonly name = 'UnchangedError';
+  readonly url?: string | undefined;
 
-  constructor(readonly url?: string) {
+  constructor(url?: string) {
     super(url === undefined ? 'Unchanged' : `Unchanged: ${url}`);
+    this.url = url;
   }
 }
 

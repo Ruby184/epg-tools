@@ -95,6 +95,16 @@ export interface EpgConfig {
    * open files rather than pacing any source. Defaults to 16.
    */
   localConcurrency?: number;
+  /**
+   * Run the sites in worker threads, so one site's parsing cannot hold up
+   * another's: `true` for a pool of one thread per core, a number for at most
+   * that many. Every site still runs at once; with more sites than threads,
+   * some share one. Off by default: a thread costs some 25 MiB and a second to
+   * start, and the config module is read again by every one. See "Sites in
+   * threads of their own" in the configuration guide. `--threads[=n]` and
+   * `--no-threads` override it.
+   */
+  threads?: boolean | number;
   merge?: MergeOptions;
   /**
    * Channels that are other channels shifted — a `+1` and its like. They cost
@@ -236,8 +246,10 @@ export interface EpgConfig {
    * export default defineConfig({ sites, output, events });
    * ```
    *
-   * Read by the CLI, since a library caller passes its own `reporter` and can
-   * put `emitterReporter` in it with `combineReporters`.
+   * Honoured wherever a run is started from this config — `epg serve` and
+   * `epg grab`, and `build`, `runGrab`, `runMerge` and `createGuideHandler`
+   * just the same. A library caller's own `reporter` is kept beside it rather
+   * than replaced.
    */
   events?: EpgEventSink;
 }

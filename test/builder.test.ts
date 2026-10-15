@@ -545,6 +545,35 @@ describe('ChannelBuilder', () => {
   });
 });
 
+describe('a value the builder cannot use', () => {
+  it('throws without somewhere to report it, since a field must not vanish quietly', () => {
+    // A builder used on its own has no reporter, and a `<date>` that silently
+    // disappeared would be found by reading the guide rather than the log.
+    expect(() => ProgrammeBuilder.of('one', '20260717203000', 'Show').date('20')).toThrow();
+  });
+
+  it('leaves the field out and says so where there is a `warn`', () => {
+    const said: string[] = [];
+    const built = new ProgrammeBuilder({
+      channel: 'one',
+      start: '20260717203000',
+      title: 'Show',
+      warn: (message) => said.push(message),
+    })
+      .date('20')
+      .stop('nope')
+      .build();
+
+    expect(built.date).toBeUndefined();
+    expect(built.stop).toBeUndefined();
+    // The programme itself survives, which is the point of the trade.
+    expect(built.title).toEqual([{ value: 'Show' }]);
+    expect(said).toHaveLength(2);
+    expect(said[0]).toContain('date:');
+    expect(said[1]).toContain('stop:');
+  });
+});
+
 describe('XmltvDocumentBuilder', () => {
   it('accepts base fields or standalone builders and produces serializer input', () => {
     const doc = new XmltvDocumentBuilder()

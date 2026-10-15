@@ -25,9 +25,10 @@ import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../confi
 import { createCacheStore } from '../build.js';
 import type { CacheEntryMeta, CacheStore, ChannelDayKey } from '../cache/types.js';
 import { dayRange, toDayString, addDays } from '../core/days.js';
-import { emitter, type Reporter, type Says } from '../core/events.js';
+import { emitter, reportingTo, type Reporter, type Says } from '../core/events.js';
 import { compressor, type CompressionFormat } from '../core/output.js';
 import { covered, resolveSites } from '../grabber/channels.js';
+import { threadCount } from '../grabber/thread.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { generateGuide } from '../merge/guide.js';
 import { channelSelection, configured } from '../merge/select.js';
@@ -35,7 +36,7 @@ import type { BuildGuideOptions, DerivedChannel, GuideContext } from '../merge/t
 import type { XmltvDocumentMeta } from '../xmltv/types.js';
 import { outputOptions } from '../xmltv/serialize.js';
 import type { GuideOutputOptions } from '../xmltv/serialize.js';
-import type { NextGrab } from './schedule.js';
+import type { GuideCached, NextGrab } from './schedule.js';
 
 /** Where the guide is served from when nothing says otherwise. */
 export const DEFAULT_SERVE_PATH = '/guide.xml';
@@ -60,6 +61,9 @@ export const DEFAULT_REVALIDATE_MS = 1000;
  * changed fingerprint still re-resolves immediately — this is only the floor
  * under the case the fingerprint cannot see, a grab that adds a channel and
  * touches nothing already in the grid.
+ *
+ * It is a ceiling on *guide* requests only. A health check never resolves,
+ * whatever this says: see {@link GuideHandler.answer}'s health route.
  */
 export const DEFAULT_SITES_MAX_AGE_MS = 10 * 60 * 1000;
 
@@ -162,6 +166,8 @@ export interface GuideHandlerOptions {
   now?: Date;
   /** Shift the window, as a run's `offset` does. */
   offset?: number;
+  /** The module the config came from, as a run's `configModule` is — for `threads`. */
+  configModule?: string | URL;
   /**
    * A cache to serve from, rather than the one the config describes.
    *
@@ -900,11 +906,18 @@ function encodingFor(
  */
 export async function createGuideHandler(
   source: ConfigSource,
-  options: GuideHandlerOptions = {},
+  given: GuideHandlerOptions = {},
 ): Promise<GuideHandler> {
   const config = await resolveConfigSource(source);
+  // What the config asked to be told, beside whatever the caller passes — a
+  // server mounted on an app of its own reads the same field `epg serve` does.
+  const options = reportingTo(given, config.events);
   const emit = emitter(options);
   const path = options.path ?? config.serve?.path ?? DEFAULT_SERVE_PATH;
+
+  // When the server starts, rather than at its first scheduled grab — which
+  // may be hours later, and would fail every night from then on.
+  threadCount(config.threads, options.configModule);
   const health = options.health ?? config.serve?.health ?? DEFAULT_HEALTH_PATH;
   const compress = options.compress ?? config.serve?.compress ?? 'gzip';
   const revalidateMs = options.revalidateMs ?? DEFAULT_REVALIDATE_MS;
@@ -1101,7 +1114,7 @@ export async function createGuideHandler(
    * polls arriving together would each sweep the same thousands of keys, which
    * is the storm this whole design exists to avoid.
    */
-  const current = async (now: Date): Promise<Snapshot> => {
+  const current = async (now: Date, { resolving = true } = {}): Promise<Snapshot> => {
     if (snapshot !== undefined && Date.now() - checkedAt < revalidateMs) {
       return snapshot;
     }
@@ -1117,15 +1130,21 @@ export async function createGuideHandler(
       // the grid out puts a ceiling on that, without letting a poll drive a
       // request the way resolving on every revalidation would.
       const held = snapshot;
-      const stale = held === undefined || Date.now() - resolvedAt >= sitesMaxAgeMs;
-      const next = stale ? await take(now) : await take(now, held.sites);
+      // `resolving: false` is the health check, which must not make a request
+      // to a source: what it reports is what this server could serve, and a
+      // source that is down is not a reason to fail a probe. It still has to
+      // resolve when there is nothing held at all — without a grid there is
+      // nothing to count — and it leaves `resolvedAt` where it was, so the
+      // next request that does want fresh lists still gets them.
+      const stale = held === undefined || (resolving && Date.now() - resolvedAt >= sitesMaxAgeMs);
+      const next = !stale && held !== undefined ? await take(now, held.sites) : await take(now);
 
       // And if a grab has been, the list may have changed with it — so the
       // sites are resolved again *now*, and the fingerprint taken over what
       // results, rather than leaving this request with a grid that is out of
       // date.
       const fresh =
-        !stale && held !== undefined && next.print.etag !== held.print.etag
+        resolving && !stale && held !== undefined && next.print.etag !== held.print.etag
           ? await take(now)
           : next;
 
@@ -1381,7 +1400,11 @@ export async function createGuideHandler(
    * metadata only — so a container healthcheck costs what a poll's `304` costs.
    */
   async function healthOf(now: Date): Promise<GuideHealth> {
-    const { print } = await current(now);
+    // Never resolving: a probe reports what this server holds, and must not be
+    // the thing that goes and asks a source for its channel list — see
+    // `current`. The sweep itself is metadata, which is what makes a health
+    // check cost what a `304` costs.
+    const { print } = await current(now, { resolving: false });
     const window = windowOf(now);
     // The one unambiguous "cannot do its job": nothing at all is cached, so
     // there is no guide to serve. How stale is too stale is the operator's
@@ -1572,6 +1595,7 @@ export async function createGuideHandler(
         cache,
         ...(options.reporter ? { reporter: options.reporter } : {}),
         ...(options.offset === undefined ? {} : { offset: options.offset }),
+        ...(options.configModule === undefined ? {} : { configModule: options.configModule }),
         signal: stops.signal,
       });
     } catch (error) {
@@ -1598,23 +1622,63 @@ export async function createGuideHandler(
       return;
     }
 
-    const next = schedule(from, runs);
+    // The answer may be awaited — a schedule is allowed to ask what is cached
+    // before deciding, and that is a sweep. Nothing waits on this: the server
+    // is already answering requests, and all that is pending is a timer.
+    void (async () => {
+      let next: Date | number | undefined;
 
-    if (next === undefined) {
-      return;
-    }
+      try {
+        next = await schedule({ from, runs, cached: () => cachedFor(from) });
+      } catch (error) {
+        // A schedule that threw has said nothing about when to run again, and
+        // guessing on its behalf would be the wrong hour forever. Reported
+        // rather than thrown: the process must not end over it, and a server
+        // that cannot plan is still a server that can serve.
+        if (!stopped) {
+          emit({ type: 'serve:grabFailed', error });
+        }
 
-    const at = typeof next === 'number' ? next : next.getTime();
-    const delay = Math.max(runs === 0 ? 0 : MIN_GRAB_GAP_MS, at - from.getTime());
+        return;
+      }
 
-    // Not `unref`'d: a server whose only remaining work is the next grab is
-    // still a server that should be running.
-    timer = setTimeout(() => {
-      running = grabNow().finally(() => {
-        running = undefined;
-        planNext(new Date());
-      });
-    }, delay);
+      // `close` may have happened while it was deciding, and a timer set after
+      // that is one nobody will clear.
+      if (next === undefined || stopped) {
+        return;
+      }
+
+      const at = typeof next === 'number' ? next : next.getTime();
+      const delay = Math.max(runs === 0 ? 0 : MIN_GRAB_GAP_MS, at - from.getTime());
+
+      // Not `unref`'d: a server whose only remaining work is the next grab is
+      // still a server that should be running.
+      timer = setTimeout(() => {
+        running = grabNow().finally(() => {
+          running = undefined;
+          planNext(new Date());
+        });
+      }, delay);
+    })();
+  };
+
+  /**
+   * What the cache holds for the window, for a schedule that asks.
+   *
+   * Through `current`, so it is the same sweep a request would do and the same
+   * snapshot it would leave behind — a server starting with an empty cache
+   * resolves its sites once here rather than once more on the first request.
+   */
+  const cachedFor = async (now: Date): Promise<GuideCached> => {
+    const { print } = await current(now);
+
+    return {
+      present: print.present,
+      expected: print.expected,
+      // Not the epoch: with nothing cached the newest `grabbedAt` is zero, and
+      // a date from 1970 reads like a fact rather than like an absence.
+      ...(print.present > 0 ? { grabbedAt: print.lastModified } : {}),
+    };
   };
 
   planNext(options.now ?? new Date());

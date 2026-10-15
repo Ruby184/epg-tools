@@ -199,12 +199,15 @@ export {
   FsCacheDriver,
   FsNdjsonCacheDriver,
   FsXmltvCacheDriver,
-  CacheDriverBase,
+  CODECS,
+  fromRecord,
+  toRecord,
   isStale,
   DEFAULT_STALENESS,
   CACHE_DRIVER_NAMES,
 } from './cache/main.js';
 export type * from './cache/types.js';
+export type { CacheCodec, CodecName } from './cache/codec.js';
 
 export {
   grab,
@@ -234,6 +237,7 @@ export {
   resolveSites,
   retryAfterMs,
   isUnchanged,
+  kyWith,
   siteHttp,
   sitePacing,
   SiteStateHandle,
@@ -268,8 +272,10 @@ export type {
   M3uSkipReason,
   MissingAllowance,
   ResolvedAllowance,
+  SiteConnection,
 } from './grabber/main.js';
 export type * from './grabber/types.js';
+export type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from './xmltv/builder.js';
 
 export { createGuideHandler, grabEvery, serveGuide } from './serve/main.js';
 export type {
@@ -285,6 +291,8 @@ export type {
   GuideServer,
   Replying,
   ReplyingRequest,
+  GrabScheduleContext,
+  GuideCached,
   NextGrab,
   ServeOptions,
 } from './serve/main.js';

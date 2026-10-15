@@ -99,19 +99,24 @@ export interface M3uAttributeOptions {
  * the ones that *are* attribute lists, in whichever grammar the reader says.
  */
 export class M3uTag {
-  constructor(
-    /** The tag name, without its `#`. */
-    readonly name: string,
-    /** Everything after the character that ended the name. */
-    readonly value: string,
-    /** 1-based line the tag was on. */
-    readonly line: number,
-    /**
-     * 1-based column where {@link value} begins, so a reader can anchor a
-     * warning at something it found inside it.
-     */
-    readonly col: number,
-  ) {}
+  /** The tag name, without its `#`. */
+  readonly name: string;
+  /** Everything after the character that ended the name. */
+  readonly value: string;
+  /** 1-based line the tag was on. */
+  readonly line: number;
+  /**
+   * 1-based column where {@link value} begins, so a reader can anchor a
+   * warning at something it found inside it.
+   */
+  readonly col: number;
+
+  constructor(name: string, value: string, line: number, col: number) {
+    this.name = name;
+    this.value = value;
+    this.line = line;
+    this.col = col;
+  }
 
   /**
    * The value read as an attribute list, in whichever grammar the tag uses.
@@ -234,12 +239,15 @@ const DEFAULT_MAX_LINE_LENGTH = 1024 * 1024;
  * dialect's business, and no reader is obliged to think it means anything.
  */
 export class M3uUri {
-  constructor(
-    /** The line, trimmed of nothing. */
-    readonly text: string,
-    /** 1-based line it was on. */
-    readonly line: number,
-  ) {}
+  /** The line, trimmed of nothing. */
+  readonly text: string;
+  /** 1-based line it was on. */
+  readonly line: number;
+
+  constructor(text: string, line: number) {
+    this.text = text;
+    this.line = line;
+  }
 }
 
 /**

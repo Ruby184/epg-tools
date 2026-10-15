@@ -522,6 +522,55 @@ describe('mergeProgrammeLists start tolerance', () => {
     expect(merged).toHaveLength(1);
   });
 
+  it('asks a matcher of its own only about what is near, when it says how near', () => {
+    // A bare function is asked about everything, which is what makes a custom
+    // matcher slow on a fortnight of listings. Saying how far it looks is what
+    // keeps the walk short — and the proof is in what it was asked.
+    const asked: number[] = [];
+    const matches = (a: XmltvProgramme, b: XmltvProgramme): boolean => {
+      asked.push(Math.abs(a.start.getTime() - b.start.getTime()));
+
+      return false;
+    };
+
+    const day = Array.from({ length: 24 }, (_, hour) =>
+      prog('X', `2026-01-15T${String(hour).padStart(2, '0')}:00:00Z`, `Show ${String(hour)}`, 'sk'),
+    );
+    const second = [prog('X', '2026-01-15T12:02:00Z', 'Show 12', 'en')];
+
+    mergeProgrammeLists([day, second], 'merge', { windowMs: 600_000, matches });
+
+    // Only the hours either side of 12:02, not the whole day.
+    expect(asked).toHaveLength(1);
+    expect(asked[0]).toBe(120_000);
+
+    asked.length = 0;
+    mergeProgrammeLists([day, second], 'merge', matches);
+
+    // The same matcher without a window is offered every programme there is.
+    expect(asked).toHaveLength(24);
+  });
+
+  it('takes a title rule of the caller’s own, which is cheaper than a matcher', () => {
+    // What a provider adds to a title is a rule only the caller can write, and
+    // writing it as a whole matcher means rediscovering the tolerance and the
+    // duration guard to keep them.
+    const merged = mergeProgrammeLists(
+      [
+        [prog('X', '2026-01-15T20:00:00Z', 'Film: Casablanca', 'sk')],
+        [prog('X', '2026-01-15T20:02:00Z', 'Casablanca', 'en')],
+      ],
+      'merge',
+      { normalizeTitle: (title) => title.replace(/^film:\s*/i, '').toLowerCase() },
+    );
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.title).toEqual([
+      { value: 'Film: Casablanca', lang: 'sk' },
+      { value: 'Casablanca', lang: 'en' },
+    ]);
+  });
+
   describe('the duration guard', () => {
     it('keeps consecutive same-titled clips apart', () => {
       const merged = mergeProgrammeLists(

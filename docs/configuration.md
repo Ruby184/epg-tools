@@ -109,7 +109,8 @@ so it solves half a problem.
 | `days` | `number` | `7` | How many days to grab and include in the guide. A site may override it. |
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
-| `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source. |
+| `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source; a parse waiting on its own `ctx.paced` request does not count against it. |
+| `threads` | `boolean \| number` | `false` | Run the sites in worker threads, so one site's parsing cannot hold up another's: `true` for one thread per core, a number for at most that many — see [Sites in threads of their own](#sites-in-threads-of-their-own). `--threads[=n]` / `--no-threads` override it. |
 | `merge` | `MergeOptions` | `{ cover: 'all', channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true, dropContainers: true }` | Who grabs a channel several sites offer (`cover`) and how the ones that did are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
 | `derived` | `DerivedChannel[] \| (context) => DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. A function is asked per run, with the channels there turned out to be. See [Derived channels](#derived-channels). |
 | `channels` | `readonly string[]` | all of them | Keep only these channels, by `xmltvId` — see [keeping only some channels](#keeping-only-some-channels). `--channels` overrides it. |
@@ -219,6 +220,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--cache-dir <dir>` | override the cache directory |
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
+| `--threads[=n]` | `build`/`grab`/`serve`: run the sites in [worker threads](#sites-in-threads-of-their-own), one per core or at most `n`; `--no-threads` runs them all in one, whatever the config says |
 | `--dry-run` | `grab`/`build` only: say what a run would fetch, and stop — see [what a run would do](#what-a-run-would-do) |
 | `--allow-missing <n>` | exit 0 with up to this much of the guide missing: a number of channel-days, or a share like `5%` |
 | `--extensions <names>` | `build`/`merge` only: keep only these [provider extensions](#provider-extensions), comma-separated — `--extensions lcn,uniqueID` |
@@ -895,6 +897,13 @@ holds a cache, and with a schedule a timer that keeps the process alive.
 guide — it reads the same metadata sweep the ETag comes from, so a container
 healthcheck costs what a poll's `304` costs.
 
+It never asks a **source** anything. A guide request re-resolves channel lists
+that have gone past `sitesMaxAgeMs`; a probe does not, whatever their age,
+because what it reports is what this server holds and a source being down is
+not a reason to fail it. The one exception is the first probe on a server that
+has not served anything yet: without a channel list there is no grid to count,
+so that one resolves as any first request would.
+
 ```json
 {
   "ok": true,
@@ -965,7 +974,11 @@ Together the next run is the earliest `at + n × every` still ahead of now, so
 With **no** `at`, the first run is at startup — which is what "every six hours"
 means for something long-running, and what stops a fresh deployment serving an
 empty cache until the first interval is up. Naming an `at` is saying when you
-want it, so startup is not a run.
+want it, so startup is not a run — **unless there is nothing cached**, which a
+deployment at three in the afternoon of a server that grabs at four in the
+morning otherwise answers for thirteen hours by serving nothing. It cannot
+duplicate work, the condition for it being that the cache is empty, and
+`whenEmpty: false` turns it off.
 
 The grab shares this server's cache rather than opening one of its own, so what
 it writes is what the very next request is served. It is the same run `epg grab`
@@ -975,7 +988,11 @@ performs, reported through the same events, interleaved with the server's own.
 whole contract is to say when the next run is due:
 
 ```ts
-type NextGrab = (from: Date, runs: number) => Date | number | undefined;
+type NextGrab = (context: {
+  from: Date;
+  runs: number;
+  cached(): Promise<{ present: number; expected: number; grabbedAt?: Date }>;
+}) => Date | number | undefined | Promise<Date | number | undefined>;
 ```
 
 Called once at startup and again after each grab **finishes** — after, so a grab
@@ -983,6 +1000,14 @@ that overruns its own interval can never stack another behind itself. Return a
 `Date` or an epoch millisecond count; return something at or before `from` to
 run as soon as possible, and `undefined` to stop scheduling and carry on
 serving. `runs` is how many have already finished, `0` at startup.
+
+`cached()` is the one thing a schedule cannot find out for itself: the cache
+*file* exists from the moment the server opens it, so whether there is anything
+to **serve** is not a question that can be answered by looking from outside.
+It sweeps the window — which means resolving every site's channel list — so it
+is a function rather than a value, and a schedule that does not ask pays
+nothing. An answer may be a promise, which is what lets a schedule ask before
+it decides.
 
 Which is how a cron expression gets in without this package carrying a cron
 parser — the next timestamp is exactly what a cron library already hands out:
@@ -992,7 +1017,7 @@ import { CronExpressionParser } from 'cron-parser';
 
 export default defineConfig({
   serve: {
-    grab: (from) =>
+    grab: ({ from }) =>
       CronExpressionParser.parse('0 4 * * *', { currentDate: from }).next().toDate(),
   },
 });
@@ -1400,6 +1425,94 @@ in memory until it is written while a staleness check only finds more to do.
 Raising it is worth pairing with `UV_THREADPOOL_SIZE`, which is what actually
 runs Node's file operations (four threads by default).
 
+A parse that is waiting on a request of its own — a detail fetched through
+`ctx.paced` — gives its slot up for as long as it waits, and takes one back,
+ahead of parses that have not started, before it goes on. Waiting on the
+network is neither of the two things this bounds, and holding the slot through
+it let one site that fetches a detail per programme fill every slot in the run
+with parses waiting on its own pacing: every other site's parses, however
+cheap, then queued behind it.
+
+### Sites in threads of their own
+
+Every site's code runs on one thread by default, and so does every site's
+parsing. A `parseDay` that works through a big document in one go holds that
+thread, and every other site's responses wait to be read until it lets go: a
+site whose requests take 50ms can measure them in seconds, beside a site whose
+parsing has nothing to do with it. `grab:done`'s `loopMaxMs` is how you tell
+that is happening.
+
+`threads` runs the sites in worker threads instead: `true` (or `--threads`)
+for one thread per core, a number (`--threads=4`) for at most that many. Every
+site still runs at once. With as many threads as sites each has one to itself;
+with fewer, a site goes to whichever thread is running fewest, and shares it. A
+config of one CPU-heavy site (300ms of synchronous parsing per channel-day) and
+one that only waits on the network, run through `epg build`:
+
+| | the network site's requests | the network site took |
+|---|---|---|
+| one thread | 645ms on average, 4,809ms at worst | 5,346ms |
+| `--threads` | 50ms on average, 51ms at worst | 588ms |
+
+The CPU-heavy site takes as long either way. It is only kept to itself.
+
+What it costs:
+
+- **About 25 MiB and a second to start, per thread.** Nine measured 1.2s to be
+  ready and 223 MiB together, which is what a number below the count of sites
+  is for. Threads start as sites need them, so a pool larger than the sites
+  costs no more than one the same size. Worth it for a run that is slow because
+  of its own parsing, not otherwise. A site that shares a thread is still held
+  up by the other sites' parsing in it. A whole-document source that streams (a published
+  guide, `defineXmltvSite`) yields as it goes and rarely needs one. If it only
+  keeps a few of the guide's channels, it already steps over the rest.
+- **The config module is read again in every thread.** A thread cannot be
+  handed a site, because a site is functions, so it imports the config file and
+  finds its site by name. Whatever the module does when it is read happens once
+  more per thread. A config function runs again, so one that fetches a token
+  fetches it again. And anything two sites share at the top of the module, such
+  as one token or one rate limit, is no longer shared between threads.
+- **Threads are kept for the life of the process.** A thread reads the config
+  module once, when its first site arrives, and is reused by later runs, so
+  `epg serve` grabs every night with the code it started with, as it does
+  without threads. Edit the config, and restart it. A thread running nothing
+  does not keep a process from exiting.
+- **Only a config run from a file.** The `epg` command knows which file it
+  loaded. A program calling `build`, `runGrab` or `serveGuide` itself passes
+  `configModule`: a path or URL whose default export is the config. It must be
+  a module of its own, since every worker would otherwise run the calling
+  program again. `threads` without one fails before any site is asked for its
+  channels. A `tv_grab_*` shim runs its sites in one thread whatever the config
+  says, since a thread importing the config would not have the answers in the
+  shim's `.conf`.
+- **A channel's `data` must be plain values.** The channel lists settled before
+  the grab (by `--channels`, `cover` or `build`) are copied to the threads. A
+  copy of an instance of a class arrives without its methods, and a date
+  without the offset kept on it, so a site whose channel data holds one is
+  refused with a message rather than failing in every parse.
+- **Writes cost the main thread less, not more.** A thread encodes each
+  channel-day with the codec its store names and sends the bytes over, and the
+  main thread only stamps and saves them: 3.5ms for 3,500 programmes (2.6 MiB)
+  with the ndjson cache, the default, against 41 for the same write without
+  threads, and about the same for xmltv and memory. Sqlite saves less, 24ms
+  against 59. SQLite writes the bytes on the thread that holds the database,
+  once into its log and again when it checkpoints. A driver with a [codec of
+  its own](./api.md#epg-toolscache) is sent the programmes instead, since a
+  thread cannot be handed code, and the main thread encodes them itself:
+  half as much again as the same write without threads.
+
+What stays on the main thread: the cache, which every site's worker writes
+through, so there is still one writer and any driver works. Also the reporter,
+which hears each site's events as they happen; the channel lists, `cover` and
+`--channels` (settled before the sites start, and handed to each worker); and
+the merge. `localConcurrency` bounds the parsing in each thread, and the cache
+work of all of them together. `loopMaxMs` is the main thread's, so with threads
+it no longer counts what the sites' parsing costs.
+
+Cancelling a run with threads waits for each site to wind down — to finish the
+write it started, save its state and say what it did — so the summary it
+answers with is the whole of what reached the cache.
+
 ## Merge strategies
 
 When several sites cover the same `xmltvId` (site order in `sites` = priority):
@@ -1470,6 +1583,7 @@ leave two elements per programme, which is the one thing merging is for — so
 |---|---|---|
 | `startToleranceMs` | `300_000` | How far apart two starts may be and still be one broadcast. `0` matches the instant exactly. |
 | `titles` | `'when-shifted'` | When titles must agree: only for starts that differ (`when-shifted`), for every pair (`always`), or never (`never`). Titles are compared case- and accent-insensitively, with whitespace collapsed; nothing a programme carries is rewritten. |
+| `normalizeTitle` | the above | How a title is reduced before two are compared. For what a *provider* adds rather than how it spells things — `Správy` against `Správy TV`, `Film: Casablanca` against `Casablanca`. |
 
 A five-minute window is safe because a shifted pair has two more hurdles: it
 must agree on its title, and — when both sides say where they end — the shift
@@ -1479,13 +1593,37 @@ last rule is what keeps two same-titled three-minute clips apart however wide
 the tolerance is.
 
 Inside one source's own list none of this applies: two entries in a schedule are
-two broadcasts, and only entries naming the identical instant are pooled. For a
-source pair no option describes, pass a predicate instead:
+two broadcasts, and only entries naming the identical instant are pooled.
+
+**A title rule is the cheap fix.** Where two sources describe the same
+broadcast but one prefixes or suffixes its titles, `normalizeTitle` says so in
+a line and everything else — the tolerance, the duration guard — keeps working:
 
 ```ts
 merge: {
-  match: (a, b) => a.episodeNum?.[0]?.value === b.episodeNum?.[0]?.value,
+  match: { normalizeTitle: (title) => title.replace(/^film:\s*/i, '').toLowerCase() },
 }
+```
+
+For a source pair no option describes, pass a predicate — **with the window it
+needs**:
+
+```ts
+merge: {
+  match: {
+    windowMs: 600_000,
+    matches: (a, b) => a.episodeNum?.[0]?.value === b.episodeNum?.[0]?.value,
+  },
+}
+```
+
+A bare function still works and is asked about *every* programme on the
+channel, because a function that never said how far it looks might look
+anywhere. On a fortnight of listings that is every pair, which is where a
+custom matcher stops being quick — the window is what keeps the walk short.
+
+```ts
+merge: { match: (a, b) => … }   // correct, and linear in nothing
 ```
 
 ### Cleaning up the output

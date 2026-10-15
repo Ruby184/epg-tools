@@ -6,6 +6,7 @@ export {
   coverageOf,
   covered,
   defaultChannelInfo,
+  kyWith,
   resolveChannels,
   resolveSites,
   siteHttp,
@@ -18,6 +19,7 @@ export type {
   M3uChannelsOptions,
   M3uSkipReason,
 } from './channels.js';
+export type { SiteConnection } from './connection.js';
 export { defineM3uSite, guideUrlsFromM3u } from './m3u-source.js';
 export type { M3uSiteOptions } from './m3u-source.js';
 export { retryAfterMs, sitePacing } from './pacing.js';
@@ -78,3 +80,10 @@ export {
 export type { SplitXmltvOptions, XmltvDayZone } from './xmltv-document.js';
 export type { XmltvSiteOptions, XmltvUrlSource } from './xmltv-source.js';
 export type * from './types.js';
+/**
+ * What a parse is handed, as types — so a helper a site splits out can say
+ * what it takes. The builders themselves are values on `epg-tools/xmltv`;
+ * these are the types `ParseContext` next door is written in terms of, and
+ * having them anywhere else was the part that did not work.
+ */
+export type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from '../xmltv/builder.js';

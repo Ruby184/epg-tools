@@ -1,4 +1,5 @@
 import type { XmltvProgramme } from '../xmltv/types.js';
+import type { CacheCodec, CodecName } from './codec.js';
 
 /** Identifies one cached unit: programmes of one channel for one UTC day. */
 export interface ChannelDayKey {
@@ -149,10 +150,10 @@ export interface CacheStore {
 }
 
 /**
- * One programme as a driver that stores JSON keeps it: a plain object whose
- * dates are XMLTV strings rather than `Date`s, so neither the offset the source
- * wrote them in nor how precise it was is lost on the way through
- * `JSON.stringify`. Made and read back by {@link CacheDriverBase}'s record pair.
+ * One programme as a record: a plain object whose dates are XMLTV strings rather
+ * than `Date`s, so neither the offset the source wrote them in nor how precise it
+ * was is lost on the way through `JSON.stringify`. What the `json` and `ndjson`
+ * codecs keep, made and read back by `toRecord` and `fromRecord`.
  */
 export type StoredProgramme = Record<string, unknown>;
 
@@ -176,9 +177,12 @@ export interface FoundMeta {
   meta: Partial<StoredEntryMeta> | undefined;
 }
 
-/** An entry as a driver found it: what it says about itself, and its programmes. */
-export interface FoundEntry<T> extends FoundMeta {
-  programmes: T[];
+/**
+ * An entry as a driver found it: what it says about itself, and its
+ * programmes as the bytes the driver's codec reads — see {@link CacheDriver.codec}.
+ */
+export interface FoundEntry extends FoundMeta {
+  body: Uint8Array;
 }
 
 /**
@@ -206,19 +210,22 @@ export interface FoundState {
  * {@link CacheManager} it is given to, which is what makes writing one of these
  * a small job.
  *
- * A driver reads and writes programmes in whatever form it keeps them —
- * `TStored`, which only it knows about — and says how one is made and read back
- * with {@link toStored} and {@link fromStored}. The manager is what calls those,
- * at the two moments they are needed, so no driver has to remember to. What they
- * do is a driver's own business, and {@link CacheDriverBase} — where a new
- * driver should start — has already answered it: JSON with the dates in XMLTV
- * form, so the offset and the precision they came with survive.
+ * It keeps bytes. What they say is its {@link codec}'s, and the manager is what
+ * encodes and decodes, at the two moments a programme crosses into the store
+ * and back — so a driver never builds a programme, and never has to remember
+ * the dates its records keep in XMLTV form so their offsets survive.
  */
-export interface CacheDriver<TStored = unknown> {
-  /** One programme as this driver keeps it. */
-  toStored(programme: XmltvProgramme): TStored;
-  /** The programme one stored thing stands for. */
-  fromStored(stored: TStored): XmltvProgramme;
+export interface CacheDriver {
+  /**
+   * What makes this driver's bytes: one of `CODECS` by name — `'json'` for
+   * most stores — or a codec of its own.
+   *
+   * A name is also what lets a site in a thread of its own encode a
+   * channel-day for this store itself, so the main thread only saves it. A
+   * codec of a driver's own is code no thread has, so such a store is handed
+   * programmes, and encodes them, on the main thread.
+   */
+  readonly codec: CodecName | CacheCodec;
   /**
    * What one entry says about itself, without its programmes.
    *
@@ -236,14 +243,22 @@ export interface CacheDriver<TStored = unknown> {
    * across a network — asking once for a channel's whole window instead of
    * fourteen times is the difference between a fast sweep and a slow one.
    *
-   * {@link CacheDriverBase} implements it by asking {@link readMeta} for each
-   * key in turn, so a driver only overrides it if its store can do better.
-   * Optional here, so a driver written from scratch need not have it: the
-   * manager asks one at a time when it is missing.
+   * Optional, so a driver written from scratch need not have it: the manager
+   * asks {@link readMeta} one key at a time when it is missing.
    */
   readMetas?(keys: readonly ChannelDayKey[]): Promise<Array<FoundMeta | undefined>>;
-  read(key: ChannelDayKey): Promise<FoundEntry<TStored> | undefined>;
-  write(key: ChannelDayKey, programmes: TStored[], meta: StoredEntryMeta): Promise<void>;
+  /** One entry: its meta, and the bytes {@link write} was given for it. */
+  read(key: ChannelDayKey): Promise<FoundEntry | undefined>;
+  /**
+   * Keep these bytes for this channel-day, with its meta — as they are: they
+   * may be what a thread encoded and handed over, and keeping them unchanged is
+   * what spares the main thread the work.
+   *
+   * The buffer may be larger than the view: an encoder allocates for the worst
+   * case. A driver that holds on to the bytes, rather than writing them out,
+   * keeps a copy of the view.
+   */
+  write(key: ChannelDayKey, body: Uint8Array, meta: StoredEntryMeta): Promise<void>;
   delete(key: ChannelDayKey): Promise<void>;
   /** Remove entries for days before `before` (`YYYY-MM-DD`). Returns removed count. */
   prune(options: { before: string }): Promise<number>;

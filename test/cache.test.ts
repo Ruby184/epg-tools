@@ -4,9 +4,9 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CACHE_SCHEMA,
-  CacheDriverBase,
   CacheManager,
   DEFAULT_STALENESS,
+  type FsCacheDriver,
   FsNdjsonCacheDriver,
   FsXmltvCacheDriver,
   MemoryCacheDriver,
@@ -27,7 +27,13 @@ import type {
   StoredProgramme,
   StoredStateMeta,
 } from '../src/cache/main.js';
-import { getXmltvOffset, getXmltvPrecision, parseXmltvString } from '../src/xmltv/main.js';
+import { CODECS, type CacheCodec, type CodecName } from '../src/cache/codec.js';
+import {
+  getXmltvOffset,
+  getXmltvPrecision,
+  parseXmltvDate,
+  parseXmltvString,
+} from '../src/xmltv/main.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 
 /**
@@ -189,7 +195,7 @@ describe('a cache of ndjson files, cancelled', () => {
     // so a cancelled run has to stop inside that loop, not merely before it.
     class Counting extends FsNdjsonCacheDriver {
       protected override async parseMeta(
-        chunks: AsyncIterable<string>,
+        chunks: AsyncIterable<Uint8Array>,
       ): Promise<Partial<CacheEntryMeta> | undefined> {
         for await (const _chunk of chunks) {
           taken++;
@@ -588,7 +594,7 @@ describe('a cache of xmltv files', () => {
     // through `entryData` because `write` builds the meta itself.
     class Exposed extends FsXmltvCacheDriver {
       data(meta: StoredEntryMeta): string {
-        return this.entryData([programme()], meta);
+        return Buffer.concat(this.entry(CODECS.xmltv.encode([programme()]), meta)).toString();
       }
     }
 
@@ -798,8 +804,9 @@ describe('CacheManager', () => {
    * what a driver written outside this package looks like. What it holds is
    * exactly what it was given, so a test can read it, or spoil it.
    */
-  class RecordingDriver extends CacheDriverBase implements CacheDriver<StoredProgramme> {
-    readonly entries = new Map<string, { meta: StoredEntryMeta; programmes: StoredProgramme[] }>();
+  class RecordingDriver implements CacheDriver {
+    readonly codec = 'json' as const;
+    readonly entries = new Map<string, { meta: StoredEntryMeta; body: Uint8Array }>();
     /** What each site remembers, by `site|key`, for a test to read or to spoil. */
     readonly groups = new Map<string, { meta: Partial<StoredStateMeta>; data: unknown }>();
     deletes: string[] = [];
@@ -811,8 +818,13 @@ describe('CacheManager', () => {
     }
 
     /** What the store holds for a key, for a test to read or to spoil. */
-    stored(key: ChannelDayKey): { meta: StoredEntryMeta; programmes: StoredProgramme[] } {
+    stored(key: ChannelDayKey): { meta: StoredEntryMeta; body: Uint8Array } {
       return this.entries.get(this.#id(key))!;
+    }
+
+    /** The records the bytes for a key hold, as the `json` codec wrote them. */
+    records(key: ChannelDayKey): StoredProgramme[] {
+      return JSON.parse(new TextDecoder().decode(this.stored(key).body)) as StoredProgramme[];
     }
 
     async readMeta(key: ChannelDayKey): Promise<FoundMeta | undefined> {
@@ -821,16 +833,12 @@ describe('CacheManager', () => {
       return entry && { meta: entry.meta };
     }
 
-    async read(key: ChannelDayKey): Promise<FoundEntry<StoredProgramme> | undefined> {
+    async read(key: ChannelDayKey): Promise<FoundEntry | undefined> {
       return this.entries.get(this.#id(key));
     }
 
-    async write(
-      key: ChannelDayKey,
-      programmes: StoredProgramme[],
-      meta: StoredEntryMeta,
-    ): Promise<void> {
-      this.entries.set(this.#id(key), { meta, programmes });
+    async write(key: ChannelDayKey, body: Uint8Array, meta: StoredEntryMeta): Promise<void> {
+      this.entries.set(this.#id(key), { meta, body });
     }
 
     async delete(key: ChannelDayKey): Promise<void> {
@@ -877,7 +885,8 @@ describe('CacheManager', () => {
 
     // Nothing the driver holds is a `Date`: neither the offset nor the precision
     // would have survived `JSON.stringify`, so the record keeps the XMLTV form.
-    const [record] = driver.stored(key).programmes;
+    // A driver that names `json` keeps exactly what that codec wrote.
+    const [record] = driver.records(key);
 
     expect(record!.start).toBe('20260807203000 +0200');
     expect(record!.date).toBe('2020');
@@ -1414,7 +1423,7 @@ describe.skipIf(sqlite === undefined)('SqliteCacheDriver', () => {
     // sharing the cache.
     const { DatabaseSync } = await import('node:sqlite');
     const db = new DatabaseSync(file);
-    db.exec("UPDATE entries SET programmes = 'not json at all'");
+    db.exec("UPDATE entries SET programmes = CAST('not json at all' AS BLOB)");
     db.close();
 
     await using store = cache(new SqliteCacheDriver({ dir }));
@@ -1559,4 +1568,152 @@ describe('isStale with refetchAll', () => {
     expect(isStale('2026-07-15', fresh, wide, now)).toBe(false);
     expect(isStale('2026-07-15', fresh, policy, now)).toBe(true);
   });
+});
+
+describe('a channel-day a thread encoded for its store', () => {
+  // How a site in a thread of its own hands its programmes over to a store
+  // that names a codec: encoded already, for the main thread only to save.
+  // What comes out must be what writing the programmes would have kept.
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'epg-cache-encoded-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
+  const grabbedAt = '2026-07-17T12:00:00.000Z';
+
+  /** Two programmes carrying what an encoding has to keep: an offset, and a year. */
+  const offered = (): XmltvProgramme[] => [
+    programme({
+      start: parseXmltvDate('20260717200000 +0200'),
+      stop: parseXmltvDate('20260717210000 +0200'),
+      date: parseXmltvDate('2020'),
+    }),
+    programme({
+      start: parseXmltvDate('20260717210000 +0200'),
+      title: [{ value: 'Neskoro', lang: 'sk' }],
+    }),
+  ];
+
+  const drivers: Array<[string, () => CacheDriver]> = [
+    ['ndjson', () => new FsNdjsonCacheDriver({ dir })],
+    ['xmltv', () => new FsXmltvCacheDriver({ dir })],
+    ['memory', () => new MemoryCacheDriver()],
+    ...(sqlite === undefined
+      ? []
+      : ([['sqlite', () => new sqlite.SqliteCacheDriver({ dir })]] as Array<
+          [string, () => CacheDriver]
+        >)),
+  ];
+
+  for (const [name, make] of drivers) {
+    it(`reads back from the ${name} driver what writing programmes would have kept`, async () => {
+      const store = cache(make());
+      const encoded = { ...key, channelId: 'two' };
+      const codec = store.codecName!;
+
+      await store.write(key, offered(), { grabbedAt });
+      await store.writeEncoded(encoded, CODECS[codec].encode(offered()), 2, { grabbedAt });
+
+      const read = await store.read(encoded);
+
+      expect(read).toEqual(await store.read(key));
+      expect(getXmltvOffset(read![0]!.start)).toBe(120);
+      expect(getXmltvPrecision(read![0]!.date!)).toBe(4);
+      expect((await store.getMeta(encoded))?.programmeCount).toBe(2);
+    });
+  }
+
+  it('writes the same ndjson file, byte for byte, as programmes would have', async () => {
+    const store = ndjson({ dir });
+    const file = path.join(dir, 'example.com', 'one', '2026-07-17.ndjson');
+
+    await store.write(key, offered(), { grabbedAt });
+
+    const written = await fs.readFile(file, 'utf8');
+
+    await store.writeEncoded(key, CODECS.ndjson.encode(offered()), 2, { grabbedAt });
+
+    expect(await fs.readFile(file, 'utf8')).toBe(written);
+  });
+
+  it('keeps with a codec a driver brings, and names none for a thread', async () => {
+    // A codec that leaves descriptions out: code no thread has, so the store
+    // names none, and is only ever handed programmes.
+    const brief: CacheCodec = {
+      encode: (programmes) =>
+        CODECS.json.encode(programmes.map(({ desc: _desc, ...kept }) => kept as XmltvProgramme)),
+      decode: (body) => CODECS.json.decode(body),
+    };
+
+    class Brief extends MemoryCacheDriver {
+      override readonly codec = brief;
+    }
+
+    const store = cache(new Brief());
+
+    await store.write(key, [programme({ desc: [{ value: 'Long.' }] })], { grabbedAt });
+
+    expect((await store.read(key))?.[0]?.desc).toBeUndefined();
+    expect(store.codecName).toBeUndefined();
+    await expect(store.writeEncoded(key, new Uint8Array(), 0)).rejects.toThrow('write programmes');
+  });
+
+  it('refuses a codec it has no name for', () => {
+    class Unheard extends MemoryCacheDriver {
+      override readonly codec = 'yaml' as never;
+    }
+
+    expect(() => cache(new Unheard())).toThrow(
+      "A cache driver's codec is one of ndjson, json, xmltv",
+    );
+  });
+});
+
+describe('a meta longer than one read', () => {
+  // A meta is read from the front of an entry in chunks of bytes, each read into
+  // the buffer the last one used, and a chunk ends wherever the read did —
+  // inside a character, as often as not. What the meta is decoded from has to
+  // be every chunk as it was read, and the character put back together.
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'epg-cache-meta-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  const key = { site: 'example.com', channelId: 'one', day: '2026-07-17' };
+
+  const drivers: Array<[CodecName, (options: FsCacheDriverOptions) => FsCacheDriver]> = [
+    ['ndjson', (options) => new FsNdjsonCacheDriver(options)],
+    ['xmltv', (options) => new FsXmltvCacheDriver(options)],
+  ];
+
+  for (const [codec, make] of drivers) {
+    it(`reads back whole from the ${codec} driver, however the reads fall`, async () => {
+      const driver = make({ dir });
+
+      // Three-byte characters, a few thousand bytes of them, from each of three
+      // starting points: one of those puts a read's end inside one.
+      for (const lead of ['', 'a', 'aa']) {
+        const meta = {
+          ...stamped({ grabbedAt: '2026-07-17T12:00:00.000Z', programmeCount: 1 }),
+          note: `${lead}${'€'.repeat(1500)}`,
+        };
+
+        await driver.write(key, CODECS[codec].encode([programme()]), meta);
+
+        expect((await driver.readMeta(key))?.meta).toEqual(meta);
+        expect((await driver.read(key))?.meta).toEqual(meta);
+      }
+    });
+  }
 });

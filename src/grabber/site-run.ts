@@ -13,7 +13,8 @@
  * - **`pipelines`** (per site) bounds how many responses this site has in hand
  *   at once: fetched, and not yet written.
  * - **`localWork`** (per run) bounds what never leaves the machine — the
- *   staleness sweep, and parsing a channel-day and writing it.
+ *   staleness sweep, and parsing a channel-day and writing it. A parse waiting
+ *   on a request of its own is not that, and gives its slot up meanwhile.
  * - **`sites`** (per run, in {@link grab}) is how many sites go at once.
  */
 
@@ -26,6 +27,7 @@ import { ProgrammeBuilder } from '../xmltv/builder.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import { resolveChannels } from './channels.js';
 import { parseContext, requestContext, streamContext, type ContextDeps } from './context.js';
+import { LocalSlot } from './local-slot.js';
 import { sitePacing } from './pacing.js';
 import { planRequests, type Pair, type Request } from './planner.js';
 import {
@@ -615,11 +617,14 @@ export class SiteRun {
   /**
    * Parse one channel-day out of the payload and cache it.
    *
-   * Queued on `localWork`: `parseDay` is the site's own code and the write is a
+   * On a `localWork` slot: `parseDay` is the site's own code and the write is a
    * file, so a wide response must not put every one of its channel-days through
    * both at once. Ahead of the sweep in the queue, because a response already in
    * hand is held in memory until it is written, while a staleness check only
    * discovers more work to do.
+   *
+   * Except while the parse waits on a request of its own, which is neither —
+   * see {@link LocalSlot}.
    */
   #store(
     config: SiteConfig<any, BatchingOption, any>,
@@ -627,25 +632,22 @@ export class SiteRun {
     day: string,
     payload: unknown,
   ): Promise<void> {
-    const { enqueue, localWork } = this.#run;
+    const { enqueue, localWork, signal } = this.#run;
+    const slot = new LocalSlot(localWork, enqueue, 1);
 
-    return enqueue(
-      localWork,
-      async ({ signal: taskSignal }) => {
-        const parsed = await config.parseDay(
-          parseContext(channel, day, payload, {
-            ...this.#deps(taskSignal),
-            // A request of the parse's own goes through the site's queue, like
-            // the request being parsed did — ahead of the planned ones, so a
-            // channel-day in hand is finished rather than joined by another.
-            paced: (task) => this.#sending(task, { priority: 1 }),
-          }),
-        );
+    return slot.hold(async () => {
+      const parsed = await config.parseDay(
+        parseContext(channel, day, payload, {
+          ...this.#deps(signal),
+          // A request of the parse's own goes through the site's queue, like
+          // the request being parsed did — ahead of the planned ones, so a
+          // channel-day in hand is finished rather than joined by another.
+          paced: (task) => slot.away(() => this.#sending(task, { priority: 1 })),
+        }),
+      );
 
-        await this.#persist(channel, day, parsed, taskSignal);
-      },
-      { priority: 1 },
-    );
+      await this.#persist(channel, day, parsed, signal);
+    });
   }
 
   /** The same, for a channel-day a stream has already worked out. */

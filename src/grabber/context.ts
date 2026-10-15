@@ -156,6 +156,10 @@ export function parseContext<TRaw>(
         start,
         title,
         ...(channel.lang === undefined ? {} : { lang: channel.lang }),
+        // The site's own `warn`, which is what lets a bad optional field be
+        // left out and said rather than take the programme with it. A caller
+        // can still pass its own through `options`.
+        warn: (message) => deps.says.warn(`${channel.xmltvId} ${day}: ${message}`),
         ...options,
       }),
   };

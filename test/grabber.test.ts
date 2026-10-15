@@ -381,6 +381,58 @@ describe('grab', () => {
     expect(written!.meta.grabbedAt).toBe(NOW.toISOString());
   });
 
+  it('keeps a programme whose optional field it could not read, and says so', async () => {
+    // A source that gives a usable programme and an unusable `date` has given
+    // a usable programme. Losing the listing over the one field it could have
+    // been written without is the wrong trade — and the field going quietly
+    // would be worse than either.
+    const cache = new MemoryCache();
+    const said: string[] = [];
+
+    const config = makeConfig({
+      parseDay({ programme, day }) {
+        return [
+          programme(new Date(`${day}T06:00:00.000Z`), 'Ranné správy')
+            .date('20')
+            .stop('nope')
+            .desc('Prehľad dňa'),
+        ];
+      },
+    });
+
+    const summary = await grab([config], {
+      cache,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'site:warning') {
+          said.push(event.message);
+        }
+      },
+    });
+
+    expect(summary.fetched).toBe(1);
+    expect(summary.failed).toBe(0);
+
+    const written = cache.get({
+      site: 'example.com',
+      channelId: 'one.example',
+      day: TODAY,
+    })!.programmes;
+
+    // The programme is there, with everything that could be read.
+    expect(written).toHaveLength(1);
+    expect(written[0]!.title).toEqual([{ value: 'Ranné správy' }]);
+    expect(written[0]!.desc).toEqual([{ value: 'Prehľad dňa' }]);
+    expect(written[0]!.date).toBeUndefined();
+    expect(written[0]!.stop).toBeUndefined();
+
+    // And both omissions were said, naming the channel-day and the field.
+    expect(said).toHaveLength(2);
+    expect(said[0]).toContain(`one.example ${TODAY}: date:`);
+    expect(said[0]).toContain('left out');
+    expect(said[1]).toContain('stop:');
+  });
+
   it('parses with a builder bound to the channel and its language', async () => {
     const cache = new MemoryCache();
 
@@ -393,6 +445,7 @@ describe('grab', () => {
             .stop(new Date(`${day}T07:00:00.000Z`))
             .desc('Prehľad dňa')
             .category('news')
+            .country('US')
             .episode(3, 2),
           programme(new Date(`${day}T20:00:00.000Z`), 'Film', { lang: 'en' }).new(),
         ];
@@ -412,6 +465,10 @@ describe('grab', () => {
     expect(written[0]!.title).toEqual([{ value: 'Ranné správy', lang: 'sk' }]);
     expect(written[0]!.desc).toEqual([{ value: 'Prehľad dňa', lang: 'sk' }]);
     expect(written[0]!.category).toEqual([{ value: 'news', lang: 'sk' }]);
+    // Not the channel's language: a country is a code, and `lang="sk"` on one
+    // claims `US` is Slovak prose. The elements that carry words take the
+    // default; the one that carries a code does not.
+    expect(written[0]!.country).toEqual([{ value: 'US' }]);
     expect(written[0]!.stop?.toISOString()).toBe(`${TODAY}T07:00:00.000Z`);
     // `.episode(3, 2)` is episode 3 of season 2, in both systems the builder emits.
     expect(written[0]!.episodeNum).toEqual([
@@ -1016,6 +1073,56 @@ describe('grab', () => {
     expect(seen?.signal?.aborted).toBe(true);
   });
 
+  it('says when a run’s own parsing is why every source looked slow', async () => {
+    // The failure this exists to end: `parseDay` is the site's own code on the
+    // main thread, so while it works through a big document nothing else runs
+    // — including the reads that finish *other* sites' requests. Every source
+    // is then measured as slow at once, which reads as a network problem and
+    // is not one.
+    const cache = new MemoryCache();
+    let loopMaxMs = -1;
+
+    const config = makeConfig({
+      days: 1,
+      // Answered at once, so the parse starts before the monitor would have
+      // sampled for the first time if the run did not wait for it to: a block
+      // before the first sample is one it never sees, and this one read as
+      // a few milliseconds that way.
+      async request() {
+        return {};
+      },
+      parseDay({ channel, day, programme }) {
+        const until = Date.now() + 1200;
+
+        while (Date.now() < until) {
+          // A parse that never yields, as a synchronous one does not.
+        }
+
+        return [programme(new Date(`${day}T06:00:00.000Z`), channel.xmltvId)];
+      },
+    });
+
+    const report = collect();
+
+    await grab([config], {
+      cache,
+      now: NOW,
+      reporter: (event) => {
+        report.reporter(event);
+
+        if (event.type === 'grab:done') {
+          loopMaxMs = event.loopMaxMs;
+        }
+      },
+    });
+
+    // The parse held the loop for over a second, and the summary says so in
+    // the one place somebody reading request times will see it.
+    expect(loopMaxMs).toBeGreaterThanOrEqual(1000);
+    expect(report.messages.at(-1)).toContain('blocked for up to');
+    expect(report.messages.at(-1)).toContain("this run's own parsing");
+  });
+
   it('counts what a site asked for, a parse’s own requests included', async () => {
     // Counted at the queue rather than off the `request:*` events, which is the
     // difference this asserts: a parse's fetch takes a slot and is a request to
@@ -1281,6 +1388,86 @@ describe('grab', () => {
 
     expect(summary.fetched).toBe(24);
     expect(cache.max).toBe(3);
+  });
+
+  it('lets another site parse while one waits on requests its parses made', async () => {
+    // The starvation this ends: a parse that fetches details through `paced`
+    // held its `localWork` slot for the whole wait, so a site making detail
+    // calls for a wide response filled every slot in the run, and another
+    // site's parses — however cheap — queued behind its pacing. A consumer
+    // measured a site with two sub-second requests finishing after 170s.
+    //
+    // Ordered rather than timed: the detail calls wait on a gate that only
+    // the other site finishing opens. Holding the slots through the wait, that
+    // is a deadlock, which the fallback breaks so the order can say so.
+    class CountingCache extends MemoryCache {
+      writing = 0;
+      maxWriting = 0;
+
+      override async write(key: ChannelDayKey, programmes: XmltvProgramme[]): Promise<void> {
+        this.writing++;
+        this.maxWriting = Math.max(this.maxWriting, this.writing);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        this.writing--;
+
+        return super.write(key, programmes);
+      }
+    }
+
+    const cache = new CountingCache();
+    const order: string[] = [];
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const fallback = setTimeout(() => {
+      order.push('fallback');
+      open();
+    }, 2000);
+
+    const detailed = makeBatchConfig({
+      site: 'detailed.example',
+      concurrency: 4,
+      channels: ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'].map(channel),
+      async parseDay({ day, paced }) {
+        await Promise.all([paced(() => gate), paced(() => gate)]);
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+    const plain = makeBatchConfig({
+      site: 'plain.example',
+      // After the detailed site's parses have taken the slots, which is the
+      // case that matters: not first in the queue, but behind the waiting.
+      async request({ channels }) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        return { items: channels.map((c) => ({ id: c.siteId })) } satisfies BatchData;
+      },
+    });
+
+    const summary = await grab([detailed, plain], {
+      cache,
+      now: NOW,
+      localConcurrency: 4,
+      reporter: (event) => {
+        if (event.type === 'site:done') {
+          order.push(event.site);
+
+          if (event.site === 'plain.example') {
+            open();
+          }
+        }
+      },
+    });
+
+    clearTimeout(fallback);
+
+    expect(summary.fetched).toBe(11);
+    expect(order).toEqual(['plain.example', 'detailed.example']);
+    // Every detailed parse came back from its wait at once, and each took a
+    // slot back before writing: the bound on files still holds.
+    expect(cache.maxWriting).toBeLessThanOrEqual(4);
   });
 
   it('runs two sites in parallel under the site queue', async () => {

@@ -11,11 +11,12 @@
  * listing it has — including a site dropped from the config, whose directory
  * stays behind holding nothing else.
  *
- * Where a driver puts entries and what it keeps them *as* are separate
+ * Where a driver puts entries and what an entry looks like are separate
  * problems, so the second one belongs to a subclass: `FsNdjsonCacheDriver` and
- * `FsXmltvCacheDriver` say what one entry is — including where its meta goes —
- * and everything else, the layout and cancellation and deleting and pruning, is
- * the same either way and lives here. Which is also what keeps the xmltv module
+ * `FsXmltvCacheDriver` say how an entry's bytes are framed with its meta, and
+ * name the codec that makes those bytes — and everything else, the layout and
+ * cancellation and deleting and pruning, is the same either way and lives
+ * here. Which is also what keeps the xmltv module
  * out of a run that does not use it: the driver that needs it is the one that
  * imports it.
  *
@@ -26,7 +27,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { writeFileAtomic } from '../core/atomic.js';
-import { CacheDriverBase } from './driver.js';
+import type { CacheCodec, CodecName } from './codec.js';
 import type {
   CacheDriver,
   ChannelDayKey,
@@ -35,7 +36,6 @@ import type {
   FoundState,
   FsCacheDriverOptions,
   StoredEntryMeta,
-  StoredProgramme,
   StoredStateMeta,
 } from './types.js';
 
@@ -57,35 +57,35 @@ const PRUNE_CONCURRENCY = 8;
  */
 const READ_CHUNK = 2048;
 
-export abstract class FsCacheDriver<TStored = StoredProgramme>
-  extends CacheDriverBase<TStored>
-  implements CacheDriver<TStored>
-{
+export abstract class FsCacheDriver implements CacheDriver {
   protected readonly dir: string;
   protected readonly signal: AbortSignal | undefined;
 
   constructor(options: FsCacheDriverOptions) {
-    super();
     this.dir = options.dir;
     this.signal = options.signal;
   }
+
+  abstract readonly codec: CodecName | CacheCodec;
 
   /** The extension one entry is written with, without the dot. */
   protected abstract get extension(): string;
 
   /**
-   * What one entry holds — written atomically, here. An entry carries its own
-   * meta, so a format has to have somewhere to put it.
+   * What one entry's file holds, in the order it is written — atomically,
+   * here. An entry carries its own meta, so a format has to have somewhere to
+   * put it; and pieces rather than one buffer, so the body goes out as it came
+   * rather than being copied in behind its meta first.
    */
-  protected abstract entryData(programmes: TStored[], meta: StoredEntryMeta): string;
+  protected abstract entry(body: Uint8Array, meta: StoredEntryMeta): Uint8Array[];
 
   /**
-   * What one entry held: its programmes, and what it says about itself. The file
-   * is read out here, and the meta comes along because the read has it in hand
-   * — a second pass to find something already in front of us would be work for
+   * What one entry's file held: what it says about itself, and the bytes its
+   * codec reads. The meta comes along because the read has it in hand — a
+   * second pass to find something already in front of us would be work for
    * nothing.
    */
-  protected abstract parseEntry(content: string): FoundEntry<TStored>;
+  protected abstract parseEntry(content: Buffer): FoundEntry | Promise<FoundEntry>;
 
   /**
    * The meta an entry begins with, read from the front of it — or nothing, when
@@ -96,9 +96,15 @@ export abstract class FsCacheDriver<TStored = StoredProgramme>
    * rather than the whole of it to read. Taking one chunk and stopping is the
    * ordinary case; taking more is what makes the front of an entry however long
    * it needs to be.
+   *
+   * Bytes, as they were read, and a chunk is good until the next is asked for:
+   * every read goes into the same buffer, so one worth keeping past that is
+   * copied. A chunk ends wherever the read did, a character's bytes included,
+   * so what turns them into text has to see the next chunk before the end of
+   * this one — a streaming decoder, or one decode of the chunks joined.
    */
   protected abstract parseMeta(
-    chunks: AsyncIterable<string>,
+    chunks: AsyncIterable<Uint8Array>,
   ): Promise<Partial<StoredEntryMeta> | undefined>;
 
   /**
@@ -165,21 +171,15 @@ export abstract class FsCacheDriver<TStored = StoredProgramme>
   }
 
   /**
-   * An open file as text, a chunk at a time and none of it before it is asked
-   * for.
+   * An open file, a chunk at a time and none of it before it is asked for.
    *
    * Node has readier tools for this — a `ReadStream` iterates chunks too — but a
    * stream is a heavy object to build per file, and this is the hottest thing a
    * cache does: 2,000 of these cost 178ms against a stream's 262ms, and against
    * 236ms for reading whole entries that only the front of is wanted.
-   *
-   * The decoder is what makes chunking at arbitrary byte counts safe: a
-   * character split across two reads is held until the rest of it arrives,
-   * rather than becoming a replacement one.
    */
-  async *#chunksOf(handle: fs.FileHandle): AsyncGenerator<string> {
+  async *#chunksOf(handle: fs.FileHandle): AsyncGenerator<Uint8Array> {
     const buffer = Buffer.allocUnsafe(READ_CHUNK);
-    const decoder = new TextDecoder();
     let position = 0;
 
     while (true) {
@@ -196,7 +196,7 @@ export abstract class FsCacheDriver<TStored = StoredProgramme>
       }
 
       position += bytesRead;
-      yield decoder.decode(buffer.subarray(0, bytesRead), { stream: true });
+      yield buffer.subarray(0, bytesRead);
     }
   }
 
@@ -259,9 +259,12 @@ export abstract class FsCacheDriver<TStored = StoredProgramme>
     }
   }
 
-  async read(key: ChannelDayKey): Promise<FoundEntry<TStored> | undefined> {
+  async read(key: ChannelDayKey): Promise<FoundEntry | undefined> {
+    let content: Buffer;
+
     try {
-      return this.parseEntry(await fs.readFile(this.#entryFilePath(key), this.readOptions()));
+      // Bytes, not text: what the codec reads, decoded once and by it.
+      content = await fs.readFile(this.#entryFilePath(key), { signal: this.signal });
     } catch (error) {
       if (this.#isNotFound(error)) {
         return;
@@ -269,13 +272,15 @@ export abstract class FsCacheDriver<TStored = StoredProgramme>
 
       throw error;
     }
+
+    return this.parseEntry(content);
   }
 
-  async write(key: ChannelDayKey, programmes: TStored[], meta: StoredEntryMeta): Promise<void> {
+  async write(key: ChannelDayKey, body: Uint8Array, meta: StoredEntryMeta): Promise<void> {
     // One file, so an entry is either there with its meta or not there at all:
     // two writes left a window where it had already been written and could not
     // yet be told apart from one that had never been grabbed.
-    await this.#writeFile(this.#entryFilePath(key), this.entryData(programmes, meta));
+    await this.#writeFile(this.#entryFilePath(key), this.entry(body, meta));
   }
 
   /**
@@ -293,7 +298,7 @@ export abstract class FsCacheDriver<TStored = StoredProgramme>
    * Asked before making anything, so that a write cancelled in the moment
    * between the two leaves no directory behind either.
    */
-  async #writeFile(file: string, data: string): Promise<void> {
+  async #writeFile(file: string, data: string | Iterable<Uint8Array>): Promise<void> {
     try {
       await writeFileAtomic(file, data, this.signal);
     } catch (error) {

@@ -59,6 +59,7 @@ import {
   type SchedulesDirectMapOptions,
   type SchedulesDirectStation,
 } from './map.js';
+import { kyWith } from '../channels.js';
 import { schedulesDirectPass } from './stream.js';
 import type { WireAccountLineup, WireLineupChange } from './wire.js';
 
@@ -435,7 +436,10 @@ export function defineSchedulesDirectSite(
     // skips them, so a day is as long as this may go unverified.
     cacheChannels: { maxAgeDays: 1 },
     ...site,
-    ky: { ...site.ky, hooks: schedulesDirectHooks(site.ky?.hooks) },
+    ky: kyWith(site.ky, (existing) => ({
+      ...existing,
+      hooks: schedulesDirectHooks(existing?.hooks),
+    })),
 
     /**
      * The station's own extras, composed with a caller's `channelInfo` rather

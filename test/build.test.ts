@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,6 +8,7 @@ import { gunzip as gunzipCallback } from 'node:zlib';
 import { describe, expect, it, vi } from 'vitest';
 import { build, createCacheStore, guideStream, runGrab, runMerge } from '../src/build.js';
 import { CacheManager, FsNdjsonCacheDriver } from '../src/cache/main.js';
+import type { EpgEventMap } from '../src/core/events.js';
 import type { ChannelDayKey, StoredEntryMeta } from '../src/cache/main.js';
 import { defineConfig, type EpgConfig } from '../src/config.js';
 import { parseXmltvString } from '../src/xmltv/main.js';
@@ -569,6 +571,20 @@ describe("cover: 'first'", () => {
   });
 });
 
+describe('what a config asked to be told', () => {
+  it('reaches the emitter through a library run, not only the command', async () => {
+    const dir = await tempDir();
+    const heard: string[] = [];
+    const events = new EventEmitter<EpgEventMap>();
+
+    events.on('grab:done', (event) => heard.push(`done ${String(event.fetched)}`));
+
+    await runGrab({ ...config(dir), events }, { now: NOW });
+
+    expect(heard).toEqual(['done 1']);
+  });
+});
+
 describe('the cache a config describes', () => {
   /** A driver that counts what a run asked of it, and whether it was let go of. */
   class CountingDriver extends FsNdjsonCacheDriver {
@@ -577,11 +593,11 @@ describe('the cache a config describes', () => {
 
     override async write(
       key: ChannelDayKey,
-      programmes: string[],
+      body: Uint8Array,
       meta: StoredEntryMeta,
     ): Promise<void> {
       this.writes++;
-      await super.write(key, programmes, meta);
+      await super.write(key, body, meta);
     }
 
     async close(): Promise<void> {

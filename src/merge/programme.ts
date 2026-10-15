@@ -5,7 +5,12 @@ import type {
   XmltvTextValue,
   XmltvUrlValue,
 } from '../xmltv/types.js';
-import type { ProgrammeMatch, ProgrammeMatcher, ProgrammeStrategy } from './types.js';
+import type {
+  ProgrammeMatch,
+  ProgrammeMatcher,
+  ProgrammeStrategy,
+  WindowedMatcher,
+} from './types.js';
 
 /**
  * How two programmes are paired up when nothing says otherwise: five minutes
@@ -15,6 +20,7 @@ import type { ProgrammeMatch, ProgrammeMatcher, ProgrammeStrategy } from './type
 export const DEFAULT_MATCH: Required<ProgrammeMatch> = {
   startToleranceMs: 300_000,
   titles: 'when-shifted',
+  normalizeTitle,
 };
 
 /** Union two optional arrays, keeping first occurrence per dedup key. */
@@ -258,10 +264,14 @@ export function normalizeTitle(value: string): string {
 }
 
 /** Do these two programmes share a title, in any language either offers? */
-export function titlesMatch(a: XmltvProgramme, b: XmltvProgramme): boolean {
-  const titles = new Set(a.title.map((title) => normalizeTitle(title.value)));
+export function titlesMatch(
+  a: XmltvProgramme,
+  b: XmltvProgramme,
+  normalize: (title: string) => string = normalizeTitle,
+): boolean {
+  const titles = new Set(a.title.map((title) => normalize(title.value)));
 
-  return b.title.some((title) => titles.has(normalizeTitle(title.value)));
+  return b.title.some((title) => titles.has(normalize(title.value)));
 }
 
 /** How long a programme runs, when it says where it ends. */
@@ -290,12 +300,21 @@ export interface ResolvedMatch {
  * one's own passes through with no reach to speak of — only it knows what it
  * pairs up, so every candidate is offered to it.
  */
-export function resolveMatch(match?: ProgrammeMatch | ProgrammeMatcher): ResolvedMatch {
+export function resolveMatch(
+  match?: ProgrammeMatch | ProgrammeMatcher | WindowedMatcher,
+): ResolvedMatch {
   if (typeof match === 'function') {
+    // Everything, because a function that never said how far it looks might
+    // look anywhere — and the cost of that is in `WindowedMatcher`, which is
+    // how a matcher says.
     return { windowMs: Number.POSITIVE_INFINITY, matches: match };
   }
 
-  const { startToleranceMs, titles } = { ...DEFAULT_MATCH, ...match };
+  if (match !== undefined && 'matches' in match) {
+    return { windowMs: match.windowMs, matches: match.matches };
+  }
+
+  const { startToleranceMs, titles, normalizeTitle: normalize } = { ...DEFAULT_MATCH, ...match };
 
   return {
     windowMs: startToleranceMs,
@@ -309,10 +328,10 @@ export function resolveMatch(match?: ProgrammeMatch | ProgrammeMatcher): Resolve
       // The same instant: two sources describing one broadcast, unless a
       // config says even that has to be corroborated by the title.
       if (shift === 0) {
-        return titles === 'always' ? titlesMatch(a, b) : true;
+        return titles === 'always' ? titlesMatch(a, b, normalize) : true;
       }
 
-      if (titles !== 'never' && !titlesMatch(a, b)) {
+      if (titles !== 'never' && !titlesMatch(a, b, normalize)) {
         return false;
       }
 
@@ -649,7 +668,7 @@ export function backfillInto(
 export function mergeProgrammeLists(
   lists: XmltvProgramme[][],
   strategy: ProgrammeStrategy,
-  match?: ProgrammeMatch | ProgrammeMatcher,
+  match?: ProgrammeMatch | ProgrammeMatcher | WindowedMatcher,
   fillStopMs: number | undefined = DEFAULT_FILL_STOP_MS,
 ): XmltvProgramme[] {
   if (strategy === 'concat') {

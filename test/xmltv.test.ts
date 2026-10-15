@@ -232,6 +232,27 @@ describe('xmltv dates', () => {
     expect(formatXmltvDate(parseXmltvDate('20260717'), { offset: false })).toBe('20260717');
   });
 
+  it('reads a short number as the calendar date it plainly is', () => {
+    // What a source hands over as `{ year: 2025 }`, and what used to arrive as
+    // half past midnight on the 1st of January 1970.
+    expect(formatXmltvDate(xmltvDate(2025), { offset: false })).toBe('2025');
+    expect(formatXmltvDate(xmltvDate(202_503), { offset: false })).toBe('202503');
+    expect(formatXmltvDate(xmltvDate(20_250_102), { offset: false })).toBe('20250102');
+
+    // The same answer the string gives, which is the whole rule.
+    expect(xmltvDate(2025).getTime()).toBe(xmltvDate('2025').getTime());
+    expect(getXmltvPrecision(xmltvDate(2025))).toBe(4);
+
+    // And ten digits and up are still what they have always been: a real
+    // timestamp begins there, and a calendar reading of one would be absurd.
+    expect(xmltvDate(1_216_081_800).getTime()).toBe(1_216_081_800_000);
+    // Nine digits is neither an XMLTV date form nor a plausible calendar
+    // reading, so it stays a timestamp too.
+    expect(xmltvDate(123_456_789).getTime()).toBe(123_456_789_000);
+    // A month nobody has: refused rather than quietly read as seconds.
+    expect(() => xmltvDate(20_261_345)).toThrow();
+  });
+
   it('xmltvDate factory accepts unix seconds, strings, and flag options', () => {
     expect(xmltvDate(1_216_081_800).getTime()).toBe(1_216_081_800_000);
     expect(xmltvDate('20260717203000 +0200').getTime()).toBe(Date.UTC(2026, 6, 17, 18, 30));
@@ -2209,6 +2230,104 @@ describe('parseXmltvString', () => {
 
     expect(doc.programmes).toEqual([]);
     expect(doc.warnings.map((w) => w.code)).toEqual(['invalid-programme']);
+  });
+});
+
+describe('parsing only some channels', () => {
+  const at = (hour: number): string => `202607172${hour}0000 +0000`;
+  const document =
+    '<tv>' +
+    '<channel id="a"><display-name>A</display-name></channel>' +
+    '<channel id="b"><display-name>B</display-name></channel>' +
+    `<programme start="${at(0)}" channel="a"><title>A1</title></programme>` +
+    `<programme start="${at(1)}" channel="b"><title lang="en">B1</title><desc>x</desc></programme>` +
+    `<programme start="${at(2)}" channel="b"/>` +
+    `<programme start="${at(3)}" channel="a"><title>A2</title></programme>` +
+    '</tv>';
+
+  /** Every event, read in small chunks so a skip meets a chunk boundary mid-element. */
+  async function streamed(xml: string, channels: ReadonlySet<string>): Promise<XmltvParseEvent[]> {
+    const events: XmltvParseEvent[] = [];
+
+    for await (const event of parseXmltvStream(rechunk(xml, 7), { channels })) {
+      events.push(event);
+    }
+
+    return events;
+  }
+
+  it('builds nothing of the channels it was not asked for', () => {
+    const doc = parseXmltvString(document, { channels: new Set(['a']) });
+
+    expect(doc.channels.map((channel) => channel.id)).toEqual(['a']);
+    expect(doc.programmes.map((programme) => programme.title[0]!.value)).toEqual(['A1', 'A2']);
+    expect(doc.warnings).toEqual([]);
+  });
+
+  it('takes a predicate as well as a set', () => {
+    const doc = parseXmltvString(document, { channels: (id) => id === 'b' });
+
+    expect(doc.channels.map((channel) => channel.id)).toEqual(['b']);
+    // The self-closing one comes through with no title, as it would without the
+    // option: a kept channel is parsed exactly as it always was.
+    expect(doc.programmes.map((programme) => programme.title[0]?.value)).toEqual(['B1', undefined]);
+  });
+
+  it('reads the same in chunks as whole, whatever a chunk boundary cuts', async () => {
+    const whole = parseXmltvString(document, { channels: new Set(['a']) });
+    const events = await streamed(document, new Set(['a']));
+
+    expect(
+      events.filter((event) => event.type === 'programme').map((event) => event.value),
+    ).toEqual(whole.programmes);
+    expect(events.filter((event) => event.type === 'warning')).toEqual([]);
+  });
+
+  it('says nothing about what it stepped over, and still speaks for what it kept', () => {
+    const xml =
+      '<tv>' +
+      // A bad stop, a duplicated attribute and markup inside a text element:
+      // each a warning on a kept channel, and none of anybody's business here.
+      `<programme start="${at(0)}" stop="soon" channel="b" channel="c">` +
+      '<title>B<b>old</b></title></programme>' +
+      `<programme start="${at(1)}" stop="soon" channel="a"><title>A</title></programme>` +
+      '</tv>';
+
+    const doc = parseXmltvString(xml, { channels: new Set(['a']) });
+
+    expect(doc.programmes.map((programme) => programme.title[0]!.value)).toEqual(['A']);
+    expect(doc.warnings.map((warning) => warning.code)).toEqual(['invalid-attribute']);
+  });
+
+  it('is not fooled by a close tag inside a comment or CDATA it steps over', async () => {
+    const xml =
+      '<tv>' +
+      `<programme start="${at(0)}" channel="b"><!-- </programme> -->` +
+      '<desc><![CDATA[ </programme> ]]></desc></programme>' +
+      `<programme start="${at(1)}" channel="a"><title>A</title></programme>` +
+      '</tv>';
+
+    expect(parseXmltvString(xml, { channels: new Set(['a']) }).programmes).toHaveLength(1);
+
+    const events = await streamed(xml, new Set(['a']));
+
+    expect(events.filter((event) => event.type === 'programme')).toHaveLength(1);
+    expect(events.filter((event) => event.type === 'warning')).toEqual([]);
+  });
+
+  it('leaves an element naming no channel to the usual handling', () => {
+    const xml = `<tv><programme start="${at(0)}"><title>X</title></programme></tv>`;
+
+    // Dropped with its warning, as without the option.
+    expect(parseXmltvString(xml, { channels: new Set(['a']) }).warnings).toHaveLength(1);
+
+    // Kept by `tolerateMissingId`, it is asked about as `""` like any other id.
+    expect(
+      parseXmltvString(xml, { channels: new Set(['a']), tolerateMissingId: true }).programmes,
+    ).toEqual([]);
+    expect(
+      parseXmltvString(xml, { channels: new Set(['']), tolerateMissingId: true }).programmes,
+    ).toHaveLength(1);
   });
 });
 

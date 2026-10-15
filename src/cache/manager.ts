@@ -2,7 +2,7 @@
  * The cache a run talks to: everything true of every driver, in one place.
  *
  * A {@link CacheDriver} answers for one store and nothing more — put these
- * programmes there, hand them back, say what this entry claims about itself.
+ * bytes there, hand them back, say what this entry claims about itself.
  * What is the same whatever the store is lives here instead of being written
  * again in each of them:
  *
@@ -12,17 +12,17 @@
  * - **what to do with a bad entry.** It goes, and the day reads as never
  *   grabbed, so the next run fetches it rather than serving something nothing
  *   here can vouch for.
- * - **when a programme becomes something a store can hold, and when it comes
- *   back.** *How* is the driver's, since the store is the one thing it is expert
- *   in — {@link CacheDriverBase} answers it for anything ordinary, and a driver
- *   overrides that. But the two moments are the same for every store, so they
- *   are here, and no driver has to remember to convert.
+ * - **when programmes become bytes, and when they come back.** *What* the bytes
+ *   are is a codec's — one of {@link CODECS} the driver names, or one it brings.
+ *   But the two moments are the same for every store, so they are here, and no
+ *   driver has to remember to encode.
  *
  * This is a {@link CacheStore}, which is what the grab and the merge take, so
  * neither of them knows which driver is underneath.
  */
 
 import type { XmltvProgramme } from '../xmltv/types.js';
+import { codecOf, type CacheCodec, type CodecName } from './codec.js';
 import type {
   CacheDriver,
   CacheEntryMeta,
@@ -67,10 +67,13 @@ export const STATE_SCHEMA = 1;
 export class CacheManager implements CacheStore, AsyncDisposable {
   readonly #driver: CacheDriver;
   readonly #invalidate: CacheManagerOptions['invalidate'];
+  /** What makes the driver's bytes, settled once: a named codec looked up, a driver's own taken as it is. */
+  readonly #codec: CacheCodec;
 
   constructor(options: CacheManagerOptions) {
     this.#driver = options.driver;
     this.#invalidate = options.invalidate;
+    this.#codec = codecOf(options.driver.codec);
   }
 
   /** The store underneath, for anything that has to ask it something directly. */
@@ -127,7 +130,7 @@ export class CacheManager implements CacheStore, AsyncDisposable {
     // whatever was last put there, and an entry that cannot answer for itself is
     // not one to build a guide from.
     return found !== undefined && (await this.#verified(key, found.meta)) !== undefined
-      ? found.programmes.map((stored) => this.#driver.fromStored(stored))
+      ? this.#codec.decode(found.body)
       : undefined;
   }
 
@@ -136,22 +139,59 @@ export class CacheManager implements CacheStore, AsyncDisposable {
     programmes: XmltvProgramme[],
     meta?: Partial<CacheEntryMeta>,
   ): Promise<void> {
-    const stamped: StoredEntryMeta = {
+    await this.#driver.write(
+      key,
+      this.#codec.encode(programmes),
+      this.#stamped(programmes.length, meta),
+    );
+  }
+
+  /**
+   * The codec a site's thread may encode a channel-day with for this store —
+   * the name the driver gave — or `undefined` when the driver brought a codec
+   * of its own, which no thread has, and is handed programmes instead.
+   */
+  get codecName(): CodecName | undefined {
+    return typeof this.#driver.codec === 'string' ? this.#driver.codec : undefined;
+  }
+
+  /**
+   * Save a channel-day a site's thread encoded with {@link codecName}: stamped
+   * here, and kept as it came — 0.3ms of the main thread's time to receive and
+   * under a millisecond to keep for 3,500 programmes, where encoding them here
+   * would cost several.
+   *
+   * `programmeCount` is the thread's, counted from the same programmes it
+   * encoded, since counting them here would mean decoding the bytes.
+   */
+  async writeEncoded(
+    key: ChannelDayKey,
+    body: Uint8Array,
+    programmeCount: number,
+    meta?: Partial<CacheEntryMeta>,
+  ): Promise<void> {
+    if (this.codecName === undefined) {
+      throw new TypeError(
+        'This cache keeps its entries with a codec of its own, which no thread has: write programmes',
+      );
+    }
+
+    await this.#driver.write(key, body, this.#stamped(programmeCount, meta));
+  }
+
+  /** An entry's meta as it is written, whichever way the programmes arrived. */
+  #stamped(programmeCount: number, meta?: Partial<CacheEntryMeta>): StoredEntryMeta {
+    return {
       grabbedAt: meta?.grabbedAt ?? new Date().toISOString(),
-      // Counted here rather than taken on trust: the count is what a staleness
-      // check reads instead of the programmes, so it has to be the programmes.
-      programmeCount: programmes.length,
+      // Counted from the programmes themselves — here, or by the thread that
+      // encoded them: the count is what a staleness check reads instead of the
+      // programmes, so it has to be the programmes.
+      programmeCount,
       // What this entry is and who wrote it, so that reading it back is never a
       // guess. The caller says neither: they are facts about the writing.
       schema: CACHE_SCHEMA,
       writtenBy: __PKG_VERSION__,
     };
-
-    await this.#driver.write(
-      key,
-      programmes.map((programme) => this.#driver.toStored(programme)),
-      stamped,
-    );
   }
 
   async delete(key: ChannelDayKey): Promise<void> {

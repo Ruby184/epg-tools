@@ -23,6 +23,8 @@
  *   decides for itself how, and a single-site grabber can leave it out.
  */
 
+import { monitorEventLoopDelay } from 'node:perf_hooks';
+
 /**
  * How much a reporter is being told, in the order a threshold reads them.
  *
@@ -174,7 +176,22 @@ export type EpgEventInput =
    */
   | { type: 'run:cancelled'; fetched?: number }
   // ── grabbing ─────────────────────────────────────────────────────────────
-  | ({ type: 'grab:done' } & GrabCounts)
+  /**
+   * The run is over, with what it fetched and how busy the loop was.
+   *
+   * `loopMaxMs` is the longest the event loop went unserved. It is here
+   * because of what it explains: `parseDay` is the site's own code running on
+   * the main thread, and while one works through a big document in a single
+   * synchronous call nothing else can read a socket — so *every other site's*
+   * requests are measured as slow, and the numbers point at the sources rather
+   * than at the parse. A run whose worst figure is seconds is a run whose
+   * request times mean something else than they appear to.
+   *
+   * A stall, not a load: a document parsed as it streams yields between
+   * chunks, and keeps this in the tens of milliseconds however busy it keeps
+   * the thread.
+   */
+  | ({ type: 'grab:done'; loopMaxMs: number } & GrabCounts)
   /**
    * What this site is about to do, which the planner has just worked out.
    *
@@ -475,6 +492,63 @@ export function stamped(reporter: Reporter): Emit {
   return (event) => reporter({ ...event, ...EVENT_KINDS[event.type] } as EpgEvent);
 }
 
+/** How often the loop is sampled — see {@link watchEventLoop}. */
+const RESOLUTION_MS = 10;
+
+/**
+ * How long the event loop went unserved, watched for the length of a run.
+ *
+ * A `parseDay` is the site's own code on the main thread: while one works
+ * through a big document without yielding, nothing else runs, including the
+ * reads that finish other sites' requests. Without this the only sign is every
+ * source looking slow at once, which reads as a network problem and is not one.
+ *
+ * `monitorEventLoopDelay` is a libuv timer at 10ms resolution — cheap enough
+ * to leave on, and the only way to tell "the sources were slow" from "we never
+ * got round to listening".
+ */
+export async function watchEventLoop(): Promise<{
+  worst: () => Promise<number>;
+  stop: () => void;
+}> {
+  const histogram = monitorEventLoopDelay({ resolution: RESOLUTION_MS });
+
+  histogram.enable();
+
+  // Until the monitor has sampled once. It records the gap between one sample
+  // and the next, so a block before its first sample is not a gap it ever sees
+  // — and a run's first parse can start at once, when a site's request
+  // answers without waiting: 4.8s of parsing then read as 13ms.
+  await new Promise((resolve) => {
+    setTimeout(resolve, RESOLUTION_MS * 2);
+  });
+
+  return {
+    /**
+     * The longest delay seen, in milliseconds — the histogram counts in
+     * nanoseconds and nobody reads one.
+     *
+     * After a timer rather than an immediate, which is the difference between
+     * reading the block and missing it: the monitor is a libuv timer, timers
+     * run before the check phase an immediate belongs to, and a caller asking
+     * straight after a long block would be asking before the monitor had had
+     * its turn. Twice the resolution is one sample's worth of waiting at the
+     * end of a run that took minutes.
+     *
+     * `0` on a run too short to have been sampled at all, which is honest:
+     * nothing was kept waiting.
+     */
+    worst: async () => {
+      await new Promise((resolve) => {
+        setTimeout(resolve, RESOLUTION_MS * 2);
+      });
+
+      return Math.round(histogram.max / 1e6);
+    },
+    stop: () => histogram.disable(),
+  };
+}
+
 /** A run nobody is listening to. */
 export const silent: Emit = () => {};
 
@@ -493,6 +567,92 @@ export interface ReportedOptions {
  */
 export function emitter(options: ReportedOptions): Emit {
   return options.reporter === undefined ? silent : stamped(options.reporter);
+}
+
+/**
+ * The options a run reports through, with the config's own emitter added.
+ *
+ * `reporter` is how a run talks to whoever started it, and a library caller
+ * passes its own. `events` is what the *program* asked to be told, and it is
+ * in the config because that is where a program says it — so every way of
+ * starting a run honours it, not only the command that happens to read the
+ * config file.
+ */
+export function reportingTo<T extends ReportedOptions>(
+  options: T,
+  events: EpgEventSink | undefined,
+): T {
+  if (events === undefined) {
+    return options;
+  }
+
+  return { ...options, reporter: combineReporters(options.reporter, emitterReporter(events)) };
+}
+
+/**
+ * What {@link emitterReporter} needs of an emitter — Node's own fits, and so
+ * does anything with an `emit` taking a name and a value.
+ */
+export interface EpgEventSink {
+  emit(type: EpgEvent['type'], event: EpgEvent): unknown;
+}
+
+/**
+ * Every event, re-emitted on an `EventEmitter` under its own type.
+ *
+ * For a long-lived process where several things care about different events: a
+ * readiness ping, a reload, a metric. Each subscribes to the one it is about,
+ * instead of one `switch` in a reporter growing a case per concern.
+ *
+ * ```ts
+ * const events = new EventEmitter<EpgEventMap>();
+ *
+ * events.on('serve:started', () => process.send?.('ready'));
+ * events.on('serve:reloaded', () => void reloadMyOwnThings());
+ *
+ * serveGuide(config, { reporter: emitterReporter(events) });
+ * ```
+ *
+ * Typing the emitter with {@link EpgEventMap} is what makes each listener's
+ * argument the event it asked for. Nothing is filtered: an emitter with no
+ * listener for a type is the cheapest sink there is.
+ */
+export function emitterReporter(events: EpgEventSink): Reporter {
+  return (event) => {
+    events.emit(event.type, event);
+  };
+}
+
+/**
+ * Several reporters as one, each given every event in the order written.
+ *
+ * What a process with more than one interest reaches for — lines for a log and
+ * an emitter for the app, without writing the two-line function that calls
+ * both. `undefined` is skipped, so a caller's own optional reporter composes
+ * without a conditional:
+ *
+ * ```ts
+ * reporter: combineReporters(options.reporter, loggerReporter({ logger })),
+ * ```
+ *
+ * A reporter that throws is not caught here, as it is not caught anywhere
+ * else: a sink that cannot keep up with a run is a bug in the sink, and
+ * swallowing it would leave a run reporting into silence with nothing said.
+ */
+export function combineReporters(...reporters: (Reporter | undefined)[]): Reporter {
+  const listening = reporters.filter((reporter) => reporter !== undefined);
+
+  // The common cases without a wrapper: one reporter is itself, and none at
+  // all is the same silence `emitter` gives a run nobody is listening to.
+  if (listening.length === 1) {
+    return listening[0]!;
+  }
+
+  return (event) => {
+    for (const reporter of listening) {
+      reporter(event);
+    }
+  };
 }
 
 /**
