@@ -327,4 +327,17 @@ export interface XmltvParseOptions {
    * assumed to be UTC. Numeric `±HHMM` offsets never need this.
    */
   timezones?: XmltvTimezoneOffsets;
+
+  /**
+   * Only these channels: a `<channel>` whose `id`, or a `<programme>` whose
+   * `channel`, is not among them is skipped without being built — no event,
+   * and no warning about anything inside it. A set of ids, or a predicate.
+   *
+   * Worth it wherever most of a document is going to be thrown away: building
+   * a programme (its dates, entities, credits) is nearly all of what parsing
+   * costs, and stepping over one is a few percent of that. An element with no
+   * id at all is handled as it always is — dropped with a warning, or kept
+   * under `tolerateMissingId` and then put to this with an id of `""`.
+   */
+  channels?: ReadonlySet<string> | ((id: string) => boolean);
 }

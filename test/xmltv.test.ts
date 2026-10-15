@@ -2233,6 +2233,104 @@ describe('parseXmltvString', () => {
   });
 });
 
+describe('parsing only some channels', () => {
+  const at = (hour: number): string => `202607172${hour}0000 +0000`;
+  const document =
+    '<tv>' +
+    '<channel id="a"><display-name>A</display-name></channel>' +
+    '<channel id="b"><display-name>B</display-name></channel>' +
+    `<programme start="${at(0)}" channel="a"><title>A1</title></programme>` +
+    `<programme start="${at(1)}" channel="b"><title lang="en">B1</title><desc>x</desc></programme>` +
+    `<programme start="${at(2)}" channel="b"/>` +
+    `<programme start="${at(3)}" channel="a"><title>A2</title></programme>` +
+    '</tv>';
+
+  /** Every event, read in small chunks so a skip meets a chunk boundary mid-element. */
+  async function streamed(xml: string, channels: ReadonlySet<string>): Promise<XmltvParseEvent[]> {
+    const events: XmltvParseEvent[] = [];
+
+    for await (const event of parseXmltvStream(rechunk(xml, 7), { channels })) {
+      events.push(event);
+    }
+
+    return events;
+  }
+
+  it('builds nothing of the channels it was not asked for', () => {
+    const doc = parseXmltvString(document, { channels: new Set(['a']) });
+
+    expect(doc.channels.map((channel) => channel.id)).toEqual(['a']);
+    expect(doc.programmes.map((programme) => programme.title[0]!.value)).toEqual(['A1', 'A2']);
+    expect(doc.warnings).toEqual([]);
+  });
+
+  it('takes a predicate as well as a set', () => {
+    const doc = parseXmltvString(document, { channels: (id) => id === 'b' });
+
+    expect(doc.channels.map((channel) => channel.id)).toEqual(['b']);
+    // The self-closing one comes through with no title, as it would without the
+    // option: a kept channel is parsed exactly as it always was.
+    expect(doc.programmes.map((programme) => programme.title[0]?.value)).toEqual(['B1', undefined]);
+  });
+
+  it('reads the same in chunks as whole, whatever a chunk boundary cuts', async () => {
+    const whole = parseXmltvString(document, { channels: new Set(['a']) });
+    const events = await streamed(document, new Set(['a']));
+
+    expect(
+      events.filter((event) => event.type === 'programme').map((event) => event.value),
+    ).toEqual(whole.programmes);
+    expect(events.filter((event) => event.type === 'warning')).toEqual([]);
+  });
+
+  it('says nothing about what it stepped over, and still speaks for what it kept', () => {
+    const xml =
+      '<tv>' +
+      // A bad stop, a duplicated attribute and markup inside a text element:
+      // each a warning on a kept channel, and none of anybody's business here.
+      `<programme start="${at(0)}" stop="soon" channel="b" channel="c">` +
+      '<title>B<b>old</b></title></programme>' +
+      `<programme start="${at(1)}" stop="soon" channel="a"><title>A</title></programme>` +
+      '</tv>';
+
+    const doc = parseXmltvString(xml, { channels: new Set(['a']) });
+
+    expect(doc.programmes.map((programme) => programme.title[0]!.value)).toEqual(['A']);
+    expect(doc.warnings.map((warning) => warning.code)).toEqual(['invalid-attribute']);
+  });
+
+  it('is not fooled by a close tag inside a comment or CDATA it steps over', async () => {
+    const xml =
+      '<tv>' +
+      `<programme start="${at(0)}" channel="b"><!-- </programme> -->` +
+      '<desc><![CDATA[ </programme> ]]></desc></programme>' +
+      `<programme start="${at(1)}" channel="a"><title>A</title></programme>` +
+      '</tv>';
+
+    expect(parseXmltvString(xml, { channels: new Set(['a']) }).programmes).toHaveLength(1);
+
+    const events = await streamed(xml, new Set(['a']));
+
+    expect(events.filter((event) => event.type === 'programme')).toHaveLength(1);
+    expect(events.filter((event) => event.type === 'warning')).toEqual([]);
+  });
+
+  it('leaves an element naming no channel to the usual handling', () => {
+    const xml = `<tv><programme start="${at(0)}"><title>X</title></programme></tv>`;
+
+    // Dropped with its warning, as without the option.
+    expect(parseXmltvString(xml, { channels: new Set(['a']) }).warnings).toHaveLength(1);
+
+    // Kept by `tolerateMissingId`, it is asked about as `""` like any other id.
+    expect(
+      parseXmltvString(xml, { channels: new Set(['a']), tolerateMissingId: true }).programmes,
+    ).toEqual([]);
+    expect(
+      parseXmltvString(xml, { channels: new Set(['']), tolerateMissingId: true }).programmes,
+    ).toHaveLength(1);
+  });
+});
+
 describe('real-world fixture (epg-parser basic.xml)', () => {
   async function loadFixture(): Promise<string> {
     return readFile(join(import.meta.dirname, 'fixtures', 'epg-parser-basic.xml'), 'utf8');

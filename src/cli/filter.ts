@@ -69,23 +69,19 @@ export async function filterGuide(file: string, options: FilterOptions): Promise
 
   /** Everything the guide says, minus the channels nobody asked for. */
   async function* kept(): AsyncGenerator<XmltvParseEvent> {
-    const source = parseXmltvStream(guideBytes(file), ...(signal ? [{ signal }] : []));
+    // The parser steps over every other channel unbuilt — by the channel a
+    // programme names, not by what was kept before it: a guide is not obliged
+    // to describe a channel before it schedules one, and dropping a programme
+    // for arriving early would silently lose a day of it.
+    const source = parseXmltvStream(guideBytes(file), {
+      ...(wanted ? { channels: wanted } : {}),
+      ...(signal ? { signal } : {}),
+    });
 
     for await (const event of source) {
       if (event.type === 'channel') {
-        if (wanted !== undefined && !wanted.has(event.value.id)) {
-          continue;
-        }
-
         seen.add(event.value.id);
       } else if (event.type === 'programme') {
-        // By the channel it names, not by what was kept above: a guide is not
-        // obliged to describe a channel before it schedules one, and dropping a
-        // programme for arriving early would silently lose a day of it.
-        if (wanted !== undefined && !wanted.has(event.value.channel)) {
-          continue;
-        }
-
         programmes++;
       }
 

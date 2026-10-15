@@ -172,11 +172,17 @@ export class XmltvScanner {
   readonly #rootScanLimit: number;
   /** Named timezone abbreviation → offset minutes, for datetime parsing. */
   readonly #timezones: XmltvTimezoneOffsets | undefined;
+  /** Whether a channel is wanted, when only some are — see `channels`. */
+  readonly #wanted: ((id: string) => boolean) | undefined;
 
   constructor(options: XmltvParseOptions = {}) {
     this.#tolerateMissingId = options.tolerateMissingId ?? false;
     this.#rootScanLimit = options.rootScanLimit ?? DEFAULT_ROOT_SCAN_LIMIT;
     this.#timezones = options.timezones;
+    this.#wanted =
+      options.channels === undefined || typeof options.channels === 'function'
+        ? options.channels
+        : options.channels.has.bind(options.channels);
   }
 
   /**
@@ -2045,6 +2051,23 @@ export class XmltvScanner {
       return null;
     }
 
+    // Only some channels wanted, and not this one: stepped over unbuilt. Its
+    // warnings go with it, and everything pending is its own — `consume` takes
+    // each top-level element's as it finishes, and records none between.
+    if (this.#wanted !== undefined && !this.#wanted(channel.id)) {
+      if (!selfClosing) {
+        const discarded = this.#readTextContent(buf, this.#pos, 'channel', false);
+
+        if (discarded === NEED_MORE) {
+          return NEED_MORE;
+        }
+      }
+
+      this.#pendingWarnings.length = 0;
+
+      return null;
+    }
+
     if (selfClosing) {
       return channel;
     }
@@ -2119,6 +2142,66 @@ export class XmltvScanner {
     selfClosing: boolean,
   ): XmltvProgramme | null | NeedMore {
     const at = this.#tagStart;
+
+    // Only some channels wanted: asked before the attributes are put to work,
+    // since `start` and `stop` are parsed as they are met and those dates are a
+    // real part of what building a programme costs. One naming no channel is
+    // left to the handling below, unless `tolerateMissingId` keeps it — then
+    // its empty id is put to the question like any other. Stepped over unbuilt,
+    // its warnings with it: everything pending is its own, since `consume`
+    // takes each top-level element's as it finishes and records none between.
+    if (this.#wanted !== undefined) {
+      let channel = '';
+
+      for (let i = 0; attrs && i < attrs.length; i += 2) {
+        if (attrs[i] === 'channel') {
+          channel = attrs[i + 1]!;
+          break;
+        }
+      }
+
+      if ((channel !== '' || this.#tolerateMissingId) && !this.#wanted(channel)) {
+        // From one `<` to the next until the programme's own close tag, without
+        // reading the tags between: that is most of what stepping over one
+        // costs the careful way. A comment, CDATA or processing instruction can
+        // hold what looks like a close tag, and a programme almost never has
+        // one, so meeting one sends it the careful way from the start.
+        for (let i = this.#pos; !selfClosing;) {
+          const lt = buf.indexOf('<', i);
+
+          if (lt === -1) {
+            return NEED_MORE;
+          }
+
+          const marker = buf.charCodeAt(lt + 1);
+
+          if (marker === SLASH) {
+            const end = this.#matchClose(buf, lt, 'programme');
+
+            if (end === NEED_MORE) {
+              return NEED_MORE;
+            }
+
+            if (end !== NO_MATCH) {
+              this.#pos = end;
+              break;
+            }
+          } else if (marker === BANG || marker === QUESTION) {
+            if (this.#readTextContent(buf, this.#pos, 'programme', false) === NEED_MORE) {
+              return NEED_MORE;
+            }
+
+            break;
+          }
+
+          i = lt + 1;
+        }
+
+        this.#pendingWarnings.length = 0;
+
+        return null;
+      }
+    }
 
     // Populate inline, with each attribute's `pos` in scope for its warning.
     // `start` stays optional on the draft until validated below; `startRaw`

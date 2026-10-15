@@ -84,8 +84,11 @@ export interface XmltvSiteOptions<TData = XmltvChannel> extends Omit<
    * be named here (or by a `.br` url, or an `application/x-brotli` type).
    */
   compression?: CompressionFormat | false;
-  /** Passed to the parser: `timezones` for named zones, `tolerateMissingId`. */
-  parse?: XmltvParseOptions;
+  /**
+   * Passed to the parser: `timezones` for named zones, `tolerateMissingId`.
+   * Not `channels`: which channels are kept is what `channels` above says.
+   */
+  parse?: Omit<XmltvParseOptions, 'channels'>;
   /**
    * Whether the document groups each channel's programmes together.
    *

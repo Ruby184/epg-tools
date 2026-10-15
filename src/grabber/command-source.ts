@@ -185,8 +185,11 @@ export interface CommandSiteOptions<TData = XmltvChannel> extends Omit<
   dayZone?: XmltvDayZone;
   /** Whether the document groups each channel's programmes together. */
   order?: 'grouped' | 'any';
-  /** Passed to the parser: `timezones` for named zones, `tolerateMissingId`. */
-  parse?: XmltvParseOptions;
+  /**
+   * Passed to the parser: `timezones` for named zones, `tolerateMissingId`.
+   * Not `channels`: which channels are kept is what the site's `channels` says.
+   */
+  parse?: Omit<XmltvParseOptions, 'channels'>;
 }
 
 /** What to run, and what to do while it runs. */

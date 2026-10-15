@@ -338,8 +338,11 @@ export interface SplitXmltvOptions<TData> {
   dayZone?: XmltvDayZone;
   /** Whether the document groups each channel's programmes together. */
   order?: 'grouped' | 'any';
-  /** Passed to the parser: `timezones` for named zones, `tolerateMissingId`. */
-  parse?: XmltvParseOptions;
+  /**
+   * Passed to the parser: `timezones` for named zones, `tolerateMissingId`.
+   * Not `channels`: which channels are kept is what `channelDays` says.
+   */
+  parse?: Omit<XmltvParseOptions, 'channels'>;
 }
 
 export async function* splitXmltvDocument<TData>(
@@ -400,6 +403,11 @@ export async function* splitXmltvDocument<TData>(
 
   for await (const event of parseXmltvStream(document, {
     ...parse,
+    // Every other channel stepped over unbuilt. A published guide is mostly
+    // channels nobody here asked for — seven kept of four thousand is a real
+    // source — and building a programme is nearly all of what parsing one
+    // costs: one channel of a hundred reads in 31ms where all of them take 336.
+    channels: (id) => wanted.has(id),
     ...(signal ? { signal } : {}),
   })) {
     if (event.type === 'warning') {
@@ -418,13 +426,12 @@ export async function* splitXmltvDocument<TData>(
     const siteId = programme.channel;
     const channels = wanted.get(siteId);
 
-    // Before the ordering below, not after it: a channel nobody asked for
-    // must not take part in deciding whether the document is grouped. It
-    // used to, and `a … x … a` — a wanted channel split by an unwanted one —
-    // made the pass give up and hold the *whole rest of the document* in
-    // memory, when dropping `x` leaves `a` one contiguous run needing
-    // neither a hold nor a second write. Memory being the point of this
-    // adapter, that was the expensive way round.
+    // The parser has stepped over every channel not in `wanted` already, so
+    // this is the narrowing more than a filter — and it stays before the
+    // ordering below for the reason it was put there: a channel nobody asked
+    // for must not take part in deciding whether the document is grouped.
+    // `a … x … a` — a wanted channel split by an unwanted one — once made the
+    // pass give up and hold the *whole rest of the document* in memory.
     if (channels === undefined) {
       continue;
     }
