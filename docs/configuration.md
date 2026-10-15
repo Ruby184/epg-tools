@@ -110,6 +110,7 @@ so it solves half a problem.
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
 | `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source; a parse waiting on its own `ctx.paced` request does not count against it. |
+| `threads` | `boolean \| number` | `false` | Run the sites in worker threads, so one site's parsing cannot hold up another's: `true` for one thread per core, a number for at most that many — see [Sites in threads of their own](#sites-in-threads-of-their-own). `--threads[=n]` / `--no-threads` override it. |
 | `merge` | `MergeOptions` | `{ cover: 'all', channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true, dropContainers: true }` | Who grabs a channel several sites offer (`cover`) and how the ones that did are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
 | `derived` | `DerivedChannel[] \| (context) => DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. A function is asked per run, with the channels there turned out to be. See [Derived channels](#derived-channels). |
 | `channels` | `readonly string[]` | all of them | Keep only these channels, by `xmltvId` — see [keeping only some channels](#keeping-only-some-channels). `--channels` overrides it. |
@@ -219,6 +220,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--cache-dir <dir>` | override the cache directory |
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
+| `--threads[=n]` | `build`/`grab`/`serve`: run the sites in [worker threads](#sites-in-threads-of-their-own), one per core or at most `n`; `--no-threads` runs them all in one, whatever the config says |
 | `--dry-run` | `grab`/`build` only: say what a run would fetch, and stop — see [what a run would do](#what-a-run-would-do) |
 | `--allow-missing <n>` | exit 0 with up to this much of the guide missing: a number of channel-days, or a share like `5%` |
 | `--extensions <names>` | `build`/`merge` only: keep only these [provider extensions](#provider-extensions), comma-separated — `--extensions lcn,uniqueID` |
@@ -1430,6 +1432,58 @@ network is neither of the two things this bounds, and holding the slot through
 it let one site that fetches a detail per programme fill every slot in the run
 with parses waiting on its own pacing: every other site's parses, however
 cheap, then queued behind it.
+
+### Sites in threads of their own
+
+Every site's code runs on one thread by default, and so does every site's
+parsing. A `parseDay` that works through a big document in one go holds that
+thread, and every other site's responses wait to be read until it lets go: a
+site whose requests take 50ms can measure them in seconds, beside a site whose
+parsing has nothing to do with it. `grab:done`'s `loopMaxMs` is how you tell
+that is happening.
+
+`threads` runs the sites in worker threads instead: `true` (or `--threads`)
+for one thread per core, a number (`--threads=4`) for at most that many. Every
+site still runs at once. With as many threads as sites each has one to itself;
+with fewer, a site goes to whichever thread is running fewest, and shares it. A
+config of one CPU-heavy site (300ms of synchronous parsing per channel-day) and
+one that only waits on the network, run through `epg build`:
+
+| | the network site's requests | the network site took |
+|---|---|---|
+| one thread | 645ms on average, 4,809ms at worst | 5,346ms |
+| `--threads` | 50ms on average, 51ms at worst | 588ms |
+
+The CPU-heavy site takes as long either way. It is only kept to itself.
+
+What it costs:
+
+- **About 25 MiB and a second to start, per thread.** Nine measured 1.2s to be
+  ready and 223 MiB together, which is what a number below the count of sites
+  is for. Threads start as sites need them, so a pool larger than the sites
+  costs no more than one the same size. Worth it for a run that is slow because
+  of its own parsing, not otherwise. A site that shares a thread is still held
+  up by the other sites' parsing in it. A whole-document source that streams (a published
+  guide, `defineXmltvSite`) yields as it goes and rarely needs one. If it only
+  keeps a few of the guide's channels, it already steps over the rest.
+- **The config module is read again in every thread.** A thread cannot be
+  handed a site, because a site is functions, so it imports the config file and
+  finds its site by name. Whatever the module does when it is read happens once
+  more per thread. A config function runs again, so one that fetches a token
+  fetches it again. And anything two sites share at the top of the module, such
+  as one token or one rate limit, is no longer shared between threads.
+- **Only a config run from a file.** The `epg` command knows which file it
+  loaded. A program calling `build`, `runGrab` or `serveGuide` itself passes
+  `configModule`: a path or URL whose default export is the config. It must be
+  a module of its own, since every worker would otherwise run the calling
+  program again. `threads: true` without one fails before any site starts.
+
+What stays on the main thread: the cache, which every site's worker writes
+through, so there is still one writer and any driver works. Also the reporter,
+which hears each site's events as they happen; the channel lists, `cover` and
+`--channels` (settled before the sites start, and handed to each worker); and
+the merge. `loopMaxMs` is the main thread's, so with threads it no longer
+counts what the sites' parsing costs.
 
 ## Merge strategies
 

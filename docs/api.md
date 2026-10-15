@@ -77,6 +77,7 @@ await using cache = await createCacheStore(config);
 | `reporter` | `(event: EpgEvent) => void` | none | Where the run's events go — see [reporting what a run is doing](#reporting-what-a-run-is-doing). Omit for silence. |
 | `cache` | `CacheStore` | the one the config describes | Use this store instead. It stays the caller's — nothing here closes what it did not open — which is for a process running several builds, or a test with a store already in hand. |
 | `signal` | `AbortSignal` | none | Cancel the run — see [Cancelling a run](./configuration.md#cancelling-a-run). A grab resolves with the partial summary; a merge rejects, and the guide it was writing is discarded rather than replacing the one in place. `build` skips the merge entirely if the grab was cancelled. |
+| `configModule` | `string \| URL` | none | The module the config came from — a path or a URL whose default export is it. Needed by a config with [`threads`](./configuration.md#sites-in-threads-of-their-own), whose sites' workers import it to find their site; without it such a run fails before any site starts. The `epg` command fills it in. A module of its own, never the program calling `build`: every worker would run that program again. |
 
 ## Reporting what a run is doing
 

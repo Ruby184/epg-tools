@@ -464,6 +464,23 @@ describe('epg', () => {
     expect(stderr).toContain('ndjson, xmltv, sqlite, memory');
   });
 
+  it('refuses a thread count that is not one — the command after a bare flag included', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+
+    const many = await run(['build', '--config', config, '--threads=many']);
+
+    expect(many.code).toBe(2);
+    expect(many.stderr).toContain('Invalid --threads value: many');
+
+    // The count is optional, so the word after the flag is offered to it: a
+    // command there is refused rather than taken as how many threads.
+    const before = await run(['--threads', 'build', '--config', config]);
+
+    expect(before.code).toBe(2);
+    expect(before.stderr).toContain('Invalid --threads value: build');
+  });
+
   it('serves the guide until it is told to stop', async () => {
     const dir = await tempDir();
     const config = await plainConfig(dir);

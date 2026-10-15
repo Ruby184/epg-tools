@@ -55,6 +55,10 @@ Options:
       --cache-driver <name>  Override where cached days are kept: ndjson, xmltv,
                         sqlite or memory
       --refresh         Refetch every day in the window, ignoring what is cached
+      --threads[=n]     Run the sites in worker threads, so one site's parsing
+                        cannot hold up another's: one per core, or at most n.
+                        build/grab/serve. --no-threads runs them in one,
+                        whatever the config says
       --allow-missing <n>   Exit 0 with up to this much of the guide missing:
                         a number of channel-days, or a share like 5%
       --dry-run         grab/build only: say what a run would fetch, and stop.
@@ -195,6 +199,26 @@ const SELECTABLE = ['build', 'grab', 'merge', 'serve'];
 /** `2 channels`, `1 channel` — a count is read, so it should read. */
 function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
+/** `--threads`: bare for one per core, or how many at most. */
+function poolSize(raw: string, flag: string): true | number {
+  if (raw === 'true') {
+    return true;
+  }
+
+  const count = Number(raw);
+
+  // A word that is not a count is refused rather than taken: an optional value
+  // claims the word after it, so `epg --threads build` would otherwise read the
+  // command as how many threads.
+  if (!Number.isInteger(count) || count < 0) {
+    throw new OptionError(
+      `Invalid ${flag} value: ${raw} (expected a number of threads, or nothing for one per core)`,
+    );
+  }
+
+  return count;
 }
 
 /** `--indent`: spaces if it is a number, the string itself otherwise. */
@@ -513,6 +537,9 @@ async function execute(
       // can do.
       'cache-driver': { type: 'string', choices: CACHE_DRIVER_NAMES },
       refresh: { type: 'boolean' },
+      // A count, or bare for one per core. Negatable, because a config can turn
+      // them on: `--no-threads` is how a run says otherwise without editing it.
+      threads: { type: 'string', optionalValue: 'true', negatable: true, transform: poolSize },
       'dry-run': { type: 'boolean' },
       'allow-missing': { type: 'string', transform: allowance },
       port: { type: 'number', min: 0, max: 65_535 },
@@ -704,6 +731,11 @@ async function execute(
     };
   }
 
+  if (values.threads !== undefined) {
+    // `null` is `--no-threads`.
+    config = { ...config, threads: values.threads ?? false };
+  }
+
   // `--log-level` is the explicit answer and wins; between the two shorthands
   // the quieter one does, so `-qv` in a script cannot turn silence into fourteen
   // thousand lines.
@@ -728,6 +760,12 @@ async function execute(
     ...(chosen ? { reporter: chosen } : {}),
     ...(values.offset !== undefined ? { offset: values.offset } : {}),
     ...(signal ? { signal } : {}),
+    // The file this loaded, which is what a site's thread imports to find its
+    // site. What the flags above changed stays here, and reaches a thread as
+    // the run does — the cache it answers, the window and staleness it is
+    // handed, the channels already settled — so nothing is lost by its
+    // reading the file as written.
+    configModule: pathToFileURL(configFile).href,
   };
 
   if (values['dry-run']) {

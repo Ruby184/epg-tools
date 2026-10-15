@@ -41,6 +41,10 @@ export default defineConfig({
     'cache/main': 'src/cache/main.ts',
     'cache/sqlite': 'src/cache/sqlite-driver.ts',
     'grabber/main': 'src/grabber/main.ts',
+    // Not in the export map: a site's worker is started on this file by URL,
+    // so it has to be a file of its own rather than wherever the bundler would
+    // put the code — see `src/grabber/thread.ts`.
+    'grabber/thread': 'src/grabber/thread.ts',
     'merge/main': 'src/merge/main.ts',
     'serve/main': 'src/serve/main.ts',
     'tv-grab/main': 'src/tv-grab/main.ts',

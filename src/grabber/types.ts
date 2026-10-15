@@ -941,6 +941,21 @@ export interface GrabOptions {
    * pile of one failure per channel-day it never got to.
    */
   signal?: AbortSignal;
+  /**
+   * Run the sites in worker threads, so one site's parsing cannot hold up
+   * another's: `true` for a pool of one thread per core, a number for at most
+   * that many, `false` or `0` for none. Every site still runs at once — with
+   * more sites than threads, some share one. Needs {@link configModule}: a
+   * worker is handed the module rather than the site, and finds its site there
+   * by name.
+   */
+  threads?: boolean | number;
+  /**
+   * The module these sites came from — a path or a URL whose default export is
+   * the config — for {@link threads}. A module of its own: a worker imports it,
+   * and importing the program that called this would run that program again.
+   */
+  configModule?: string | URL;
 }
 
 /**

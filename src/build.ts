@@ -62,6 +62,14 @@ export interface RunOptions {
    * are the ones this package ships.
    */
   reporter?: Reporter;
+  /**
+   * The module the config came from — a path or a URL whose default export is
+   * it — which a config with `threads: true` needs: each site's worker imports
+   * it to find that site. The `epg` command fills it in with the file it
+   * loaded. A module of its own, never the program calling this, which every
+   * worker would otherwise run again.
+   */
+  configModule?: string | URL;
 }
 
 /**
@@ -290,6 +298,8 @@ export async function runGrab(source: ConfigSource, given: RunOptions = {}): Pro
       now,
       ...reported(options),
       ...(options.signal ? { signal: options.signal } : {}),
+      ...(config.threads === undefined ? {} : { threads: config.threads }),
+      ...(options.configModule === undefined ? {} : { configModule: options.configModule }),
     });
 
     // Nothing more is asked of the cache once the run is off: pruning a window

@@ -165,6 +165,8 @@ export interface GuideHandlerOptions {
   now?: Date;
   /** Shift the window, as a run's `offset` does. */
   offset?: number;
+  /** The module the config came from, as a run's `configModule` is — for `threads`. */
+  configModule?: string | URL;
   /**
    * A cache to serve from, rather than the one the config describes.
    *
@@ -1588,6 +1590,7 @@ export async function createGuideHandler(
         cache,
         ...(options.reporter ? { reporter: options.reporter } : {}),
         ...(options.offset === undefined ? {} : { offset: options.offset }),
+        ...(options.configModule === undefined ? {} : { configModule: options.configModule }),
         signal: stops.signal,
       });
     } catch (error) {
