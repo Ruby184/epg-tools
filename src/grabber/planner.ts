@@ -39,6 +39,8 @@ export interface Request {
   pairs: Pair[];
 }
 
+const BATCH_MODES: readonly BatchMode[] = ['none', 'channels', 'days', 'both'];
+
 /**
  * What a site's `batching` amounts to for the planner: how wide a request may
  * be along each axis, and whether the context says `channel`/`day` or
@@ -59,8 +61,36 @@ export function resolveBatching(batching: BatchingOption | undefined): ResolvedB
   // Both shapes `batching` accepts, and its absence, as one object.
   const settings: { mode: BatchMode; channelsPerRequest?: number; daysPerRequest?: number } =
     typeof batching === 'string' ? { mode: batching } : (batching ?? { mode: 'none' });
+
+  // Refused rather than read as `none`, which is where anything else lands
+  // below: one channel-day per request, and nothing said. `{
+  // channelsPerRequest: 30 }` without its mode asked for thirty channels a
+  // request and got one, and so does `'channel'`. The types reject both; a
+  // config in JavaScript, or a test, is not held to them — one reproducing a
+  // slowdown measured a different site than it described this way.
+  if (!BATCH_MODES.includes(settings.mode)) {
+    throw new TypeError(
+      `batching has no mode: one of ${BATCH_MODES.map((mode) => `'${mode}'`).join(', ')}, ` +
+        `on its own or as { mode, channelsPerRequest?, daysPerRequest? } ` +
+        `(got ${settings.mode === undefined ? 'an object without one' : JSON.stringify(settings.mode)})`,
+    );
+  }
+
   const manyChannels = settings.mode === 'channels' || settings.mode === 'both';
   const manyDays = settings.mode === 'days' || settings.mode === 'both';
+
+  // The same mistake from the other side: a cap the mode never reads.
+  for (const [cap, batched, axis] of [
+    ['channelsPerRequest', manyChannels, 'channels'],
+    ['daysPerRequest', manyDays, 'days'],
+  ] as const) {
+    if (!batched && settings[cap] !== undefined) {
+      throw new TypeError(
+        `batching mode '${settings.mode}' does not read ${cap}: it asks for one of its ${axis} ` +
+          `per request. Use mode '${axis}', or 'both'.`,
+      );
+    }
+  }
   const cap = (size: number | undefined): number =>
     size !== undefined && size > 0 ? size : Number.POSITIVE_INFINITY;
 

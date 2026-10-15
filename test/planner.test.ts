@@ -61,11 +61,22 @@ describe('resolveBatching', () => {
       maxDays: 1,
     });
     // A cap on the axis this mode does not batch is not a number to be silently
-    // ignored — the types refuse it — and the axis stays pinned regardless.
-    expect(resolveBatching({ mode: 'channels', daysPerRequest: 7 } as never)).toMatchObject({
-      maxChannels: Number.POSITIVE_INFINITY,
-      maxDays: 1,
-    });
+    // ignored: the types refuse it, and so does a config they never checked.
+    expect(() => resolveBatching({ mode: 'channels', daysPerRequest: 7 } as never)).toThrow(
+      "batching mode 'channels' does not read daysPerRequest",
+    );
+  });
+
+  it('refuses a mode it does not know rather than reading it as none', () => {
+    // The shape that cost a reproduction its conclusion: the caps without the
+    // mode, which used to mean one channel-day per request.
+    expect(() => resolveBatching({ channelsPerRequest: 30 } as never)).toThrow(
+      'batching has no mode',
+    );
+    expect(() => resolveBatching({ channelsPerRequest: 30 } as never)).toThrow(
+      'got an object without one',
+    );
+    expect(() => resolveBatching('channel' as never)).toThrow('got "channel"');
   });
 
   it('reads a cap of zero as "as many as it takes"', () => {
