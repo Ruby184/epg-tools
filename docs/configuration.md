@@ -895,6 +895,13 @@ holds a cache, and with a schedule a timer that keeps the process alive.
 guide — it reads the same metadata sweep the ETag comes from, so a container
 healthcheck costs what a poll's `304` costs.
 
+It never asks a **source** anything. A guide request re-resolves channel lists
+that have gone past `sitesMaxAgeMs`; a probe does not, whatever their age,
+because what it reports is what this server holds and a source being down is
+not a reason to fail it. The one exception is the first probe on a server that
+has not served anything yet: without a channel list there is no grid to count,
+so that one resolves as any first request would.
+
 ```json
 {
   "ok": true,

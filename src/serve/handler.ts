@@ -60,6 +60,9 @@ export const DEFAULT_REVALIDATE_MS = 1000;
  * changed fingerprint still re-resolves immediately — this is only the floor
  * under the case the fingerprint cannot see, a grab that adds a channel and
  * touches nothing already in the grid.
+ *
+ * It is a ceiling on *guide* requests only. A health check never resolves,
+ * whatever this says: see {@link GuideHandler.answer}'s health route.
  */
 export const DEFAULT_SITES_MAX_AGE_MS = 10 * 60 * 1000;
 
@@ -1104,7 +1107,7 @@ export async function createGuideHandler(
    * polls arriving together would each sweep the same thousands of keys, which
    * is the storm this whole design exists to avoid.
    */
-  const current = async (now: Date): Promise<Snapshot> => {
+  const current = async (now: Date, { resolving = true } = {}): Promise<Snapshot> => {
     if (snapshot !== undefined && Date.now() - checkedAt < revalidateMs) {
       return snapshot;
     }
@@ -1120,15 +1123,21 @@ export async function createGuideHandler(
       // the grid out puts a ceiling on that, without letting a poll drive a
       // request the way resolving on every revalidation would.
       const held = snapshot;
-      const stale = held === undefined || Date.now() - resolvedAt >= sitesMaxAgeMs;
-      const next = stale ? await take(now) : await take(now, held.sites);
+      // `resolving: false` is the health check, which must not make a request
+      // to a source: what it reports is what this server could serve, and a
+      // source that is down is not a reason to fail a probe. It still has to
+      // resolve when there is nothing held at all — without a grid there is
+      // nothing to count — and it leaves `resolvedAt` where it was, so the
+      // next request that does want fresh lists still gets them.
+      const stale = held === undefined || (resolving && Date.now() - resolvedAt >= sitesMaxAgeMs);
+      const next = !stale && held !== undefined ? await take(now, held.sites) : await take(now);
 
       // And if a grab has been, the list may have changed with it — so the
       // sites are resolved again *now*, and the fingerprint taken over what
       // results, rather than leaving this request with a grid that is out of
       // date.
       const fresh =
-        !stale && held !== undefined && next.print.etag !== held.print.etag
+        resolving && !stale && held !== undefined && next.print.etag !== held.print.etag
           ? await take(now)
           : next;
 
@@ -1384,7 +1393,11 @@ export async function createGuideHandler(
    * metadata only — so a container healthcheck costs what a poll's `304` costs.
    */
   async function healthOf(now: Date): Promise<GuideHealth> {
-    const { print } = await current(now);
+    // Never resolving: a probe reports what this server holds, and must not be
+    // the thing that goes and asks a source for its channel list — see
+    // `current`. The sweep itself is metadata, which is what makes a health
+    // check cost what a `304` costs.
+    const { print } = await current(now, { resolving: false });
     const window = windowOf(now);
     // The one unambiguous "cannot do its job": nothing at all is cached, so
     // there is no guide to serve. How stale is too stale is the operator's

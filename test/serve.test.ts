@@ -1333,6 +1333,48 @@ describe('serveGuide health', () => {
     expect(body.shape).toEqual(expect.any(String));
   });
 
+  it('never asks a source for its channel list, however overdue the lists are', async () => {
+    const cache = cacheWith({ one: [programme('one', 6)] });
+    await cache.seed('2026-09-03T04:00:00.000Z');
+
+    let asked = 0;
+    const config: EpgConfig = {
+      ...configFor([]),
+      sites: [
+        {
+          site: 'example.tv',
+          channels: () => {
+            asked++;
+
+            return [{ xmltvId: 'one', siteId: 'one', name: 'one' }];
+          },
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+    };
+
+    // Nothing held and nothing allowed to age: every sweep here would resolve.
+    const server = await serve(config, cache, { revalidateMs: 0, sitesMaxAgeMs: 0 });
+
+    // The first one has no grid to count, so it resolves like any first
+    // request would. What matters is that the next ten do not.
+    expect((await health(server)).body.ok).toBe(true);
+    expect(asked).toBe(1);
+
+    for (let poll = 0; poll < 10; poll++) {
+      await health(server);
+    }
+
+    expect(asked).toBe(1);
+
+    // And a request for the guide still gets lists as fresh as it asked for,
+    // which is the thing a health check must not be able to take away.
+    await fetch(server.url);
+
+    expect(asked).toBe(2);
+  });
+
   it('says nothing about which sites or channels they are', async () => {
     const cache = cacheWith({ one: [programme('one', 6)] });
     await cache.seed('2026-09-03T04:00:00.000Z');
