@@ -109,7 +109,7 @@ so it solves half a problem.
 | `days` | `number` | `7` | How many days to grab and include in the guide. A site may override it. |
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
-| `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source. |
+| `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source; a parse waiting on its own `ctx.paced` request does not count against it. |
 | `merge` | `MergeOptions` | `{ cover: 'all', channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true, dropContainers: true }` | Who grabs a channel several sites offer (`cover`) and how the ones that did are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
 | `derived` | `DerivedChannel[] \| (context) => DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. A function is asked per run, with the channels there turned out to be. See [Derived channels](#derived-channels). |
 | `channels` | `readonly string[]` | all of them | Keep only these channels, by `xmltvId` — see [keeping only some channels](#keeping-only-some-channels). `--channels` overrides it. |
@@ -1422,6 +1422,14 @@ Writes are queued ahead of sweep reads, since a response already fetched is held
 in memory until it is written while a staleness check only finds more to do.
 Raising it is worth pairing with `UV_THREADPOOL_SIZE`, which is what actually
 runs Node's file operations (four threads by default).
+
+A parse that is waiting on a request of its own — a detail fetched through
+`ctx.paced` — gives its slot up for as long as it waits, and takes one back,
+ahead of parses that have not started, before it goes on. Waiting on the
+network is neither of the two things this bounds, and holding the slot through
+it let one site that fetches a detail per programme fill every slot in the run
+with parses waiting on its own pacing: every other site's parses, however
+cheap, then queued behind it.
 
 ## Merge strategies
 

@@ -1390,6 +1390,86 @@ describe('grab', () => {
     expect(cache.max).toBe(3);
   });
 
+  it('lets another site parse while one waits on requests its parses made', async () => {
+    // The starvation this ends: a parse that fetches details through `paced`
+    // held its `localWork` slot for the whole wait, so a site making detail
+    // calls for a wide response filled every slot in the run, and another
+    // site's parses — however cheap — queued behind its pacing. A consumer
+    // measured a site with two sub-second requests finishing after 170s.
+    //
+    // Ordered rather than timed: the detail calls wait on a gate that only
+    // the other site finishing opens. Holding the slots through the wait, that
+    // is a deadlock, which the fallback breaks so the order can say so.
+    class CountingCache extends MemoryCache {
+      writing = 0;
+      maxWriting = 0;
+
+      override async write(key: ChannelDayKey, programmes: XmltvProgramme[]): Promise<void> {
+        this.writing++;
+        this.maxWriting = Math.max(this.maxWriting, this.writing);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        this.writing--;
+
+        return super.write(key, programmes);
+      }
+    }
+
+    const cache = new CountingCache();
+    const order: string[] = [];
+    let open: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const fallback = setTimeout(() => {
+      order.push('fallback');
+      open();
+    }, 2000);
+
+    const detailed = makeBatchConfig({
+      site: 'detailed.example',
+      concurrency: 4,
+      channels: ['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight'].map(channel),
+      async parseDay({ day, paced }) {
+        await Promise.all([paced(() => gate), paced(() => gate)]);
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+    const plain = makeBatchConfig({
+      site: 'plain.example',
+      // After the detailed site's parses have taken the slots, which is the
+      // case that matters: not first in the queue, but behind the waiting.
+      async request({ channels }) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        return { items: channels.map((c) => ({ id: c.siteId })) } satisfies BatchData;
+      },
+    });
+
+    const summary = await grab([detailed, plain], {
+      cache,
+      now: NOW,
+      localConcurrency: 4,
+      reporter: (event) => {
+        if (event.type === 'site:done') {
+          order.push(event.site);
+
+          if (event.site === 'plain.example') {
+            open();
+          }
+        }
+      },
+    });
+
+    clearTimeout(fallback);
+
+    expect(summary.fetched).toBe(11);
+    expect(order).toEqual(['plain.example', 'detailed.example']);
+    // Every detailed parse came back from its wait at once, and each took a
+    // slot back before writing: the bound on files still holds.
+    expect(cache.maxWriting).toBeLessThanOrEqual(4);
+  });
+
   it('runs two sites in parallel under the site queue', async () => {
     const cache = new MemoryCache();
     let inFlight = 0;
