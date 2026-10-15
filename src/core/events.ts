@@ -507,10 +507,21 @@ const RESOLUTION_MS = 10;
  * to leave on, and the only way to tell "the sources were slow" from "we never
  * got round to listening".
  */
-export function watchEventLoop(): { worst: () => Promise<number>; stop: () => void } {
+export async function watchEventLoop(): Promise<{
+  worst: () => Promise<number>;
+  stop: () => void;
+}> {
   const histogram = monitorEventLoopDelay({ resolution: RESOLUTION_MS });
 
   histogram.enable();
+
+  // Until the monitor has sampled once. It records the gap between one sample
+  // and the next, so a block before its first sample is not a gap it ever sees
+  // — and a run's first parse can start at once, when a site's request
+  // answers without waiting: 4.8s of parsing then read as 13ms.
+  await new Promise((resolve) => {
+    setTimeout(resolve, RESOLUTION_MS * 2);
+  });
 
   return {
     /**

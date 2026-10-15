@@ -50,7 +50,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
 
   // Watched for the whole run, because the number it produces is the one that
   // explains the others — see `grab:done`.
-  const loop = watchEventLoop();
+  const loop = await watchEventLoop();
 
   /**
    * Queue one task, cancellable without paying for the privilege.

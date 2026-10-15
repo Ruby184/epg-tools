@@ -1084,11 +1084,11 @@ describe('grab', () => {
 
     const config = makeConfig({
       days: 1,
-      // Some real loop time before the block, as any run has: the monitor
-      // samples at 10ms and cannot report a stretch it never ran inside of.
+      // Answered at once, so the parse starts before the monitor would have
+      // sampled for the first time if the run did not wait for it to: a block
+      // before the first sample is one it never sees, and this one read as
+      // a few milliseconds that way.
       async request() {
-        await new Promise((resolve) => setTimeout(resolve, 40));
-
         return {};
       },
       parseDay({ channel, day, programme }) {
