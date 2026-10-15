@@ -517,7 +517,7 @@ names live only on a subpath (marked below).
 | M3U | `parseM3uStream`, `parseM3uFile`, `parseM3uString`, `serializeM3uEntry`, `serializeM3uHeader`, `writeM3uStream`, `writeM3uToFile`, `M3uParseStream`, `M3uSerializeStream` |
 | Channels | `parseChannelsXml`, `serializeChannelsXml`, `serializeChannelsXmlEntry`, `matchChannels`, `timeshiftOf`, `timeshiftName` |
 | Cache | `CacheManager`, `CACHE_SCHEMA`, `CacheDriverBase`, `FsCacheDriver`, `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`, `MemoryCacheDriver`, `NoCacheDriver`, `isStale`, `DEFAULT_STALENESS` |
-| Grabber | `grab`, `defineSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `defineXtreamSite`, `defineSchedulesDirectSite`, `schedulesDirectAccount`, `defineCommandSite`, `defineTvGrabCommandSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`, `xtreamChannelExtras`, `xtreamProgrammeExtras`, `schedulesDirectChannelExtras`, `schedulesDirectProgrammeExtras`, `channelElement`, `siteHttp`, `sitePacing`, `retryAfterMs` |
+| Grabber | `grab`, `defineSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `defineXtreamSite`, `defineSchedulesDirectSite`, `schedulesDirectAccount`, `defineCommandSite`, `defineTvGrabCommandSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`, `xtreamChannelExtras`, `xtreamProgrammeExtras`, `schedulesDirectChannelExtras`, `schedulesDirectProgrammeExtras`, `channelElement`, `siteHttp`, `kyWith`, `sitePacing`, `retryAfterMs` |
 | Selection | `channelSelection`, `unmatched` — what `channels` means once `derived` is taken into account, and what it asked for that nothing produced |
 | Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `backfillInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
 
@@ -788,7 +788,7 @@ grabbed again.
 `schedulesDirectAccount`, `resolveChannels`, `resolveSites`,
 `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`,
 `xtreamChannelExtras`, `xtreamProgrammeExtras`, `schedulesDirectChannelExtras`,
-`schedulesDirectProgrammeExtras`, `siteHttp`, `sitePacing`,
+`schedulesDirectProgrammeExtras`, `siteHttp`, `kyWith`, `sitePacing`,
 `retryAfterMs`, `channelElement`, `defaultChannelInfo`, `SiteStateHandle`,
 `StateKey`, `TrackedMap`, `channelsMaxAgeMs`,
 `DEFAULT_CHANNELS_MAX_AGE_DAYS`, `UnchangedError`, `isUnchanged`,
@@ -812,7 +812,9 @@ surprise to anyone else. Given a `store`, both honour a site's
 its max age comes back without the source being asked, and a site's `channels`
 function is handed that handle's bag as its `state` — an empty one of its own
 where there is no store. `siteHttp(config,
-signal?)` builds the site's ky instance, and `sitePacing(config, { signal?, emit?
+signal?)` builds the site's ky instance — from its `ky` options, or by
+extending a ky instance it brought — and `kyWith(ky, compose)` is how an
+adapter built on another adds options of its own to either form, and `sitePacing(config, { signal?, emit?
 })` its queue. `channelElement(config, channel)` is what every `<channel>` in the
 output goes through — the site's `channelInfo` if it has one,
 `defaultChannelInfo` if not.

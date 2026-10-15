@@ -234,6 +234,7 @@ export {
   resolveSites,
   retryAfterMs,
   isUnchanged,
+  kyWith,
   siteHttp,
   sitePacing,
   SiteStateHandle,
@@ -268,6 +269,7 @@ export type {
   M3uSkipReason,
   MissingAllowance,
   ResolvedAllowance,
+  SiteConnection,
 } from './grabber/main.js';
 export type * from './grabber/types.js';
 export type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from './xmltv/builder.js';

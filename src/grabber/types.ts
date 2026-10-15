@@ -5,6 +5,7 @@ import type { LineupConfig } from '../tv-grab/lineups.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheEntryMeta, CacheStore, StalenessPolicy } from '../cache/types.js';
 import type { GrabCounts, Reporter, Says } from '../core/events.js';
+import type { SiteConnection } from './connection.js';
 
 /**
  * A channel to grab: maps an output XMLTV id to a site-specific id.
@@ -620,10 +621,25 @@ export interface BaseSiteConfig<TData = unknown> {
   /**
    * Base options for this site's own ky instance (`prefix`, `headers`,
    * `hooks`, `retry`, `timeout`, …). Each site gets its own, so nothing here
-   * reaches another site — including a `dispatcher`, which is how one site
-   * goes through a proxy and the rest do not.
+   * reaches another site — including a `dispatcher`, which is one way a site
+   * goes through a proxy and the rest do not. {@link connection} is the other,
+   * and the one that does not need undici's types to be written down.
+   *
+   * A ky **instance** is accepted in place of the options, for a project that
+   * already has one — its auth hooks, its retry policy, its `prefix`. It is
+   * extended rather than replaced, so what this site needs on top (the run's
+   * abort signal, conditional requests, a proxy) is added to what the instance
+   * already carries instead of taking its place.
    */
-  ky?: KyOptions;
+  ky?: KyOptions | KyInstance;
+  /**
+   * What this site's connections are made with — a proxy, TLS options — for
+   * the things `fetch` cannot be told per request. See {@link SiteConnection}.
+   *
+   * Needs the optional peer dependency `undici`, pinned to the copy Node
+   * bundles; anything else is refused with a message naming which to install.
+   */
+  connection?: SiteConnection;
   /** Per-site override of the staleness policy. */
   staleness?: Partial<StalenessPolicy>;
   /**

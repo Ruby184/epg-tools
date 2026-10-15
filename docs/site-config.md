@@ -47,7 +47,8 @@ it cannot leave a half-built site's output in the cache.
 | `rateLimit` | `{ requests, perMs, strict? }` | unset — no pacing | How often this site may be asked. `strict` defaults to `true` (sliding window). |
 | `backoff` | `false \| SiteBackoff` | on: `{ statuses: [429, 503], fallbackMs: 5000, maxMs: 60000, adapt: true }` | What to do when the source says slow down. |
 | `batching` | `BatchMode` or `{ mode, channelsPerRequest?, daysPerRequest? }` | `'none'` | How much of the channel × day grid one `request` covers. |
-| `ky` | ky `Options` | — | Base options for this site's own ky instance: `prefix`, `headers`, `hooks`, `retry`, `timeout`, `dispatcher`, … |
+| `ky` | ky `Options` or a ky **instance** | — | Base options for this site's own ky instance: `prefix`, `headers`, `hooks`, `retry`, `timeout`, `dispatcher`, … An instance a project already has is accepted in its place and extended rather than replaced. |
+| `connection` | `{ proxy?, tls? }` | — | What this site's connections are made with — a proxy, TLS options. Needs the optional peer `undici` — see [HTTP settings and proxies](#http-settings-and-proxies). |
 | `staleness` | `Partial<StalenessPolicy>` | the config's policy | Per-site override of when a cached day is refetched — including `emptyMaxAgeDays`, worth raising for a source with genuinely empty channels in it. |
 
 ### `GrabberChannel`
@@ -1297,39 +1298,69 @@ That instance is what `request` receives as `http`, and the run's abort signal
 is baked into it — anything asked for through it is abortable whether or not a
 site remembered to pass the signal on.
 
-A proxy for one site is the same idea: ky passes options it does not recognize
-down to `fetch`, and Node's `fetch` honours a `dispatcher`.
+A client the project already has is accepted in place of the options, and
+extended rather than replaced — its hooks, its retry policy and its `prefix`
+all survive, and what the site needs on top is added to them:
 
 ```ts
-import { ProxyAgent } from 'undici';
+import ky from 'ky';
 
+const authenticated = ky.create({ prefix: 'https://api.a.example.tv', hooks: { … } });
+
+const a = defineSiteConfig({ site: 'a.example.tv', ky: authenticated /* … */ });
+```
+
+### A proxy, or TLS, for one site
+
+Neither can be set per request, because both belong to the *connection*. That
+is what `connection` is for:
+
+```ts
 const behindProxy = defineSiteConfig({
   site: 'a.example.tv',
-  ky: {
-    prefix: 'https://api.a.example.tv',
-    dispatcher: new ProxyAgent('http://user:pass@proxy.local:3128'),
+  ky: { prefix: 'https://api.a.example.tv' },
+  connection: {
+    proxy: 'http://user:pass@proxy.local:3128',
+    // or `true`, to read HTTP_PROXY, HTTPS_PROXY and NO_PROXY — for this site
+    // only, and only because it asked. Nothing here reads them unasked.
   },
   // …
 });
 ```
 
-Only that site is tunnelled; the others go out directly. Three things to know:
+Only that site is tunnelled; the others go out directly.
 
-- **Pin `undici` to the major Node bundles** — `node -p process.versions.undici`.
-  A mismatched major fails every request with
-  `InvalidArgumentError: invalid onRequestStart method`, because the dispatcher
-  handler API differs between the standalone package and the copy inside Node.
+**It needs `undici` installed, at the version your Node bundles.** It is an
+optional peer dependency of this package, and the pin is not optional:
+
+```sh
+npm install undici@$(node -p process.versions.undici)
+```
+
+Node's `fetch` runs on a copy of undici built into Node, and a dispatcher from a
+different **major** cannot drive it — every request fails with
+`TypeError: fetch failed`, caused by `invalid onRequestStart method`, which says
+nothing about versions to anyone who has not met it before. So the version is
+checked when the dispatcher is built, and a mismatch is refused with a message
+naming both versions and the command above. A different minor or patch is fine;
+the interface changes at the major.
+
+Two related things, for completeness:
+
+- `ky: { dispatcher }` still works, and still takes precedence over anything
+  `connection` would build. Use it for a dispatcher of your own —
+  `connection` is the shorthand for the two cases everyone meets, and it exists
+  because `dispatcher` only typechecks where `RequestInit` comes from Node's
+  types: with the DOM lib in scope, DOM's `RequestInit` shadows it and has never
+  heard of `dispatcher`, which is why configs ended up writing
+  `ky: { fetch: (input, init) => fetch(input, { ...init, dispatcher } as RequestInit) }`.
 - **Keep the global `fetch`.** Pairing ky with undici's *own* `fetch` export
   does not work: ky hands it a global `Request`, which it rejects with
   `Failed to parse URL from [object Request]`.
-- `dispatcher` typechecks wherever `RequestInit` comes from Node's types
-  (`lib` without `DOM`, as in this package). With the DOM lib in scope, DOM's
-  `RequestInit` shadows it and has no `dispatcher`; then pass it through a
-  custom fetch instead:
-  `ky: { fetch: (input, init) => fetch(input, { ...init, dispatcher } as RequestInit) }`.
 
 Node 24 also understands `NODE_USE_ENV_PROXY=1` with `HTTP_PROXY`/`HTTPS_PROXY`
-/`NO_PROXY`, but that applies to the whole process — every site or none.
+/`NO_PROXY`, and needs no package at all — but it applies to the whole process,
+every site or none.
 
 ### A source whose TLS is older than Node
 
@@ -1346,21 +1377,21 @@ server still offering a 1024-bit Diffie-Hellman group — `tvprogram.cz` is a
 real example, TLS 1.2 with `DHE-RSA-AES256-GCM-SHA384` and a 1024-bit group —
 is refused before a byte of HTTP is sent. `fetch` has no way to say "that is
 fine for this one host", because the TLS options live on the connection rather
-than on the request. The dispatcher is where the connection is made:
+than on the request — and `connection.tls` is where that connection is made:
 
 ```ts
-import { Agent } from 'undici';
-
 const oldTls = defineSiteConfig({
   site: 'tvprogram.cz',
-  ky: {
-    prefix: 'https://www.tvprogram.cz',
-    // Only this site's connections; everything else keeps Node's defaults.
-    dispatcher: new Agent({ connect: { ciphers: 'DEFAULT:@SECLEVEL=0' } }),
-  },
+  ky: { prefix: 'https://www.tvprogram.cz' },
+  // Only this site's connections; everything else keeps Node's defaults.
+  connection: { tls: { ciphers: 'DEFAULT:@SECLEVEL=0' } },
   // …
 });
 ```
+
+These are `tls.connect` options, and through a proxy they are for the
+connection to the **source**, inside the tunnel, rather than to the proxy.
+Installing `undici` is the same requirement as above.
 
 Two things that look like the fix and are not:
 

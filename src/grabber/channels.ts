@@ -1,4 +1,4 @@
-import ky, { type KyInstance } from 'ky';
+import ky, { replaceOption, type KyInstance, type Options as KyOptions } from 'ky';
 import PQueue from 'p-queue';
 import { readFile } from 'node:fs/promises';
 import { parseChannelsXml } from '../channels/parse.js';
@@ -18,6 +18,7 @@ import type {
 import { ChannelBuilder } from '../xmltv/builder.js';
 import type { XmltvChannel } from '../xmltv/types.js';
 import { revalidationHooks } from './revalidate.js';
+import { siteDispatcher, type SiteDispatcher } from './connection.js';
 import { channelsMaxAgeMs, SiteStateHandle } from './state.js';
 import type {
   AnySiteConfig,
@@ -38,22 +39,84 @@ import type {
  * on: every call through `http` is then abortable whether or not whoever wrote
  * the site remembered to forward it. A site that brought a signal of its own in
  * `ky.signal` keeps it — both are honoured, either one aborts.
+ *
+ * A site whose `ky` is an **instance** rather than options is extended rather
+ * than rebuilt, through {@link kyWith} — so a client a project already had
+ * keeps everything it was carrying, and what is added here is added to it in
+ * the same order an options object would have ended up in.
  */
 export function siteHttp(config: AnySiteConfig, signal?: AbortSignal): KyInstance {
-  const signals = [config.ky?.signal, signal].filter(
-    (candidate): candidate is AbortSignal => candidate != null,
-  );
+  const dispatcher = siteDispatcher(config.connection);
+  const composed = kyWith(config.ky, (existing) => {
+    const signals = [existing?.signal, signal].filter(
+      (candidate): candidate is AbortSignal => candidate != null,
+    );
 
-  return ky.create({
-    ...config.ky,
-    // Only for a site that asked. ky hands each `afterResponse` hook a clone of
-    // the response, so a site with no use for conditional requests should not be
-    // paying for one — even a cheap one.
-    ...(config.conditionalGet === true ? { hooks: revalidationHooks(config.ky?.hooks) } : {}),
-    ...(signals.length > 0
-      ? { signal: signals.length === 1 ? signals[0]! : AbortSignal.any(signals) }
-      : {}),
+    return {
+      ...existing,
+      // Only for a site that asked. ky hands each `afterResponse` hook a clone
+      // of the response, so a site with no use for conditional requests should
+      // not be paying for one — even a cheap one.
+      ...(config.conditionalGet === true ? { hooks: revalidationHooks(existing?.hooks) } : {}),
+      ...(signals.length > 0
+        ? { signal: signals.length === 1 ? signals[0]! : AbortSignal.any(signals) }
+        : {}),
+      ...(dispatcher === undefined ? {} : { fetch: dispatching(dispatcher, existing?.fetch) }),
+    };
   });
+
+  return typeof composed === 'function' ? composed : ky.create(composed);
+}
+
+/**
+ * A site's `ky` with something composed onto it, whichever form it is in.
+ *
+ * `compose` is handed the options already there — an instance's too, which ky
+ * will hand over — and returns the whole set, so one expression decides how the
+ * two meet: which hooks run before the site's, which prefix wins. What comes
+ * back is told to *replace* rather than merge, because ky's own merge appends
+ * hooks and accumulates search parameters, and `compose` has already folded in
+ * the parent's: merging again would run each of them twice.
+ *
+ * For a site adapter built on another — `defineXtreamSite` and the rest are —
+ * which has options of its own to put on a client the caller may have brought
+ * fully formed.
+ */
+export function kyWith(
+  base: KyOptions | KyInstance | undefined,
+  compose: (existing: KyOptions | undefined) => KyOptions,
+): KyOptions | KyInstance {
+  if (typeof base !== 'function') {
+    return compose(base);
+  }
+
+  return base.extend((parent) =>
+    Object.fromEntries(
+      Object.entries(compose(parent)).map(([option, value]) => [option, replaceOption(value)]),
+    ),
+  );
+}
+
+/**
+ * The site's `fetch`, with its dispatcher attached to every request.
+ *
+ * This is the cast a site config used to have to write for itself, and the
+ * reason `connection` exists: `dispatcher` is a real option of Node's `fetch`,
+ * but `RequestInit` is DOM's wherever the DOM lib is in scope, and DOM's has
+ * never heard of it.
+ *
+ * Whatever `fetch` the site brought is kept and called — overwriting it would
+ * silently undo a site that wrapped `fetch` for a reason.
+ */
+function dispatching(
+  dispatcher: () => Promise<SiteDispatcher>,
+  brought: KyOptions['fetch'],
+): NonNullable<KyOptions['fetch']> {
+  return async (input, init) => {
+    const withDispatcher = { ...init, dispatcher: await dispatcher() } as unknown as RequestInit;
+
+    return (brought ?? globalThis.fetch)(input, withDispatcher);
+  };
 }
 
 /** What a caller can offer {@link resolveChannels} beyond the site itself. */

@@ -6,6 +6,7 @@ export {
   coverageOf,
   covered,
   defaultChannelInfo,
+  kyWith,
   resolveChannels,
   resolveSites,
   siteHttp,
@@ -18,6 +19,7 @@ export type {
   M3uChannelsOptions,
   M3uSkipReason,
 } from './channels.js';
+export type { SiteConnection } from './connection.js';
 export { defineM3uSite, guideUrlsFromM3u } from './m3u-source.js';
 export type { M3uSiteOptions } from './m3u-source.js';
 export { retryAfterMs, sitePacing } from './pacing.js';

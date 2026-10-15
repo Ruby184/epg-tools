@@ -125,6 +125,14 @@
     "typescript": "^7.0.2",
     "vitest": "^5.0.4"
   },
+  "peerDependencies": {
+    "undici": ">=6.19"
+  },
+  "peerDependenciesMeta": {
+    "undici": {
+      "optional": true
+    }
+  },
   "lint-staged": {
     "*.{ts,mts,cts,js,mjs,cjs,json}": "oxfmt",
     "*.{ts,mts,cts,js,mjs,cjs}": "oxlint --fix"

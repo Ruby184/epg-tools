@@ -210,6 +210,41 @@ export const paced = defineSiteConfig({
   parseDay: () => [],
 });
 
+// --- docs/site-config.md: HTTP settings and proxies -------------------------
+const authenticated = ky.create({ prefix: 'https://api.a.example.tv' });
+
+export const broughtClient = defineSiteConfig({
+  site: 'a.example.tv',
+  ky: authenticated,
+  channels: [],
+  async request() {
+    return {};
+  },
+  parseDay: () => [],
+});
+
+export const behindProxy = defineSiteConfig({
+  site: 'a.example.tv',
+  ky: { prefix: 'https://api.a.example.tv' },
+  connection: { proxy: 'http://user:pass@proxy.local:3128' },
+  channels: [],
+  async request() {
+    return {};
+  },
+  parseDay: () => [],
+});
+
+export const oldTls = defineSiteConfig({
+  site: 'tvprogram.cz',
+  ky: { prefix: 'https://www.tvprogram.cz' },
+  connection: { tls: { ciphers: 'DEFAULT:@SECLEVEL=0' } },
+  channels: [],
+  async request() {
+    return {};
+  },
+  parseDay: () => [],
+});
+
 // --- docs/site-config.md: A channel list that has to be fetched ------------
 const fetchedChannels = defineSiteConfig({
   site: 'example.tv',
