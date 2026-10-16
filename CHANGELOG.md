@@ -11,6 +11,17 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.9.0](https://github.com/Ruby184/epg-tools/compare/v0.8.0...v0.9.0) (2026-10-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* the run's zone is `timeZone`, as `Intl` spells it and as it sits beside `dayZone`: in the config, `RunOptions`, `GrabOptions`, `BuildGuideOptions`, `GuideHandlerOptions`, `GrabEveryOptions` and the `serve.grab` context. `timezone` is no longer read. The `--timezone` flag is unchanged.
+
+### Features
+
+* a site's code is told the run's zone, and reads its clock ([824e1ed](https://github.com/Ruby184/epg-tools/commit/824e1edf263b7237cf3fa6994849b2d5595bd824))
+
 ## [0.8.0](https://github.com/Ruby184/epg-tools/compare/v0.7.0...v0.8.0) (2026-10-16)
 
 
