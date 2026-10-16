@@ -24,7 +24,7 @@ import PQueue from 'p-queue';
 import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../config.js';
 import { createCacheStore } from '../build.js';
 import type { CacheEntryMeta, CacheStore, ChannelDayKey } from '../cache/types.js';
-import { dayRange, toDayString, addDays } from '../core/days.js';
+import { dayRange, dayIn, addDays, resolveTimeZone } from '../core/days.js';
 import { errorMessage } from '../core/error.js';
 import { emitter, reportingTo, type Reporter, type Says } from '../core/events.js';
 import { compressor, type CompressionFormat } from '../core/output.js';
@@ -167,6 +167,8 @@ export interface GuideHandlerOptions {
   now?: Date;
   /** Shift the window, as a run's `offset` does. */
   offset?: number;
+  /** The zone whose calendar says which day is today, over the config's `timezone`. */
+  timezone?: string;
   /** The module the config came from, as a run's `configModule` is — for `threads`. */
   configModule?: string | URL;
   /**
@@ -924,6 +926,9 @@ export async function createGuideHandler(
   const revalidateMs = options.revalidateMs ?? DEFAULT_REVALIDATE_MS;
   const cors = options.cors ?? config.serve?.cors ?? false;
   const sitesMaxAgeMs = options.sitesMaxAgeMs ?? DEFAULT_SITES_MAX_AGE_MS;
+  // The caller's, checked here, or the config's, checked as it was loaded.
+  const timeZone =
+    options.timezone === undefined ? config.timezone : resolveTimeZone(options.timezone);
   const schedule = options.grab ?? config.serve?.grab;
   const declaredBase = config.serve?.baseUrl;
 
@@ -1097,7 +1102,7 @@ export async function createGuideHandler(
   };
 
   const windowOf = (now: Date): { days: string[]; startDay: string; id: string } => {
-    const today = toDayString(now);
+    const today = dayIn(now, timeZone);
     const startDay = options.offset ? addDays(today, options.offset) : today;
     const days = [...dayRange(startDay, config.days ?? 7)];
 
@@ -1248,6 +1253,7 @@ export async function createGuideHandler(
       cache,
       startDay: window.startDay,
       now,
+      timezone: timeZone,
       ...(config.days !== undefined ? { days: config.days } : {}),
       ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
       ...(config.localConcurrency !== undefined ? { readAhead: config.localConcurrency } : {}),
@@ -1635,6 +1641,7 @@ export async function createGuideHandler(
         cache,
         ...(options.reporter ? { reporter: options.reporter } : {}),
         ...(options.offset === undefined ? {} : { offset: options.offset }),
+        timezone: timeZone,
         ...(options.configModule === undefined ? {} : { configModule: options.configModule }),
         signal: stops.signal,
       });
@@ -1669,7 +1676,12 @@ export async function createGuideHandler(
       let next: Date | number | undefined;
 
       try {
-        next = await schedule({ from, runs, cached: () => cachedFor(from) });
+        next = await schedule({
+          from,
+          runs,
+          cached: () => cachedFor(from),
+          timezone: timeZone,
+        });
       } catch (error) {
         // A schedule that threw has said nothing about when to run again, and
         // guessing on its behalf would be the wrong hour forever. Reported

@@ -1,4 +1,4 @@
-import { dayRange, dayToDate, toDayString } from '../core/days.js';
+import { addDays, dayIn, dayRange, dayToDate, resolveTimeZone, wallTimeIn } from '../core/days.js';
 import { errorMessage, GrabberError } from '../core/error.js';
 import { writeOutput, type OutputOptions, type OutputTarget } from '../core/output.js';
 import { emitter } from '../core/events.js';
@@ -29,8 +29,6 @@ import type { BuildGuideOptions, FillGapsContext, FillGapsOptions, GuideContext 
  * four by default anyway.
  */
 const DEFAULT_READ_AHEAD = 16;
-
-const DAY_MS = 86_400_000;
 
 /**
  * Yield `items` in order, with `depth` of them being read at once.
@@ -263,7 +261,8 @@ function titleOf(programme: XmltvProgramme): string {
 
 export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator<string> {
   const now = options.now ?? new Date();
-  const days = [...dayRange(options.startDay ?? toDayString(now), options.days ?? 7)];
+  const timeZone = resolveTimeZone(options.timezone);
+  const days = [...dayRange(options.startDay ?? dayIn(now, timeZone), options.days ?? 7)];
   const channelStrategy = options.merge?.channelStrategy ?? 'merge-programmes';
   const programmeStrategy = options.merge?.programmeStrategy ?? 'merge';
   const { cache } = options;
@@ -488,11 +487,13 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   const filling = channelStrategy === 'keep-all' ? undefined : gaps;
 
   // The guide's own bounds, for `clampToWindow`: the first day's midnight, and
-  // the midnight that ends the last one.
-  const windowStart = days.length > 0 ? dayToDate(days[0]!).getTime() : 0;
+  // the midnight that ends the last one — on the run's clock, which is the
+  // calendar its days are on. A source filing local days would otherwise lose
+  // the small hours of the first one to a UTC midnight that comes later.
+  const windowStart = days.length > 0 ? wallTimeIn(days[0]!, timeZone) : 0;
   const windowEnd =
     days.length > 0
-      ? dayToDate(days[days.length - 1]!).getTime() + DAY_MS
+      ? wallTimeIn(addDays(days[days.length - 1]!, 1), timeZone)
       : Number.MAX_SAFE_INTEGER;
 
   /**
@@ -756,7 +757,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
 
       // Anything starting before the day just folded in: no later day can
       // reasonably claim it, so it is done.
-      const horizon = dayToDate(day).getTime();
+      const horizon = wallTimeIn(day, timeZone);
       let held = 0;
 
       while (held < pending.length && pending[held]!.start.getTime() < horizon) {

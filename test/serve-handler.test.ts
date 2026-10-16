@@ -282,6 +282,22 @@ describe('createGuideHandler', () => {
     ]);
   });
 
+  it('serves the window that starts on the zone’s today', async () => {
+    // Half past midnight on the 3rd in Bratislava, still the 2nd in UTC.
+    const late = new Date('2026-09-02T22:30:00.000Z');
+    const windowFor = async (config: EpgConfig) => {
+      const handler = await handlerFor(config, await cacheWith({}), { now: late });
+      const { body } = await handler.answer({ headers: {}, route: 'health' });
+
+      return body?.window.startDay;
+    };
+
+    expect(await windowFor({ ...configFor(['one']), timezone: 'Europe/Bratislava' })).toBe(
+      '2026-09-03',
+    );
+    expect(await windowFor(configFor(['one']))).toBe('2026-09-02');
+  });
+
   it('answers a conditional poll out of the answer itself, with no transport in it', async () => {
     const handler = await handlerFor(
       configFor(['one']),

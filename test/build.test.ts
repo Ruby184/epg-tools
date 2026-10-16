@@ -355,6 +355,73 @@ describe('offset', () => {
   });
 });
 
+describe('a run with a time zone', () => {
+  // Half past midnight on the 17th in Bratislava, which is still the 16th in UTC.
+  const LATE = new Date('2026-07-16T22:30:00.000Z');
+
+  /** One programme in the first half hour of each local day, and one at night. */
+  function local(fetchedDays: string[]): SiteConfig<unknown> {
+    return {
+      ...site(fetchedDays),
+      parseDay({ day }): XmltvProgramme[] {
+        // 00:15 and 20:00 on the day, on Bratislava's summer clock (UTC+2).
+        const at = (time: string) =>
+          new Date(new Date(`${day}T${time}:00.000Z`).getTime() - 2 * 3_600_000);
+
+        return [
+          { channel: 'one.example', start: at('00:15'), title: [{ value: 'small hours' }] },
+          { channel: 'one.example', start: at('20:00'), title: [{ value: 'evening' }] },
+        ];
+      },
+    };
+  }
+
+  it('starts its window on the zone’s today', async () => {
+    const dir = await tempDir();
+    const fetchedDays: string[] = [];
+
+    await runGrab(config(dir, { sites: [local(fetchedDays)], timezone: 'Europe/Bratislava' }), {
+      now: LATE,
+    });
+
+    expect(fetchedDays).toEqual(['2026-07-17']);
+  });
+
+  it('clamps the guide to the zone’s midnights, keeping the first day’s small hours', async () => {
+    const dir = await tempDir();
+
+    await build(
+      config(dir, {
+        sites: [local([])],
+        timezone: 'Europe/Bratislava',
+        merge: { clampToWindow: true },
+      }),
+      { now: LATE },
+    );
+
+    const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+    // 00:15 on the 17th is 22:15 on the 16th in UTC — inside the day by the
+    // zone's clock, and outside it by UTC's.
+    expect(guide.programmes.map((programme) => programme.title[0]?.value)).toEqual([
+      'small hours',
+      'evening',
+    ]);
+  });
+
+  it('refuses a zone that is not one, before anything is asked', async () => {
+    const dir = await tempDir();
+    const fetchedDays: string[] = [];
+
+    await expect(
+      runGrab(config(dir, { sites: [local(fetchedDays)], timezone: 'Mars/Olympus' }), {
+        now: LATE,
+      }),
+    ).rejects.toThrow('timezone must be an IANA time zone');
+    expect(fetchedDays).toEqual([]);
+  });
+});
+
 describe('cancellation', () => {
   it('writes no guide when the grab was cancelled, and keeps what it cached', async () => {
     const dir = await tempDir();

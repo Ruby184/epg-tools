@@ -103,6 +103,17 @@ describe('isStale', () => {
     expect(isStale('2026-07-20', freshMeta, policy, now)).toBe(false);
   });
 
+  it('takes today on the zone’s calendar when it is given one', () => {
+    // Half past midnight in Bratislava, still the 17th in UTC: the 18th is
+    // today there, and always fetched again.
+    const lateNight = new Date('2026-07-17T22:30:00.000Z');
+
+    expect(
+      isStale('2026-07-18', freshMeta, DEFAULT_STALENESS, lateNight, 'Europe/Bratislava'),
+    ).toBe(true);
+    expect(isStale('2026-07-18', freshMeta, DEFAULT_STALENESS, lateNight, 'UTC')).toBe(false);
+  });
+
   it('treats an unparseable grabbedAt as stale', () => {
     const corruptMeta = { grabbedAt: 'not-a-date', programmeCount: 3 };
 

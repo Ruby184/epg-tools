@@ -464,6 +464,16 @@ describe('epg', () => {
     expect(stderr).toContain('ndjson, xmltv, sqlite, memory');
   });
 
+  it('refuses a time zone that is not one, as the usage error it is', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+
+    const { code, stderr } = await run(['grab', '--config', config, '--timezone', 'Mars/Olympus']);
+
+    expect(code).toBe(2);
+    expect(stderr).toContain('--timezone must be an IANA time zone such as "Europe/Bratislava"');
+  });
+
   it('refuses a thread count that is not one — the command after a bare flag included', async () => {
     const dir = await tempDir();
     const config = await plainConfig(dir);

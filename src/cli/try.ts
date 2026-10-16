@@ -29,7 +29,7 @@ import type { Writable } from 'node:stream';
 import { CacheManager } from '../cache/manager.js';
 import { NoCacheDriver } from '../cache/no-cache-driver.js';
 import { resolveConfigSource, type ConfigSource } from '../config.js';
-import { toDayString } from '../core/days.js';
+import { dayIn } from '../core/days.js';
 import { GrabberError } from '../core/error.js';
 import { writeFlushed } from '../core/streams.js';
 import { kyWith, resolveChannels, siteHttp } from '../grabber/channels.js';
@@ -325,7 +325,8 @@ export async function tryChannelDay(
   options: TryOptions = {},
 ): Promise<number> {
   const config = await resolveConfigSource(source);
-  const day = options.day ?? toDayString(new Date());
+  // Today on the run's calendar, which is the day a run would ask for first.
+  const day = options.day ?? dayIn(new Date(), config.timezone);
   const site = siteNamed(config.sites, siteName);
 
   // The same reading a run makes, so a site that a run would refuse is refused

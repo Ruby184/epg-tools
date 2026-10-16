@@ -906,6 +906,12 @@ export interface GrabOptions {
    * shift it (an XMLTV grabber's `--offset` needs exactly this split).
    */
   startDay?: string;
+  /**
+   * The time zone whose calendar says which day is today — for the window's
+   * first day when `startDay` is not given, and for the days staleness always
+   * fetches again. UTC's when left out. See `EpgConfig.timezone`.
+   */
+  timezone?: string;
   /** How many sites run in parallel. Defaults to all. */
   siteConcurrency?: number;
   /**

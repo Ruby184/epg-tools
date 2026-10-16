@@ -1,4 +1,4 @@
-import { diffDays, toDayString } from '../core/days.js';
+import { dayIn, diffDays } from '../core/days.js';
 import type { CacheEntryMeta, StalenessPolicy } from './types.js';
 
 const DAY_MS = 86_400_000;
@@ -15,12 +15,16 @@ const DAY_MS = 86_400_000;
  *   `emptyMaxAgeDays` instead for an entry that holds no programmes, since a
  *   day that came back empty is as likely to be a source that was briefly
  *   broken as it is a channel with nothing on.
+ *
+ * Today is `now`'s day on the calendar of `timeZone`, UTC's without one — the
+ * run's, so the days it always refetches are the ones it means by today.
  */
 export function isStale(
   day: string,
   meta: CacheEntryMeta | undefined,
   policy: StalenessPolicy,
   now: Date,
+  timeZone?: string,
 ): boolean {
   // Ahead of the entry itself: a run asked to refetch everything is not asking
   // about this entry at all.
@@ -28,7 +32,7 @@ export function isStale(
     return true;
   }
 
-  const offset = diffDays(day, toDayString(now));
+  const offset = diffDays(day, dayIn(now, timeZone));
 
   if (offset >= 0 && offset < policy.alwaysRefetchDays) {
     return true;

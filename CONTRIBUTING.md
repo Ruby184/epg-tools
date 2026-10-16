@@ -67,6 +67,10 @@ two constants the build bakes in; the types it leaves to Node's own stripping,
 which is why the suite needs 22.18. `npm test` runs both, and one on its own is
 `npm test -- --project unit` (or `threads`).
 
+Both run with `TZ=UTC`, set in `vitest.config.ts`: a run's days follow the
+process's zone when a config names none, so a test that meant UTC would pass in
+CI and fail on a laptop in Prague. A test about zones names its own.
+
 ### Benchmarks compare against the arm beside them, and against your last run
 
 A benchmark is a `test` that builds its arms with the `bench` fixture and hands

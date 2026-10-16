@@ -16,7 +16,7 @@ import { generateGuide, writeGuide } from './merge/main.js';
 import { channelSelection, configured, unmatched, unmatchedMessage } from './merge/select.js';
 import type { BuildGuideOptions, DerivedChannel } from './merge/types.js';
 import { outputOptions } from './xmltv/serialize.js';
-import { addDays, toDayString } from './core/days.js';
+import { addDays, dayIn, localTimeZone, resolveTimeZone } from './core/days.js';
 import { GrabberError } from './core/error.js';
 import type { Emit, Reporter, Says } from './core/events.js';
 import { emitter, reportingTo } from './core/events.js';
@@ -58,6 +58,11 @@ export interface RunOptions {
    * so staleness and the `grabbedAt` stamp keep using the real current time.
    */
   offset?: number;
+  /**
+   * The time zone whose calendar says which day is today, in place of the
+   * config's `timezone` — see there.
+   */
+  timezone?: string;
   /**
    * Where this run's events go — see {@link Reporter}.
    *
@@ -341,9 +346,19 @@ async function settled(
   return { sites: kept, failures, derived: selection?.derived ?? declarations, sessions };
 }
 
-/** First day of the window implied by `now` + `offset`. */
-function startDayOf(options: RunOptions, now: Date): string {
-  const today = toDayString(now);
+/**
+ * The zone a run's days are reckoned in: the caller's, checked here before
+ * anything is fetched, else the config's, checked as it was loaded.
+ */
+function zoneOf(config: EpgConfig, options: RunOptions): string {
+  return options.timezone === undefined
+    ? (config.timezone ?? localTimeZone())
+    : resolveTimeZone(options.timezone);
+}
+
+/** First day of the window implied by `now` + `offset`, on the run's calendar. */
+function startDayOf(options: RunOptions, now: Date, timeZone: string): string {
+  const today = dayIn(now, timeZone);
   return options.offset ? addDays(today, options.offset) : today;
 }
 
@@ -354,11 +369,14 @@ function guideOptions(
   now: Date,
   cache: CacheStore,
 ): BuildGuideOptions {
+  const timeZone = zoneOf(config, options);
+
   return {
     sites: config.sites,
     cache,
-    startDay: startDayOf(options, now),
+    startDay: startDayOf(options, now, timeZone),
     now,
+    timezone: timeZone,
     ...(config.days !== undefined ? { days: config.days } : {}),
     ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
     // The same bound the grab gives its own local work, for the same resource:
@@ -400,7 +418,8 @@ async function grabInto(
   options: RunOptions,
   now: Date,
 ): Promise<GrabSummary> {
-  const startDay = startDayOf(options, now);
+  const timeZone = zoneOf(config, options);
+  const startDay = startDayOf(options, now, timeZone);
   const summary = await grabWith(
     settling.sites,
     {
@@ -413,6 +432,7 @@ async function grabInto(
         : {}),
       ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
       now,
+      timezone: timeZone,
       ...reported(options),
       ...(options.signal ? { signal: options.signal } : {}),
       ...(config.threads === undefined ? {} : { threads: config.threads }),
@@ -434,7 +454,7 @@ async function grabInto(
   if (config.cache?.prune !== false && options.signal?.aborted !== true) {
     // Never prune inside the window we just grabbed: a negative offset puts
     // the window start before today, and those days must survive.
-    const today = toDayString(now);
+    const today = dayIn(now, timeZone);
     const before = startDay < today ? startDay : today;
     const removed = await cache.prune({ before });
 
@@ -451,9 +471,11 @@ export async function runGrab(source: ConfigSource, given: RunOptions = {}): Pro
   const config = await resolveConfigSource(source);
   const options = reportingTo(given, config.events);
 
-  // Before a channel list is fetched: a run that cannot start its threads says
-  // so first, rather than after every site has been asked for one.
+  // Before a channel list is fetched: a run that cannot start its threads, or
+  // was given a zone that is not one, says so first, rather than after every
+  // site has been asked for one.
   threadCount(config.threads, options.configModule);
+  zoneOf(config, options);
   const now = options.now ?? new Date();
 
   return withCache(config, options, async (cache) => {
@@ -534,6 +556,7 @@ export async function build(source: ConfigSource, given: RunOptions = {}): Promi
 
   // As `runGrab` does, and for the same reason: before the lists below.
   threadCount(config.threads, options.configModule);
+  zoneOf(config, options);
 
   // One cache for both halves, rather than each of them asking the config for
   // its own: a driver that opens a database opens it once, and one that keeps

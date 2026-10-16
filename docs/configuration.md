@@ -109,6 +109,7 @@ flag.
 | `output` | `string` | **required** | Where the guide is written: a path, replaced atomically once complete, or a Unix socket to stream it into. |
 | `compress` | `'gzip' \| 'brotli' \| 'zstd' \| false \| { format, level? }` | what the output's name says | Compress the guide — see [Compressing the guide](#compressing-the-guide). A `.gz`, `.br` or `.zst` output already asks for it; this is for a socket, for a plain document under a compressed-sounding name, or for choosing a level. |
 | `days` | `number` | `7` | How many days to grab and include in the guide. A site may override it. |
+| `timezone` | `string` | the process's zone — `TZ`, UTC where unset | Whose calendar says which day is today, as an IANA name like `'Europe/Bratislava'` — see [which day is today](#which-day-is-today). `--timezone` overrides it. |
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
 | `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source; a parse waiting on its own `ctx.paced` request does not count against it. |
@@ -219,6 +220,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `-c, --config <path>` | config file; defaults to `epg.config.ts\|js\|mjs` in the working directory |
 | `-d, --days <n>` | override the config's `days` |
 | `--offset <n>` | start the window n days from today; may be negative |
+| `--timezone <zone>` | whose calendar says which day is today, as `Europe/Bratislava` — see [which day is today](#which-day-is-today). The process's own zone by default |
 | `-o, --output <path>` | override the output file, or a Unix socket to stream into — a `.gz`, `.br` or `.zst` name [compresses it](./configuration.md#compressing-the-guide) |
 | `--cache-dir <dir>` | override the cache directory |
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
@@ -234,7 +236,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--health <p>` | `serve` only: the path that answers a health check, default `/health` |
 | `--no-health` | `serve` only: do not answer one at all |
 | `--grab-every <d>` | `serve` only: also grab on this interval — `6h`, `30m`, `1d`. Off unless said — see [grabbing on a schedule](#grabbing-on-a-schedule) |
-| `--grab-at <t>` | `serve` only: a local time of day to line `--grab-every` up with, as `04:00`. On its own it means once a day, at that time |
+| `--grab-at <t>` | `serve` only: a time of day to line `--grab-every` up with, as `04:00`, on the clock of [`timezone`](#which-day-is-today). On its own it means once a day, at that time |
 | `--raw` | `try` only: print the whole payload, not the first 2000 characters |
 | `--format <how>` | `validate`, `channels` and `--dry-run`: `text` (default) or `json` |
 | `--strict` | `validate` only: count warnings as failures too |
@@ -981,6 +983,12 @@ export default defineConfig({
 });
 ```
 
+`at` is a time on the clock of the config's [`timezone`](#which-day-is-today) —
+the process's own zone where there is none — and `grabEvery('1d', { at: '04:00',
+timezone: 'Europe/Bratislava' })` reads it in a zone of its own. Asked of the
+zone rather than added to its midnight, so a night the clocks change still
+grabs at four.
+
 The two halves answer each other. An interval alone **drifts** — restart at
 three in the afternoon and that is when you grab from then on, which is wrong
 when a source publishes overnight. A time of day alone can only mean once a day.
@@ -1009,6 +1017,7 @@ type NextGrab = (context: {
   from: Date;
   runs: number;
   cached(): Promise<{ present: number; expected: number; grabbedAt?: Date }>;
+  timezone?: string;   // the server's, for a schedule that reads a time of day
 }) => Date | number | undefined | Promise<Date | number | undefined>;
 ```
 
@@ -1399,6 +1408,31 @@ reports the same and writes no guide.
 `grabbedAt` stamp keep using the real current time and the post-grab prune
 never removes a day inside the window. Negative values work in both the
 `--offset -1` and `--offset=-1` forms.
+
+### Which day is today
+
+A day in the cache is a calendar date, and which zone's calendar is the
+source's business — an XMLTV source files a programme under the day it falls on
+in the offset it was written in, unless its `dayZone` says otherwise. Which of
+those days is *today* is the run's, and `timezone` is how it is said:
+
+```ts
+export default defineConfig({
+  // ...
+  timezone: 'Europe/Bratislava',
+  serve: { grab: grabEvery('24h', { at: '00:30' }) },
+});
+```
+
+Today is where the window starts, which days `alwaysRefetchDays` fetches again,
+what `epg try` asks for and where a prune stops; and the window's days run
+from midnight to midnight on that clock when the guide is
+[clamped](#cleaning-up-the-output) to them. Left out, it is the process's own
+zone — what `TZ` says, and UTC in a container that sets none — and a schedule's
+`at` is read on the same clock, so the two cannot disagree. Set it when the
+machine's clock is not the guide's: a server in UTC grabbing for Bratislava
+would otherwise take half past midnight there for the day before, refetch the
+day that has just ended, and stop a day short.
 
 ## How caching works
 

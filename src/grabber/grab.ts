@@ -8,7 +8,7 @@
  */
 
 import PQueue from 'p-queue';
-import { toDayString } from '../core/days.js';
+import { dayIn, resolveTimeZone } from '../core/days.js';
 import { emitter, type GrabCounts, watchEventLoop } from '../core/events.js';
 import type { SiteSession } from './session.js';
 import { SiteRun, type Run } from './site-run.js';
@@ -41,6 +41,7 @@ export async function grabWith(
   // Before anything starts, rather than once per site that then cannot — it
   // throws when there are threads to start and no module to start them on.
   const threadsWanted = threadCount(options.threads, options.configModule);
+  const timeZone = resolveTimeZone(options.timezone);
   const threads =
     threadsWanted === 0 ? undefined : SiteThreads.for(threadsWanted, options.configModule!);
   /** Every site running in a thread, so a cancelled run can wait for them — see below. */
@@ -111,7 +112,8 @@ export async function grabWith(
     cache,
     now,
     grabbedAt: now.toISOString(),
-    startDay: options.startDay ?? toDayString(now),
+    startDay: options.startDay ?? dayIn(now, timeZone),
+    timeZone,
     emit,
     ...(signal ? { signal } : {}),
     localWork,

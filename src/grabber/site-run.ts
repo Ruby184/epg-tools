@@ -78,6 +78,8 @@ export interface Run {
   /** Say what happened, for whoever is listening — see `core/events.ts`. */
   emit: Emit;
   signal?: AbortSignal | undefined;
+  /** The zone whose calendar says which day is today — see `GrabOptions.timezone`. */
+  timeZone?: string | undefined;
   /** The run-wide queue for work that never leaves the machine. */
   localWork: PQueue;
   enqueue: Enqueue;
@@ -428,7 +430,7 @@ export class SiteRun {
           return this.#resolved.window.flatMap((day, index) => {
             const cached = metas[index];
 
-            if (isStale(day, cached, this.#resolved.staleness, now)) {
+            if (isStale(day, cached, this.#resolved.staleness, now, this.#run.timeZone)) {
               // The meta goes with it: what a conditional request asks with, and
               // what it would keep. Read once here rather than again later.
               return [{ channel, day, ...(cached === undefined ? {} : { cached }) }];

@@ -26,8 +26,8 @@
 import type { Writable } from 'node:stream';
 import { isStale } from '../cache/main.js';
 import type { CacheStore, StalenessPolicy } from '../cache/types.js';
-import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../config.js';
-import { addDays, toDayString } from '../core/days.js';
+import { resolveConfigSource, type ConfigSource } from '../config.js';
+import { addDays, dayIn } from '../core/days.js';
 import { writeLines } from '../core/streams.js';
 import { resolveChannels } from '../grabber/channels.js';
 import { planRequests } from '../grabber/planner.js';
@@ -121,6 +121,8 @@ async function planSite(
     days?: number;
     /** The run's policy, under which a site's own override still wins. */
     staleness?: Partial<StalenessPolicy>;
+    /** The run's zone, for which day is today — see `EpgConfig.timezone`. */
+    timeZone?: string;
   } & PlanOptions,
 ): Promise<PlanSite> {
   const resolved = resolveSite(
@@ -173,7 +175,7 @@ async function planSite(
     );
 
     for (const [index, day] of window.entries()) {
-      if (isStale(day, metas[index], staleness, options.now)) {
+      if (isStale(day, metas[index], staleness, options.now, options.timeZone)) {
         stale.push({ channel, day });
       }
     }
@@ -229,9 +231,12 @@ export async function planRun(
   cache: CacheStore,
   options: PlanOptions = {},
 ): Promise<PlanReport> {
-  const config: EpgConfig = await resolveConfigSource(source);
+  const config = await resolveConfigSource(source);
   const now = options.now ?? new Date();
-  const startDay = options.offset ? addDays(toDayString(now), options.offset) : toDayString(now);
+  // Today on the run's calendar, as a run would take it.
+  const timeZone = config.timezone;
+  const today = dayIn(now, timeZone);
+  const startDay = options.offset ? addDays(today, options.offset) : today;
 
   const sites: PlanSite[] = [];
 
@@ -242,6 +247,7 @@ export async function planRun(
           cache,
           startDay,
           now,
+          timeZone,
           ...(config.days === undefined ? {} : { days: config.days }),
           ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
           ...(options.offset === undefined ? {} : { offset: options.offset }),
