@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { getDefaultHighWaterMark, Readable, Transform, type TransformCallback } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -1209,16 +1209,29 @@ export async function* writeXmltvStream(
   if (pending) yield pending;
 }
 
-/** Stream an XMLTV document to a file (parent directories are created). */
+/**
+ * Stream an XMLTV document to a file (parent directories are created).
+ *
+ * A write that does not finish — cancelled, or failed part way — takes the file
+ * with it: half a document is not one, and nothing should come along later and
+ * read it as a guide.
+ */
 export async function writeXmltvToFile(
   filePath: string,
   input: XmltvStreamInput,
   options?: WriteOptions,
 ): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
-  await pipeline(Readable.from(writeXmltvStream(input, options)), createWriteStream(filePath), {
-    signal: options?.signal,
-  });
+
+  try {
+    await pipeline(Readable.from(writeXmltvStream(input, options)), createWriteStream(filePath), {
+      signal: options?.signal,
+    });
+  } catch (error) {
+    await rm(filePath, { force: true });
+
+    throw error;
+  }
 }
 
 export interface SerializeStreamOptions extends WriteOptions {

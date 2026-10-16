@@ -25,6 +25,7 @@ import {
   serializeDocumentFooter,
   serializeProcessingInstruction,
   writeXmltvStream,
+  writeXmltvToFile,
   parseXmltvFile,
   parseXmltvStream,
   parseXmltvString,
@@ -1688,6 +1689,41 @@ describe('cancelling', () => {
 
     // Stopped where it was told to, not at the end of a document that has none.
     expect(seen).toBe(5);
+  });
+
+  it('leaves no half-written file behind when a file write is cancelled', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'epg-xmltv-cancel-'));
+    const file = join(dir, 'guide.xml');
+    const controller = new AbortController();
+    let written = 0;
+
+    async function* programmes(): AsyncGenerator<typeof oneProgramme> {
+      for await (const programme of endlessProgrammes()) {
+        // Well past the first batch, so something has reached the disk.
+        if (++written === 2_000) {
+          controller.abort(new Error('enough'));
+        }
+
+        yield programme;
+      }
+    }
+
+    try {
+      await expect(
+        writeXmltvToFile(
+          file,
+          { channels: [], programmes: programmes() },
+          {
+            signal: controller.signal,
+          },
+        ),
+      ).rejects.toThrow();
+      // Half a document is not one, and nothing should come along later and
+      // read it as a guide.
+      await expect(readFile(file)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('stops a file read part way, at a chunk boundary', async () => {
