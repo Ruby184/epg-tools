@@ -10,6 +10,7 @@
 import PQueue from 'p-queue';
 import { toDayString } from '../core/days.js';
 import { emitter, type GrabCounts, watchEventLoop } from '../core/events.js';
+import type { SiteSession } from './session.js';
 import { SiteRun, type Run } from './site-run.js';
 import { SiteThreads, threadCount } from './thread.js';
 import type { AnySiteConfig, GrabOptions, GrabSummary } from './types.js';
@@ -23,6 +24,20 @@ import type { AnySiteConfig, GrabOptions, GrabSummary } from './types.js';
 const DEFAULT_LOCAL_CONCURRENCY = 16;
 
 export async function grab(configs: AnySiteConfig[], options: GrabOptions): Promise<GrabSummary> {
+  return grabWith(configs, options, new Map());
+}
+
+/**
+ * {@link grab}, carrying on with the sessions a run opened while it settled the
+ * sites' lists — so a list fetch and the requests after it share one queue,
+ * one hold on a `429` and one state. A site on this thread only: a session is a
+ * queue and a timer, and neither crosses to a worker.
+ */
+export async function grabWith(
+  configs: AnySiteConfig[],
+  options: GrabOptions,
+  sessions: ReadonlyMap<string, SiteSession>,
+): Promise<GrabSummary> {
   // Before anything starts, rather than once per site that then cannot — it
   // throws when there are threads to start and no module to start them on.
   const threadsWanted = threadCount(options.threads, options.configModule);
@@ -134,7 +149,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
           // has a queue or a client to let go of — and one in a thread rejects
           // the same way, for that or for a config its thread could not read.
           if (threads === undefined) {
-            await new SiteRun(config, run).run();
+            await new SiteRun(config, run, sessions.get(config.site)).run();
           } else {
             const site = threads.run(config, run);
 

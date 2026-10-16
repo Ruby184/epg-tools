@@ -8,6 +8,7 @@ import type { ChannelCoverage } from '../merge/types.js';
 import type { CacheStore } from '../cache/types.js';
 import { errorMessage, unanswered } from '../core/error.js';
 import type { Emit, Says } from '../core/events.js';
+import type { SiteSession } from './session.js';
 import type {
   AnyIterable,
   M3uDirective,
@@ -161,6 +162,14 @@ export interface ResolveChannelsOptions {
    * thing that happens to it.
    */
   select?: ReadonlySet<string>;
+  /**
+   * How a fetch of the list is sent: through the site's request queue, so its
+   * `rateLimit`, `concurrency` and hold on a `429` apply to the list as they do
+   * to the days after it. Only the fetch — a list written out in the config, or
+   * still fresh in the cache, sends nothing and takes no slot. Without it the
+   * site's `channels` is simply called.
+   */
+  paced?: <T>(fetch: () => Promise<T>) => Promise<T>;
 }
 
 /** Said to nobody, for a caller that has nowhere to put it. */
@@ -213,20 +222,24 @@ export async function resolveChannels(
       metadata?: unknown;
     },
   ): Promise<GrabberChannel[]> => {
-    const answer = await source({
-      http: options.http ?? siteHttp(config, options.signal),
-      ...(options.signal ? { signal: options.signal } : {}),
-      ...(options.says ?? SILENT),
-      // The site's own bag, the very `Map` its requests and parses are handed —
-      // so what fetching the list taught the site is there for everything that
-      // follows. Asked for here rather than up front, which keeps the handle's
-      // "reads nothing until asked" promise: a list written out in a config, or
-      // one still fresh in the cache, never reaches this. Without a handle it is
-      // an empty bag of its own, dropped afterwards, as a run over
-      // `NoCacheDriver` hands a request.
-      state: (await options.state?.bag()) ?? new Map(),
-      ...(held === undefined ? {} : { cached: held }),
-    });
+    // The site's own bag, the very `Map` its requests and parses are handed —
+    // so what fetching the list taught the site is there for everything that
+    // follows. Asked for here rather than up front, which keeps the handle's
+    // "reads nothing until asked" promise: a list written out in a config, or
+    // one still fresh in the cache, never reaches this. Without a handle it is
+    // an empty bag of its own, dropped afterwards, as a run over `NoCacheDriver`
+    // hands a request. Read before the fetch is sent, so a slot is held for the
+    // request and nothing else.
+    const state = (await options.state?.bag()) ?? new Map();
+    const fetch = async () =>
+      source({
+        http: options.http ?? siteHttp(config, options.signal),
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.says ?? SILENT),
+        state,
+        ...(held === undefined ? {} : { cached: held }),
+      });
+    const answer = await (options.paced ? options.paced(fetch) : fetch());
 
     if (Array.isArray(answer)) {
       return answer;
@@ -460,36 +473,52 @@ export async function covered(
  */
 export async function resolveSites(
   sites: AnySiteConfig[],
-  options: {
-    signal?: AbortSignal;
-    concurrency?: number;
-    /** Where a cached channel list lives. Without it, every list is fetched. */
-    store?: CacheStore;
-    /** Fetch every list whatever is cached — `--refresh`. */
-    refresh?: boolean;
-    now?: Date;
-    /**
-     * Where each site's own `log` and `warn` go, as the events they are.
-     *
-     * An emitter rather than a `says` pair, because there is one per site and
-     * only the name differs — the same two events a run's own contexts send.
-     */
-    emit?: Emit;
-    /** Keep only these channels — see {@link ResolveChannelsOptions.select}. */
-    select?: ReadonlySet<string>;
-    /**
-     * What to do with a site whose list could not be resolved: given the site
-     * as configured and what its list threw, answer a site to use in its place,
-     * or nothing to leave it out.
-     *
-     * Without it, the first failure rejects the whole call. With it, one source
-     * down costs that source and nothing else — a build grabs the rest and
-     * counts the site as one that answered nothing, a server keeps the list it
-     * resolved last, a merge leaves the site out. A cancelled run rejects
-     * either way: a cancel is not a source that failed.
-     */
-    failed?: (site: AnySiteConfig, error: unknown) => AnySiteConfig | undefined;
-  } = {},
+  options: ResolveSitesOptions = {},
+): Promise<AnySiteConfig[]> {
+  return resolveSessions(sites, options, new Map());
+}
+
+/** What {@link resolveSites} takes beside the sites. */
+export interface ResolveSitesOptions {
+  signal?: AbortSignal;
+  concurrency?: number;
+  /** Where a cached channel list lives. Without it, every list is fetched. */
+  store?: CacheStore;
+  /** Fetch every list whatever is cached — `--refresh`. */
+  refresh?: boolean;
+  now?: Date;
+  /**
+   * Where each site's own `log` and `warn` go, as the events they are.
+   *
+   * An emitter rather than a `says` pair, because there is one per site and
+   * only the name differs — the same two events a run's own contexts send.
+   */
+  emit?: Emit;
+  /** Keep only these channels — see {@link ResolveChannelsOptions.select}. */
+  select?: ReadonlySet<string>;
+  /**
+   * What to do with a site whose list could not be resolved: given the site
+   * as configured and what its list threw, answer a site to use in its place,
+   * or nothing to leave it out.
+   *
+   * Without it, the first failure rejects the whole call. With it, one source
+   * down costs that source and nothing else — a build grabs the rest and
+   * counts the site as one that answered nothing, a server keeps the list it
+   * resolved last, a merge leaves the site out. A cancelled run rejects
+   * either way: a cancel is not a source that failed.
+   */
+  failed?: (site: AnySiteConfig, error: unknown) => AnySiteConfig | undefined;
+}
+
+/**
+ * {@link resolveSites}, with each site's list fetched through the session the
+ * run holds for it, where it holds one — its queue, its client and its state,
+ * which the grab then carries on with. See `SiteSession`.
+ */
+export async function resolveSessions(
+  sites: AnySiteConfig[],
+  options: ResolveSitesOptions,
+  sessions: ReadonlyMap<string, SiteSession>,
 ): Promise<AnySiteConfig[]> {
   const queue = new PQueue({ concurrency: Math.max(1, options.concurrency ?? sites.length) });
   const { store } = options;
@@ -505,11 +534,17 @@ export async function resolveSites(
   const resolved = await Promise.all(
     sites.map((site) =>
       queue.add(async (): Promise<AnySiteConfig | undefined> => {
-        const state = store === undefined ? undefined : SiteStateHandle.open(store, site.site);
+        const session = sessions.get(site.site);
+        const state =
+          session?.state ??
+          (store === undefined ? undefined : SiteStateHandle.open(store, site.site));
         const { emit } = options;
 
         try {
           const channels = await resolveChannels(site, {
+            ...(session
+              ? { http: session.pacing.http, paced: (fetch) => session.send(fetch) }
+              : {}),
             ...(options.signal ? { signal: options.signal } : {}),
             ...(state ? { state } : {}),
             ...(options.refresh === undefined ? {} : { refresh: options.refresh }),

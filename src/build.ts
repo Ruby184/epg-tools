@@ -6,7 +6,10 @@ import {
   MemoryCacheDriver,
 } from './cache/main.js';
 import type { CacheDriver, CacheStore } from './cache/main.js';
-import { covered, coverageOf, grab, resolveSites } from './grabber/main.js';
+import { resolveSessions } from './grabber/channels.js';
+import { grabWith } from './grabber/grab.js';
+import { covered, coverageOf } from './grabber/main.js';
+import { openSession, type SiteSession } from './grabber/session.js';
 import { threadCount } from './grabber/thread.js';
 import type { AnySiteConfig, GrabberChannel, GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
@@ -224,6 +227,11 @@ interface Settled {
   failures: { site: string; error: unknown }[];
   /** What `derived` declared about these lists, as the selection left it. */
   derived: DerivedChannel[] | undefined;
+  /**
+   * The sessions the lists were fetched through, for the grab to carry on with
+   * — and to let go of once it is done.
+   */
+  sessions: Map<string, SiteSession>;
 }
 
 /**
@@ -245,25 +253,49 @@ async function settled(
   emit: Emit,
 ): Promise<Settled> {
   const failures: Settled['failures'] = [];
-  const sites = await resolveSites(config.sites, {
-    ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
-    ...(options.signal ? { signal: options.signal } : {}),
-    // What a site says while fetching its list, which happens here rather than
-    // inside the grab — so without this it would be said nowhere.
-    emit,
-    store: cache,
-    // `--refresh` means ask the source, and a channel list is something the
-    // source says.
-    ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
-    now,
-    // One source down is not every source down: the rest are settled and
-    // grabbed, and this one is counted.
-    failed: (site, error) => {
-      failures.push({ site: site.site, error });
+  const sessions = new Map<string, SiteSession>();
 
-      return undefined;
+  // For a site whose list is fetched, and only those: the fetch goes through the
+  // queue its requests will, and the grab carries on with the same one.
+  for (const site of config.sites) {
+    if (typeof site.channels !== 'function') {
+      continue;
+    }
+
+    try {
+      sessions.set(
+        site.site,
+        openSession(site, cache, { ...(options.signal ? { signal: options.signal } : {}), emit }),
+      );
+    } catch {
+      // Settings no queue can be built from: the grab says what is wrong with
+      // the site, as it would have without this.
+    }
+  }
+
+  const sites = await resolveSessions(
+    config.sites,
+    {
+      ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+      // What a site says while fetching its list, which happens here rather than
+      // inside the grab — so without this it would be said nowhere.
+      emit,
+      store: cache,
+      // `--refresh` means ask the source, and a channel list is something the
+      // source says.
+      ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
+      now,
+      // One source down is not every source down: the rest are settled and
+      // grabbed, and this one is counted.
+      failed: (site, error) => {
+        failures.push({ site: site.site, error });
+
+        return undefined;
+      },
     },
-  });
+    sessions,
+  );
 
   // After the lists, because a `derived` function is a function *of* them. The
   // selection then narrows what was resolved, which is the same answer as
@@ -306,7 +338,7 @@ async function settled(
     });
   }
 
-  return { sites: kept, failures, derived: selection?.derived ?? declarations };
+  return { sites: kept, failures, derived: selection?.derived ?? declarations, sessions };
 }
 
 /** First day of the window implied by `now` + `offset`. */
@@ -363,26 +395,37 @@ function reported(options: RunOptions): Pick<RunOptions, 'reporter'> {
  */
 async function grabInto(
   config: EpgConfig,
-  sites: AnySiteConfig[],
-  failedSites: Settled['failures'],
+  settling: Pick<Settled, 'sites' | 'failures' | 'sessions'>,
   cache: CacheStore,
   options: RunOptions,
   now: Date,
 ): Promise<GrabSummary> {
   const startDay = startDayOf(options, now);
-  const summary = await grab(sites, {
-    cache,
-    startDay,
-    ...(config.days !== undefined ? { days: config.days } : {}),
-    ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
-    ...(config.localConcurrency !== undefined ? { localConcurrency: config.localConcurrency } : {}),
-    ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
-    now,
-    ...reported(options),
-    ...(options.signal ? { signal: options.signal } : {}),
-    ...(config.threads === undefined ? {} : { threads: config.threads }),
-    ...(options.configModule === undefined ? {} : { configModule: options.configModule }),
-    ...(failedSites.length > 0 ? { failedSites } : {}),
+  const summary = await grabWith(
+    settling.sites,
+    {
+      cache,
+      startDay,
+      ...(config.days !== undefined ? { days: config.days } : {}),
+      ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
+      ...(config.localConcurrency !== undefined
+        ? { localConcurrency: config.localConcurrency }
+        : {}),
+      ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
+      now,
+      ...reported(options),
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(config.threads === undefined ? {} : { threads: config.threads }),
+      ...(options.configModule === undefined ? {} : { configModule: options.configModule }),
+      ...(settling.failures.length > 0 ? { failedSites: settling.failures } : {}),
+    },
+    settling.sessions,
+  ).finally(() => {
+    // What a site in a thread, or one that never ran, left holding: a hold's
+    // timer is deliberately not unref'd.
+    for (const session of settling.sessions.values()) {
+      session.pacing.dispose();
+    }
   });
 
   // Nothing more is asked of the cache once the run is off: pruning a window
@@ -419,12 +462,22 @@ export async function runGrab(source: ConfigSource, given: RunOptions = {}): Pro
     // so this is the same work done early enough to act on, and a
     // `cacheChannels` site answers from the cache both times.
     if (config.channels === undefined && !narrowed(config)) {
-      return grabInto(config, config.sites, [], cache, options, now);
+      return grabInto(
+        config,
+        { sites: config.sites, failures: [], sessions: new Map() },
+        cache,
+        options,
+        now,
+      );
     }
 
-    const settling = await settled(config, cache, options, now, emitter(options));
-
-    return grabInto(config, settling.sites, settling.failures, cache, options, now);
+    return grabInto(
+      config,
+      await settled(config, cache, options, now, emitter(options)),
+      cache,
+      options,
+      now,
+    );
   });
 }
 
@@ -502,14 +555,7 @@ export async function build(source: ConfigSource, given: RunOptions = {}): Promi
       ...(settling.derived ? { derived: settling.derived } : {}),
       sites: settling.sites,
     };
-    const summary = await grabInto(
-      resolved,
-      settling.sites,
-      settling.failures,
-      cache,
-      options,
-      now,
-    );
+    const summary = await grabInto(resolved, settling, cache, options, now);
 
     if (options.signal?.aborted !== true) {
       await runMerge(resolved, { ...options, now, cache });

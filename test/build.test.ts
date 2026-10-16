@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { gunzip as gunzipCallback } from 'node:zlib';
 import { describe, expect, it, vi } from 'vitest';
 import { build, createCacheStore, guideStream, runGrab, runMerge } from '../src/build.js';
-import { CacheManager, FsNdjsonCacheDriver } from '../src/cache/main.js';
+import { CacheManager, FsNdjsonCacheDriver, NoCacheDriver } from '../src/cache/main.js';
 import type { EpgEventMap } from '../src/core/events.js';
 import type { ChannelDayKey, StoredEntryMeta } from '../src/cache/main.js';
 import { defineConfig, type EpgConfig } from '../src/config.js';
@@ -76,6 +76,69 @@ async function collect(chunks: AsyncGenerator<string>): Promise<string> {
 
   return out;
 }
+
+describe('a channel list fetched before the grab', () => {
+  // A build settles every list before any site is asked for a day, and the
+  // fetch is still the first request of the site's turn: one queue, one state.
+
+  it('is paced with the requests after it', async () => {
+    const dir = await tempDir();
+    const at: number[] = [];
+    const paced: SiteConfig<unknown> = {
+      ...site([]),
+      rateLimit: { requests: 1, perMs: 80 },
+      channels: async () => {
+        at.push(Date.now());
+
+        return [{ xmltvId: 'one.example', siteId: '1', name: 'One' }];
+      },
+      async request({ day }) {
+        at.push(Date.now());
+
+        return { day };
+      },
+    };
+
+    await build(config(dir, { sites: [paced] }), { now: NOW });
+
+    // One request a window: the day waits out the window the list opened,
+    // rather than landing on its heels.
+    expect(at).toHaveLength(2);
+    expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(70);
+  });
+
+  it('hands the requests what fetching it taught the site, with nothing cached', async () => {
+    const dir = await tempDir();
+    const seen: unknown[] = [];
+    const counted: number[] = [];
+    const learning: SiteConfig<unknown> = {
+      ...site([]),
+      channels: async ({ state }) => {
+        state.set('token', 'from the list');
+
+        return [{ xmltvId: 'one.example', siteId: '1', name: 'One' }];
+      },
+      async request({ day, state }) {
+        seen.push(state.get('token'));
+
+        return { day };
+      },
+    };
+
+    await build(config(dir, { sites: [learning], cache: { driver: () => new NoCacheDriver() } }), {
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'site:done') {
+          counted.push(event.requests);
+        }
+      },
+    });
+
+    expect(seen).toEqual(['from the list']);
+    // The list and the day, both counted where both were sent.
+    expect(counted).toEqual([2]);
+  });
+});
 
 describe('a run that selects channels', () => {
   /** One site with two channels, recording which of them it was asked for. */

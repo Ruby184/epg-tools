@@ -1431,14 +1431,35 @@ describe('grab', () => {
       },
     });
 
-    // The channel list, two days, and the fetch each parse made.
-    expect(done[0]?.requests).toBe(5);
+    // Two days, and the fetch each parse made. Not the channel list, which is
+    // written out in the config and asks the source nothing.
+    expect(done[0]?.requests).toBe(4);
     // Spent waiting on the source, which here is the two sleeps and nothing
     // like the whole site. Not their sum: `Date.now()` rounds down and a timer
     // may fire a touch early, so two five-millisecond sleeps can measure nine
     // — the claim is that the waiting was recorded, not that it was exact.
     expect(done[0]?.requestMs).toBeGreaterThanOrEqual(5);
     expect(done[0]?.ms).toBeGreaterThanOrEqual(done[0]!.requestMs);
+  });
+
+  it('counts a channel list as a request only when it was fetched', async () => {
+    const requests = async (config: SiteConfig<unknown>, cache = new MemoryCache()) => {
+      const run = collect();
+
+      await grab([config], { cache, now: NOW, reporter: run.reporter });
+
+      return run.of('site:done')[0]?.requests;
+    };
+    const cache = new MemoryCache();
+    const fetched = makeConfig({ cacheChannels: true, channels: () => [channel('one.example')] });
+
+    // Asked of the source: one request, then the day.
+    expect(await requests(fetched, cache)).toBe(2);
+    // Still fresh in the cache the next time, so only the day: today's, which
+    // is always asked again.
+    expect(await requests(fetched, cache)).toBe(1);
+    // Written out in the config: the day alone.
+    expect(await requests(makeConfig())).toBe(1);
   });
 
   it('paces a request a parse makes in the site queue, like any other', async () => {
