@@ -1109,6 +1109,94 @@ describe('grab', () => {
     });
   });
 
+  describe("a channel's data", () => {
+    /** A site whose one channel carries `data`. */
+    const carrying = (data: unknown) =>
+      makeConfig({ channels: [{ ...channel('one'), data }] as GrabberChannel[] });
+
+    it('is taken as it is when it is plain', async () => {
+      const shared = { region: 'sk' };
+      const data = {
+        name: 'One',
+        number: 1,
+        hd: true,
+        none: null,
+        missing: undefined,
+        groups: ['news', 'sport'],
+        nested: { deeper: [{ id: 'a' }] },
+        // The same object twice is fine: JSON writes it twice.
+        home: shared,
+        away: shared,
+        bare: Object.create(null) as object,
+      };
+
+      expect(await resolveChannels(carrying(data))).toEqual([{ ...channel('one'), data }]);
+    });
+
+    for (const [what, data, said] of [
+      ['a date', { since: new Date(0) }, 'an instance of Date at data.since'],
+      ['a map', { lookup: new Map() }, 'an instance of Map at data.lookup'],
+      ['a function', { parse: () => 1 }, 'a function at data.parse'],
+      ['NaN', { rating: Number.NaN }, 'NaN at data.rating'],
+      ['undefined in a list', { ids: ['a', undefined] }, 'undefined at data.ids[1]'],
+    ] as const) {
+      it(`refuses ${what}, and says where`, async () => {
+        await expect(resolveChannels(carrying(data))).rejects.toThrow(
+          `Site "example.com": channel "one" holds ${said}`,
+        );
+      });
+    }
+
+    it('refuses a circular one', async () => {
+      const data: Record<string, unknown> = {};
+
+      data['self'] = data;
+
+      await expect(resolveChannels(carrying(data))).rejects.toThrow(
+        'a circular reference at data.self',
+      );
+    });
+
+    it('fails the site it belongs to, and no other', async () => {
+      const run = collect();
+      const summary = await grab(
+        [{ ...carrying({ since: new Date(0) }), site: 'dated.example' }, makeConfig()],
+        { cache: new MemoryCache(), now: NOW, reporter: run.reporter },
+      );
+
+      expect(summary).toMatchObject({ fetched: 1, sitesFailed: 1 });
+      expect(run.of('site:failed').map((event) => event.site)).toEqual(['dated.example']);
+    });
+
+    it('refuses a fetched list before it is stored, with nothing stored standing in', async () => {
+      const cache = new MemoryCache();
+      let fetches = 0;
+      const config = makeConfig({
+        cacheChannels: { maxAgeDays: 1 },
+        channels: () => {
+          fetches += 1;
+
+          return [{ ...channel('one'), data: fetches === 1 ? {} : { lookup: new Map() } }];
+        },
+      });
+      const first = SiteStateHandle.open(cache, config.site);
+
+      await resolveChannels(config, { state: first, now: NOW });
+      await first.save();
+
+      // Past the list's age, so the source is asked again — and answers with
+      // something no copy would keep. That is an answer, not a source that did
+      // not give one, so the list from before does not stand in.
+      await expect(
+        resolveChannels(config, {
+          state: SiteStateHandle.open(cache, config.site),
+          now: new Date(NOW.getTime() + 2 * 86_400_000),
+        }),
+      ).rejects.toThrow('an instance of Map at data.lookup');
+      expect(cache.state.get('example.com|channels')?.meta?.writtenAt).toBe(NOW.toISOString());
+    });
+  });
+
   describe('resolveSites, when one list fails', () => {
     /** A site whose source refuses its list, counting how often it is asked. */
     const refusing = (asked: string[]) =>

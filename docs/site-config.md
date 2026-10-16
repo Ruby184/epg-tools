@@ -65,7 +65,7 @@ it cannot leave a half-built site's output in the cache.
 | `lang` | `string` | The language this channel broadcasts in. Used as the **default `lang` for every text element** the scoped [`programme` builder](#building-programmes) creates but `<country>`, so a site says it once here instead of on every title and description. |
 | `logo` | `string` | Icon URL, used by the default `channelInfo`. |
 | `preset` | `string` | The number this channel appears on. Written as a lineup entry's `<preset>` by the [`lineups` capability](./tv-grab.md#channel-lineups); ignored by the guide. |
-| `data` | `TData` | Anything else the site knows about this channel, kept as it came and handed back to `channelInfo` and `parseDay`. Its type is inferred from what `channels` returns. |
+| `data` | `TData` | Anything else the site knows about this channel, kept as it came and handed back to `channelInfo` and `parseDay`. Plain values only — see [below](#a-channel-list-that-has-to-be-fetched). Its type is inferred from what `channels` returns. |
 
 ## Channels
 
@@ -110,13 +110,18 @@ const example = defineSiteConfig({
 ```
 
 `data` is per channel and so optional; read it as `data?.x` unless you know
-every channel in your list carries one. The grabber never looks inside it — but
-under [`threads`](./configuration.md#sites-in-threads-of-their-own) it is
-copied. A list written out in the config, or settled before the grab, is handed
-to the site's thread, so its `data` must be plain values: a list holding a
-class instance, a function or a date carrying an offset is refused with a
-message, rather than arriving without what made it one and failing in every
-parse.
+every channel in your list carries one. The grabber never reads it, but it does
+copy it: a list is stored as JSON when the site
+[keeps it](#keeping-a-fetched-list), and handed to the site's worker under
+[`threads`](./configuration.md#sites-in-threads-of-their-own). Neither copy says
+what it changed — a `Date` comes back a string, a `Map` an empty object, a class
+instance without its methods — so the run that fetched a list and every run
+after it would see different data. So `data` must be **plain values**: strings,
+finite numbers, booleans, `null`, arrays and plain objects. Anything else is
+refused with a message naming the channel and where in its `data` — `Site
+"example.tv": channel "one" holds an instance of Date at data.since` — and fails
+that site, whether or not this run would have copied the list. A config means
+the same thing however it is run.
 
 Beside `http` the function is handed `log`, `warn`, `signal` and `state` — the
 site's own bag, [the same one](#remembering-something-between-runs) every
@@ -188,9 +193,10 @@ off when it is, since a channel added to the source then turns up on the next ru
 rather than a day later. It applies to the function form only; a list written out
 in the config is already there.
 
-Two things to know. The list goes through JSON, so a channel's `data` must
-survive that: a `Date` or a `Map` in there comes back a string or `{}`, and every
-run but the one that fetched it sees the round-tripped form. And `--refresh`
+Two things to know. The list goes through JSON, which is one reason a channel's
+`data` must be [plain values](#a-channel-list-that-has-to-be-fetched): a list
+whose `data` holds anything else is refused before it is stored, rather than
+read back different by every run after the one that fetched it. And `--refresh`
 fetches the list whatever is cached, because asking the source is what that flag
 means.
 

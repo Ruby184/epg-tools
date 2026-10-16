@@ -1514,11 +1514,12 @@ What it costs:
   channels. A `tv_grab_*` shim runs its sites in one thread whatever the config
   says, since a thread importing the config would not have the answers in the
   shim's `.conf`.
-- **A channel's `data` must be plain values.** The channel lists settled before
-  the grab (by `--channels`, `cover` or `build`) are copied to the threads. A
-  copy of an instance of a class arrives without its methods, and a date
-  without the offset kept on it, so a site whose channel data holds one is
-  refused with a message rather than failing in every parse.
+- **A channel's `data` is copied.** The channel lists settled before the grab
+  (by `--channels`, `cover` or `build`) are copied to the threads, which is one
+  reason `data` must be [plain values](./site-config.md#a-channel-list-that-has-to-be-fetched)
+  — with or without threads, since a list kept in the cache is copied too. A
+  site whose channel data holds anything else is refused with a message, rather
+  than handed a copy that has lost what made it one.
 - **Writes cost the main thread less, not more.** A thread encodes each
   channel-day with the codec its store names and sends the bytes over, and the
   main thread only stamps and saves them: 3.5ms for 3,500 programmes (2.6 MiB)

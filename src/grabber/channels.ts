@@ -179,6 +179,90 @@ export interface ResolveChannelsOptions {
   paced?: <T>(fetch: () => Promise<T>) => Promise<T>;
 }
 
+/**
+ * The first thing in a channel's `data` that is not a plain value, named with
+ * where it is — or nothing, when all of it is.
+ *
+ * Plain is what JSON gives back as it was given: strings, finite numbers,
+ * booleans, `null`, arrays and plain objects. A property holding `undefined` is
+ * fine, since leaving it out is all JSON does with it and reading it gives the
+ * same. Anything else comes back as something else — a `Date` a string, a `Map`
+ * an empty object, an instance of a class without its methods, `NaN` a `null` —
+ * or not at all, as a function does.
+ */
+function unplain(value: unknown, at: string, ancestors = new Set<object>()): string | undefined {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return undefined;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? undefined : `${String(value)} at ${at}`;
+  }
+
+  if (typeof value !== 'object') {
+    return `${typeof value === 'undefined' ? 'undefined' : `a ${typeof value}`} at ${at}`;
+  }
+
+  // The objects above this one, not every one seen: the same object twice in
+  // a list is fine — JSON writes it twice — and only one inside itself is not.
+  if (ancestors.has(value)) {
+    return `a circular reference at ${at}`;
+  }
+
+  const prototype: unknown = Object.getPrototypeOf(value);
+
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
+    const name = (value as { constructor?: { name?: string } }).constructor?.name;
+
+    return `${name ? `an instance of ${name}` : 'an object of a class'} at ${at}`;
+  }
+
+  ancestors.add(value);
+
+  try {
+    for (const [key, item] of Object.entries(value)) {
+      const where = Array.isArray(value) ? `${at}[${key}]` : `${at}.${key}`;
+      // `undefined` as a property is left out, which reads the same; in an
+      // array it becomes `null`, which does not.
+      const found =
+        item === undefined && !Array.isArray(value) ? undefined : unplain(item, where, ancestors);
+
+      if (found !== undefined) {
+        return found;
+      }
+    }
+
+    return undefined;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+/**
+ * Refuse a channel list whose `data` holds anything but plain values.
+ *
+ * A list is copied whole wherever it goes: stored as JSON when the site keeps
+ * it (`cacheChannels`), and handed to a worker under `threads`. Neither copy
+ * says what it changed, so the run that fetched a list and every run after it
+ * would see different data, and a parse would find out only by failing. So it
+ * is refused up front, whatever this run does with the list — a config means
+ * the same thing however it is run.
+ */
+export function assertPlainData(site: string, channels: readonly GrabberChannel[]): void {
+  for (const channel of channels) {
+    const found = channel.data === undefined ? undefined : unplain(channel.data, 'data');
+
+    if (found !== undefined) {
+      throw new TypeError(
+        `Site "${site}": channel "${channel.xmltvId}" holds ${found}. A channel's data must be ` +
+          `plain values — strings, finite numbers, booleans, null, arrays and plain objects — ` +
+          `since a channel list is stored as JSON and copied to worker threads, and anything ` +
+          `else would come back as something else`,
+      );
+    }
+  }
+}
+
 /** Said to nobody, for a caller that has nowhere to put it. */
 const SILENT: Says = { log: () => {}, warn: () => {} };
 
@@ -215,6 +299,8 @@ export async function resolveChannels(
   const source = config.channels;
 
   if (typeof source !== 'function') {
+    assertPlainData(config.site, source);
+
     return kept(source);
   }
 
@@ -265,7 +351,11 @@ export async function resolveChannels(
   // Nothing to read and nothing to keep: the site did not ask for its list to be
   // cached, or this caller has nowhere to put it.
   if (maxAgeMs === undefined || state === undefined) {
-    return kept(await fromSource());
+    const fetched = await fromSource();
+
+    assertPlainData(config.site, fetched);
+
+    return kept(fetched);
   }
 
   const now = options.now ?? new Date();
@@ -311,6 +401,10 @@ export async function resolveChannels(
 
     return kept(held.channels);
   }
+
+  // Checked here rather than inside the fetch: a list the source answered with
+  // is not one that failed to arrive, and nothing stored stands in for it.
+  assertPlainData(config.site, channels);
 
   // Stored before the selection, never after: what the cache holds is what the
   // site offers, so the next run — selecting something else, or nothing — reads
