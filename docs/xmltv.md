@@ -479,7 +479,7 @@ const programme = new ProgrammeBuilder({
   .stop('20260717203000 +0200')
   .desc('The day in review.')
   .category('News')
-  .episode(3, 2)                 // episode 3, season 2 → an xmltv_ns episode-num
+  .episode(3, 2)                 // episode 3, season 2 → xmltv_ns 1.2.0/1 and onscreen S02E03
   .actor('Jane Doe', { role: 'Presenter' })
   .build();
 ```
@@ -487,6 +487,14 @@ const programme = new ProgrammeBuilder({
 The default `lang` reaches every text element but one: `.country()` is a code,
 not prose, so it carries a `lang` only when given one —
 `<country lang="sk">US</country>` would say an ISO 3166 code is Slovak.
+
+`.episode(episode, season?, options?)` writes the numbers it is given and no
+others. One the source did not give — left out, `null`, `NaN`, or not a whole
+number above zero — is left empty rather than guessed: `.episode(177)` is
+`xmltv_ns` `.176.0/1` and `onscreen` `E177`, a season alone is `74..` with no
+`onscreen` (it has no form for one), and neither writes nothing at all. A
+season made up as `1` would be a claim the source never made, and one a
+consumer shows; before 0.8.0 it was the default.
 
 A time the builder cannot read is handled by what the field is. `start` is
 required, so a bad one always throws. The rest can be done without, so the

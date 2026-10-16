@@ -566,7 +566,7 @@ parseDay({ payload, programme }) {
     .stop(new Date(item.end))
     .desc(item.summary)             // lang: 'sk', because the channel said so
     .category(item.genre)
-    .episode(item.episode, item.season)
+    .episode(item.episode, item.season)   // either may be null: what is missing is left out
     .video({ quality: 'HDTV' })
     .rating(item.rating, { system: 'SK' }));
 }
