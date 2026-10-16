@@ -414,11 +414,11 @@ export async function runGrab(source: ConfigSource, given: RunOptions = {}): Pro
   const now = options.now ?? new Date();
 
   return withCache(config, options, async (cache) => {
-    // Settled here only when there is something to narrow — a `cover` that
-    // takes channels away. Every site resolves its own list anyway, so this is
-    // the same work done early enough to act on, and a `cacheChannels` site
-    // answers from the cache both times.
-    if (!narrowed(config)) {
+    // Settled here only when there is something to narrow — a selection, or a
+    // `cover` that takes channels away. Every site resolves its own list anyway,
+    // so this is the same work done early enough to act on, and a
+    // `cacheChannels` site answers from the cache both times.
+    if (config.channels === undefined && !narrowed(config)) {
       return grabInto(config, config.sites, [], cache, options, now);
     }
 

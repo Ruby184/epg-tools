@@ -86,10 +86,10 @@ export interface PlanOptions {
   /**
    * Keep only these channels.
    *
-   * Handed in rather than read off `config.channels`, because the two commands
-   * that take `--dry-run` do different things with it: `build` selects before
-   * it grabs, and `grab` does not select at all. A report that decided for
-   * itself would be describing neither.
+   * Handed in rather than read off `config.channels`, because what a selection
+   * keeps depends on `derived`, and a `derived` function is a function of the
+   * channel lists — which a report that fetches nothing does not have. The
+   * caller decides how much of it can be known.
    */
   select?: ReadonlySet<string>;
 }

@@ -779,21 +779,17 @@ async function execute(
     const { planRun, writePlanReport } = await import('./plan.js');
     const { channelSelection } = await import('../merge/select.js');
     const cache = await createCacheStore(config, signal);
-    // Only `build` narrows before it grabs — `runGrab` does not select at all,
-    // so a report that applied `config.channels` to `grab --dry-run` would name
-    // fewer requests than `epg grab` goes on to make.
+    // What the run itself would select, `grab` as much as `build`: a channel
+    // left out is never fetched by either.
     // Only what is written down: a `derived` function is a function of the
     // channel lists, and a report that is not going to fetch anything has no
     // lists to ask it about. What that costs is a plan whose narrowing misses
     // the sources a declared shift would have kept — visible only under
     // `--channels` with a `derived` function, and a count either way.
-    const selection =
-      command === 'build'
-        ? channelSelection({
-            ...(config.channels ? { channels: config.channels } : {}),
-            ...(Array.isArray(config.derived) ? { derived: config.derived } : {}),
-          })
-        : undefined;
+    const selection = channelSelection({
+      ...(config.channels ? { channels: config.channels } : {}),
+      ...(Array.isArray(config.derived) ? { derived: config.derived } : {}),
+    });
 
     try {
       const report = await planRun(config, cache, {

@@ -1665,7 +1665,7 @@ describe('epg', () => {
       expect(code).toBe(1);
     });
 
-    it('selects channels for build and not for grab, as each command does', async () => {
+    it('selects channels for grab as it does for build', async () => {
       const dir = await tempDir();
       const config = await configFile(
         dir,
@@ -1686,14 +1686,13 @@ describe('epg', () => {
       };`,
       );
 
-      // `build` narrows before it grabs; `runGrab` does not select at all, so a
-      // report that applied the selection to `grab` would name half the
-      // requests `epg grab` goes on to make.
+      // Both narrow before they grab, so a channel left out is never fetched by
+      // either — and the report counts what the run would go on to make.
       expect((await run(['build', '--config', config, '--dry-run'])).stdout).toContain(
         '1 site, 1 channel',
       );
       expect((await run(['grab', '--config', config, '--dry-run'])).stdout).toContain(
-        '1 site, 2 channels',
+        '1 site, 1 channel',
       );
     });
 

@@ -77,6 +77,79 @@ async function collect(chunks: AsyncGenerator<string>): Promise<string> {
   return out;
 }
 
+describe('a run that selects channels', () => {
+  /** One site with two channels, recording which of them it was asked for. */
+  function twoChannels(fetched: string[]): SiteConfig<unknown> {
+    return {
+      ...site([]),
+      channels: [
+        { xmltvId: 'one.example', siteId: '1', name: 'One' },
+        { xmltvId: 'two.example', siteId: '2', name: 'Two' },
+      ],
+      async request({ channel, day }) {
+        fetched.push(channel.xmltvId);
+
+        return { day };
+      },
+    };
+  }
+
+  it('grabs only what it selects, as a build does', async () => {
+    const dir = await tempDir();
+    const fetched: string[] = [];
+
+    const summary = await runGrab(
+      config(dir, { sites: [twoChannels(fetched)], channels: ['two.example'] }),
+      { now: NOW },
+    );
+
+    expect(fetched).toEqual(['two.example']);
+    expect(summary.fetched).toBe(1);
+
+    // Never fetched, and never cached either.
+    const cache = await createCacheStore(config(dir));
+
+    expect(
+      await cache.getMeta({ site: 'example.com', channelId: 'one.example', day: TODAY }),
+    ).toBeUndefined();
+  });
+
+  it('grabs what a selected `derived` channel shifts', async () => {
+    const dir = await tempDir();
+    const fetched: string[] = [];
+
+    await runGrab(
+      config(dir, {
+        sites: [twoChannels(fetched)],
+        derived: [{ xmltvId: 'two.example+1', from: 'two.example', offset: 60 }],
+        channels: ['two.example+1'],
+      }),
+      { now: NOW },
+    );
+
+    expect(fetched).toEqual(['two.example']);
+  });
+
+  it('says once that a selected channel is produced by no site, in a build too', async () => {
+    const dir = await tempDir();
+    const warnings: string[] = [];
+
+    await build(
+      config(dir, { sites: [twoChannels([])], channels: ['two.example', 'nope.example'] }),
+      {
+        now: NOW,
+        reporter: (event) => {
+          if (event.type === 'merge:warning') {
+            warnings.push(event.message);
+          }
+        },
+      },
+    );
+
+    expect(warnings).toEqual([expect.stringContaining('nope.example')]);
+  });
+});
+
 describe('a site whose channel list fails', () => {
   /** A site whose source refuses its channel list, counting how often it is asked. */
   function refusing(asked: string[]): SiteConfig<unknown> {
