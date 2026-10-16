@@ -956,6 +956,14 @@ export interface GrabOptions {
    * and importing the program that called this would run that program again.
    */
   configModule?: string | URL;
+  /**
+   * Sites whose channel list failed before the grab began — for a caller that
+   * settled the lists first, as `build` does, with `resolveSites` and its
+   * `failed`. Reported and counted as a list that failed in the grab's own
+   * hands: `site:failed` with the error, `site:done` with nothing done, and one
+   * more in `sitesFailed`. Nothing is asked of them.
+   */
+  failedSites?: ReadonlyArray<{ site: string; error: unknown }>;
 }
 
 /**

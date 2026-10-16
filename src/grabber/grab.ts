@@ -104,6 +104,26 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     tally,
   };
 
+  // Said first, and the way a site says it when its list fails in its own turn,
+  // so a run whose caller settled the lists reads the same as one that did not.
+  for (const failed of options.failedSites ?? []) {
+    tally.sitesFailed++;
+    emit({ type: 'site:failed', site: failed.site, error: failed.error });
+    emit({
+      type: 'site:done',
+      site: failed.site,
+      requests: 0,
+      ms: 0,
+      requestMs: 0,
+      fetched: 0,
+      empty: 0,
+      fromCache: 0,
+      unchanged: 0,
+      failed: 0,
+      sitesFailed: 1,
+    });
+  }
+
   const sites = new PQueue({ concurrency: Math.max(1, options.siteConcurrency ?? configs.length) });
 
   await Promise.all(

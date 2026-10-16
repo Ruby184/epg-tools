@@ -209,6 +209,79 @@ describe('createGuideHandler', () => {
     expect(await overHttp.json()).toEqual(body);
   });
 
+  it('keeps a site’s last list while fetching it again fails, and serves the rest', async () => {
+    let asked = 0;
+    const run = collect();
+    const config: EpgConfig = {
+      ...configFor(['one']),
+      sites: [
+        ...configFor(['one']).sites,
+        {
+          site: 'flaky.tv',
+          channels: async () => {
+            asked += 1;
+
+            if (asked > 1) {
+              throw new Error('Request failed with status code 429');
+            }
+
+            return [{ xmltvId: 'two', siteId: 'two', name: 'two' }];
+          },
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+        {
+          site: 'down.tv',
+          channels: async () => {
+            throw new Error('Request failed with status code 503');
+          },
+          request: async () => ({}),
+          parseDay: () => [],
+        },
+      ],
+    };
+    // The lists read again on every request, as they are once the default ten
+    // minutes have passed.
+    const handler = await handlerFor(config, await cacheWith({ one: [programme('one', 6)] }), {
+      sitesMaxAgeMs: 0,
+      revalidateMs: 0,
+      reporter: run.reporter,
+    });
+
+    const channelsServed = async (): Promise<string[]> => {
+      const answer = await handler.answer({ headers: {}, route: 'guide' });
+      let xml = '';
+
+      expect(answer.status).toBe(200);
+
+      for await (const chunk of answer.body as AsyncIterable<Uint8Array>) {
+        xml += Buffer.from(chunk).toString();
+      }
+
+      return [...xml.matchAll(/<channel id="([^"]+)"/g)].map((match) => match[1]!);
+    };
+
+    expect(await channelsServed()).toEqual(['one', 'two']);
+    // Refused this time, and still in the guide: one `429` while a consumer
+    // polls is no reason to take a site's channels away from it.
+    expect(await channelsServed()).toEqual(['one', 'two']);
+    expect(asked).toBe(2);
+    expect((await handler.answer({ headers: {}, route: 'health' })).status).toBe(200);
+    expect(
+      run
+        .of('site:warning')
+        .map((event) => `${event.site}: ${event.message}`)
+        .sort(),
+    ).toEqual([
+      'down.tv: could not resolve its channel list, so the guide has none of its channels ' +
+        'until it can: Request failed with status code 503',
+      'down.tv: could not resolve its channel list, so the guide has none of its channels ' +
+        'until it can: Request failed with status code 503',
+      `flaky.tv: could not resolve its channel list, so the one from ${NOW.toISOString()} ` +
+        'stays in the guide: Request failed with status code 429',
+    ]);
+  });
+
   it('answers a conditional poll out of the answer itself, with no transport in it', async () => {
     const handler = await handlerFor(
       configFor(['one']),

@@ -6,6 +6,7 @@ import { parseM3uFile } from '../m3u/parse.js';
 import type { ChannelListEntry, ChannelListWarning } from '../channels/types.js';
 import type { ChannelCoverage } from '../merge/types.js';
 import type { CacheStore } from '../cache/types.js';
+import { errorMessage } from '../core/error.js';
 import type { Emit, Says } from '../core/events.js';
 import type {
   AnyIterable,
@@ -181,6 +182,10 @@ const SILENT: Says = { log: () => {}, warn: () => {} };
  * age comes back without the source being asked, and a freshly fetched one is
  * remembered for the next command. The handle is *not* saved here — whoever
  * opened it saves it once, when it is done with the site.
+ *
+ * And where fetching it again fails, the list stored last is used whatever its
+ * age, and the site says so: a source answering `429` for a moment should not
+ * take the site's whole lineup with it.
  */
 export async function resolveChannels(
   config: AnySiteConfig,
@@ -258,7 +263,29 @@ export async function resolveChannels(
   // a site that can tell cheaply that nothing has changed hands it straight
   // back rather than rebuilding it. `--refresh` withholds it, because a run
   // told to ask the source again means it.
-  const channels = await fromSource(options.refresh === true ? undefined : group.held(now));
+  const held = group.held(now);
+  let channels: GrabberChannel[];
+
+  try {
+    channels = await fromSource(options.refresh === true ? undefined : held);
+  } catch (error) {
+    // The source was asked and did not answer, so the list it gave last time,
+    // however old — `--refresh` included, since asking is what it wanted and
+    // asking is what failed. Said, so a list that keeps failing is noticed, and
+    // not stored again, so the next command asks the source as this one did. A
+    // cancelled run is not a source that failed.
+    if (held === undefined || options.signal?.aborted === true) {
+      throw error;
+    }
+
+    (options.says ?? SILENT).warn(
+      `could not fetch its channel list, so the one stored ${held.at.toISOString()} is used: ` +
+        errorMessage(error),
+      { storedAt: held.at.toISOString() },
+    );
+
+    return kept(held.channels);
+  }
 
   // Stored before the selection, never after: what the cache holds is what the
   // site offers, so the next run — selecting something else, or nothing — reads
@@ -422,6 +449,9 @@ export async function covered(
  * Given a `store`, a site that asked for `cacheChannels` reads its list from
  * there and writes a fetched one back — one state handle per site, opened and
  * saved here, since resolving is the whole of what this call does with a site.
+ *
+ * One site's list failing rejects the whole call, unless `failed` says what to
+ * do with that site instead.
  */
 export async function resolveSites(
   sites: AnySiteConfig[],
@@ -442,52 +472,81 @@ export async function resolveSites(
     emit?: Emit;
     /** Keep only these channels — see {@link ResolveChannelsOptions.select}. */
     select?: ReadonlySet<string>;
+    /**
+     * What to do with a site whose list could not be resolved: given the site
+     * as configured and what its list threw, answer a site to use in its place,
+     * or nothing to leave it out.
+     *
+     * Without it, the first failure rejects the whole call. With it, one source
+     * down costs that source and nothing else — a build grabs the rest and
+     * counts the site as one that answered nothing, a server keeps the list it
+     * resolved last, a merge leaves the site out. A cancelled run rejects
+     * either way: a cancel is not a source that failed.
+     */
+    failed?: (site: AnySiteConfig, error: unknown) => AnySiteConfig | undefined;
   } = {},
 ): Promise<AnySiteConfig[]> {
   const queue = new PQueue({ concurrency: Math.max(1, options.concurrency ?? sites.length) });
   const { store } = options;
 
-  return Promise.all(
+  const failing = (site: AnySiteConfig, error: unknown): AnySiteConfig | undefined => {
+    if (options.failed === undefined || options.signal?.aborted === true) {
+      throw error;
+    }
+
+    return options.failed(site, error);
+  };
+
+  const resolved = await Promise.all(
     sites.map((site) =>
-      queue.add(async (): Promise<AnySiteConfig> => {
+      queue.add(async (): Promise<AnySiteConfig | undefined> => {
         const state = store === undefined ? undefined : SiteStateHandle.open(store, site.site);
         const { emit } = options;
-        const channels = await resolveChannels(site, {
-          ...(options.signal ? { signal: options.signal } : {}),
-          ...(state ? { state } : {}),
-          ...(options.refresh === undefined ? {} : { refresh: options.refresh }),
-          ...(options.now ? { now: options.now } : {}),
-          ...(options.select ? { select: options.select } : {}),
-          ...(emit
-            ? {
-                says: {
-                  log: (message, data) =>
-                    emit({
-                      type: 'site:note',
-                      site: site.site,
-                      message,
-                      ...(data ? { data } : {}),
-                    }),
-                  warn: (message, data) =>
-                    emit({
-                      type: 'site:warning',
-                      site: site.site,
-                      message,
-                      ...(data ? { data } : {}),
-                    }),
-                },
-              }
-            : {}),
-        });
 
-        // Only a list that was fetched is one to write, and the handle knows
-        // whether that happened — so a merge over a cached list touches nothing.
-        await state?.save();
+        try {
+          const channels = await resolveChannels(site, {
+            ...(options.signal ? { signal: options.signal } : {}),
+            ...(state ? { state } : {}),
+            ...(options.refresh === undefined ? {} : { refresh: options.refresh }),
+            ...(options.now ? { now: options.now } : {}),
+            ...(options.select ? { select: options.select } : {}),
+            ...(emit
+              ? {
+                  says: {
+                    log: (message, data) =>
+                      emit({
+                        type: 'site:note',
+                        site: site.site,
+                        message,
+                        ...(data ? { data } : {}),
+                      }),
+                    warn: (message, data) =>
+                      emit({
+                        type: 'site:warning',
+                        site: site.site,
+                        message,
+                        ...(data ? { data } : {}),
+                      }),
+                  },
+                }
+              : {}),
+          });
 
-        return { ...site, channels };
+          return { ...site, channels };
+        } catch (error) {
+          return failing(site, error);
+        } finally {
+          // Only a list that was fetched is one to write, and the handle knows
+          // whether that happened — so a merge over a cached list touches
+          // nothing. A site whose list failed still has what its `channels`
+          // learnt on the way, as a site whose turn failed in a grab does.
+          await state?.save();
+        }
       }),
     ),
   );
+
+  return resolved.filter((site) => site !== undefined);
 }
 
 /**

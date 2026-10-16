@@ -34,7 +34,8 @@ of the guide.
 
 `failed` is a **count** of channel-days that did not come back. `sitesFailed`
 counts sites that answered nothing at all — one that could not be read, or whose
-channel list never arrived. They are apart because a site has no grid to spread
+channel list never arrived. `build` counts a list that failed before its grab
+began the same way, and grabs and merges the other sites. They are apart because a site has no grid to spread
 it over: a site that could not be read has no channel list, so what it *would*
 have covered is not knowable, and adding one to a count of channel-days would
 make a dead source look like a rounding error beside a guide of thousands.
@@ -394,8 +395,9 @@ channel-days a `304` costs 230ms on the default file cache against 32ms on
 guide](./configuration.md#serving-the-guide). Those lookups are keyed by the channel list in hand,
 which is re-resolved when the fingerprint moves and at least every
 `sitesMaxAgeMs` (ten minutes), so that a grab which only adds a channel is not
-invisible until midnight. See [serving the
-guide](./configuration.md#serving-the-guide) for what that costs and saves.
+invisible until midnight. A site whose list fails then keeps the one it resolved
+last. See [serving the guide](./configuration.md#serving-the-guide) for what
+that costs and saves.
 
 ### On a server of your own
 
@@ -845,8 +847,15 @@ union, which is what a list of sites holds.
 `resolveChannels(site, { http?, signal?, state?, refresh?, now?, says? })`
 returns a site's channels whichever form they came in — a list or a fetched one
 — and `resolveSites(sites, { signal?, concurrency?, store?, refresh?, now?,
-emit? })` does it for several, which is what `build` uses to fix the list across
-the grab and the merge. A site's own `log` and `warn` go to `says` (or, for
+emit?, failed? })` does it for several, which is what `build` uses to fix the
+list across the grab and the merge. One site's list failing rejects the whole
+call unless `failed(site, error)` says what to do with that site instead: answer
+a site to use in its place, or `undefined` to leave it out. `build`, `serve` and
+the merge all pass one, so one source down costs that source and nothing else;
+a cancelled run rejects either way. Settling the lists and then grabbing, as
+`build` does, hand what failed to `grab` as `failedSites: [{ site, error }]`:
+each is reported and counted as a list that failed in the grab's own hands —
+`site:failed`, `site:done`, one more in `sitesFailed` — and asked nothing. A site's own `log` and `warn` go to `says` (or, for
 several sites, to `emit` as the events they are) and are **dropped without
 one** — which is what a caller writing a channel list to stdout wants, and a
 surprise to anyone else. Given a `store`, both honour a site's

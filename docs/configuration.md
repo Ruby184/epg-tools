@@ -692,6 +692,13 @@ older than `cacheChannels`'s own max age is refetched by whoever asks for it
 next, `serve` included, so a server left running while the grabs stop still asks
 once a day.
 
+**A list that fails to resolve costs that site, not the guide.** When the lists
+are read again and one site's fails, a `429` say, that site keeps the list it
+resolved last, its channels stay in the guide, and the failure is reported as a
+warning. The list is tried again the next time the lists are read. A site whose
+list has not resolved once since the server started is left out until it does.
+Either way the other sites are served, and `/health` answers for what is held.
+
 The guide streams straight into the response, so nothing is held in memory; a
 consumer that hangs up mid-guide stops the merge feeding it, and is reported as
 a disconnect rather than a failure — a reader that has seen enough, a proxy that

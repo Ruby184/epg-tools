@@ -77,6 +77,82 @@ async function collect(chunks: AsyncGenerator<string>): Promise<string> {
   return out;
 }
 
+describe('a site whose channel list fails', () => {
+  /** A site whose source refuses its channel list, counting how often it is asked. */
+  function refusing(asked: string[]): SiteConfig<unknown> {
+    return {
+      ...site([]),
+      site: 'broken.example',
+      channels: async () => {
+        asked.push('channels');
+        throw new Error('Request failed with status code 429');
+      },
+    };
+  }
+
+  it('costs a build that site, and the guide comes from the rest', async () => {
+    const dir = await tempDir();
+    const asked: string[] = [];
+    const failed: string[] = [];
+
+    const summary = await build(config(dir, { sites: [site([]), refusing(asked)] }), {
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'site:failed') {
+          failed.push(event.site);
+        }
+      },
+    });
+
+    // Counted as `epg grab` counts it, so the run still exits non-zero.
+    expect(summary).toMatchObject({ fetched: 1, sitesFailed: 1 });
+    expect(failed).toEqual(['broken.example']);
+    // Once, by the build: the grab is handed the failure rather than asking again.
+    expect(asked).toEqual(['channels']);
+
+    const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+    expect(guide.channels.map((channel) => channel.id)).toEqual(['one.example']);
+    expect(guide.programmes).toHaveLength(1);
+  });
+
+  it('costs a grab that resolves the lists early for `cover` only that site', async () => {
+    const dir = await tempDir();
+    const asked: string[] = [];
+
+    const summary = await runGrab(
+      config(dir, { sites: [site([]), refusing(asked)], merge: { cover: 'first' } }),
+      { now: NOW },
+    );
+
+    expect(summary).toMatchObject({ fetched: 1, sitesFailed: 1 });
+    expect(asked).toEqual(['channels']);
+  });
+
+  it('leaves a merge without that site, and says so', async () => {
+    const dir = await tempDir();
+    const warnings: string[] = [];
+
+    await runGrab(config(dir), { now: NOW });
+    await runMerge(config(dir, { sites: [site([]), refusing([])] }), {
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:warning') {
+          warnings.push(event.message);
+        }
+      },
+    });
+
+    const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+    expect(guide.channels.map((channel) => channel.id)).toEqual(['one.example']);
+    expect(warnings).toEqual([
+      'broken.example could not resolve its channel list, so the guide has none of its ' +
+        'channels: Request failed with status code 429',
+    ]);
+  });
+});
+
 describe('offset', () => {
   it('moves the grab window without moving "now"', async () => {
     const dir = await tempDir();
@@ -583,6 +659,26 @@ describe('what a config asked to be told', () => {
 
     expect(heard).toEqual(['done 1']);
   });
+
+  it('reaches it once from a build, through both halves', async () => {
+    const dir = await tempDir();
+    const heard = new Map<string, number>();
+    const events = new EventEmitter<EpgEventMap>();
+
+    for (const type of ['site:done', 'grab:done', 'merge:summary'] as const) {
+      events.on(type, () => heard.set(type, (heard.get(type) ?? 0) + 1));
+    }
+
+    await build({ ...config(dir), events }, { now: NOW });
+
+    // Each half used to add the emitter again to a reporter that already had
+    // it, so everything a build said reached it twice.
+    expect(Object.fromEntries(heard)).toEqual({
+      'site:done': 1,
+      'grab:done': 1,
+      'merge:summary': 1,
+    });
+  });
 });
 
 describe('the cache a config describes', () => {
@@ -658,19 +754,15 @@ describe('the cache a config describes', () => {
     // back — a driver holding a database handle is waiting for exactly this.
     expect(drivers.map((driver) => driver.closed)).toEqual([1, 1, 1]);
 
-    // And a run that threw: the `finally` is the whole point.
+    // And a run that threw: the `finally` is the whole point. Thrown by the
+    // config's own code, since a site's list failing no longer stops a merge.
     const failing = withDriver({
-      sites: [
-        {
-          ...site([]),
-          channels: () => {
-            throw new Error('no channel list');
-          },
-        },
-      ],
+      derived: () => {
+        throw new Error('no derived channels');
+      },
     });
 
-    await expect(runMerge(failing, { now: NOW })).rejects.toThrow('no channel list');
+    await expect(runMerge(failing, { now: NOW })).rejects.toThrow('no derived channels');
     expect(drivers).toHaveLength(4);
     expect(drivers.at(-1)!.closed).toBe(1);
   });

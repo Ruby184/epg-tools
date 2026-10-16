@@ -1,5 +1,5 @@
 import { dayRange, dayToDate, toDayString } from '../core/days.js';
-import { GrabberError } from '../core/error.js';
+import { errorMessage, GrabberError } from '../core/error.js';
 import { writeOutput, type OutputOptions, type OutputTarget } from '../core/output.js';
 import { emitter } from '../core/events.js';
 import type { Says } from '../core/events.js';
@@ -299,6 +299,18 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
         ...(options.signal ? { signal: options.signal } : {}),
         store: cache,
         now,
+        // Left out, and said: with no list there is nothing to read its
+        // entries by, and one source down is no reason to write no guide.
+        failed: (site, error) => {
+          emit({
+            type: 'merge:warning',
+            message:
+              `${site.site} could not resolve its channel list, so the guide has none of its ` +
+              `channels: ${errorMessage(error)}`,
+          });
+
+          return undefined;
+        },
       }),
       options.merge?.cover,
       { now, ...mergeSays },

@@ -168,6 +168,15 @@ run but the one that fetched it sees the round-tripped form. And `--refresh`
 fetches the list whatever is cached, because asking the source is what that flag
 means.
 
+**When fetching it again fails, the stored list is used, however old.** A
+source that answers `429` or is down for an hour should not take the site's
+whole lineup with it, so a site with a list stored is grabbed and merged with
+that list, and says so: `could not fetch its channel list, so the one stored
+<when> is used`. It is not stored again, so the next command asks the source as
+this one did. That goes for `--refresh` too, since asking is what it wanted and
+asking is what failed. With nothing stored, the site fails as any other would.
+A cancelled run is not a failed source, and stops rather than falling back.
+
 **When the list is past its age, the site is handed the old one.** Plenty of
 sources can say cheaply that nothing has changed — a lineup with a `modified`
 stamp, a document that answers `304`, an account that publishes a version — and

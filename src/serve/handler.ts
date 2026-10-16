@@ -25,6 +25,7 @@ import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../confi
 import { createCacheStore } from '../build.js';
 import type { CacheEntryMeta, CacheStore, ChannelDayKey } from '../cache/types.js';
 import { dayRange, toDayString, addDays } from '../core/days.js';
+import { errorMessage } from '../core/error.js';
 import { emitter, reportingTo, type Reporter, type Says } from '../core/events.js';
 import { compressor, type CompressionFormat } from '../core/output.js';
 import { covered, resolveSites } from '../grabber/channels.js';
@@ -1046,6 +1047,55 @@ export async function createGuideHandler(
   let resolvedAt = 0;
   let inFlight: Promise<Snapshot> | undefined;
 
+  /**
+   * What each site's list resolved to last, and when — before `cover` or a
+   * selection had a say, so a list held over is judged afresh beside the
+   * others.
+   *
+   * For a site whose list fails the next time the lists are read: it keeps
+   * this one, and its channels stay in the guide, rather than one source
+   * answering `429` while a consumer polls costing that consumer every channel
+   * the source had. Tried again when the lists are next read.
+   */
+  const lastResolved = new Map<string, { site: AnySiteConfig; at: Date }>();
+
+  /** Every site's list, the one each had last standing in for one that failed. */
+  const lists = async (now: Date): Promise<AnySiteConfig[]> => {
+    const sites = await resolveSites(config.sites, {
+      emit,
+      ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+      store: cache,
+      now,
+      failed: (site, error) => {
+        const last = lastResolved.get(site.site);
+
+        emit({
+          type: 'site:warning',
+          site: site.site,
+          message:
+            last === undefined
+              ? `could not resolve its channel list, so the guide has none of its channels ` +
+                `until it can: ${errorMessage(error)}`
+              : `could not resolve its channel list, so the one from ` +
+                `${last.at.toISOString()} stays in the guide: ${errorMessage(error)}`,
+        });
+
+        return last?.site;
+      },
+    });
+
+    for (const site of sites) {
+      // Only a list that was resolved now: one held over keeps the time it was
+      // resolved at.
+      if (lastResolved.get(site.site)?.site !== site) {
+        lastResolved.set(site.site, { site, at: now });
+      }
+    }
+
+    return sites;
+  };
+
   const windowOf = (now: Date): { days: string[]; startDay: string; id: string } => {
     const today = toDayString(now);
     const startDay = options.offset ? addDays(today, options.offset) : today;
@@ -1062,17 +1112,7 @@ export async function createGuideHandler(
       // `cover` before anything is counted: a channel this run leaves to
       // another site has no entry of its own, and sweeping for one would have
       // the grid expecting what nobody was asked to grab.
-      (await covered(
-        await resolveSites(config.sites, {
-          emit,
-          ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
-          ...(options.signal ? { signal: options.signal } : {}),
-          store: cache,
-          now,
-        }),
-        config.merge?.cover,
-        { now, ...mergeSays },
-      ));
+      (await covered(await lists(now), config.merge?.cover, { now, ...mergeSays }));
 
     // After the lists, because a `derived` function is a function of them — and
     // the selection after that, since a shift declared here is what decides
