@@ -14,7 +14,7 @@
  * historical changes included.
  */
 
-import { daysInMonth, setXmltvOffset, setXmltvPrecision, XmltvDateError } from './date.js';
+import { daysInMonth, keepXmltvOffset, setXmltvPrecision, XmltvDateError } from './date.js';
 import type { XmltvDate } from './date.js';
 
 const MINUTE = 60_000;
@@ -301,7 +301,9 @@ export function zonedXmltvDate(local: string, timeZone: string): XmltvDate {
   const { instant, offset } = resolve(wall, timeZone);
   const date = new Date(instant);
 
-  setXmltvOffset(date, offset);
+  // Kept even at zero: the zone was named, which a builder tells apart from an
+  // instant that came with nothing to say about how to write it.
+  keepXmltvOffset(date, offset);
   // Four digits for the year and two for each field after it, which is how the
   // rest of this module counts precision.
   setXmltvPrecision(date, fieldsGiven.length * 2 + 2);
@@ -322,5 +324,5 @@ export function zonedXmltvDate(local: string, timeZone: string): XmltvDate {
  * ```
  */
 export function setXmltvZone(date: Date, timeZone: string): Date {
-  return setXmltvOffset(date, xmltvZoneOffset(timeZone, date));
+  return keepXmltvOffset(date, xmltvZoneOffset(timeZone, date));
 }

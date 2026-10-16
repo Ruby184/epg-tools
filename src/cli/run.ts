@@ -57,7 +57,7 @@ Options:
   -d, --days <n>        Override the number of days
       --offset <n>      Start the window n days from today (may be negative)
       --timezone <zone> Whose calendar says which day is today, e.g.
-                        Europe/Bratislava (default UTC)
+                        Europe/Bratislava (default: the process's, from TZ)
   -o, --output <path>   Override the output file, or a Unix socket to write into
       --cache-dir <dir> Override the cache directory
       --cache-driver <name>  Override where cached days are kept: ndjson, xmltv,
@@ -145,7 +145,7 @@ function dayString(raw: string, flag: string): string {
  * A flag checked by whatever reads the config field behind it.
  *
  * Four flags mean exactly what a config field means — `--allow-missing` is
- * `allowMissing`, `--timezone` is `timezone`, `--grab-every` and `--grab-at`
+ * `allowMissing`, `--timezone` is `timeZone`, `--grab-every` and `--grab-at`
  * are the two halves of `grabEvery` — so each is read by the function that
  * defines the meaning, and
  * a value that cannot work is refused where somebody typed it rather than on
@@ -645,7 +645,7 @@ async function execute(
   }
 
   if (values.timezone !== undefined) {
-    config = { ...config, timezone: values.timezone };
+    config = { ...config, timeZone: values.timezone };
   }
 
   if (values.output !== undefined) {
@@ -923,7 +923,7 @@ async function execute(
       // starts there — which the guide still reads once it has been grabbed.
       const before =
         values.before ??
-        earliestDay(config.sites, dayIn(new Date(), config.timezone), config.timezone);
+        earliestDay(config.sites, dayIn(new Date(), config.timeZone), config.timeZone);
 
       await using cache = await createCacheStore(config, signal);
       const removed = await cache.prune({ before });

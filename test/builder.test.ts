@@ -14,7 +14,9 @@ import {
   parseXmltvNsEpisodeNum,
   serializeChannel,
   serializeProgramme,
+  setXmltvZone,
   writeXmltvStream,
+  zonedXmltvDate,
 } from '../src/xmltv/main.js';
 
 async function collect(input: Parameters<typeof writeXmltvStream>[0]): Promise<string> {
@@ -505,6 +507,96 @@ describe('ProgrammeBuilder', () => {
 
     expect(doc.warnings).toEqual([]);
     expect(doc.programmes).toEqual([built]);
+  });
+});
+
+describe('a builder given a zone', () => {
+  const BRATISLAVA = 'Europe/Bratislava';
+  /** Six in the evening UTC, eight in Bratislava in summer. */
+  const EVENING = '2026-07-17T18:00:00.000Z';
+
+  /** How each date of a programme built from these is written. */
+  function written(start: Parameters<typeof ProgrammeBuilder.of>[1], timeZone = BRATISLAVA) {
+    const programme = new ProgrammeBuilder({ channel: 'one', start, title: 'News', timeZone })
+      .stop(new Date('2026-07-17T19:00:00.000Z'))
+      .build();
+
+    return {
+      start: [programme.start.toISOString(), getXmltvOffset(programme.start)],
+      stop: getXmltvOffset(programme.stop!),
+    };
+  }
+
+  it('writes a bare Date and a unix timestamp in the zone’s offset, at the same instant', () => {
+    expect(written(new Date(EVENING))).toEqual({ start: [EVENING, 120], stop: 120 });
+    expect(written(Date.parse(EVENING) / 1000).start).toEqual([EVENING, 120]);
+  });
+
+  it('leaves a date that says its own offset as it says', () => {
+    // Prague's offset is Bratislava's, so a zone of its own is told apart by
+    // being somewhere else.
+    expect(written(zonedXmltvDate('2026-07-17 14:00', 'America/New_York')).start).toEqual([
+      EVENING,
+      -240,
+    ]);
+    expect(written('20260717180000 +0100').start).toEqual(['2026-07-17T17:00:00.000Z', 60]);
+    // An XMLTV string with no offset is UTC, and says so.
+    expect(written('20260717180000').start).toEqual([EVENING, 0]);
+  });
+
+  it('leaves a zone whose offset is zero as it says, as it does any other', () => {
+    // London in winter is +0000, and still London rather than a bare instant.
+    expect(written(zonedXmltvDate('2026-01-17 18:00', 'Europe/London')).start).toEqual([
+      '2026-01-17T18:00:00.000Z',
+      0,
+    ]);
+    expect(written(setXmltvZone(new Date(EVENING), 'UTC')).start).toEqual([EVENING, 0]);
+  });
+
+  it('takes a Date parsed from +0000 for a bare one, the parser leaving UTC unmarked', () => {
+    expect(written(parseXmltvDate('20260717180000 +0000')).start).toEqual([EVENING, 120]);
+  });
+
+  it('keeps a programme in UTC when its zone is UTC', () => {
+    expect(written(new Date(EVENING), 'UTC')).toEqual({ start: [EVENING, 0], stop: 0 });
+  });
+
+  it('takes an offset a call names over its zone', () => {
+    const programme = new ProgrammeBuilder({
+      channel: 'one',
+      start: new Date(EVENING),
+      title: 'News',
+      timeZone: BRATISLAVA,
+    })
+      .stop(new Date('2026-07-17T19:00:00.000Z'), { offset: 60 })
+      .build();
+
+    expect(getXmltvOffset(programme.stop!)).toBe(60);
+  });
+
+  it('writes the other dates a programme has in it too, but not <date>', () => {
+    const programme = new ProgrammeBuilder({
+      channel: 'one',
+      start: new Date(EVENING),
+      title: 'News',
+      timeZone: BRATISLAVA,
+    })
+      .pdcStart(new Date(EVENING))
+      .vpsStart(new Date(EVENING))
+      .previouslyShown({ start: new Date('2026-07-10T18:00:00.000Z') })
+      .date(new Date('2026-07-17T00:00:00.000Z'))
+      .build();
+
+    expect(getXmltvOffset(programme.pdcStart!)).toBe(120);
+    expect(getXmltvOffset(programme.vpsStart!)).toBe(120);
+    expect(getXmltvOffset(programme.previouslyShown!.start!)).toBe(120);
+    expect(getXmltvOffset(programme.date!)).toBe(0);
+  });
+
+  it('is UTC without one, as it was', () => {
+    const programme = ProgrammeBuilder.of('one', new Date(EVENING), 'News').build();
+
+    expect(getXmltvOffset(programme.start)).toBe(0);
   });
 });
 

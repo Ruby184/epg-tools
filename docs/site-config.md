@@ -47,7 +47,7 @@ it cannot leave a half-built site's output in the cache.
 | `lineups` | `(channels, metadata) => LineupConfig[]` | one `List` lineup of every channel | How this site's channels divide into reception platforms, for a `tv_grab_*`'s [`lineups` capability](./tv-grab.md#channel-lineups). Handed the resolved list and the [metadata stored with it](#keeping-a-fetched-list), so it costs no request. |
 | `transform` | `(programme, ctx) => XmltvProgramme \| null` | — | A last say over each of this site's programmes as the cache is **read** — see [fixing up one source](#fixing-up-one-source). |
 | `days` | `number` | the config's `days`, then `7` | Override how many days this site grabs. |
-| `dayZone` | `'source' \| 'utc' \| string` | `'source'` — the run's own calendar | Which calendar this site's channel-days are on: `'utc'` for a source keyed by UTC date, or an IANA zone. A run on another calendar fetches the days of this one that cover its window and files their programmes into its own days as it merges — see [which day is today](./configuration.md#which-day-is-today). The XMLTV, Xtream and command adapters pass theirs through, so a zone there other than the run's is a calendar of the site's own rather than a way to move the guide's days: that is the run's [`timezone`](./configuration.md#which-day-is-today). |
+| `dayZone` | `'source' \| 'run' \| 'utc' \| string` | `'source'` — the run's own calendar | Which calendar this site's channel-days are on: the run's (`'source'` or `'run'`), `'utc'` for a source keyed by UTC date, or an IANA zone — the one to name for a source whose times are on a fixed clock, so its contexts' [`at`](#requests-and-parsing) reads them there whatever the run's zone. A run on another calendar fetches the days of this one that cover its window and files their programmes into its own days as it merges — see [which day is today](./configuration.md#which-day-is-today). The XMLTV, Xtream and command adapters pass theirs through, so a zone there other than the run's is a calendar of the site's own rather than a way to move the guide's days: that is the run's [`timeZone`](./configuration.md#which-day-is-today). |
 | `concurrency` | `number` | `1` | How many requests this site may have in flight at once. |
 | `rateLimit` | `{ requests, perMs, strict? }` | unset — no pacing | How often this site may be asked. `strict` defaults to `true` (sliding window). |
 | `backoff` | `false \| SiteBackoff` | on: `{ statuses: [429, 503], fallbackMs: 5000, maxMs: 60000, adapt: true }` | What to do when the source says slow down. |
@@ -124,9 +124,10 @@ refused with a message naming the channel and where in its `data` — `Site
 that site, whether or not this run would have copied the list. A config means
 the same thing however it is run.
 
-Beside `http` the function is handed `log`, `warn`, `signal` and `state` — the
-site's own bag, [the same one](#remembering-something-between-runs) every
-request and parse of the run is given. Which is where what the *list* taught the
+Beside `http` the function is handed `log`, `warn`, `signal`, the run's
+`timeZone` and the site's `dayZone`, and `state` — the site's own bag,
+[the same one](#remembering-something-between-runs) every request and parse of
+the run is given. Which is where what the *list* taught the
 site goes, as opposed to what it taught you about a channel:
 
 ```ts
@@ -298,6 +299,9 @@ What a `parseDay` call is given:
 | `channel` | `GrabberChannel<TData>` | The channel being parsed, as the site declared it — its `siteId`, `lang` and `data` included. |
 | `day` | `string` | The day being parsed, as `YYYY-MM-DD`. |
 | `date` | `Date` | The same day as UTC midnight. |
+| `timeZone` | `string` | The run's zone, the guide's clock — see [which day is today](./configuration.md#which-day-is-today). |
+| `dayZone` | `string` | The zone this site's days are on: `timeZone`, unless the site's `dayZone` names another. |
+| `at` | `(time, day?) => Date` | A [time of day](#times-of-day) on `day`, or on the day given. |
 | `programme` | `(start, title, options?) => ProgrammeBuilder` | A [builder bound to this channel-day](#building-programmes). |
 | `http` | `KyInstance` | The site's client — the very instance `request` was handed. See [a parse that needs another request](#a-parse-that-needs-another-request). |
 | `paced` | `<T>(task) => Promise<T>` | Run a request through the site's queue, so its `concurrency`, `rateLimit` and backoff apply to it. |
@@ -328,14 +332,40 @@ const example = defineSiteConfig({
 Afterwards each `programme.channel` is normalized to the channel's `xmltvId`
 and the list is sorted by `start`.
 
-`new Date(…)` there is right only because that source gives instants. When it
-gives a wall clock instead — `2026-07-17 20:00`, meaning eight in the evening
-where the broadcaster is — reach for
-[`zonedXmltvDate`](./xmltv.md#named-zones), which reads it in the zone you name
-rather than in whatever `TZ` the run happens to have:
+`new Date(…)` there is right because that source gives instants, and
+`programme` writes one in the run's offset — `20:00 +0200` in a Bratislava run
+rather than `18:00 +0000`, the same instant either way. A `Date` that already
+says its offset is written as it says.
+
+### Times of day
+
+When a source gives a wall clock instead — `20:00`, meaning eight in the
+evening on the day asked for — `at` reads it on the clock of the site's days,
+`dayZone`, and writes it in the run's offset:
 
 ```ts
-programme(zonedXmltvDate(item.start, 'Europe/Bratislava'), item.title);
+parseDay({ payload, at, programme }) {
+  return payload.items.map((item) => programme(at(item.time), item.title));
+}
+```
+
+It takes `20:00`, `6:05` or `20:00:30`, and is precise to the second only where
+the time gives one. Hours past 23 run on into the next day, as listings that
+carry a night past midnight write it: `25:30` is half past one the next morning.
+A time on another day takes that day as well, `at('01:30', nextDay)`, and a
+context covering several days always needs one. A day's bounds — its midnight
+and the next, 23 or 25 hours apart when the clocks change — are `at('00:00')`
+and `at('24:00')`.
+
+`dayZone` is the run's zone unless the site says otherwise, so **a source whose
+times are on a fixed clock names it**: `dayZone: 'Europe/Bratislava'` for a
+Slovak broadcaster. In a Bratislava run that changes nothing, and in any other
+run `at` still reads the source's clock rather than the run's — as do the days
+the site is asked for. A full local datetime, `2026-07-17 20:00`, is
+[`zonedXmltvDate`](./xmltv.md#named-zones)'s, given the same zone:
+
+```ts
+programme(zonedXmltvDate(item.start, dayZone), item.title);
 ```
 
 A failed `request` fails every channel-day it covered; one channel-day's
@@ -551,7 +581,8 @@ and before `fillStop` and `clipOverlaps`, so a gap it leaves behind is
 
 Return the programme, a different one, or `null`/`undefined` to leave it out.
 Build a new object rather than changing the one handed in: it may be a cache
-store's own.
+store's own. Its context carries the same `timeZone`, `dayZone` and
+[`at`](#times-of-day) a parse is given, for the day the programme was kept under.
 
 ### Building programmes
 
@@ -577,6 +608,13 @@ Hand the builders back as they are, or a plain `XmltvProgramme` object, or any
 mix of the two — `parseDay` takes all three, and calls `.build()` for you.
 `programme.channel` is normalized to the channel's `xmltvId` either way, so a
 plain object need not repeat it.
+
+Only the builder writes an instant in the run's offset: a bare `Date` or a
+unix timestamp given to it reads locally, while a plain object's dates are
+written as they are, which for a `new Date(…)` is UTC. A `Date` parsed from a
+`+0000` string looks bare to it too, since the parser leaves UTC unmarked — so
+hand a source's string on as the string, or pass `timeZone: 'UTC'` in the
+builder's options.
 
 The channel's `lang` is only a *default*: pass a language to any text method
 (`.desc(value, 'en')`) and that element carries it instead, for a programme
@@ -731,6 +769,24 @@ Each entry also carries `cached` — what the cache already holds for that
 channel-day, its `grabbedAt` and `programmeCount`, and absent where it holds
 nothing — since a stale channel-day is usually there and merely old enough to
 ask about again.
+
+And every mode gets `timeZone`, `dayZone` and [`at`](#times-of-day), as a parse
+does. Under `'days'` and `'both'` there is no one day to assume, so `at` takes
+the day as well — from the first day's midnight to the end of the last is the
+stretch a range API wants, on the clock of the site's days, where `from` and
+`to` are only UTC midnights:
+
+```ts
+async request({ channel, days, at, http }) {
+  return http.get('epg', {
+    searchParams: {
+      id: channel.siteId,
+      from: at('00:00', days[0]!).toISOString(),
+      until: at('24:00', days.at(-1)!).toISOString(),
+    },
+  }).json<Raw>();
+},
+```
 
 Sources that return many channels' schedules in one call
 (`?channels=a,b,c&date=…`) want `'channels'`:
@@ -1014,7 +1070,7 @@ rather than a download.
 |---|---|---|
 | `url` | **required** | Where the document is — or a function `({ http, signal }) => string`, which may be async, for a url that has to be looked up first. |
 | `channels` | every channel the document declares | The channels to take, mapping `siteId` (its `<channel id>`) to the id you want out. A list narrows *and* renames. |
-| `dayZone` | `'source'` | Which day a programme belongs to: the day it falls on in the offset the document wrote it with (`source`), the day of its UTC instant (`utc`), or the day in a named zone (`Europe/Bratislava`). A zone other than the run's puts the site's days on [that calendar](./configuration.md#which-day-is-today), and the run covers its window with them; to move the guide's own days, set the run's `timezone`. |
+| `dayZone` | `'source'` | Which day a programme belongs to: the day it falls on in the offset the document wrote it with (`source`), the day in the run's own zone (`run`) — the guide's days, for a document written in another offset — the day of its UTC instant (`utc`), or the day in a named zone (`Europe/Bratislava`). A zone other than the run's puts the site's days on [that calendar](./configuration.md#which-day-is-today), and the run covers its window with them; to move the guide's own days, set the run's `timeZone`, or file by it with `run`. |
 | `compression` | sniffed | `'gzip'`, `'brotli'`, `'zstd'`, or `false` for none. |
 | `parse` | — | `Omit<XmltvParseOptions, 'channels'>`: `timezones` for a document using named zones, `tolerateMissingId`. Not `channels`, since which channels are kept is what `channels` above says. |
 | `order` | `'grouped'` | Whether the document groups each channel's programmes together — see below. |
@@ -1244,7 +1300,8 @@ wanted, **not necessarily contiguous** — a day fresh in the cache is left out)
 `span` (how long a stretch reaches from the first to the last, which is what a
 `--days`-style option means), `startDay`, and `offset` from today — the
 program's today, which is the process's local date, since it inherits `TZ`
-and counts its own `--offset` from there.
+and counts its own `--offset` from there. And `timeZone` and `dayZone`, for a
+program that takes a zone of its own.
 
 **The exit code decides whether the document finished.** A child's stdout ends
 *cleanly* when the process dies, and a Perl grabber that fails a fetch part way

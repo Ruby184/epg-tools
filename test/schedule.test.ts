@@ -181,12 +181,12 @@ describe('grabEvery in a time zone', () => {
   const BRATISLAVA = 'Europe/Bratislava';
 
   /** When a schedule says next, as an instant, asked with what a server knows. */
-  async function nextFrom(schedule: NextGrab, from: string, timezone?: string): Promise<string> {
+  async function nextFrom(schedule: NextGrab, from: string, timeZone?: string): Promise<string> {
     const answer = await schedule({
       from: new Date(from),
       runs: 1,
       cached: holding(),
-      ...(timezone === undefined ? {} : { timezone }),
+      ...(timeZone === undefined ? {} : { timeZone }),
     });
 
     return new Date(typeof answer === 'number' ? answer : (answer as Date)).toISOString();
@@ -195,7 +195,7 @@ describe('grabEvery in a time zone', () => {
   it('reads its time of day on that zone’s clock', async () => {
     // 22:00 in Bratislava: half past midnight there is 22:30 UTC the same day.
     await expect(
-      nextFrom(grabEvery('1d', { at: '00:30', timezone: BRATISLAVA }), '2026-10-15T20:00:00Z'),
+      nextFrom(grabEvery('1d', { at: '00:30', timeZone: BRATISLAVA }), '2026-10-15T20:00:00Z'),
     ).resolves.toBe('2026-10-15T22:30:00.000Z');
   });
 
@@ -214,7 +214,7 @@ describe('grabEvery in a time zone', () => {
   it('keeps its own zone over the server’s', async () => {
     await expect(
       nextFrom(
-        grabEvery('1d', { at: '00:30', timezone: 'UTC' }),
+        grabEvery('1d', { at: '00:30', timeZone: 'UTC' }),
         '2026-10-15T20:00:00Z',
         BRATISLAVA,
       ),
@@ -225,13 +225,13 @@ describe('grabEvery in a time zone', () => {
     // Half past midnight on the night summer time starts at two: four o'clock
     // is three hours away, not four.
     await expect(
-      nextFrom(grabEvery('1d', { at: '04:00', timezone: BRATISLAVA }), '2026-03-28T23:30:00Z'),
+      nextFrom(grabEvery('1d', { at: '04:00', timeZone: BRATISLAVA }), '2026-03-28T23:30:00Z'),
     ).resolves.toBe('2026-03-29T02:00:00.000Z');
   });
 
   it('refuses a zone that is not one, while the config is being read', () => {
-    expect(() => grabEvery('1d', { at: '00:30', timezone: 'Mars/Olympus' })).toThrow(
-      'grab.timezone must be an IANA time zone',
+    expect(() => grabEvery('1d', { at: '00:30', timeZone: 'Mars/Olympus' })).toThrow(
+      'grab.timeZone must be an IANA time zone',
     );
   });
 });

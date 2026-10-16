@@ -17,6 +17,7 @@
  */
 
 import { createCacheStore } from '../build.js';
+import { resolveTimeZone } from '../core/days.js';
 import type { CacheStore } from '../cache/main.js';
 import type { EpgConfig } from '../config.js';
 import { resolveChannels } from '../grabber/channels.js';
@@ -403,10 +404,11 @@ export async function lineupsFromSites(
   // The same cache a grab uses: a list fetched an hour ago is not fetched again
   // to answer this, and what the site said about it is read back with it.
   const cache = options.cache ?? (await createCacheStore(config));
+  const timeZone = resolveTimeZone(config.timeZone);
 
   for (const site of config.sites) {
     const state = SiteStateHandle.open(cache, site.site);
-    const channels = await resolveChannels(site, { state });
+    const channels = await resolveChannels(site, { state, timeZone });
 
     await state.save();
 

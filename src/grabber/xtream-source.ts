@@ -598,7 +598,7 @@ export function defineXtreamSite(
         .filter((listing): listing is XtreamProgramme => listing !== undefined);
     },
 
-    parseDay({ payload, day, programme }) {
+    parseDay({ payload, day, programme, timeZone }) {
       const programmes: ProgrammeBuilder[] = [];
 
       for (const item of payload) {
@@ -606,7 +606,7 @@ export function defineXtreamSite(
         // one day of it at a time — filed by where it *starts*, so a programme
         // running through midnight stays in the entry already cached for it
         // rather than moving when the next day is refetched.
-        if (dayOf(item.start, dayZone) !== day) {
+        if (dayOf(item.start, dayZone, timeZone) !== day) {
           continue;
         }
 

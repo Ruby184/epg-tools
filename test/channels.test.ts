@@ -577,6 +577,8 @@ describe('channelsFromChannelsXml, from a path', () => {
     await channelsFromChannelsXml(FIXTURE)({
       http: undefined as never,
       state: new Map(),
+      timeZone: 'UTC',
+      dayZone: 'UTC',
       log: () => {},
       warn: (message) => said.push(message),
     });

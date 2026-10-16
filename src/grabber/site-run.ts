@@ -78,8 +78,8 @@ export interface Run {
   /** Say what happened, for whoever is listening — see `core/events.ts`. */
   emit: Emit;
   signal?: AbortSignal | undefined;
-  /** The zone whose calendar says which day is today — see `GrabOptions.timezone`. */
-  timeZone?: string | undefined;
+  /** The zone whose calendar says which day is today — see `GrabOptions.timeZone`. */
+  timeZone: string;
   /** The run-wide queue for work that never leaves the machine. */
   localWork: PQueue;
   enqueue: Enqueue;
@@ -349,6 +349,7 @@ export class SiteRun {
       state: this.#state,
       refresh: this.#resolved.staleness.refetchAll,
       now: this.#run.now,
+      timeZone: this.#run.timeZone,
       paced: (fetch) => this.#sending(fetch),
     });
 
@@ -370,7 +371,7 @@ export class SiteRun {
       site: this.#site,
       channels: this.#channels.length,
       days: this.#resolved.window.length,
-      ...(dayZone === undefined || dayZone === this.#run.timeZone ? {} : { dayZone }),
+      ...(dayZone === this.#run.timeZone ? {} : { dayZone }),
       entries: stale.length,
       requests: requests.length,
     });
@@ -505,6 +506,8 @@ export class SiteRun {
       state: this.#siteState,
       says: this.#says,
       ...(signal ? { signal } : {}),
+      timeZone: this.#run.timeZone,
+      dayZone: this.#resolved.dayZone,
     };
   }
 

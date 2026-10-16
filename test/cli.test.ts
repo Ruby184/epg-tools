@@ -1578,7 +1578,7 @@ describe('epg', () => {
         `export default {
         sites: [{ ...${siteSource()}, dayZone: 'utc' }],
         days: 1,
-        timezone: 'America/New_York',
+        timeZone: 'America/New_York',
         output: ${JSON.stringify(join(dir, 'guide.xml'))},
         cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
       };`,

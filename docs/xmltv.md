@@ -488,6 +488,14 @@ The default `lang` reaches every text element but one: `.country()` is a code,
 not prose, so it carries a `lang` only when given one —
 `<country lang="sk">US</country>` would say an ISO 3166 code is Slovak.
 
+`timeZone` is the same kind of default, for times: a bare instant — a `Date`
+with no offset of its own, or a unix timestamp — is written in that zone's
+offset, so `new Date('2026-07-17T18:00:00Z')` comes out `20260717200000 +0200`
+in Bratislava. A time that says its offset — a string, or a `Date` from
+[`zonedXmltvDate`](#named-zones) or `setXmltvZone` — is written as it says.
+A `Date` parsed from a `+0000` string is bare, though: the parser leaves UTC
+unmarked. A site's `parseDay` gets a builder with the run's zone already given.
+
 `.episode(episode, season?, options?)` writes the numbers it is given and no
 others. One the source did not give — left out, `null`, `NaN`, or not a whole
 number above zero — is left empty rather than guessed: `.episode(177)` is

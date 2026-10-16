@@ -378,7 +378,7 @@ describe('epg try', () => {
               ],
             }),
           ),
-          timezone: 'Europe/Bratislava',
+          timeZone: 'Europe/Bratislava',
         },
         'example.tv',
         'one.example.tv',

@@ -258,6 +258,29 @@ describe('defineCommandSite', () => {
     expect(control.invocations[0]?.argv).toEqual(['--days', '1', '--offset', '0', '--from', today]);
   });
 
+  it('tells the arguments which zone the run is in', async () => {
+    const control = await startControl();
+    const zoned = (context: { timeZone: string; dayZone: string }) => [
+      GRABBER,
+      '--tz',
+      context.timeZone,
+      '--day-zone',
+      context.dayZone,
+    ];
+
+    await resolveChannels(site({ args: zoned, env: { FAKE_CONTROL: control.path } }), {
+      timeZone: 'Europe/Bratislava',
+    });
+    await control.close();
+
+    expect(control.invocations[0]?.argv).toEqual([
+      '--tz',
+      'Europe/Bratislava',
+      '--day-zone',
+      'Europe/Bratislava',
+    ]);
+  });
+
   it('asks for the channel list on its own, where the program has a cheaper way', async () => {
     const channels = await resolveChannels(
       site({ channelsArgs: [GRABBER, '--list-channels'] }),

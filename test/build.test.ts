@@ -7,12 +7,13 @@ import { promisify } from 'node:util';
 import { gunzip as gunzipCallback } from 'node:zlib';
 import { describe, expect, it, vi } from 'vitest';
 import { build, createCacheStore, guideStream, runGrab, runMerge } from '../src/build.js';
+import { planRun } from '../src/cli/plan.js';
 import { CacheManager, FsNdjsonCacheDriver, NoCacheDriver } from '../src/cache/main.js';
 import type { EpgEventMap } from '../src/core/events.js';
 import type { ChannelDayKey, StoredEntryMeta } from '../src/cache/main.js';
 import { defineConfig, type EpgConfig } from '../src/config.js';
 import { parseXmltvString } from '../src/xmltv/main.js';
-import type { SiteConfig } from '../src/grabber/types.js';
+import { defineSiteConfig, type SiteConfig } from '../src/grabber/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 
 /**
@@ -380,7 +381,7 @@ describe('a run with a time zone', () => {
     const dir = await tempDir();
     const fetchedDays: string[] = [];
 
-    await runGrab(config(dir, { sites: [local(fetchedDays)], timezone: 'Europe/Bratislava' }), {
+    await runGrab(config(dir, { sites: [local(fetchedDays)], timeZone: 'Europe/Bratislava' }), {
       now: LATE,
     });
 
@@ -393,7 +394,7 @@ describe('a run with a time zone', () => {
     await build(
       config(dir, {
         sites: [local([])],
-        timezone: 'Europe/Bratislava',
+        timeZone: 'Europe/Bratislava',
         merge: { clampToWindow: true },
       }),
       { now: LATE },
@@ -406,6 +407,154 @@ describe('a run with a time zone', () => {
     expect(guide.programmes.map((programme) => programme.title[0]?.value)).toEqual([
       'small hours',
       'evening',
+    ]);
+  });
+
+  it('hands a site’s own code the run’s zone, its days’ zone and a clock on its day', async () => {
+    const dir = await tempDir();
+    const seen: Record<string, unknown> = {};
+    const clocked: SiteConfig<unknown> = {
+      ...site([]),
+      channels: async ({ timeZone, dayZone }) => {
+        seen['channels'] = [timeZone, dayZone];
+
+        return [{ xmltvId: 'one.example', siteId: '1', name: 'One' }];
+      },
+      async request({ timeZone, dayZone, at }) {
+        // A day's bounds are its midnight and the next.
+        seen['request'] = [timeZone, dayZone, at('00:00').toISOString(), at('24:00').toISOString()];
+
+        return {};
+      },
+      parseDay({ timeZone, dayZone, at, programme }) {
+        seen['parse'] = [timeZone, dayZone];
+
+        return [
+          // An instant, written in the run's offset rather than UTC's.
+          programme(new Date('2026-07-17T05:00:00.000Z'), 'Morning'),
+          programme(at('20:00'), 'Evening'),
+        ];
+      },
+      transform(programme, { timeZone, dayZone, at }) {
+        seen['transform'] = [timeZone, dayZone, at('20:00').toISOString()];
+
+        return programme;
+      },
+    };
+
+    await build(
+      config(dir, {
+        sites: [clocked],
+        timeZone: 'Europe/Bratislava',
+        derived: ({ timeZone }) => {
+          seen['derived'] = timeZone;
+
+          return [];
+        },
+        merge: {
+          transform: (programme, { timeZone }) => {
+            seen['merge'] = timeZone;
+
+            return programme;
+          },
+        },
+      }),
+      { now: LATE },
+    );
+
+    const zones = ['Europe/Bratislava', 'Europe/Bratislava'];
+
+    expect(seen).toEqual({
+      channels: zones,
+      request: [...zones, '2026-07-16T22:00:00.000Z', '2026-07-17T22:00:00.000Z'],
+      parse: zones,
+      transform: [...zones, '2026-07-17T18:00:00.000Z'],
+      derived: 'Europe/Bratislava',
+      merge: 'Europe/Bratislava',
+    });
+
+    const xml = await readFile(join(dir, 'guide.xml'), 'utf8');
+
+    expect(xml).toContain('start="20260717070000 +0200"');
+    // As precise as the time it was given.
+    expect(xml).toContain('start="202607172000 +0200"');
+  });
+
+  describe('and a channel list that has to be fetched', () => {
+    /** A site whose list is fetched, saying which zones it was told. */
+    function listing(seen: string[][]): SiteConfig<unknown> {
+      return {
+        ...site([]),
+        channels: async ({ timeZone, dayZone }) => {
+          seen.push([timeZone, dayZone]);
+
+          return [{ xmltvId: 'one.example', siteId: '1', name: 'One' }];
+        },
+      };
+    }
+
+    it('tells it the run’s zone when the grab fetches it itself', async () => {
+      // No selection and no `cover`, so nothing settles the list before the
+      // grab: the site's own turn fetches it.
+      const dir = await tempDir();
+      const seen: string[][] = [];
+
+      await runGrab(config(dir, { sites: [listing(seen)], timeZone: 'Europe/Bratislava' }), {
+        now: LATE,
+      });
+
+      expect(seen).toEqual([['Europe/Bratislava', 'Europe/Bratislava']]);
+    });
+
+    it('tells it the same in a dry run', async () => {
+      const dir = await tempDir();
+      const seen: string[][] = [];
+      const epgConfig = config(dir, { sites: [listing(seen)], timeZone: 'Europe/Bratislava' });
+
+      await planRun(epgConfig, await createCacheStore(epgConfig), { now: LATE });
+
+      expect(seen).toEqual([['Europe/Bratislava', 'Europe/Bratislava']]);
+    });
+  });
+
+  it('asks a context covering several days which of them a time is on', async () => {
+    const dir = await tempDir();
+    const seen: string[] = [];
+
+    await runGrab(
+      config(dir, {
+        sites: [
+          defineSiteConfig({
+            site: 'example.com',
+            channels: [{ xmltvId: 'one.example', siteId: '1', name: 'One' }],
+            batching: 'days',
+            parseDay: () => [],
+            async request({ at, days }) {
+              seen.push(
+                at('00:00', days[0]!).toISOString(),
+                at('24:00', days.at(-1)!).toISOString(),
+              );
+
+              try {
+                (at as (time: string) => Date)('20:00');
+              } catch (error) {
+                seen.push((error as Error).message);
+              }
+
+              return {};
+            },
+          }),
+        ],
+        days: 2,
+        timeZone: 'Europe/Bratislava',
+      }),
+      { now: LATE },
+    );
+
+    expect(seen).toEqual([
+      '2026-07-16T22:00:00.000Z',
+      '2026-07-18T22:00:00.000Z',
+      'at("20:00") needs a day: this context covers more than one',
     ]);
   });
 
@@ -436,7 +585,7 @@ describe('a run with a time zone', () => {
       const dir = await tempDir();
       const fetchedDays: string[] = [];
 
-      await build(config(dir, { sites: [utc(fetchedDays)], timezone: 'Europe/Bratislava' }), {
+      await build(config(dir, { sites: [utc(fetchedDays)], timeZone: 'Europe/Bratislava' }), {
         now: LATE,
       });
 
@@ -456,7 +605,7 @@ describe('a run with a time zone', () => {
     it('keeps the UTC day before the window through the prune after the grab', async () => {
       const dir = await tempDir();
 
-      await runGrab(config(dir, { sites: [utc([])], timezone: 'Europe/Bratislava' }), {
+      await runGrab(config(dir, { sites: [utc([])], timeZone: 'Europe/Bratislava' }), {
         now: LATE,
       });
 
@@ -467,11 +616,40 @@ describe('a run with a time zone', () => {
       ).toMatchObject({ programmeCount: 2 });
     });
 
+    it('hands its code the day’s zone beside the run’s', async () => {
+      const dir = await tempDir();
+      const seen: string[][] = [];
+
+      await runGrab(
+        config(dir, {
+          sites: [
+            {
+              ...utc([]),
+              async request({ channelDays, timeZone, dayZone }) {
+                const { day } = channelDays[0]!;
+
+                seen.push([day, timeZone, dayZone]);
+
+                return { day };
+              },
+            },
+          ],
+          timeZone: 'Europe/Bratislava',
+        }),
+        { now: LATE },
+      );
+
+      expect(seen).toEqual([
+        ['2026-07-16', 'Europe/Bratislava', 'UTC'],
+        ['2026-07-17', 'Europe/Bratislava', 'UTC'],
+      ]);
+    });
+
     it('says whose days it counts as it starts', async () => {
       const dir = await tempDir();
       const started: unknown[] = [];
 
-      await runGrab(config(dir, { sites: [utc([])], timezone: 'Europe/Bratislava' }), {
+      await runGrab(config(dir, { sites: [utc([])], timeZone: 'Europe/Bratislava' }), {
         now: LATE,
         reporter: (event) => {
           if (event.type === 'site:started') {
@@ -486,7 +664,7 @@ describe('a run with a time zone', () => {
     it('refetches both UTC days the zone’s today spans, the later one too', async () => {
       const dir = await tempDir();
       const fetchedDays: string[] = [];
-      const epgConfig = config(dir, { sites: [utc(fetchedDays)], timezone: 'Europe/Bratislava' });
+      const epgConfig = config(dir, { sites: [utc(fetchedDays)], timeZone: 'Europe/Bratislava' });
 
       await runGrab(epgConfig, { now: LATE });
       fetchedDays.length = 0;
@@ -499,7 +677,7 @@ describe('a run with a time zone', () => {
     it('stops asking for the UTC day before once UTC’s midnight has passed too', async () => {
       const dir = await tempDir();
       const fetchedDays: string[] = [];
-      const epgConfig = config(dir, { sites: [utc(fetchedDays)], timezone: 'Europe/Bratislava' });
+      const epgConfig = config(dir, { sites: [utc(fetchedDays)], timeZone: 'Europe/Bratislava' });
 
       await runGrab(epgConfig, { now: LATE });
       fetchedDays.length = 0;
@@ -534,7 +712,7 @@ describe('a run with a time zone', () => {
             },
           ],
           days: 2,
-          timezone: 'Europe/Bratislava',
+          timeZone: 'Europe/Bratislava',
         }),
         { now: LATE },
       );
@@ -569,7 +747,7 @@ describe('a run with a time zone', () => {
       it('keeps it, as a source on the guide’s calendar would', async () => {
         const dir = await tempDir();
 
-        await build(config(dir, { sites: [film], timezone: 'Europe/Bratislava' }), { now: LATE });
+        await build(config(dir, { sites: [film], timeZone: 'Europe/Bratislava' }), { now: LATE });
 
         const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
 
@@ -585,7 +763,7 @@ describe('a run with a time zone', () => {
         await build(
           config(dir, {
             sites: [film],
-            timezone: 'Europe/Bratislava',
+            timeZone: 'Europe/Bratislava',
             merge: { clampToWindow: true },
           }),
           { now: LATE },
@@ -606,7 +784,7 @@ describe('a run with a time zone', () => {
       const summary = await build(
         config(dir, {
           sites: [site([]), { ...utc([]), site: 'mars.example', dayZone: 'Mars/Olympus' }],
-          timezone: 'Europe/Bratislava',
+          timeZone: 'Europe/Bratislava',
         }),
         {
           now: LATE,
@@ -635,10 +813,10 @@ describe('a run with a time zone', () => {
     const fetchedDays: string[] = [];
 
     await expect(
-      runGrab(config(dir, { sites: [local(fetchedDays)], timezone: 'Mars/Olympus' }), {
+      runGrab(config(dir, { sites: [local(fetchedDays)], timeZone: 'Mars/Olympus' }), {
         now: LATE,
       }),
-    ).rejects.toThrow('timezone must be an IANA time zone');
+    ).rejects.toThrow('timeZone must be an IANA time zone');
     expect(fetchedDays).toEqual([]);
   });
 });

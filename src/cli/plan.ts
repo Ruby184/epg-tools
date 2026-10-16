@@ -127,8 +127,8 @@ async function planSite(
     days?: number;
     /** The run's policy, under which a site's own override still wins. */
     staleness?: Partial<StalenessPolicy>;
-    /** The run's zone, for which day is today — see `EpgConfig.timezone`. */
-    timeZone?: string;
+    /** The run's zone, for which day is today — see `EpgConfig.timeZone`. */
+    timeZone: string;
   } & PlanOptions,
 ): Promise<PlanSite> {
   const resolved = resolveSite(
@@ -168,6 +168,7 @@ async function planSite(
   const channels = (await resolveChannels(watched, {
     state: SiteStateHandle.open(options.cache, resolved.site),
     now: options.now,
+    timeZone: options.timeZone,
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.select ? { select: options.select } : {}),
   })) as GrabberChannel[];
@@ -195,7 +196,7 @@ async function planSite(
     site: resolved.site,
     channels: { count: channels.length, from },
     days: window.length,
-    ...(dayZone === undefined || dayZone === options.timeZone ? {} : { dayZone }),
+    ...(dayZone === options.timeZone ? {} : { dayZone }),
     entries: channels.length * window.length,
     fresh: channels.length * window.length - stale.length,
     stale: stale.length,
@@ -243,7 +244,7 @@ export async function planRun(
   const config = await resolveConfigSource(source);
   const now = options.now ?? new Date();
   // Today on the run's calendar, as a run would take it.
-  const timeZone = config.timezone;
+  const timeZone = config.timeZone;
   const today = dayIn(now, timeZone);
   const startDay = options.offset ? addDays(today, options.offset) : today;
 

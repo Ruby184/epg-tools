@@ -292,7 +292,7 @@ describe('createGuideHandler', () => {
       return body?.window.startDay;
     };
 
-    expect(await windowFor({ ...configFor(['one']), timezone: 'Europe/Bratislava' })).toBe(
+    expect(await windowFor({ ...configFor(['one']), timeZone: 'Europe/Bratislava' })).toBe(
       '2026-09-03',
     );
     expect(await windowFor(configFor(['one']))).toBe('2026-09-02');

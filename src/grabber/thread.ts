@@ -67,8 +67,8 @@ export interface SiteThreadData {
   now: string;
   grabbedAt: string;
   startDay: string;
-  /** The run's zone, for which day is today — see `GrabOptions.timezone`. */
-  timeZone?: string;
+  /** The run's zone, for which day is today — see `GrabOptions.timeZone`. */
+  timeZone: string;
   defaults: Run['defaults'];
   localConcurrency: number;
   /** The codec the run's store keeps its entries with, when a thread has it — see `CacheManager.codecName`. */
@@ -316,7 +316,7 @@ export class SiteThreads {
       now: run.now.toISOString(),
       grabbedAt: run.grabbedAt,
       startDay: run.startDay,
-      ...(run.timeZone === undefined ? {} : { timeZone: run.timeZone }),
+      timeZone: run.timeZone,
       defaults: run.defaults,
       localConcurrency: run.localWork.concurrency,
       ...(run.cache instanceof CacheManager && run.cache.codecName !== undefined
@@ -678,7 +678,7 @@ export async function workSite(
       now: new Date(data.now),
       grabbedAt: data.grabbedAt,
       startDay: data.startDay,
-      ...(data.timeZone === undefined ? {} : { timeZone: data.timeZone }),
+      timeZone: data.timeZone,
       emit: (event) => {
         send(port, { kind: 'event', event: plainEvent(event) });
       },

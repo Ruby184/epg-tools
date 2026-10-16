@@ -151,10 +151,29 @@ export interface ChannelDay<TData = unknown> {
 export type SiteState = Map<string, unknown>;
 
 /**
+ * Which clocks a site's times are on — the same two on every context it is
+ * handed, and the same zone twice for every site that keeps the run's calendar.
+ */
+interface SiteZones {
+  /**
+   * The run's zone, an IANA name: the guide's clock — see `EpgConfig.timeZone`.
+   * The offset to write an instant in for the guide to read locally:
+   * `setXmltvZone(new Date(item.start), timeZone)`.
+   */
+  timeZone: string;
+  /**
+   * The zone this site's days are on: {@link timeZone}, unless the site's
+   * `dayZone` names another calendar — `UTC` for a source keyed by UTC date. A
+   * day's midnight is `zonedXmltvDate(day, dayZone)`.
+   */
+  dayZone: string;
+}
+
+/**
  * What every context carries, whichever shape the rest of it takes: the
  * channel-days it is for, the site's client, its state, and the run's signal.
  */
-export interface BaseRequestContext<TData = unknown> extends Says {
+export interface BaseRequestContext<TData = unknown> extends Says, SiteZones {
   /**
    * Exactly the channel-days this request is being made for — every one of
    * them stale, in channel order and then day order.
@@ -183,7 +202,7 @@ export interface BaseRequestContext<TData = unknown> extends Says {
  * Context for the function form of {@link SiteConfig.channels} — a channel list
  * that is fetched rather than written out.
  */
-export interface ChannelsContext extends Says {
+export interface ChannelsContext extends Says, SiteZones {
   /**
    * The site's ky instance, the very one its requests use: same prefix,
    * headers, retry, proxy and abort signal.
@@ -248,12 +267,14 @@ export interface ChannelsContext extends Says {
  * It runs as the cache is read rather than as it is written, so this is where a
  * site notices what only the whole of a channel-day shows.
  */
-export interface SiteTransformContext<TData = unknown> extends Says {
+export interface SiteTransformContext<TData = unknown> extends Says, SiteZones {
   channel: GrabberChannel<TData>;
   /** The day as `YYYY-MM-DD`. */
   day: string;
   /** The same day as UTC midnight. */
   date: Date;
+  /** A time of day on {@link day}, as on a parse — see {@link ParseContext.at}. */
+  at(time: string, day?: string): Date;
 }
 
 /**
@@ -310,6 +331,8 @@ interface OneDay {
   date: Date;
   /** The day as `YYYY-MM-DD`. */
   day: string;
+  /** A time of day on {@link day}, or on the day given — see {@link ParseContext.at}. */
+  at(time: string, day?: string): Date;
 }
 
 /** The days a request covers, under a mode of `days` or `both`. */
@@ -331,6 +354,11 @@ interface ManyDays {
   from: Date;
   /** Last day of this request as UTC midnight, i.e. the final {@link dates} entry. */
   to: Date;
+  /**
+   * A time of day on one of the days, given as `YYYY-MM-DD` — see
+   * {@link ParseContext.at}. With several days in hand there is none to assume.
+   */
+  at(time: string, day: string): Date;
 }
 
 /** Request context for the `none` mode — one channel, one day. */
@@ -458,13 +486,30 @@ export type PacedRequest = <T>(
  * parse is where a site most often has something to say — a field the source
  * has started leaving out, a programme it had to skip.
  */
-export interface ParseContext<TRaw, TData = unknown> extends Says {
+export interface ParseContext<TRaw, TData = unknown> extends Says, SiteZones {
   /** The channel this call is parsing, as the site declared it. */
   channel: GrabberChannel<TData>;
   /** The day as UTC midnight, a `Date` of this call's own. */
   date: Date;
   /** The same day as `YYYY-MM-DD`. */
   day: string;
+  /**
+   * A time of day on {@link day} — or on another, given as `YYYY-MM-DD` — as
+   * the instant it is: read on {@link dayZone}'s clock, the calendar the day is
+   * on, and written in {@link timeZone}'s offset, the guide's.
+   *
+   * ```ts
+   * parseDay({ payload, programme, at }) {
+   *   return payload.items.map((item) => programme(at(item.time), item.title));
+   * }
+   * ```
+   *
+   * `20:00`, `6:05` or `20:00:30`, and precise to the second only where the
+   * time gives one. Hours past 23 run on into the days after, as listings that
+   * carry a night on past midnight write it: `25:30` is half past one the next
+   * morning. Anything else throws `XmltvDateError`.
+   */
+  at(time: string, day?: string): Date;
   /**
    * What {@link SiteConfig.request} handed back, whole and unchanged. A request
    * covering several channel-days is parsed once for each of them, and every
@@ -600,7 +645,11 @@ export interface BaseSiteConfig<TData = unknown> {
   days?: number;
   /**
    * Which calendar this site's channel-days are on: `'source'`, the default,
-   * for the run's own; `'utc'`; or an IANA zone such as `'America/New_York'`.
+   * and `'run'` for the run's own; `'utc'`; or an IANA zone such as
+   * `'America/New_York'` — the one to name for a source on a fixed clock, so
+   * its contexts' `at` reads its times there whatever zone the run is in.
+   * The XMLTV, Xtream and command adapters also file by it: `'source'` by
+   * each programme's own offset, `'run'` by the run's zone.
    *
    * What lets a run cover its window with a site whose days are not its own. A
    * source keyed by UTC date, in a run on Bratislava's calendar, is fetched over
@@ -924,9 +973,10 @@ export interface GrabOptions {
   /**
    * The time zone whose calendar says which day is today — for the window's
    * first day when `startDay` is not given, and for the days staleness always
-   * fetches again. UTC's when left out. See `EpgConfig.timezone`.
+   * fetches again — and what a site's contexts carry as `timeZone`. The
+   * process's own when left out. See `EpgConfig.timeZone`.
    */
-  timezone?: string;
+  timeZone?: string;
   /** How many sites run in parallel. Defaults to all. */
   siteConcurrency?: number;
   /**
