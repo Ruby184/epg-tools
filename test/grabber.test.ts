@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { HTTPError, NetworkError } from 'ky';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   CacheEntryMeta,
@@ -852,15 +853,23 @@ describe('grab', () => {
     });
 
     describe('when fetching it again fails', () => {
-      /** A site whose source answers its list once, and refuses it after that. */
-      const refusing = (asked: string[]) =>
+      /** What ky throws for a response with this status. */
+      const refused = (status: number): HTTPError =>
+        new HTTPError(
+          new Response(null, { status }),
+          new Request('https://example.com/channels'),
+          {} as ConstructorParameters<typeof HTTPError>[2],
+        );
+
+      /** A site whose source answers its list once, and fails it after that. */
+      const refusing = (asked: string[], failure: () => unknown = () => refused(429)) =>
         makeConfig({
           cacheChannels: { maxAgeDays: 1 },
           channels: () => {
             asked.push('fetched');
 
             if (asked.length > 1) {
-              throw new Error('Request failed with status code 429');
+              throw failure();
             }
 
             return [channel('one')];
@@ -898,7 +907,7 @@ describe('grab', () => {
         expect(asked).toEqual(['fetched', 'fetched']);
         expect(warned).toEqual([
           `could not fetch its channel list, so the one stored ${NOW.toISOString()} is used: ` +
-            'Request failed with status code 429',
+            'Request failed with status code 429: GET https://example.com/channels',
         ]);
         // Not stored again as if it were fetched now, so the next command asks
         // the source as this one did.
@@ -935,6 +944,61 @@ describe('grab', () => {
         ]);
       });
 
+      // The source did not answer, whatever the site made of it on the way.
+      for (const [said, failure] of [
+        ['a 503', () => refused(503)],
+        [
+          'a network error',
+          () =>
+            new NetworkError(new Request('https://example.com/channels'), {
+              cause: new TypeError('fetch failed'),
+            }),
+        ],
+        [
+          "the site's own error over a network failure",
+          () => new Error('the lineup could not be read', { cause: new TypeError('fetch failed') }),
+        ],
+      ] as const) {
+        it(`uses it after ${said}`, async () => {
+          const cache = new MemoryCache();
+          const config = refusing([], failure);
+
+          await stored(cache, config);
+
+          expect(
+            await resolveChannels(config, {
+              state: SiteStateHandle.open(cache, config.site),
+              now: later,
+            }),
+          ).toEqual([{ xmltvId: 'one', siteId: 'site-one' }]);
+        });
+      }
+
+      // The source answered, and the answer was the trouble: a list from before
+      // it said so would hide what the site is saying.
+      for (const [said, failure, message] of [
+        ['a 404', () => refused(404), 'status code 404'],
+        [
+          "the site's own error",
+          () => new Error('lineup USA-OTA-12345 is not on the account'),
+          'is not on the account',
+        ],
+      ] as const) {
+        it(`fails the site after ${said}`, async () => {
+          const cache = new MemoryCache();
+          const config = refusing([], failure);
+
+          await stored(cache, config);
+
+          await expect(
+            resolveChannels(config, {
+              state: SiteStateHandle.open(cache, config.site),
+              now: later,
+            }),
+          ).rejects.toThrow(message);
+        });
+      }
+
       it('fails the site when nothing was stored to fall back on', async () => {
         const config = refusing(['already asked once']);
 
@@ -953,11 +1017,13 @@ describe('grab', () => {
           cacheChannels: { maxAgeDays: 1 },
           channels: () => {
             controller.abort();
-            throw new Error('aborted');
+            throw refused(503);
           },
         });
 
-        await stored(cache, { ...config, channels: [channel('one')] });
+        // A list to fall back on, which only a fetched one is: a list written
+        // out in the config is never stored.
+        await stored(cache, { ...config, channels: () => [channel('one')] });
 
         // A cancel is not a source that failed: the run is stopping, and a list
         // handed back here would have it carry on as if nothing had happened.
@@ -967,7 +1033,7 @@ describe('grab', () => {
             now: later,
             signal: controller.signal,
           }),
-        ).rejects.toThrow('aborted');
+        ).rejects.toThrow('503');
       });
     });
 

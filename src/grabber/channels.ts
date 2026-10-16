@@ -6,7 +6,7 @@ import { parseM3uFile } from '../m3u/parse.js';
 import type { ChannelListEntry, ChannelListWarning } from '../channels/types.js';
 import type { ChannelCoverage } from '../merge/types.js';
 import type { CacheStore } from '../cache/types.js';
-import { errorMessage } from '../core/error.js';
+import { errorMessage, unanswered } from '../core/error.js';
 import type { Emit, Says } from '../core/events.js';
 import type {
   AnyIterable,
@@ -183,8 +183,9 @@ const SILENT: Says = { log: () => {}, warn: () => {} };
  * remembered for the next command. The handle is *not* saved here — whoever
  * opened it saves it once, when it is done with the site.
  *
- * And where fetching it again fails, the list stored last is used whatever its
- * age, and the site says so: a source answering `429` for a moment should not
+ * And where fetching it again fails because the source did not answer — the
+ * network, a timeout, a `429` or a `5xx` — the list stored last is used
+ * whatever its age, and the site says so: a source down for a moment should not
  * take the site's whole lineup with it.
  */
 export async function resolveChannels(
@@ -272,9 +273,13 @@ export async function resolveChannels(
     // The source was asked and did not answer, so the list it gave last time,
     // however old — `--refresh` included, since asking is what it wanted and
     // asking is what failed. Said, so a list that keeps failing is noticed, and
-    // not stored again, so the next command asks the source as this one did. A
-    // cancelled run is not a source that failed.
-    if (held === undefined || options.signal?.aborted === true) {
+    // not stored again, so the next command asks the source as this one did.
+    //
+    // Only a source that did not answer, though: one that answered and was
+    // found wanting — a lineup the account no longer has, a service saying it
+    // is offline — is the site telling you something, and a list from before
+    // it said so would hide it. And a cancelled run is not a source that failed.
+    if (held === undefined || options.signal?.aborted === true || !unanswered(error)) {
       throw error;
     }
 
