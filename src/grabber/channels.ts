@@ -6,7 +6,9 @@ import { parseM3uFile } from '../m3u/parse.js';
 import type { ChannelListEntry, ChannelListWarning } from '../channels/types.js';
 import type { ChannelCoverage } from '../merge/types.js';
 import type { CacheStore } from '../cache/types.js';
+import { errorMessage, unanswered } from '../core/error.js';
 import type { Emit, Says } from '../core/events.js';
+import type { SiteSession } from './session.js';
 import type {
   AnyIterable,
   M3uDirective,
@@ -113,7 +115,14 @@ function dispatching(
   brought: KyOptions['fetch'],
 ): NonNullable<KyOptions['fetch']> {
   return async (input, init) => {
-    const withDispatcher = { ...init, dispatcher: await dispatcher() } as unknown as RequestInit;
+    // One the site brought through `ky: { dispatcher }` is the one it asked for
+    // by name, and is left to win: `connection` is the shorthand for a site
+    // that did not.
+    const own = (init as { dispatcher?: unknown } | undefined)?.dispatcher;
+    const withDispatcher = {
+      ...init,
+      dispatcher: own ?? (await dispatcher()),
+    } as unknown as RequestInit;
 
     return (brought ?? globalThis.fetch)(input, withDispatcher);
   };
@@ -160,6 +169,98 @@ export interface ResolveChannelsOptions {
    * thing that happens to it.
    */
   select?: ReadonlySet<string>;
+  /**
+   * How a fetch of the list is sent: through the site's request queue, so its
+   * `rateLimit`, `concurrency` and hold on a `429` apply to the list as they do
+   * to the days after it. Only the fetch — a list written out in the config, or
+   * still fresh in the cache, sends nothing and takes no slot. Without it the
+   * site's `channels` is simply called.
+   */
+  paced?: <T>(fetch: () => Promise<T>) => Promise<T>;
+}
+
+/**
+ * The first thing in a channel's `data` that is not a plain value, named with
+ * where it is — or nothing, when all of it is.
+ *
+ * Plain is what JSON gives back as it was given: strings, finite numbers,
+ * booleans, `null`, arrays and plain objects. A property holding `undefined` is
+ * fine, since leaving it out is all JSON does with it and reading it gives the
+ * same. Anything else comes back as something else — a `Date` a string, a `Map`
+ * an empty object, an instance of a class without its methods, `NaN` a `null` —
+ * or not at all, as a function does.
+ */
+function unplain(value: unknown, at: string, ancestors = new Set<object>()): string | undefined {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+    return undefined;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? undefined : `${String(value)} at ${at}`;
+  }
+
+  if (typeof value !== 'object') {
+    return `${typeof value === 'undefined' ? 'undefined' : `a ${typeof value}`} at ${at}`;
+  }
+
+  // The objects above this one, not every one seen: the same object twice in
+  // a list is fine — JSON writes it twice — and only one inside itself is not.
+  if (ancestors.has(value)) {
+    return `a circular reference at ${at}`;
+  }
+
+  const prototype: unknown = Object.getPrototypeOf(value);
+
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
+    const name = (value as { constructor?: { name?: string } }).constructor?.name;
+
+    return `${name ? `an instance of ${name}` : 'an object of a class'} at ${at}`;
+  }
+
+  ancestors.add(value);
+
+  try {
+    for (const [key, item] of Object.entries(value)) {
+      const where = Array.isArray(value) ? `${at}[${key}]` : `${at}.${key}`;
+      // `undefined` as a property is left out, which reads the same; in an
+      // array it becomes `null`, which does not.
+      const found =
+        item === undefined && !Array.isArray(value) ? undefined : unplain(item, where, ancestors);
+
+      if (found !== undefined) {
+        return found;
+      }
+    }
+
+    return undefined;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+/**
+ * Refuse a channel list whose `data` holds anything but plain values.
+ *
+ * A list is copied whole wherever it goes: stored as JSON when the site keeps
+ * it (`cacheChannels`), and handed to a worker under `threads`. Neither copy
+ * says what it changed, so the run that fetched a list and every run after it
+ * would see different data, and a parse would find out only by failing. So it
+ * is refused up front, whatever this run does with the list — a config means
+ * the same thing however it is run.
+ */
+export function assertPlainData(site: string, channels: readonly GrabberChannel[]): void {
+  for (const channel of channels) {
+    const found = channel.data === undefined ? undefined : unplain(channel.data, 'data');
+
+    if (found !== undefined) {
+      throw new TypeError(
+        `Site "${site}": channel "${channel.xmltvId}" holds ${found}. A channel's data must be ` +
+          `plain values — strings, finite numbers, booleans, null, arrays and plain objects — ` +
+          `since a channel list is stored as JSON and copied to worker threads, and anything ` +
+          `else would come back as something else`,
+      );
+    }
+  }
 }
 
 /** Said to nobody, for a caller that has nowhere to put it. */
@@ -181,6 +282,11 @@ const SILENT: Says = { log: () => {}, warn: () => {} };
  * age comes back without the source being asked, and a freshly fetched one is
  * remembered for the next command. The handle is *not* saved here — whoever
  * opened it saves it once, when it is done with the site.
+ *
+ * And where fetching it again fails because the source did not answer — the
+ * network, a timeout, a `429` or a `5xx` — the list stored last is used
+ * whatever its age, and the site says so: a source down for a moment should not
+ * take the site's whole lineup with it.
  */
 export async function resolveChannels(
   config: AnySiteConfig,
@@ -193,6 +299,8 @@ export async function resolveChannels(
   const source = config.channels;
 
   if (typeof source !== 'function') {
+    assertPlainData(config.site, source);
+
     return kept(source);
   }
 
@@ -207,20 +315,24 @@ export async function resolveChannels(
       metadata?: unknown;
     },
   ): Promise<GrabberChannel[]> => {
-    const answer = await source({
-      http: options.http ?? siteHttp(config, options.signal),
-      ...(options.signal ? { signal: options.signal } : {}),
-      ...(options.says ?? SILENT),
-      // The site's own bag, the very `Map` its requests and parses are handed —
-      // so what fetching the list taught the site is there for everything that
-      // follows. Asked for here rather than up front, which keeps the handle's
-      // "reads nothing until asked" promise: a list written out in a config, or
-      // one still fresh in the cache, never reaches this. Without a handle it is
-      // an empty bag of its own, dropped afterwards, as a run over
-      // `NoCacheDriver` hands a request.
-      state: (await options.state?.bag()) ?? new Map(),
-      ...(held === undefined ? {} : { cached: held }),
-    });
+    // The site's own bag, the very `Map` its requests and parses are handed —
+    // so what fetching the list taught the site is there for everything that
+    // follows. Asked for here rather than up front, which keeps the handle's
+    // "reads nothing until asked" promise: a list written out in a config, or
+    // one still fresh in the cache, never reaches this. Without a handle it is
+    // an empty bag of its own, dropped afterwards, as a run over `NoCacheDriver`
+    // hands a request. Read before the fetch is sent, so a slot is held for the
+    // request and nothing else.
+    const state = (await options.state?.bag()) ?? new Map();
+    const fetch = async () =>
+      source({
+        http: options.http ?? siteHttp(config, options.signal),
+        ...(options.signal ? { signal: options.signal } : {}),
+        ...(options.says ?? SILENT),
+        state,
+        ...(held === undefined ? {} : { cached: held }),
+      });
+    const answer = await (options.paced ? options.paced(fetch) : fetch());
 
     if (Array.isArray(answer)) {
       return answer;
@@ -239,7 +351,11 @@ export async function resolveChannels(
   // Nothing to read and nothing to keep: the site did not ask for its list to be
   // cached, or this caller has nowhere to put it.
   if (maxAgeMs === undefined || state === undefined) {
-    return kept(await fromSource());
+    const fetched = await fromSource();
+
+    assertPlainData(config.site, fetched);
+
+    return kept(fetched);
   }
 
   const now = options.now ?? new Date();
@@ -258,7 +374,37 @@ export async function resolveChannels(
   // a site that can tell cheaply that nothing has changed hands it straight
   // back rather than rebuilding it. `--refresh` withholds it, because a run
   // told to ask the source again means it.
-  const channels = await fromSource(options.refresh === true ? undefined : group.held(now));
+  const held = group.held(now);
+  let channels: GrabberChannel[];
+
+  try {
+    channels = await fromSource(options.refresh === true ? undefined : held);
+  } catch (error) {
+    // The source was asked and did not answer, so the list it gave last time,
+    // however old — `--refresh` included, since asking is what it wanted and
+    // asking is what failed. Said, so a list that keeps failing is noticed, and
+    // not stored again, so the next command asks the source as this one did.
+    //
+    // Only a source that did not answer, though: one that answered and was
+    // found wanting — a lineup the account no longer has, a service saying it
+    // is offline — is the site telling you something, and a list from before
+    // it said so would hide it. And a cancelled run is not a source that failed.
+    if (held === undefined || options.signal?.aborted === true || !unanswered(error)) {
+      throw error;
+    }
+
+    (options.says ?? SILENT).warn(
+      `could not fetch its channel list, so the one stored ${held.at.toISOString()} is used: ` +
+        errorMessage(error),
+      { storedAt: held.at.toISOString() },
+    );
+
+    return kept(held.channels);
+  }
+
+  // Checked here rather than inside the fetch: a list the source answered with
+  // is not one that failed to arrive, and nothing stored stands in for it.
+  assertPlainData(config.site, channels);
 
   // Stored before the selection, never after: what the cache holds is what the
   // site offers, so the next run — selecting something else, or nothing — reads
@@ -422,72 +568,126 @@ export async function covered(
  * Given a `store`, a site that asked for `cacheChannels` reads its list from
  * there and writes a fetched one back — one state handle per site, opened and
  * saved here, since resolving is the whole of what this call does with a site.
+ *
+ * One site's list failing rejects the whole call, unless `failed` says what to
+ * do with that site instead.
  */
 export async function resolveSites(
   sites: AnySiteConfig[],
-  options: {
-    signal?: AbortSignal;
-    concurrency?: number;
-    /** Where a cached channel list lives. Without it, every list is fetched. */
-    store?: CacheStore;
-    /** Fetch every list whatever is cached — `--refresh`. */
-    refresh?: boolean;
-    now?: Date;
-    /**
-     * Where each site's own `log` and `warn` go, as the events they are.
-     *
-     * An emitter rather than a `says` pair, because there is one per site and
-     * only the name differs — the same two events a run's own contexts send.
-     */
-    emit?: Emit;
-    /** Keep only these channels — see {@link ResolveChannelsOptions.select}. */
-    select?: ReadonlySet<string>;
-  } = {},
+  options: ResolveSitesOptions = {},
+): Promise<AnySiteConfig[]> {
+  return resolveSessions(sites, options, new Map());
+}
+
+/** What {@link resolveSites} takes beside the sites. */
+export interface ResolveSitesOptions {
+  signal?: AbortSignal;
+  concurrency?: number;
+  /** Where a cached channel list lives. Without it, every list is fetched. */
+  store?: CacheStore;
+  /** Fetch every list whatever is cached — `--refresh`. */
+  refresh?: boolean;
+  now?: Date;
+  /**
+   * Where each site's own `log` and `warn` go, as the events they are.
+   *
+   * An emitter rather than a `says` pair, because there is one per site and
+   * only the name differs — the same two events a run's own contexts send.
+   */
+  emit?: Emit;
+  /** Keep only these channels — see {@link ResolveChannelsOptions.select}. */
+  select?: ReadonlySet<string>;
+  /**
+   * What to do with a site whose list could not be resolved: given the site
+   * as configured and what its list threw, answer a site to use in its place,
+   * or nothing to leave it out.
+   *
+   * Without it, the first failure rejects the whole call. With it, one source
+   * down costs that source and nothing else — a build grabs the rest and
+   * counts the site as one that answered nothing, a server keeps the list it
+   * resolved last, a merge leaves the site out. A cancelled run rejects
+   * either way: a cancel is not a source that failed.
+   */
+  failed?: (site: AnySiteConfig, error: unknown) => AnySiteConfig | undefined;
+}
+
+/**
+ * {@link resolveSites}, with each site's list fetched through the session the
+ * run holds for it, where it holds one — its queue, its client and its state,
+ * which the grab then carries on with. See `SiteSession`.
+ */
+export async function resolveSessions(
+  sites: AnySiteConfig[],
+  options: ResolveSitesOptions,
+  sessions: ReadonlyMap<string, SiteSession>,
 ): Promise<AnySiteConfig[]> {
   const queue = new PQueue({ concurrency: Math.max(1, options.concurrency ?? sites.length) });
   const { store } = options;
 
-  return Promise.all(
+  const failing = (site: AnySiteConfig, error: unknown): AnySiteConfig | undefined => {
+    if (options.failed === undefined || options.signal?.aborted === true) {
+      throw error;
+    }
+
+    return options.failed(site, error);
+  };
+
+  const resolved = await Promise.all(
     sites.map((site) =>
-      queue.add(async (): Promise<AnySiteConfig> => {
-        const state = store === undefined ? undefined : SiteStateHandle.open(store, site.site);
+      queue.add(async (): Promise<AnySiteConfig | undefined> => {
+        const session = sessions.get(site.site);
+        const state =
+          session?.state ??
+          (store === undefined ? undefined : SiteStateHandle.open(store, site.site));
         const { emit } = options;
-        const channels = await resolveChannels(site, {
-          ...(options.signal ? { signal: options.signal } : {}),
-          ...(state ? { state } : {}),
-          ...(options.refresh === undefined ? {} : { refresh: options.refresh }),
-          ...(options.now ? { now: options.now } : {}),
-          ...(options.select ? { select: options.select } : {}),
-          ...(emit
-            ? {
-                says: {
-                  log: (message, data) =>
-                    emit({
-                      type: 'site:note',
-                      site: site.site,
-                      message,
-                      ...(data ? { data } : {}),
-                    }),
-                  warn: (message, data) =>
-                    emit({
-                      type: 'site:warning',
-                      site: site.site,
-                      message,
-                      ...(data ? { data } : {}),
-                    }),
-                },
-              }
-            : {}),
-        });
 
-        // Only a list that was fetched is one to write, and the handle knows
-        // whether that happened — so a merge over a cached list touches nothing.
-        await state?.save();
+        try {
+          const channels = await resolveChannels(site, {
+            ...(session
+              ? { http: session.pacing.http, paced: (fetch) => session.send(fetch) }
+              : {}),
+            ...(options.signal ? { signal: options.signal } : {}),
+            ...(state ? { state } : {}),
+            ...(options.refresh === undefined ? {} : { refresh: options.refresh }),
+            ...(options.now ? { now: options.now } : {}),
+            ...(options.select ? { select: options.select } : {}),
+            ...(emit
+              ? {
+                  says: {
+                    log: (message, data) =>
+                      emit({
+                        type: 'site:note',
+                        site: site.site,
+                        message,
+                        ...(data ? { data } : {}),
+                      }),
+                    warn: (message, data) =>
+                      emit({
+                        type: 'site:warning',
+                        site: site.site,
+                        message,
+                        ...(data ? { data } : {}),
+                      }),
+                  },
+                }
+              : {}),
+          });
 
-        return { ...site, channels };
+          return { ...site, channels };
+        } catch (error) {
+          return failing(site, error);
+        } finally {
+          // Only a list that was fetched is one to write, and the handle knows
+          // whether that happened — so a merge over a cached list touches
+          // nothing. A site whose list failed still has what its `channels`
+          // learnt on the way, as a site whose turn failed in a grab does.
+          await state?.save();
+        }
       }),
     ),
   );
+
+  return resolved.filter((site) => site !== undefined);
 }
 
 /**

@@ -21,6 +21,7 @@
  * ```
  */
 
+import { dayIn, resolveTimeZone, wallTimeIn } from '../core/days.js';
 import { GrabberError } from '../core/error.js';
 
 /**
@@ -63,6 +64,11 @@ export interface GrabScheduleContext {
    * server's own snapshot, so asking again in the same breath costs nothing.
    */
   cached(): Promise<GuideCached>;
+  /**
+   * The zone the server's days are on — its `timezone` — for a schedule that
+   * reads a time of day. Absent where none was given.
+   */
+  timezone?: string;
 }
 
 /**
@@ -86,8 +92,8 @@ export type NextGrab = (
 /** How a {@link grabEvery} schedule is anchored. See {@link grabEvery}. */
 export interface GrabEveryOptions {
   /**
-   * A wall-clock time of day to line the interval up with, as `HH:MM` in local
-   * time.
+   * A wall-clock time of day to line the interval up with, as `HH:MM` on the
+   * clock of {@link timezone}.
    *
    * Without one the interval is measured from startup and from each grab's
    * finish, and the **first run is at startup** — which is what "every six
@@ -111,6 +117,13 @@ export interface GrabEveryOptions {
    * soon to try again is a retry policy rather than a schedule.
    */
   whenEmpty?: boolean;
+  /**
+   * The zone {@link at} is read in — an IANA name such as
+   * `'Europe/Bratislava'`. Defaults to the server's own `timezone`, so a
+   * config that says it once has its grabs at that zone's half past midnight,
+   * and to the process's local time where neither says.
+   */
+  timezone?: string;
 }
 
 /** `HH:MM`, and a real time of day rather than merely the shape of one. */
@@ -197,8 +210,12 @@ export function grabEvery(interval: number | string, options: GrabEveryOptions =
   const every = resolveInterval(interval, 'grab.every');
   const at = options.at === undefined ? undefined : resolveTimeOfDay(options.at, 'grab.at');
   const whenEmpty = options.whenEmpty ?? true;
+  // Only one given here is checked here: left out, it is the server's, which
+  // the server has checked already.
+  const zone =
+    options.timezone === undefined ? undefined : resolveTimeZone(options.timezone, 'grab.timezone');
 
-  return async ({ from, runs, cached }) => {
+  return async ({ from, runs, cached, timezone }) => {
     if (at === undefined) {
       // Unanchored: at startup, now — and after that, spaced from each finish,
       // which drifts by however long a grab takes but can never pile up.
@@ -212,13 +229,12 @@ export function grabEvery(interval: number | string, options: GrabEveryOptions =
       return from;
     }
 
-    // Midnight local on the day `from` falls in, so the anchor follows the
-    // calendar rather than being a fixed instant.
-    const midnight = new Date(from);
-
-    midnight.setHours(0, 0, 0, 0);
-
-    const anchor = midnight.getTime() + at * 60_000;
+    // That time of day on the day `from` falls on, in the zone's own calendar,
+    // so the anchor follows the calendar rather than being a fixed instant —
+    // and asked of the zone rather than added to its midnight, since a night
+    // the clocks change is not 24 hours long.
+    const timeZone = zone ?? timezone;
+    const anchor = wallTimeIn(dayIn(from, timeZone), timeZone, at);
     const elapsed = from.getTime() - anchor;
 
     // Before today's anchor, so that is the next one. After it, the following

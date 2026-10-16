@@ -204,12 +204,18 @@ export type EpgEventInput =
    * whole-document source is *one* however many channel-days come out of it.
    * The channel-days already fresh in the cache are not in either — they were
    * counted before this, which is how the sweep discovers them.
+   *
+   * `dayZone` is there only for a site whose days are on a calendar other than
+   * the run's — `UTC` for a source keyed by UTC date — and then `days` counts
+   * that calendar's: the ones covering the run's window, which is one more at
+   * an edge.
    */
   | {
       type: 'site:started';
       site: string;
       channels: number;
       days: number;
+      dayZone?: string;
       entries: number;
       requests: number;
     }

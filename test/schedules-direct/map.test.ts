@@ -676,6 +676,14 @@ describe('a programme', () => {
       expect(programme.episodeNum).toContainEqual({ system: 'xmltv_ns', value: '74..' });
     });
 
+    it('writes an episode the service numbered without a season, and no season', () => {
+      const { metadata: _none, ...unnumbered } = PROGRAM;
+      const programme = built({}, { ...unnumbered, metadata: [{ Gracenote: { episode: 5 } }] });
+
+      expect(programme.episodeNum).toContainEqual({ system: 'xmltv_ns', value: '.4.0/1' });
+      expect(programme.episodeNum).toContainEqual({ system: 'onscreen', value: 'E5' });
+    });
+
     it('writes a movie`s score on the scale it was given on', () => {
       const programme = built(
         {},

@@ -22,6 +22,11 @@ export default defineConfig({
     __PKG_VERSION__: JSON.stringify(version),
   },
   test: {
+    // One zone for the suite whatever the machine's, since a run's days now
+    // follow the process's zone when none is given — CI runs in UTC, and a
+    // test that meant something else would pass there and fail on a laptop in
+    // Prague. Tests about zones say theirs.
+    env: { TZ: 'UTC' },
     projects: [
       {
         extends: true,

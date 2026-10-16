@@ -11,15 +11,21 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { access } from 'node:fs/promises';
 import type { Writable } from 'node:stream';
-import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../config.js';
+import {
+  resolveConfigSource,
+  type ConfigSource,
+  type EpgConfig,
+  type ResolvedConfig,
+} from '../config.js';
 import { build, createCacheStore, runGrab, runMerge } from '../build.js';
 import { CACHE_DRIVER_NAMES } from '../cache/main.js';
 import { fellShort, resolveAllowance } from '../grabber/main.js';
+import { earliestDay } from '../grabber/site.js';
 import { grabEvery, resolveInterval, resolveTimeOfDay } from '../serve/schedule.js';
 import type { MissingAllowance } from '../grabber/main.js';
 import { GrabberError } from '../core/error.js';
 import { OptionError, parseOptions } from '../core/options.js';
-import { dayToDate, toDayString } from '../core/days.js';
+import { dayIn, dayToDate, resolveTimeZone, toDayString } from '../core/days.js';
 import { reportingTo, silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
 import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
 import { drain, writeFlushed, writeLines } from '../core/streams.js';
@@ -50,6 +56,8 @@ Options:
   -c, --config <path>   Config file (default: epg.config.ts|js|mjs in cwd)
   -d, --days <n>        Override the number of days
       --offset <n>      Start the window n days from today (may be negative)
+      --timezone <zone> Whose calendar says which day is today, e.g.
+                        Europe/Bratislava (default UTC)
   -o, --output <path>   Override the output file, or a Unix socket to write into
       --cache-dir <dir> Override the cache directory
       --cache-driver <name>  Override where cached days are kept: ndjson, xmltv,
@@ -63,11 +71,12 @@ Options:
                         a number of channel-days, or a share like 5%
       --dry-run         grab/build only: say what a run would fetch, and stop.
                         --format json for a machine-readable one
-      --extensions <names>  build/merge only: keep only these provider
+      --extensions <names>  build/merge/serve/filter: keep only these provider
                         extensions, comma-separated (e.g. lcn,uniqueID)
-      --no-extensions   build/merge only: leave every provider extension out,
-                        for a guide that validates against the DTD
-      --indent <n|str>  build/merge/filter: pretty-print with this indentation
+      --no-extensions   build/merge/serve/filter: leave every provider
+                        extension out, for a guide that validates against the DTD
+      --indent <n|str>  build/merge/serve/filter: pretty-print with this
+                        indentation
       --profile <name>  Shape the guide for one consumer: tvheadend or jellyfin.
                         build/merge/serve/filter. Changes the guide, never the
                         cache, so switching it refetches nothing
@@ -135,9 +144,10 @@ function dayString(raw: string, flag: string): string {
 /**
  * A flag checked by whatever reads the config field behind it.
  *
- * Three flags mean exactly what a config field means — `--allow-missing` is
- * `allowMissing`, `--grab-every` and `--grab-at` are the two halves of
- * `grabEvery` — so each is read by the function that defines the meaning, and
+ * Four flags mean exactly what a config field means — `--allow-missing` is
+ * `allowMissing`, `--timezone` is `timezone`, `--grab-every` and `--grab-at`
+ * are the two halves of `grabEvery` — so each is read by the function that
+ * defines the meaning, and
  * a value that cannot work is refused where somebody typed it rather than on
  * the night it would first have mattered. What changes is only the reporting:
  * an {@link OptionError} is what puts the usage on screen and exits 2.
@@ -155,6 +165,7 @@ function reader(resolve: (raw: string, label: string) => unknown) {
 }
 
 const allowance = reader(resolveAllowance);
+const timeZone = reader(resolveTimeZone);
 const interval = reader(resolveInterval);
 const timeOfDay = reader(resolveTimeOfDay);
 
@@ -290,7 +301,7 @@ async function findConfig(explicit: string | undefined): Promise<string> {
   );
 }
 
-async function loadConfig(file: string): Promise<EpgConfig> {
+async function loadConfig(file: string): Promise<ResolvedConfig> {
   const module = await import(pathToFileURL(file).href);
   const exported: ConfigSource | undefined = module.default;
 
@@ -527,6 +538,7 @@ async function execute(
       config: { type: 'string', short: 'c' },
       days: { type: 'number', short: 'd', min: 1 },
       offset: { type: 'number' },
+      timezone: { type: 'string', transform: timeZone },
       // Resolved as they are read, so what reaches the config is already
       // absolute — a grabber runs from wherever it was called.
       output: { type: 'string', short: 'o', transform: (raw) => path.resolve(raw) },
@@ -630,6 +642,10 @@ async function execute(
 
   if (values.days !== undefined) {
     config = { ...config, days: values.days };
+  }
+
+  if (values.timezone !== undefined) {
+    config = { ...config, timezone: values.timezone };
   }
 
   if (values.output !== undefined) {
@@ -779,21 +795,17 @@ async function execute(
     const { planRun, writePlanReport } = await import('./plan.js');
     const { channelSelection } = await import('../merge/select.js');
     const cache = await createCacheStore(config, signal);
-    // Only `build` narrows before it grabs — `runGrab` does not select at all,
-    // so a report that applied `config.channels` to `grab --dry-run` would name
-    // fewer requests than `epg grab` goes on to make.
+    // What the run itself would select, `grab` as much as `build`: a channel
+    // left out is never fetched by either.
     // Only what is written down: a `derived` function is a function of the
     // channel lists, and a report that is not going to fetch anything has no
     // lists to ask it about. What that costs is a plan whose narrowing misses
     // the sources a declared shift would have kept — visible only under
     // `--channels` with a `derived` function, and a count either way.
-    const selection =
-      command === 'build'
-        ? channelSelection({
-            ...(config.channels ? { channels: config.channels } : {}),
-            ...(Array.isArray(config.derived) ? { derived: config.derived } : {}),
-          })
-        : undefined;
+    const selection = channelSelection({
+      ...(config.channels ? { channels: config.channels } : {}),
+      ...(Array.isArray(config.derived) ? { derived: config.derived } : {}),
+    });
 
     try {
       const report = await planRun(config, cache, {
@@ -907,7 +919,11 @@ async function execute(
       });
     }
     case 'prune': {
-      const before = values.before ?? toDayString(new Date());
+      // Today, or the day before it for a site keeping a calendar whose window
+      // starts there — which the guide still reads once it has been grabbed.
+      const before =
+        values.before ??
+        earliestDay(config.sites, dayIn(new Date(), config.timezone), config.timezone);
 
       await using cache = await createCacheStore(config, signal);
       const removed = await cache.prune({ before });

@@ -26,8 +26,8 @@
 import type { Writable } from 'node:stream';
 import { isStale } from '../cache/main.js';
 import type { CacheStore, StalenessPolicy } from '../cache/types.js';
-import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../config.js';
-import { addDays, toDayString } from '../core/days.js';
+import { resolveConfigSource, type ConfigSource } from '../config.js';
+import { addDays, dayIn } from '../core/days.js';
 import { writeLines } from '../core/streams.js';
 import { resolveChannels } from '../grabber/channels.js';
 import { planRequests } from '../grabber/planner.js';
@@ -53,6 +53,12 @@ export interface PlanSite {
   channels: { count: number; from: ChannelsFrom };
   /** This site's own window, which it may have shortened. */
   days: number;
+  /**
+   * Whose calendar `days` are on, where the site keeps one other than the
+   * run's: then they are the days covering the run's window, one more at an
+   * edge.
+   */
+  dayZone?: string;
   /** Channel-days in this site's window — always `fresh + stale`. */
   entries: number;
   /** Cached and recent enough that a run would not ask again. */
@@ -86,10 +92,10 @@ export interface PlanOptions {
   /**
    * Keep only these channels.
    *
-   * Handed in rather than read off `config.channels`, because the two commands
-   * that take `--dry-run` do different things with it: `build` selects before
-   * it grabs, and `grab` does not select at all. A report that decided for
-   * itself would be describing neither.
+   * Handed in rather than read off `config.channels`, because what a selection
+   * keeps depends on `derived`, and a `derived` function is a function of the
+   * channel lists — which a report that fetches nothing does not have. The
+   * caller decides how much of it can be known.
    */
   select?: ReadonlySet<string>;
 }
@@ -121,6 +127,8 @@ async function planSite(
     days?: number;
     /** The run's policy, under which a site's own override still wins. */
     staleness?: Partial<StalenessPolicy>;
+    /** The run's zone, for which day is today — see `EpgConfig.timezone`. */
+    timeZone?: string;
   } & PlanOptions,
 ): Promise<PlanSite> {
   const resolved = resolveSite(
@@ -136,8 +144,10 @@ async function planSite(
       ...(options.staleness ? { staleness: options.staleness } : {}),
     },
     options.startDay,
+    options.timeZone,
+    options.now,
   );
-  const { window, staleness, batching } = resolved;
+  const { window, dayZone, staleness, batching } = resolved;
 
   // Counted rather than worked out from the site's `cacheChannels` and the age
   // of what is stored: whether the source was asked is exactly whether this
@@ -173,7 +183,7 @@ async function planSite(
     );
 
     for (const [index, day] of window.entries()) {
-      if (isStale(day, metas[index], staleness, options.now)) {
+      if (isStale(day, metas[index], staleness, options.now, options.timeZone, dayZone)) {
         stale.push({ channel, day });
       }
     }
@@ -185,6 +195,7 @@ async function planSite(
     site: resolved.site,
     channels: { count: channels.length, from },
     days: window.length,
+    ...(dayZone === undefined || dayZone === options.timeZone ? {} : { dayZone }),
     entries: channels.length * window.length,
     fresh: channels.length * window.length - stale.length,
     stale: stale.length,
@@ -229,9 +240,12 @@ export async function planRun(
   cache: CacheStore,
   options: PlanOptions = {},
 ): Promise<PlanReport> {
-  const config: EpgConfig = await resolveConfigSource(source);
+  const config = await resolveConfigSource(source);
   const now = options.now ?? new Date();
-  const startDay = options.offset ? addDays(toDayString(now), options.offset) : toDayString(now);
+  // Today on the run's calendar, as a run would take it.
+  const timeZone = config.timezone;
+  const today = dayIn(now, timeZone);
+  const startDay = options.offset ? addDays(today, options.offset) : today;
 
   const sites: PlanSite[] = [];
 
@@ -242,6 +256,7 @@ export async function planRun(
           cache,
           startDay,
           now,
+          timeZone,
           ...(config.days === undefined ? {} : { days: config.days }),
           ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
           ...(options.offset === undefined ? {} : { offset: options.offset }),
@@ -311,8 +326,13 @@ export async function writePlanReport(
     lines.push(
       `  ${site.site} — ${count(site.channels.count, 'channel')} (${FROM[site.channels.from]})` +
         // Only when it differs, since repeating the heading on every row would
-        // bury the one site that shortened its window.
-        (site.days === window.days ? '' : `, over its own ${count(site.days, 'day')}`),
+        // bury the one site that shortened its window. A site on another
+        // calendar always does, and says whose days it counted.
+        (site.dayZone !== undefined
+          ? `, over ${count(site.days, 'day')} of ${site.dayZone}'s calendar`
+          : site.days === window.days
+            ? ''
+            : `, over its own ${count(site.days, 'day')}`),
       `      ${count(site.entries, 'channel-day')}: ${site.fresh} cached, ` +
         `${site.stale} to fetch in ${count(site.requests, 'request')} (${site.batching})`,
     );

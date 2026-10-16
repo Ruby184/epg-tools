@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { gunzip as gunzipCallback } from 'node:zlib';
 import { describe, expect, it, vi } from 'vitest';
 import { build, createCacheStore, guideStream, runGrab, runMerge } from '../src/build.js';
-import { CacheManager, FsNdjsonCacheDriver } from '../src/cache/main.js';
+import { CacheManager, FsNdjsonCacheDriver, NoCacheDriver } from '../src/cache/main.js';
 import type { EpgEventMap } from '../src/core/events.js';
 import type { ChannelDayKey, StoredEntryMeta } from '../src/cache/main.js';
 import { defineConfig, type EpgConfig } from '../src/config.js';
@@ -77,6 +77,218 @@ async function collect(chunks: AsyncGenerator<string>): Promise<string> {
   return out;
 }
 
+describe('a channel list fetched before the grab', () => {
+  // A build settles every list before any site is asked for a day, and the
+  // fetch is still the first request of the site's turn: one queue, one state.
+
+  it('is paced with the requests after it', async () => {
+    const dir = await tempDir();
+    const at: number[] = [];
+    const paced: SiteConfig<unknown> = {
+      ...site([]),
+      rateLimit: { requests: 1, perMs: 80 },
+      channels: async () => {
+        at.push(Date.now());
+
+        return [{ xmltvId: 'one.example', siteId: '1', name: 'One' }];
+      },
+      async request({ day }) {
+        at.push(Date.now());
+
+        return { day };
+      },
+    };
+
+    await build(config(dir, { sites: [paced] }), { now: NOW });
+
+    // One request a window: the day waits out the window the list opened,
+    // rather than landing on its heels.
+    expect(at).toHaveLength(2);
+    expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(70);
+  });
+
+  it('hands the requests what fetching it taught the site, with nothing cached', async () => {
+    const dir = await tempDir();
+    const seen: unknown[] = [];
+    const counted: number[] = [];
+    const learning: SiteConfig<unknown> = {
+      ...site([]),
+      channels: async ({ state }) => {
+        state.set('token', 'from the list');
+
+        return [{ xmltvId: 'one.example', siteId: '1', name: 'One' }];
+      },
+      async request({ day, state }) {
+        seen.push(state.get('token'));
+
+        return { day };
+      },
+    };
+
+    await build(config(dir, { sites: [learning], cache: { driver: () => new NoCacheDriver() } }), {
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'site:done') {
+          counted.push(event.requests);
+        }
+      },
+    });
+
+    expect(seen).toEqual(['from the list']);
+    // The list and the day, both counted where both were sent.
+    expect(counted).toEqual([2]);
+  });
+});
+
+describe('a run that selects channels', () => {
+  /** One site with two channels, recording which of them it was asked for. */
+  function twoChannels(fetched: string[]): SiteConfig<unknown> {
+    return {
+      ...site([]),
+      channels: [
+        { xmltvId: 'one.example', siteId: '1', name: 'One' },
+        { xmltvId: 'two.example', siteId: '2', name: 'Two' },
+      ],
+      async request({ channel, day }) {
+        fetched.push(channel.xmltvId);
+
+        return { day };
+      },
+    };
+  }
+
+  it('grabs only what it selects, as a build does', async () => {
+    const dir = await tempDir();
+    const fetched: string[] = [];
+
+    const summary = await runGrab(
+      config(dir, { sites: [twoChannels(fetched)], channels: ['two.example'] }),
+      { now: NOW },
+    );
+
+    expect(fetched).toEqual(['two.example']);
+    expect(summary.fetched).toBe(1);
+
+    // Never fetched, and never cached either.
+    const cache = await createCacheStore(config(dir));
+
+    expect(
+      await cache.getMeta({ site: 'example.com', channelId: 'one.example', day: TODAY }),
+    ).toBeUndefined();
+  });
+
+  it('grabs what a selected `derived` channel shifts', async () => {
+    const dir = await tempDir();
+    const fetched: string[] = [];
+
+    await runGrab(
+      config(dir, {
+        sites: [twoChannels(fetched)],
+        derived: [{ xmltvId: 'two.example+1', from: 'two.example', offset: 60 }],
+        channels: ['two.example+1'],
+      }),
+      { now: NOW },
+    );
+
+    expect(fetched).toEqual(['two.example']);
+  });
+
+  it('says once that a selected channel is produced by no site, in a build too', async () => {
+    const dir = await tempDir();
+    const warnings: string[] = [];
+
+    await build(
+      config(dir, { sites: [twoChannels([])], channels: ['two.example', 'nope.example'] }),
+      {
+        now: NOW,
+        reporter: (event) => {
+          if (event.type === 'merge:warning') {
+            warnings.push(event.message);
+          }
+        },
+      },
+    );
+
+    expect(warnings).toEqual([expect.stringContaining('nope.example')]);
+  });
+});
+
+describe('a site whose channel list fails', () => {
+  /** A site whose source refuses its channel list, counting how often it is asked. */
+  function refusing(asked: string[]): SiteConfig<unknown> {
+    return {
+      ...site([]),
+      site: 'broken.example',
+      channels: async () => {
+        asked.push('channels');
+        throw new Error('Request failed with status code 429');
+      },
+    };
+  }
+
+  it('costs a build that site, and the guide comes from the rest', async () => {
+    const dir = await tempDir();
+    const asked: string[] = [];
+    const failed: string[] = [];
+
+    const summary = await build(config(dir, { sites: [site([]), refusing(asked)] }), {
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'site:failed') {
+          failed.push(event.site);
+        }
+      },
+    });
+
+    // Counted as `epg grab` counts it, so the run still exits non-zero.
+    expect(summary).toMatchObject({ fetched: 1, sitesFailed: 1 });
+    expect(failed).toEqual(['broken.example']);
+    // Once, by the build: the grab is handed the failure rather than asking again.
+    expect(asked).toEqual(['channels']);
+
+    const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+    expect(guide.channels.map((channel) => channel.id)).toEqual(['one.example']);
+    expect(guide.programmes).toHaveLength(1);
+  });
+
+  it('costs a grab that resolves the lists early for `cover` only that site', async () => {
+    const dir = await tempDir();
+    const asked: string[] = [];
+
+    const summary = await runGrab(
+      config(dir, { sites: [site([]), refusing(asked)], merge: { cover: 'first' } }),
+      { now: NOW },
+    );
+
+    expect(summary).toMatchObject({ fetched: 1, sitesFailed: 1 });
+    expect(asked).toEqual(['channels']);
+  });
+
+  it('leaves a merge without that site, and says so', async () => {
+    const dir = await tempDir();
+    const warnings: string[] = [];
+
+    await runGrab(config(dir), { now: NOW });
+    await runMerge(config(dir, { sites: [site([]), refusing([])] }), {
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:warning') {
+          warnings.push(event.message);
+        }
+      },
+    });
+
+    const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+    expect(guide.channels.map((channel) => channel.id)).toEqual(['one.example']);
+    expect(warnings).toEqual([
+      'broken.example could not resolve its channel list, so the guide has none of its ' +
+        'channels: Request failed with status code 429',
+    ]);
+  });
+});
+
 describe('offset', () => {
   it('moves the grab window without moving "now"', async () => {
     const dir = await tempDir();
@@ -140,6 +352,294 @@ describe('offset', () => {
     expect(fetchedDays).toEqual(['2026-07-19']);
     expect(xml).toContain('start="20260719060000');
     expect(xml).not.toContain('start="20260717');
+  });
+});
+
+describe('a run with a time zone', () => {
+  // Half past midnight on the 17th in Bratislava, which is still the 16th in UTC.
+  const LATE = new Date('2026-07-16T22:30:00.000Z');
+
+  /** One programme in the first half hour of each local day, and one at night. */
+  function local(fetchedDays: string[]): SiteConfig<unknown> {
+    return {
+      ...site(fetchedDays),
+      parseDay({ day }): XmltvProgramme[] {
+        // 00:15 and 20:00 on the day, on Bratislava's summer clock (UTC+2).
+        const at = (time: string) =>
+          new Date(new Date(`${day}T${time}:00.000Z`).getTime() - 2 * 3_600_000);
+
+        return [
+          { channel: 'one.example', start: at('00:15'), title: [{ value: 'small hours' }] },
+          { channel: 'one.example', start: at('20:00'), title: [{ value: 'evening' }] },
+        ];
+      },
+    };
+  }
+
+  it('starts its window on the zone’s today', async () => {
+    const dir = await tempDir();
+    const fetchedDays: string[] = [];
+
+    await runGrab(config(dir, { sites: [local(fetchedDays)], timezone: 'Europe/Bratislava' }), {
+      now: LATE,
+    });
+
+    expect(fetchedDays).toEqual(['2026-07-17']);
+  });
+
+  it('clamps the guide to the zone’s midnights, keeping the first day’s small hours', async () => {
+    const dir = await tempDir();
+
+    await build(
+      config(dir, {
+        sites: [local([])],
+        timezone: 'Europe/Bratislava',
+        merge: { clampToWindow: true },
+      }),
+      { now: LATE },
+    );
+
+    const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+    // 00:15 on the 17th is 22:15 on the 16th in UTC — inside the day by the
+    // zone's clock, and outside it by UTC's.
+    expect(guide.programmes.map((programme) => programme.title[0]?.value)).toEqual([
+      'small hours',
+      'evening',
+    ]);
+  });
+
+  describe('and a site keyed by UTC date', () => {
+    /** A source whose days are UTC days: 20:00 and 22:15 UTC on each. */
+    function utc(fetchedDays: string[]): SiteConfig<unknown> {
+      return {
+        ...site(fetchedDays),
+        dayZone: 'utc',
+        parseDay({ day }): XmltvProgramme[] {
+          return [
+            {
+              channel: 'one.example',
+              start: new Date(`${day}T20:00:00.000Z`),
+              title: [{ value: `evening ${day}` }],
+            },
+            {
+              channel: 'one.example',
+              start: new Date(`${day}T22:15:00.000Z`),
+              title: [{ value: `small hours after ${day}` }],
+            },
+          ];
+        },
+      };
+    }
+
+    it('is grabbed over the UTC days that cover the window, and merged into its days', async () => {
+      const dir = await tempDir();
+      const fetchedDays: string[] = [];
+
+      await build(config(dir, { sites: [utc(fetchedDays)], timezone: 'Europe/Bratislava' }), {
+        now: LATE,
+      });
+
+      // Bratislava's 17th is 22:00 UTC on the 16th to 22:00 UTC on the 17th.
+      expect(fetchedDays).toEqual(['2026-07-16', '2026-07-17']);
+
+      const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+      // The small hours of the 17th come from the UTC 16th; the 17th's own
+      // late programme is the 18th there, and outside the window.
+      expect(guide.programmes.map((programme) => programme.title[0]?.value)).toEqual([
+        'small hours after 2026-07-16',
+        'evening 2026-07-17',
+      ]);
+    });
+
+    it('keeps the UTC day before the window through the prune after the grab', async () => {
+      const dir = await tempDir();
+
+      await runGrab(config(dir, { sites: [utc([])], timezone: 'Europe/Bratislava' }), {
+        now: LATE,
+      });
+
+      const cache = await createCacheStore(config(dir));
+
+      expect(
+        await cache.getMeta({ site: 'example.com', channelId: 'one.example', day: '2026-07-16' }),
+      ).toMatchObject({ programmeCount: 2 });
+    });
+
+    it('says whose days it counts as it starts', async () => {
+      const dir = await tempDir();
+      const started: unknown[] = [];
+
+      await runGrab(config(dir, { sites: [utc([])], timezone: 'Europe/Bratislava' }), {
+        now: LATE,
+        reporter: (event) => {
+          if (event.type === 'site:started') {
+            started.push(event);
+          }
+        },
+      });
+
+      expect(started).toEqual([expect.objectContaining({ days: 2, dayZone: 'UTC' })]);
+    });
+
+    it('refetches both UTC days the zone’s today spans, the later one too', async () => {
+      const dir = await tempDir();
+      const fetchedDays: string[] = [];
+      const epgConfig = config(dir, { sites: [utc(fetchedDays)], timezone: 'Europe/Bratislava' });
+
+      await runGrab(epgConfig, { now: LATE });
+      fetchedDays.length = 0;
+      await runGrab(epgConfig, { now: new Date(LATE.getTime() + 60_000) });
+
+      // UTC's today is still the 16th, but most of Bratislava's is the 17th.
+      expect(fetchedDays).toEqual(['2026-07-16', '2026-07-17']);
+    });
+
+    it('stops asking for the UTC day before once UTC’s midnight has passed too', async () => {
+      const dir = await tempDir();
+      const fetchedDays: string[] = [];
+      const epgConfig = config(dir, { sites: [utc(fetchedDays)], timezone: 'Europe/Bratislava' });
+
+      await runGrab(epgConfig, { now: LATE });
+      fetchedDays.length = 0;
+      // Three in the morning in Bratislava, one in UTC: the 16th is behind both.
+      await build(epgConfig, { now: new Date('2026-07-17T01:00:00.000Z') });
+
+      expect(fetchedDays).toEqual(['2026-07-17']);
+
+      // What the cache already held of it is still in the guide.
+      const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+      expect(guide.programmes.map((programme) => programme.title[0]?.value)).toEqual([
+        'small hours after 2026-07-16',
+        'evening 2026-07-17',
+      ]);
+    });
+
+    it('reads and transforms each UTC day once, though two of its days cover it', async () => {
+      const dir = await tempDir();
+      const seen: string[] = [];
+
+      await build(
+        config(dir, {
+          sites: [
+            {
+              ...utc([]),
+              transform(programme, { day }) {
+                seen.push(`${day} ${programme.title[0]?.value}`);
+
+                return programme;
+              },
+            },
+          ],
+          days: 2,
+          timezone: 'Europe/Bratislava',
+        }),
+        { now: LATE },
+      );
+
+      // The 17th covers both the guide's 17th and its 18th.
+      expect(seen.toSorted()).toEqual([
+        '2026-07-16 evening 2026-07-16',
+        '2026-07-16 small hours after 2026-07-16',
+        '2026-07-17 evening 2026-07-17',
+        '2026-07-17 small hours after 2026-07-17',
+        '2026-07-18 evening 2026-07-18',
+        '2026-07-18 small hours after 2026-07-18',
+      ]);
+    });
+
+    describe('with a programme on air as the window begins', () => {
+      /** A film from 21:30 to 23:00 UTC each day: across Bratislava's midnight. */
+      const film: SiteConfig<unknown> = {
+        ...utc([]),
+        parseDay({ day }): XmltvProgramme[] {
+          return [
+            {
+              channel: 'one.example',
+              start: new Date(`${day}T21:30:00.000Z`),
+              stop: new Date(`${day}T23:00:00.000Z`),
+              title: [{ value: `film ${day}` }],
+            },
+          ];
+        },
+      };
+
+      it('keeps it, as a source on the guide’s calendar would', async () => {
+        const dir = await tempDir();
+
+        await build(config(dir, { sites: [film], timezone: 'Europe/Bratislava' }), { now: LATE });
+
+        const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+        expect(guide.programmes.map((programme) => programme.title[0]?.value)).toEqual([
+          'film 2026-07-16',
+          'film 2026-07-17',
+        ]);
+      });
+
+      it('drops it when the guide is clamped to its window', async () => {
+        const dir = await tempDir();
+
+        await build(
+          config(dir, {
+            sites: [film],
+            timezone: 'Europe/Bratislava',
+            merge: { clampToWindow: true },
+          }),
+          { now: LATE },
+        );
+
+        const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+        expect(guide.programmes.map((programme) => programme.title[0]?.value)).toEqual([
+          'film 2026-07-17',
+        ]);
+      });
+    });
+
+    it('fails a site whose dayZone is not a zone, and the guide comes from the rest', async () => {
+      const dir = await tempDir();
+      const failed: unknown[] = [];
+
+      const summary = await build(
+        config(dir, {
+          sites: [site([]), { ...utc([]), site: 'mars.example', dayZone: 'Mars/Olympus' }],
+          timezone: 'Europe/Bratislava',
+        }),
+        {
+          now: LATE,
+          reporter: (event) => {
+            if (event.type === 'site:failed') {
+              failed.push(event.error);
+            }
+          },
+        },
+      );
+
+      expect(summary).toMatchObject({ fetched: 1, sitesFailed: 1 });
+      expect(failed).toHaveLength(1);
+      expect(String(failed[0])).toContain(
+        'Site "mars.example" dayZone must be an IANA time zone such as "Europe/Bratislava"',
+      );
+
+      const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+      expect(guide.programmes).toHaveLength(1);
+    });
+  });
+
+  it('refuses a zone that is not one, before anything is asked', async () => {
+    const dir = await tempDir();
+    const fetchedDays: string[] = [];
+
+    await expect(
+      runGrab(config(dir, { sites: [local(fetchedDays)], timezone: 'Mars/Olympus' }), {
+        now: LATE,
+      }),
+    ).rejects.toThrow('timezone must be an IANA time zone');
+    expect(fetchedDays).toEqual([]);
   });
 });
 
@@ -583,6 +1083,26 @@ describe('what a config asked to be told', () => {
 
     expect(heard).toEqual(['done 1']);
   });
+
+  it('reaches it once from a build, through both halves', async () => {
+    const dir = await tempDir();
+    const heard = new Map<string, number>();
+    const events = new EventEmitter<EpgEventMap>();
+
+    for (const type of ['site:done', 'grab:done', 'merge:summary'] as const) {
+      events.on(type, () => heard.set(type, (heard.get(type) ?? 0) + 1));
+    }
+
+    await build({ ...config(dir), events }, { now: NOW });
+
+    // Each half used to add the emitter again to a reporter that already had
+    // it, so everything a build said reached it twice.
+    expect(Object.fromEntries(heard)).toEqual({
+      'site:done': 1,
+      'grab:done': 1,
+      'merge:summary': 1,
+    });
+  });
 });
 
 describe('the cache a config describes', () => {
@@ -658,19 +1178,15 @@ describe('the cache a config describes', () => {
     // back — a driver holding a database handle is waiting for exactly this.
     expect(drivers.map((driver) => driver.closed)).toEqual([1, 1, 1]);
 
-    // And a run that threw: the `finally` is the whole point.
+    // And a run that threw: the `finally` is the whole point. Thrown by the
+    // config's own code, since a site's list failing no longer stops a merge.
     const failing = withDriver({
-      sites: [
-        {
-          ...site([]),
-          channels: () => {
-            throw new Error('no channel list');
-          },
-        },
-      ],
+      derived: () => {
+        throw new Error('no derived channels');
+      },
     });
 
-    await expect(runMerge(failing, { now: NOW })).rejects.toThrow('no channel list');
+    await expect(runMerge(failing, { now: NOW })).rejects.toThrow('no derived channels');
     expect(drivers).toHaveLength(4);
     expect(drivers.at(-1)!.closed).toBe(1);
   });

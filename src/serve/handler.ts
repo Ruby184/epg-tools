@@ -24,10 +24,12 @@ import PQueue from 'p-queue';
 import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../config.js';
 import { createCacheStore } from '../build.js';
 import type { CacheEntryMeta, CacheStore, ChannelDayKey } from '../cache/types.js';
-import { dayRange, toDayString, addDays } from '../core/days.js';
+import { dayRange, dayIn, addDays, resolveTimeZone } from '../core/days.js';
+import { errorMessage } from '../core/error.js';
 import { emitter, reportingTo, type Reporter, type Says } from '../core/events.js';
 import { compressor, type CompressionFormat } from '../core/output.js';
 import { covered, resolveSites } from '../grabber/channels.js';
+import { siteWindow } from '../grabber/site.js';
 import { threadCount } from '../grabber/thread.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { generateGuide } from '../merge/guide.js';
@@ -166,6 +168,8 @@ export interface GuideHandlerOptions {
   now?: Date;
   /** Shift the window, as a run's `offset` does. */
   offset?: number;
+  /** The zone whose calendar says which day is today, over the config's `timezone`. */
+  timezone?: string;
   /** The module the config came from, as a run's `configModule` is — for `threads`. */
   configModule?: string | URL;
   /**
@@ -477,12 +481,22 @@ interface Fingerprint {
  * its own otherwise, and a site whose `channels` is a function would make a
  * request on every poll.
  */
-function keysFor(sites: AnySiteConfig[], days: string[]): ChannelDayKey[] {
+function keysFor(
+  sites: AnySiteConfig[],
+  window: { startDay: string; days: string[] },
+  timeZone: string,
+): ChannelDayKey[] {
   const keys: ChannelDayKey[] = [];
 
   for (const site of sites) {
+    // The guide's window for every site, whatever its own `days`, since that is
+    // what the merge reads — on the site's own calendar where it keeps another,
+    // its leading day included: one already cached is read whether or not a
+    // grab would still ask for it.
+    const own = siteWindow(site, window.startDay, window.days.length, timeZone);
+
     for (const channel of site.channels as GrabberChannel[]) {
-      for (const day of days) {
+      for (const day of own) {
         keys.push({ site: site.site, channelId: channel.xmltvId, day });
       }
     }
@@ -923,6 +937,9 @@ export async function createGuideHandler(
   const revalidateMs = options.revalidateMs ?? DEFAULT_REVALIDATE_MS;
   const cors = options.cors ?? config.serve?.cors ?? false;
   const sitesMaxAgeMs = options.sitesMaxAgeMs ?? DEFAULT_SITES_MAX_AGE_MS;
+  // The caller's, checked here, or the config's, checked as it was loaded.
+  const timeZone =
+    options.timezone === undefined ? config.timezone : resolveTimeZone(options.timezone);
   const schedule = options.grab ?? config.serve?.grab;
   const declaredBase = config.serve?.baseUrl;
 
@@ -1046,8 +1063,57 @@ export async function createGuideHandler(
   let resolvedAt = 0;
   let inFlight: Promise<Snapshot> | undefined;
 
+  /**
+   * What each site's list resolved to last, and when — before `cover` or a
+   * selection had a say, so a list held over is judged afresh beside the
+   * others.
+   *
+   * For a site whose list fails the next time the lists are read: it keeps
+   * this one, and its channels stay in the guide, rather than one source
+   * answering `429` while a consumer polls costing that consumer every channel
+   * the source had. Tried again when the lists are next read.
+   */
+  const lastResolved = new Map<string, { site: AnySiteConfig; at: Date }>();
+
+  /** Every site's list, the one each had last standing in for one that failed. */
+  const lists = async (now: Date): Promise<AnySiteConfig[]> => {
+    const sites = await resolveSites(config.sites, {
+      emit,
+      ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+      store: cache,
+      now,
+      failed: (site, error) => {
+        const last = lastResolved.get(site.site);
+
+        emit({
+          type: 'site:warning',
+          site: site.site,
+          message:
+            last === undefined
+              ? `could not resolve its channel list, so the guide has none of its channels ` +
+                `until it can: ${errorMessage(error)}`
+              : `could not resolve its channel list, so the one from ` +
+                `${last.at.toISOString()} stays in the guide: ${errorMessage(error)}`,
+        });
+
+        return last?.site;
+      },
+    });
+
+    for (const site of sites) {
+      // Only a list that was resolved now: one held over keeps the time it was
+      // resolved at.
+      if (lastResolved.get(site.site)?.site !== site) {
+        lastResolved.set(site.site, { site, at: now });
+      }
+    }
+
+    return sites;
+  };
+
   const windowOf = (now: Date): { days: string[]; startDay: string; id: string } => {
-    const today = toDayString(now);
+    const today = dayIn(now, timeZone);
     const startDay = options.offset ? addDays(today, options.offset) : today;
     const days = [...dayRange(startDay, config.days ?? 7)];
 
@@ -1062,17 +1128,7 @@ export async function createGuideHandler(
       // `cover` before anything is counted: a channel this run leaves to
       // another site has no entry of its own, and sweeping for one would have
       // the grid expecting what nobody was asked to grab.
-      (await covered(
-        await resolveSites(config.sites, {
-          emit,
-          ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
-          ...(options.signal ? { signal: options.signal } : {}),
-          store: cache,
-          now,
-        }),
-        config.merge?.cover,
-        { now, ...mergeSays },
-      ));
+      (await covered(await lists(now), config.merge?.cover, { now, ...mergeSays }));
 
     // After the lists, because a `derived` function is a function of them — and
     // the selection after that, since a shift declared here is what decides
@@ -1099,7 +1155,7 @@ export async function createGuideHandler(
           }));
 
     return {
-      print: await fingerprintOf(cache, keysFor(sites, window.days), window.id, shape),
+      print: await fingerprintOf(cache, keysFor(sites, window, timeZone), window.id, shape),
       sites,
       derived: selection?.derived ?? derived,
       meta,
@@ -1208,6 +1264,7 @@ export async function createGuideHandler(
       cache,
       startDay: window.startDay,
       now,
+      timezone: timeZone,
       ...(config.days !== undefined ? { days: config.days } : {}),
       ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
       ...(config.localConcurrency !== undefined ? { readAhead: config.localConcurrency } : {}),
@@ -1595,6 +1652,7 @@ export async function createGuideHandler(
         cache,
         ...(options.reporter ? { reporter: options.reporter } : {}),
         ...(options.offset === undefined ? {} : { offset: options.offset }),
+        timezone: timeZone,
         ...(options.configModule === undefined ? {} : { configModule: options.configModule }),
         signal: stops.signal,
       });
@@ -1629,7 +1687,12 @@ export async function createGuideHandler(
       let next: Date | number | undefined;
 
       try {
-        next = await schedule({ from, runs, cached: () => cachedFor(from) });
+        next = await schedule({
+          from,
+          runs,
+          cached: () => cachedFor(from),
+          timezone: timeZone,
+        });
       } catch (error) {
         // A schedule that threw has said nothing about when to run again, and
         // guessing on its behalf would be the wrong hour forever. Reported

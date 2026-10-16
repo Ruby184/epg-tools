@@ -7,7 +7,7 @@
  * steps share it. What each step is for is in its own doc; how the four queues
  * fit together is the thing to know first:
  *
- * - **`requests`** (per site, from `sitePacing`) paces the source. A task in it
+ * - **`requests`** (per site, from its {@link SiteSession}) paces the source. A task in it
  *   is one request and nothing else, which is what lets a parse — or a pass —
  *   ask for one of its own through `paced`.
  * - **`pipelines`** (per site) bounds how many responses this site has in hand
@@ -28,7 +28,6 @@ import type { XmltvProgramme } from '../xmltv/types.js';
 import { resolveChannels } from './channels.js';
 import { parseContext, requestContext, streamContext, type ContextDeps } from './context.js';
 import { LocalSlot } from './local-slot.js';
-import { sitePacing } from './pacing.js';
 import { planRequests, type Pair, type Request } from './planner.js';
 import {
   forget,
@@ -38,8 +37,9 @@ import {
   type Revalidation,
   type Validator,
 } from './revalidate.js';
+import { openSession, type SiteSession } from './session.js';
 import { resolveSite, type ResolvedSite } from './site.js';
-import { SiteStateHandle, StateKey, TrackedMap } from './state.js';
+import { StateKey, TrackedMap, type SiteStateHandle } from './state.js';
 import type {
   AnySiteConfig,
   BaseRequestContext,
@@ -78,6 +78,8 @@ export interface Run {
   /** Say what happened, for whoever is listening — see `core/events.ts`. */
   emit: Emit;
   signal?: AbortSignal | undefined;
+  /** The zone whose calendar says which day is today — see `GrabOptions.timezone`. */
+  timeZone?: string | undefined;
   /** The run-wide queue for work that never leaves the machine. */
   localWork: PQueue;
   enqueue: Enqueue;
@@ -116,10 +118,14 @@ export class SiteRun {
    */
   readonly #says: Pick<BaseRequestContext, 'log' | 'warn'>;
 
-  /** The site's own client and request queue, and how to let them go. */
+  /**
+   * The site's queue, client and state for this run — handed over by a run that
+   * fetched the site's list before the grab, and opened here otherwise.
+   */
+  readonly #session: SiteSession;
+
+  /** The site's own client, which holds its queue on a `429`. */
   readonly #http: KyInstance;
-  readonly #requests: PQueue;
-  readonly #dispose: () => void;
 
   /** One planned request each, start to finish. */
   readonly #pipelines: PQueue;
@@ -166,11 +172,7 @@ export class SiteRun {
    * actually wants — "which of my six sources is the one that failed" has no
    * answer in a single total.
    */
-  /** Requests sent, which is slots taken — see {@link SiteRun.#sending}. */
-  #sent = 0;
-  /** How long they spent waiting on the source, pacing not included. */
-  #spent = 0;
-  /** When this site's turn began, for the wall clock the other two are not. */
+  /** When this site's turn began, for the wall clock the session's two are not. */
   #began = 0;
 
   readonly #counts: GrabCounts = {
@@ -187,17 +189,16 @@ export class SiteRun {
   #validators: TrackedMap<Validator> = new TrackedMap();
   #channels: GrabberChannel[] = [];
 
-  constructor(config: AnySiteConfig, run: Run) {
+  constructor(config: AnySiteConfig, run: Run, session?: SiteSession) {
     // Before its queue exists, let alone a request: a site that cannot be
     // resolved is one nothing else here can be asked about.
-    const resolved = resolveSite(config, run.defaults, run.startDay);
+    const resolved = resolveSite(config, run.defaults, run.startDay, run.timeZone, run.now);
 
     this.#run = run;
     this.#config = config;
     this.#resolved = resolved;
     this.#site = resolved.site;
     this.#revalidates = config.conditionalGet === true;
-    this.#state = SiteStateHandle.open(run.cache, resolved.site);
     this.#says = {
       log: (message, data) =>
         run.emit({ type: 'site:note', site: resolved.site, message, ...(data ? { data } : {}) }),
@@ -209,18 +210,18 @@ export class SiteRun {
     // every call a site makes through it is abortable without the site having to
     // pass it on, and a slow-down the client meets stops the queue.
     //
-    // A task of `requests` is one request to the source and nothing else — not
+    // A task of the queue is one request to the source and nothing else — not
     // the work its response is for. That is what its `concurrency`, `rateLimit`
     // and backoff are about, and keeping it to that is what lets a `parseDay` ask
     // for a request of its own.
-    const { queue, http, dispose } = sitePacing(config, {
-      ...(run.signal ? { signal: run.signal } : {}),
-      emit: run.emit,
-    });
-
-    this.#requests = queue;
-    this.#http = http;
-    this.#dispose = dispose;
+    this.#session =
+      session ??
+      openSession(config, run.cache, {
+        ...(run.signal ? { signal: run.signal } : {}),
+        emit: run.emit,
+      });
+    this.#http = this.#session.pacing.http;
+    this.#state = this.#session.state;
 
     /**
      * What this bounds is how many responses the site has in hand at once:
@@ -247,38 +248,20 @@ export class SiteRun {
   }
 
   /**
-   * One request's worth of this site's queue, counted and timed as it goes.
+   * One request's worth of this site's queue, counted and timed as it goes —
+   * see {@link SiteSession.send}.
    *
    * The queue is the one place every request passes through — the channel list,
    * a batch, a stream's pass, and whatever a parse asks for through
    * `ctx.paced`. Counting the `request:started` events instead would miss the
    * last of those and report a streamed site as having made one request for a
    * document it fetched a hundred times.
-   *
-   * Timed from inside the task rather than from the call, for the reason the
-   * `request:done` event is: what a site waited for a slot is pacing, not the
-   * source, and adding it in would make a site paced to one request a second
-   * look like a site answering in a second.
    */
   #sending<T>(
     task: (options: { signal?: AbortSignal | undefined }) => Promise<T>,
     options?: { priority?: number },
   ): Promise<T> {
-    this.#sent += 1;
-
-    return this.#run.enqueue(
-      this.#requests,
-      async (slot) => {
-        const began = Date.now();
-
-        try {
-          return await task(slot);
-        } finally {
-          this.#spent += Date.now() - began;
-        }
-      },
-      options,
-    );
+    return this.#session.send(task, options);
   }
 
   /** Count one channel-day, for this site and for the run it is part of. */
@@ -314,7 +297,7 @@ export class SiteRun {
       this.#count('sitesFailed');
       this.#run.emit({ type: 'site:failed', site: this.#site, error });
     } finally {
-      this.#dispose();
+      this.#session.pacing.dispose();
       // Beside `dispose`, and for the same reason: a site that threw, or was
       // cancelled part way, has as much to hand back as one that finished — the
       // channel list it fetched, and whatever its own code remembered. Only the
@@ -325,11 +308,11 @@ export class SiteRun {
       this.#run.emit({
         type: 'site:done',
         site: this.#site,
-        requests: this.#sent,
+        requests: this.#session.sent,
         // Wall clock, which is the one a nightly run is long by — and nothing
         // like the sum below once a site runs several requests at once.
         ms: Date.now() - this.#began,
-        requestMs: this.#spent,
+        requestMs: this.#session.spent,
         ...this.#counts,
       });
     }
@@ -354,21 +337,20 @@ export class SiteRun {
 
     // Fetching the channel list is a request to the same source as the rest, so
     // it goes through the same queue: a site's `rateLimit` spaces the first EPG
-    // request after it, rather than the two landing back to back. The signal it
-    // is handed is p-queue's, this task's own: what governs the slot governs the
-    // work in it.
-    this.#channels = await this.#sending(({ signal }) =>
-      resolveChannels(this.#config, {
-        // The same pair its requests and parses get: a channel list that has to
-        // be fetched is the first place a site has anything to say.
-        says: this.#says,
-        http: this.#http,
-        ...(signal ? { signal } : {}),
-        state: this.#state,
-        refresh: this.#resolved.staleness.refetchAll,
-        now: this.#run.now,
-      }),
-    );
+    // request after it, rather than the two landing back to back. Only a fetch
+    // does — a list written out, settled before the grab, or still fresh in the
+    // cache sends nothing, and takes no slot and counts as no request.
+    this.#channels = await resolveChannels(this.#config, {
+      // The same pair its requests and parses get: a channel list that has to
+      // be fetched is the first place a site has anything to say.
+      says: this.#says,
+      http: this.#http,
+      ...(this.#run.signal ? { signal: this.#run.signal } : {}),
+      state: this.#state,
+      refresh: this.#resolved.staleness.refetchAll,
+      now: this.#run.now,
+      paced: (fetch) => this.#sending(fetch),
+    });
 
     const stale = await this.#collectStale();
     const requests = planRequests({
@@ -381,11 +363,14 @@ export class SiteRun {
     // The one thing said before the work rather than after it, and the only
     // place a run's shape is known in advance: the channel list has arrived, the
     // cache has been swept, and what is left is exactly this many requests.
+    const { dayZone } = this.#resolved;
+
     this.#run.emit({
       type: 'site:started',
       site: this.#site,
       channels: this.#channels.length,
       days: this.#resolved.window.length,
+      ...(dayZone === undefined || dayZone === this.#run.timeZone ? {} : { dayZone }),
       entries: stale.length,
       requests: requests.length,
     });
@@ -448,7 +433,16 @@ export class SiteRun {
           return this.#resolved.window.flatMap((day, index) => {
             const cached = metas[index];
 
-            if (isStale(day, cached, this.#resolved.staleness, now)) {
+            if (
+              isStale(
+                day,
+                cached,
+                this.#resolved.staleness,
+                now,
+                this.#run.timeZone,
+                this.#resolved.dayZone,
+              )
+            ) {
               // The meta goes with it: what a conditional request asks with, and
               // what it would keep. Read once here rather than again later.
               return [{ channel, day, ...(cached === undefined ? {} : { cached }) }];

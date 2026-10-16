@@ -6,14 +6,18 @@ import {
   MemoryCacheDriver,
 } from './cache/main.js';
 import type { CacheDriver, CacheStore } from './cache/main.js';
-import { covered, coverageOf, grab, resolveSites } from './grabber/main.js';
+import { resolveSessions } from './grabber/channels.js';
+import { grabWith } from './grabber/grab.js';
+import { covered, coverageOf } from './grabber/main.js';
+import { earliestDay } from './grabber/site.js';
+import { openSession, type SiteSession } from './grabber/session.js';
 import { threadCount } from './grabber/thread.js';
-import type { GrabberChannel, GrabSummary } from './grabber/types.js';
+import type { AnySiteConfig, GrabberChannel, GrabSummary } from './grabber/types.js';
 import { generateGuide, writeGuide } from './merge/main.js';
 import { channelSelection, configured, unmatched, unmatchedMessage } from './merge/select.js';
-import type { BuildGuideOptions } from './merge/types.js';
+import type { BuildGuideOptions, DerivedChannel } from './merge/types.js';
 import { outputOptions } from './xmltv/serialize.js';
-import { addDays, toDayString } from './core/days.js';
+import { addDays, dayIn, localTimeZone, resolveTimeZone } from './core/days.js';
 import { GrabberError } from './core/error.js';
 import type { Emit, Reporter, Says } from './core/events.js';
 import { emitter, reportingTo } from './core/events.js';
@@ -55,6 +59,11 @@ export interface RunOptions {
    * so staleness and the `grabbedAt` stamp keep using the real current time.
    */
   offset?: number;
+  /**
+   * The time zone whose calendar says which day is today, in place of the
+   * config's `timezone` — see there.
+   */
+  timezone?: string;
   /**
    * Where this run's events go — see {@link Reporter}.
    *
@@ -212,9 +221,145 @@ const droppedBy =
     });
   };
 
-/** First day of the window implied by `now` + `offset`. */
-function startDayOf(options: RunOptions, now: Date): string {
-  const today = toDayString(now);
+/** What {@link settled} leaves a run to grab, and a build to merge. */
+interface Settled {
+  /** Every site whose list resolved, narrowed by the selection and by `cover`. */
+  sites: AnySiteConfig[];
+  /**
+   * The sites whose list could not be resolved, and why — for the grab and not
+   * the merge: the grab says so and counts each as a site that answered
+   * nothing, as it does for a list that fails in its own hands.
+   */
+  failures: { site: string; error: unknown }[];
+  /** What `derived` declared about these lists, as the selection left it. */
+  derived: DerivedChannel[] | undefined;
+  /**
+   * The sessions the lists were fetched through, for the grab to carry on with
+   * — and to let go of once it is done.
+   */
+  sessions: Map<string, SiteSession>;
+}
+
+/**
+ * The channel lists a run goes by, settled before any site is asked for a day:
+ * resolved once, `derived` asked about them, the selection applied, and
+ * `cover`'s choices made.
+ *
+ * Before the grab, which is the point of each: a channel the selection leaves
+ * out is never fetched, and one `cover` leaves to another site is never asked
+ * of this one. And once, for a build — a site that fetches its channels would
+ * otherwise be asked by both halves, and a list that changed in between would
+ * leave the guide describing channels the grab never went for.
+ */
+async function settled(
+  config: EpgConfig,
+  cache: CacheStore,
+  options: RunOptions,
+  now: Date,
+  emit: Emit,
+): Promise<Settled> {
+  const failures: Settled['failures'] = [];
+  const sessions = new Map<string, SiteSession>();
+
+  // For a site whose list is fetched, and only those: the fetch goes through the
+  // queue its requests will, and the grab carries on with the same one.
+  for (const site of config.sites) {
+    if (typeof site.channels !== 'function') {
+      continue;
+    }
+
+    try {
+      sessions.set(
+        site.site,
+        openSession(site, cache, { ...(options.signal ? { signal: options.signal } : {}), emit }),
+      );
+    } catch {
+      // Settings no queue can be built from: the grab says what is wrong with
+      // the site, as it would have without this.
+    }
+  }
+
+  const sites = await resolveSessions(
+    config.sites,
+    {
+      ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+      // What a site says while fetching its list, which happens here rather than
+      // inside the grab — so without this it would be said nowhere.
+      emit,
+      store: cache,
+      // `--refresh` means ask the source, and a channel list is something the
+      // source says.
+      ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
+      now,
+      // One source down is not every source down: the rest are settled and
+      // grabbed, and this one is counted.
+      failed: (site, error) => {
+        failures.push({ site: site.site, error });
+
+        return undefined;
+      },
+    },
+    sessions,
+  );
+
+  // After the lists, because a `derived` function is a function *of* them. The
+  // selection then narrows what was resolved, which is the same answer as
+  // narrowing on the way out of each site: what a site stores is its whole list
+  // either way.
+  const declarations = await configured(config.derived, {
+    channels: sites.flatMap((site) => site.channels as GrabberChannel[]),
+    now,
+    ...saysOf(emit),
+  });
+  // Only the two fields a selection reads, so a `derived` that is still a
+  // function never reaches it.
+  const selection = channelSelection({
+    ...(config.channels ? { channels: config.channels } : {}),
+    ...(declarations ? { derived: declarations } : {}),
+  });
+  const selected = selection
+    ? sites.map((site) => ({
+        ...site,
+        channels: (site.channels as GrabberChannel[]).filter((channel) =>
+          selection.select.has(channel.xmltvId),
+        ),
+      }))
+    : sites;
+  const kept = narrowed(config)
+    ? await covered(selected, config.merge?.cover, { now, ...saysOf(emit) }, droppedBy(emit))
+    : selected;
+
+  // Here, before the grab: a mistyped id should cost a sentence, not every
+  // request of a run that was always going to come up short.
+  const missing = unmatched(
+    selection,
+    kept.flatMap((site) => (site.channels as GrabberChannel[]).map((channel) => channel.xmltvId)),
+  );
+
+  if (missing.length > 0) {
+    emit({
+      type: 'merge:warning',
+      message: unmatchedMessage(missing, selection?.select.size ?? 0),
+    });
+  }
+
+  return { sites: kept, failures, derived: selection?.derived ?? declarations, sessions };
+}
+
+/**
+ * The zone a run's days are reckoned in: the caller's, checked here before
+ * anything is fetched, else the config's, checked as it was loaded.
+ */
+function zoneOf(config: EpgConfig, options: RunOptions): string {
+  return options.timezone === undefined
+    ? (config.timezone ?? localTimeZone())
+    : resolveTimeZone(options.timezone);
+}
+
+/** First day of the window implied by `now` + `offset`, on the run's calendar. */
+function startDayOf(options: RunOptions, now: Date, timeZone: string): string {
+  const today = dayIn(now, timeZone);
   return options.offset ? addDays(today, options.offset) : today;
 }
 
@@ -225,11 +370,14 @@ function guideOptions(
   now: Date,
   cache: CacheStore,
 ): BuildGuideOptions {
+  const timeZone = zoneOf(config, options);
+
   return {
     sites: config.sites,
     cache,
-    startDay: startDayOf(options, now),
+    startDay: startDayOf(options, now, timeZone),
     now,
+    timezone: timeZone,
     ...(config.days !== undefined ? { days: config.days } : {}),
     ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
     // The same bound the grab gives its own local work, for the same resource:
@@ -257,41 +405,25 @@ function reported(options: RunOptions): Pick<RunOptions, 'reporter'> {
   return options.reporter ? { reporter: options.reporter } : {};
 }
 
-/** Grab all sites into the cache (only stale/missing channel-days are fetched). */
-export async function runGrab(source: ConfigSource, given: RunOptions = {}): Promise<GrabSummary> {
-  const config = await resolveConfigSource(source);
-  const options = reportingTo(given, config.events);
-
-  // Before a channel list is fetched: a run that cannot start its threads says
-  // so first, rather than after every site has been asked for one.
-  threadCount(config.threads, options.configModule);
-  const now = options.now ?? new Date();
-  const startDay = startDayOf(options, now);
-
-  return withCache(config, options, async (cache) => {
-    const emit = emitter(options);
-    // Resolved here only to decide what not to ask for. Every site resolves its
-    // own list anyway — this is the same work, done early enough to compare the
-    // lists against each other, and a `cacheChannels` site answers from the
-    // cache both times.
-    const sites = narrowed(config)
-      ? await covered(
-          await resolveSites(config.sites, {
-            ...(config.siteConcurrency !== undefined
-              ? { concurrency: config.siteConcurrency }
-              : {}),
-            ...(options.signal ? { signal: options.signal } : {}),
-            ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
-            emit,
-            store: cache,
-            now,
-          }),
-          config.merge?.cover,
-          { now, ...saysOf(emit) },
-          droppedBy(emit),
-        )
-      : config.sites;
-    const summary = await grab(sites, {
+/**
+ * The grab half of a run, over sites ready to grab — and the prune after it.
+ *
+ * Handed options that already report where the config says, rather than a
+ * config to work that out from: `build` adds the config's `events` once, for
+ * both halves, and a grab that added them again would say everything twice.
+ */
+async function grabInto(
+  config: EpgConfig,
+  settling: Pick<Settled, 'sites' | 'failures' | 'sessions'>,
+  cache: CacheStore,
+  options: RunOptions,
+  now: Date,
+): Promise<GrabSummary> {
+  const timeZone = zoneOf(config, options);
+  const startDay = startDayOf(options, now, timeZone);
+  const summary = await grabWith(
+    settling.sites,
+    {
       cache,
       startDay,
       ...(config.days !== undefined ? { days: config.days } : {}),
@@ -301,28 +433,75 @@ export async function runGrab(source: ConfigSource, given: RunOptions = {}): Pro
         : {}),
       ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
       now,
+      timezone: timeZone,
       ...reported(options),
       ...(options.signal ? { signal: options.signal } : {}),
       ...(config.threads === undefined ? {} : { threads: config.threads }),
       ...(options.configModule === undefined ? {} : { configModule: options.configModule }),
-    });
+      ...(settling.failures.length > 0 ? { failedSites: settling.failures } : {}),
+    },
+    settling.sessions,
+  ).finally(() => {
+    // What a site in a thread, or one that never ran, left holding: a hold's
+    // timer is deliberately not unref'd.
+    for (const session of settling.sessions.values()) {
+      session.pacing.dispose();
+    }
+  });
 
-    // Nothing more is asked of the cache once the run is off: pruning a window
-    // the grab never finished filling would take days it might still have
-    // wanted.
-    if (config.cache?.prune !== false && options.signal?.aborted !== true) {
-      // Never prune inside the window we just grabbed: a negative offset puts
-      // the window start before today, and those days must survive.
-      const today = toDayString(now);
-      const before = startDay < today ? startDay : today;
-      const removed = await cache.prune({ before });
+  // Nothing more is asked of the cache once the run is off: pruning a window
+  // the grab never finished filling would take days it might still have
+  // wanted.
+  if (config.cache?.prune !== false && options.signal?.aborted !== true) {
+    // Never prune inside the window we just grabbed: a negative offset puts
+    // the window start before today, and those days must survive — as must the
+    // day before it, for a site keeping a calendar whose window starts there.
+    const today = dayIn(now, timeZone);
+    const before = earliestDay(config.sites, startDay < today ? startDay : today, timeZone);
+    const removed = await cache.prune({ before });
 
-      if (removed > 0) {
-        emitter(options)({ type: 'prune:done', removed, before });
-      }
+    if (removed > 0) {
+      emitter(options)({ type: 'prune:done', removed, before });
+    }
+  }
+
+  return summary;
+}
+
+/** Grab all sites into the cache (only stale/missing channel-days are fetched). */
+export async function runGrab(source: ConfigSource, given: RunOptions = {}): Promise<GrabSummary> {
+  const config = await resolveConfigSource(source);
+  const options = reportingTo(given, config.events);
+
+  // Before a channel list is fetched: a run that cannot start its threads, or
+  // was given a zone that is not one, says so first, rather than after every
+  // site has been asked for one.
+  threadCount(config.threads, options.configModule);
+  zoneOf(config, options);
+  const now = options.now ?? new Date();
+
+  return withCache(config, options, async (cache) => {
+    // Settled here only when there is something to narrow — a selection, or a
+    // `cover` that takes channels away. Every site resolves its own list anyway,
+    // so this is the same work done early enough to act on, and a
+    // `cacheChannels` site answers from the cache both times.
+    if (config.channels === undefined && !narrowed(config)) {
+      return grabInto(
+        config,
+        { sites: config.sites, failures: [], sessions: new Map() },
+        cache,
+        options,
+        now,
+      );
     }
 
-    return summary;
+    return grabInto(
+      config,
+      await settled(config, cache, options, now, emitter(options)),
+      cache,
+      options,
+      now,
+    );
   });
 }
 
@@ -379,6 +558,7 @@ export async function build(source: ConfigSource, given: RunOptions = {}): Promi
 
   // As `runGrab` does, and for the same reason: before the lists below.
   threadCount(config.threads, options.configModule);
+  zoneOf(config, options);
 
   // One cache for both halves, rather than each of them asking the config for
   // its own: a driver that opens a database opens it once, and one that keeps
@@ -388,91 +568,22 @@ export async function build(source: ConfigSource, given: RunOptions = {}): Promi
   // that is where a site's cached list lives — a `cacheChannels` site then makes
   // no request for a list this cache already has.
   return withCache(config, options, async (cache) => {
-    // Channel lists resolved once too, and for the same reason one level down: a
-    // site that fetches its channels would otherwise be asked twice, and a list
-    // that changed in between would leave the guide describing channels the grab
-    // never went for.
-    const emit = emitter(options);
-    const sites = await resolveSites(config.sites, {
-      ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
-      // What a site says while fetching its list, which happens here rather
-      // than inside either half — so without this it would be said nowhere.
-      emit,
-      store: cache,
-      // `--refresh` means ask the source, and a channel list is something the
-      // source says.
-      ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
-      now,
-    });
-
-    // After the lists, because a `derived` function is a function *of* them —
-    // and once, because the grab and the merge have to agree about what exists.
-    // The selection then narrows what was resolved, which is the same answer as
-    // narrowing on the way out of each site: what a site stores is its whole
-    // list either way.
-    const declarations = await configured(config.derived, {
-      channels: sites.flatMap((site) => site.channels as GrabberChannel[]),
-      now,
-      log: (message, data) => emit({ type: 'merge:note', message, ...(data ? { data } : {}) }),
-      warn: (message, data) => emit({ type: 'merge:warning', message, ...(data ? { data } : {}) }),
-    });
-    // Only the two fields a selection reads, so a `derived` that is still a
-    // function never reaches it.
-    const selection = channelSelection({
-      ...(config.channels ? { channels: config.channels } : {}),
-      ...(declarations ? { derived: declarations } : {}),
-    });
-    const selected = selection
-      ? sites.map((site) => ({
-          ...site,
-          channels: (site.channels as GrabberChannel[]).filter((channel) =>
-            selection.select.has(channel.xmltvId),
-          ),
-        }))
-      : sites;
+    // Settled once for both halves, which have to agree about what exists.
+    const settling = await settled(config, cache, options, now, emitter(options));
+    // Without the selection, which the lists already went through, and without
+    // `events`, which `options` already reports to: a half handed either would
+    // act on it a second time — the same warning about the same missing
+    // channels, every event twice.
+    const { channels: _applied, events: _reported, ...rest } = config;
     const resolved: EpgConfig = {
-      ...config,
-      ...(declarations ? { derived: declarations } : {}),
-      // Before the grab, which is the whole of what `cover` is for: the merge
-      // below keeps what it chose either way, so a site it did not choose is
-      // never asked about that channel at all.
-      sites: narrowed(config)
-        ? await covered(selected, config.merge?.cover, { now, ...saysOf(emit) }, droppedBy(emit))
-        : selected,
+      ...rest,
+      ...(settling.derived ? { derived: settling.derived } : {}),
+      sites: settling.sites,
     };
-
-    // Here rather than only in the merge below, because here is before the
-    // grab: a mistyped id should cost a sentence, not every request of a run
-    // that was always going to come up short.
-    const missing = unmatched(
-      selection,
-      resolved.sites.flatMap((site) =>
-        (site.channels as GrabberChannel[]).map((channel) => channel.xmltvId),
-      ),
-    );
-
-    if (missing.length > 0) {
-      emit({
-        type: 'merge:warning',
-        message: unmatchedMessage(missing, selection?.select.size ?? 0),
-      });
-    }
-
-    const summary = await runGrab(resolved, { ...options, now, cache });
+    const summary = await grabInto(resolved, settling, cache, options, now);
 
     if (options.signal?.aborted !== true) {
-      // Without the selection, and with the `derived` it settled on. The sites
-      // above are already narrowed — they resolved to arrays under it — so
-      // asking the merge to select again would change nothing except to say the
-      // same thing about the same missing channels a second time.
-      const { channels: _asked, ...merging } = resolved;
-
-      await runMerge(selection ? { ...merging, derived: selection.derived } : resolved, {
-        ...options,
-        now,
-        cache,
-      });
+      await runMerge(resolved, { ...options, now, cache });
     }
 
     return summary;

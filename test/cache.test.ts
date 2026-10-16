@@ -103,6 +103,30 @@ describe('isStale', () => {
     expect(isStale('2026-07-20', freshMeta, policy, now)).toBe(false);
   });
 
+  it('takes today on the zone’s calendar when it is given one', () => {
+    // Half past midnight in Bratislava, still the 17th in UTC: the 18th is
+    // today there, and always fetched again.
+    const lateNight = new Date('2026-07-17T22:30:00.000Z');
+
+    expect(
+      isStale('2026-07-18', freshMeta, DEFAULT_STALENESS, lateNight, 'Europe/Bratislava'),
+    ).toBe(true);
+    expect(isStale('2026-07-18', freshMeta, DEFAULT_STALENESS, lateNight, 'UTC')).toBe(false);
+  });
+
+  it('counts a day of another calendar by the hours it shares with the zone’s today', () => {
+    // Half past midnight on the 18th in Bratislava, still the 17th in UTC. The
+    // 18th there runs from 22:00 UTC on the 17th to 22:00 UTC on the 18th.
+    const lateNight = new Date('2026-07-17T22:30:00.000Z');
+    const stale = (day: string) =>
+      isStale(day, freshMeta, DEFAULT_STALENESS, lateNight, 'Europe/Bratislava', 'UTC');
+
+    expect(stale('2026-07-17')).toBe(true);
+    // Most of today there, though by its date it is tomorrow in UTC.
+    expect(stale('2026-07-18')).toBe(true);
+    expect(stale('2026-07-19')).toBe(false);
+  });
+
   it('treats an unparseable grabbedAt as stale', () => {
     const corruptMeta = { grabbedAt: 'not-a-date', programmeCount: 3 };
 

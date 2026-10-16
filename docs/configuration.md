@@ -33,7 +33,8 @@ export default defineConfig({
 });
 ```
 
-Node >= 23.6 loads `epg.config.ts` directly via native type stripping. On
+Node 22.18 or newer — 23.6 or newer on the 23 line — loads `epg.config.ts`
+directly via native type stripping, which is on by default there. On an earlier
 Node 22, use `epg.config.js` / `epg.config.mjs`, or compile the TS file first.
 
 The factory form takes a context and is how a config gets answers it cannot
@@ -97,7 +98,8 @@ TypeScript enum is not supported in strip-only mode
 number instead of a surprise at run time. Node's
 `--experimental-transform-types` handles the syntax half, but not the
 resolution half above — a `.js` specifier still does not find a `.ts` file —
-so it solves half a problem.
+so it solves half a problem, and only before Node 26, which no longer has the
+flag.
 
 ## `EpgConfig` reference
 
@@ -107,19 +109,20 @@ so it solves half a problem.
 | `output` | `string` | **required** | Where the guide is written: a path, replaced atomically once complete, or a Unix socket to stream it into. |
 | `compress` | `'gzip' \| 'brotli' \| 'zstd' \| false \| { format, level? }` | what the output's name says | Compress the guide — see [Compressing the guide](#compressing-the-guide). A `.gz`, `.br` or `.zst` output already asks for it; this is for a socket, for a plain document under a compressed-sounding name, or for choosing a level. |
 | `days` | `number` | `7` | How many days to grab and include in the guide. A site may override it. |
+| `timezone` | `string` | the process's zone — `TZ`, UTC where unset | Whose calendar says which day is today, as an IANA name like `'Europe/Bratislava'` — see [which day is today](#which-day-is-today). `--timezone` overrides it. |
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
 | `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source; a parse waiting on its own `ctx.paced` request does not count against it. |
 | `threads` | `boolean \| number` | `false` | Run the sites in worker threads, so one site's parsing cannot hold up another's: `true` for one thread per core, a number for at most that many — see [Sites in threads of their own](#sites-in-threads-of-their-own). `--threads[=n]` / `--no-threads` override it. |
 | `merge` | `MergeOptions` | `{ cover: 'all', channelStrategy: 'merge-programmes', programmeStrategy: 'merge', fillStop: true, clipOverlaps: true, dropContainers: true }` | Who grabs a channel several sites offer (`cover`) and how the ones that did are combined, what counts as the same broadcast (`match`), and how the programmes are [cleaned up](#cleaning-up-the-output) on the way out — see [Merge strategies](#merge-strategies). |
-| `derived` | `DerivedChannel[] \| (context) => DerivedChannel[]` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. A function is asked per run, with the channels there turned out to be. See [Derived channels](#derived-channels). |
+| `derived` | `DerivedChannel[] \| (context) => DerivedChannel[] \| Promise<DerivedChannel[]>` | none | Channels that are other channels shifted — a `+1` and its like, costing no requests. A function is asked per run, with the channels there turned out to be. See [Derived channels](#derived-channels). |
 | `channels` | `readonly string[]` | all of them | Keep only these channels, by `xmltvId` — see [keeping only some channels](#keeping-only-some-channels). `--channels` overrides it. |
-| `meta` | `XmltvDocumentMeta \| (context) => XmltvDocumentMeta` | — | Attributes for the root `<tv>` element. A function is asked per run, with the channels there turned out to be — see [below](#root-tv-attributes). |
+| `meta` | `XmltvDocumentMeta \| (context) => XmltvDocumentMeta \| Promise<XmltvDocumentMeta>` | — | Attributes for the root `<tv>` element. A function is asked per run, with the channels there turned out to be — see [below](#root-tv-attributes). |
 | `indent` | `string \| number` | omitted — compact | Pretty-print the guide with this indentation, mirroring `JSON.stringify`: a number of spaces or a string like `'\t'`. |
 | `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — all of them | Which provider extensions the guide carries — see [Provider extensions](#provider-extensions). `false` leaves every one out, which is what makes the guide valid against the DTD. |
 | `profile` | `'tvheadend' \| 'jellyfin' \| OutputProfile` | none | Shape the guide for the consumer that reads it — see [Output profiles](#output-profiles). Applies on the way out, so switching it refetches nothing. |
 | `baseUrl` | `string \| URL` | none | Resolve every relative `<icon src>`, `<image>` and `<url>` the guide writes against this. See [serving the guide](#serving-the-guide). |
-| `serve` | `{ port?, host?, path?, compress?, cors?, baseUrl? }` | `8080`, `127.0.0.1`, `/guide.xml`, `gzip`, off, none | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). |
+| `serve` | `{ port?, host?, path?, health?, compress?, cors?, baseUrl?, grab?, server? }` | `8080`, `127.0.0.1`, `/guide.xml`, `/health`, `gzip`, off, none, no grab, a server of its own | Where `epg serve` listens and what it serves — see [serving the guide](#serving-the-guide). `health` is where it answers [a health check](#is-it-healthy), or `false` for nowhere; `grab` is [a schedule to grab on](#grabbing-on-a-schedule); `server` hands it [a server of yours](#on-a-server-of-your-own) to listen on. |
 | `allowMissing` | `number \| string` | none — anything missing fails | How much of the guide may be missing and the run still exit **0**: a number of channel-days, or a share like `'5%'` — see [allowing some of the guide to be missing](#allowing-some-of-the-guide-to-be-missing). |
 | `reporter` | `'text' \| 'json' \| 'progress'` or a factory | `'progress'` | How a run reports what it is doing — see [how much it says](#how-much-it-says). `--reporter` overrides it among the names. |
 | `events` | an `EventEmitter` | none | An emitter of your own, told everything, **whatever `--reporter` says** — a readiness ping, a reload, a metric. Type it with `EpgEventMap` and each listener's argument is the event it asked for. See [an emitter, and several sinks at once](./api.md#an-emitter-and-several-sinks-at-once). |
@@ -170,9 +173,10 @@ export default defineConfig({
 });
 ```
 
-Under `epg serve` it is asked once per snapshot rather than once per request, at
-the pace the channel lists are re-read — so it follows a lineup that changes
-without costing a poll anything.
+Under `epg serve` it is asked once per snapshot rather than once per request —
+when the server reads the cache again, which is at most once a second however
+many polls arrive — so it follows a lineup that changes without costing a poll
+anything.
 
 The ETag covers `meta` **as written, not as answered**: a changed
 `source-info-name` moves every validator, and so does changing the body of the
@@ -216,6 +220,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `-c, --config <path>` | config file; defaults to `epg.config.ts\|js\|mjs` in the working directory |
 | `-d, --days <n>` | override the config's `days` |
 | `--offset <n>` | start the window n days from today; may be negative |
+| `--timezone <zone>` | whose calendar says which day is today, as `Europe/Bratislava` — see [which day is today](#which-day-is-today). The process's own zone by default |
 | `-o, --output <path>` | override the output file, or a Unix socket to stream into — a `.gz`, `.br` or `.zst` name [compresses it](./configuration.md#compressing-the-guide) |
 | `--cache-dir <dir>` | override the cache directory |
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
@@ -223,20 +228,20 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--threads[=n]` | `build`/`grab`/`serve`: run the sites in [worker threads](#sites-in-threads-of-their-own), one per core or at most `n`; `--no-threads` runs them all in one, whatever the config says |
 | `--dry-run` | `grab`/`build` only: say what a run would fetch, and stop — see [what a run would do](#what-a-run-would-do) |
 | `--allow-missing <n>` | exit 0 with up to this much of the guide missing: a number of channel-days, or a share like `5%` |
-| `--extensions <names>` | `build`/`merge` only: keep only these [provider extensions](#provider-extensions), comma-separated — `--extensions lcn,uniqueID` |
-| `--no-extensions` | `build`/`merge` only: leave every one out, for a guide that validates against the DTD |
+| `--extensions <names>` | `build`/`merge`/`serve`/`filter`: keep only these [provider extensions](#provider-extensions), comma-separated — `--extensions lcn,uniqueID` |
+| `--no-extensions` | `build`/`merge`/`serve`/`filter`: leave every one out, for a guide that validates against the DTD |
 | `--port <n>` | `serve` only: port to listen on, default `8080` |
 | `--host <h>` | `serve` only: address to bind, default `127.0.0.1` — see [serving the guide](#serving-the-guide) |
 | `--serve-path <p>` | `serve` only: the path that answers with the guide, default `/guide.xml` |
 | `--health <p>` | `serve` only: the path that answers a health check, default `/health` |
 | `--no-health` | `serve` only: do not answer one at all |
 | `--grab-every <d>` | `serve` only: also grab on this interval — `6h`, `30m`, `1d`. Off unless said — see [grabbing on a schedule](#grabbing-on-a-schedule) |
-| `--grab-at <t>` | `serve` only: a local time of day to line `--grab-every` up with, as `04:00`. On its own it means once a day, at that time |
+| `--grab-at <t>` | `serve` only: a time of day to line `--grab-every` up with, as `04:00`, on the clock of [`timezone`](#which-day-is-today). On its own it means once a day, at that time |
 | `--raw` | `try` only: print the whole payload, not the first 2000 characters |
 | `--format <how>` | `validate`, `channels` and `--dry-run`: `text` (default) or `json` |
 | `--strict` | `validate` only: count warnings as failures too |
-| `--channels <what>` | `build`/`grab`/`merge`/`serve`, and required by `filter`: keep only these channels and fetch nothing for the rest — ids, or a file naming them. Repeatable — see [subsetting a guide](#keeping-only-some-channels) |
-| `--indent <n\|str>` | `build`/`merge`/`filter`: pretty-print with this indentation, mirroring `JSON.stringify` |
+| `--channels <what>` | `build`/`grab`/`merge`/`serve`/`filter`: keep only these channels and fetch nothing for the rest — ids, or a file naming them. Repeatable — see [subsetting a guide](#keeping-only-some-channels). `filter` needs it or one of `--profile`, `--extensions`, `--no-extensions` and `--indent` — see [subsetting a guide you already have](#subsetting-a-guide-you-already-have) |
+| `--indent <n\|str>` | `build`/`merge`/`serve`/`filter`: pretty-print with this indentation, mirroring `JSON.stringify` |
 | `--profile <name>` | `build`/`merge`/`serve`/`filter`: shape the guide for one consumer — `tvheadend` or `jellyfin`. See [Output profiles](#output-profiles) |
 | `--against <file>` | `channels` only: what you want a guide for — an M3U playlist, a `*.channels.xml` or an XMLTV guide |
 | `--write` | `channels` only: write the ids the report suggested back into `--against`, in place — or to `-o` |
@@ -565,6 +570,10 @@ epg try example.tv one.example.tv 2026-09-05
 epg try example.tv 1 --raw                 # by site id, whole payload
 ```
 
+The day is the site's: for one that keeps [another calendar](#which-day-is-today) it
+is a day by that calendar's date, and the one tried by default is the first a
+run would ask it for.
+
 ```
 example.tv → one.example.tv on 2026-09-03
 
@@ -626,8 +635,9 @@ merge, and `--reporter text -v` shows which of the two a poll got.
 buffering the document this package exists not to buffer. The cache answers
 instead: the newest `grabbedAt` across the window, with how many entries are in
 it. That reading is metadata only — no payloads, no parsing, no serializing —
-worked out at most once a second (`revalidateMs`), and once for however many
-polls arrive together.
+worked out at most once a second, and once for however many polls arrive
+together. The second is `revalidateMs`, an option to `serveGuide` and
+`createGuideHandler` rather than a config field or a flag.
 
 **How much that actually saves is a driver question**, and by more than you
 would guess. Measured over 3,500 channel-days (500 channels × 7 days), medians
@@ -654,9 +664,11 @@ The one thing it cannot see is a channel that was not in the window when the
 reading was taken: the entries are looked up by the channel list already in
 hand, so a grab that adds a channel and refreshes nothing else writes a key
 nobody asks about. The list is therefore resolved again when the fingerprint
-moves, and in any case once its `sitesMaxAgeMs` (ten minutes) is up — a ceiling
-on how long a new channel can stay invisible, without letting a poll drive the
-request that resolving a fetched channel list can mean.
+moves, and in any case once ten minutes are up — a ceiling on how long a new
+channel can stay invisible, without letting a poll drive the request that
+resolving a fetched channel list can mean. The ten minutes are `sitesMaxAgeMs`,
+which like `revalidateMs` is an option to `serveGuide` and
+`createGuideHandler`, with no config field or flag.
 
 **`SIGHUP` skips the wait.** The ceiling is a guess at how long a new channel
 may stay unseen; `kill -HUP` is you saying you know:
@@ -691,6 +703,13 @@ the ceiling costs a cache lookup instead. One wrinkle even then: a stored list
 older than `cacheChannels`'s own max age is refetched by whoever asks for it
 next, `serve` included, so a server left running while the grabs stop still asks
 once a day.
+
+**A list that fails to resolve costs that site, not the guide.** When the lists
+are read again and one site's fails, a `429` say, that site keeps the list it
+resolved last, its channels stay in the guide, and the failure is reported as a
+warning. The list is tried again the next time the lists are read. A site whose
+list has not resolved once since the server started is left out until it does.
+Either way the other sites are served, and `/health` answers for what is held.
 
 The guide streams straight into the response, so nothing is held in memory; a
 consumer that hangs up mid-guide stops the merge feeding it, and is reported as
@@ -731,8 +750,8 @@ falls back to the `Host` header, and treats the connection as `https` when the
 socket itself is TLS. A per-request base is folded into the `ETag` and the
 response says it varies on the headers it was read from, so a consumer is told
 the document changed when it did and a cache in between never hands one host
-another's guide. A fixed base adds neither, being the same document for
-everybody.
+another's guide. A fixed base is in the `ETag` too, since changing it changes
+the guide, but adds no `Vary`, being the same document for everybody.
 
 **For a browser**, set `serve.cors` — `true` for any origin, or one origin to
 allow only it. It is off by default because loopback is not the boundary it
@@ -743,11 +762,13 @@ declines to. Turning it on does the whole job rather than the one header —
 without which a browser cannot read the validator and no conditional GET happens
 at all.
 
-`compress` (`gzip` by default) is used when the request's `Accept-Encoding` names it, and
-`concurrency` (2) bounds how many guides are generated at once — a slot is held
-for the whole response, a slow consumer included, since a merge reads the whole
-cache and a burst of polls that each started one would make a cheap poll the
-most expensive thing on the machine.
+`serve.compress` (`gzip` by default) is used when the request's
+`Accept-Encoding` names it. At most two guides are generated at once — a slot
+is held for the whole response, a slow consumer included, since a merge reads
+the whole cache and a burst of polls that each started one would make a cheap
+poll the most expensive thing on the machine. The two is `concurrency`, an
+option to `serveGuide` and `createGuideHandler` rather than a config field or a
+flag.
 
 **It binds to loopback.** A guide is not a secret, but which sites you grab and
 which channels you watch is not nothing, and a command that listened on every
@@ -798,9 +819,10 @@ export default defineConfig({
 Return the server you are listening on — `app.listen()` gives you one, as does
 `fastify.server` — and `epg serve` waits for it to be bound before it reports a
 url. Mount the paths the handler gives you rather than writing your own, or
-`serve.path`, `serve.health` and `--path` stop meaning anything to whoever runs
-the command. `keepAliveMs` is not applied to a server this package did not
-make.
+`serve.path`, `serve.health`, `--serve-path` and `--health`/`--no-health` stop
+meaning anything to whoever runs the command. The 65-second keep-alive
+[above](#serving-the-guide) — `keepAliveMs`, an option to `serveGuide` rather
+than a config field — is not applied to a server this package did not make.
 
 **Where stopping is more than closing a socket**, return `{ server, close }`
 instead of the bare server — which a fastify instance already is, so there it
@@ -878,13 +900,13 @@ process.on('SIGINT', () => void handler.close());  // yours to close
 
 `handler.node(route?)`, `handler.fastify(route?)` and `handler.fetch(route?)`
 build a handler for one answer — `'guide'` or `'health'` — wherever you mount
-it. With no route they
-route by path instead and answer anything else with a 404, which is what makes
-`createServer(handler.node())` a whole server and `app.use(handler.node())`
-wrong for an app with routes of its own. Underneath both is
-`handler.answer(request)`, which takes a method, a path, headers and a signal
-and returns `{ status, headers, body }` with nothing of any transport in it —
-that is the seam a framework nobody here has heard of is adapted at.
+it. With no route they route by path instead and answer anything else with a
+404, which is what makes `createServer(handler.node())` a whole server and
+`app.use(handler.node())` wrong for an app with routes of its own. Underneath
+all three is `handler.answer(request)`, which takes a method, a url — or a
+route, for an app that has routed already — headers and a signal, and returns
+`{ status, headers, body }` with nothing of any transport in it — that is the
+seam a framework nobody here has heard of is adapted at.
 
 A mounted handler is the whole of a served guide: the same ETags, the same
 snapshot of the channel lists, the same concurrency limit, and the scheduled
@@ -960,16 +982,23 @@ epg serve --grab-every 6h             # at startup, then every six hours
 import { defineConfig, grabEvery } from 'epg-tools';
 
 export default defineConfig({
+  // ...
   serve: { grab: grabEvery('6h', { at: '04:00' }) },
 });
 ```
+
+`at` is a time on the clock of the config's [`timezone`](#which-day-is-today) —
+the process's own zone where there is none — and `grabEvery('1d', { at: '04:00',
+timezone: 'Europe/Bratislava' })` reads it in a zone of its own. Asked of the
+zone rather than added to its midnight, so a night the clocks change still
+grabs at four.
 
 The two halves answer each other. An interval alone **drifts** — restart at
 three in the afternoon and that is when you grab from then on, which is wrong
 when a source publishes overnight. A time of day alone can only mean once a day.
 Together the next run is the earliest `at + n × every` still ahead of now, so
 `--grab-at 04:00` on its own is nightly at four and `--grab-every 6h --grab-at
-04:00` is four-hourly from four.
+04:00` is six-hourly from four.
 
 With **no** `at`, the first run is at startup — which is what "every six hours"
 means for something long-running, and what stops a fresh deployment serving an
@@ -992,6 +1021,7 @@ type NextGrab = (context: {
   from: Date;
   runs: number;
   cached(): Promise<{ present: number; expected: number; grabbedAt?: Date }>;
+  timezone?: string;   // the server's, for a schedule that reads a time of day
 }) => Date | number | undefined | Promise<Date | number | undefined>;
 ```
 
@@ -1016,6 +1046,7 @@ parser — the next timestamp is exactly what a cron library already hands out:
 import { CronExpressionParser } from 'cron-parser';
 
 export default defineConfig({
+  // ...
   serve: {
     grab: ({ from }) =>
       CronExpressionParser.parse('0 4 * * *', { currentDate: from }).next().toDate(),
@@ -1296,6 +1327,17 @@ against a guide of thousands would score a source that is entirely down as a
 rounding error. The summary names those apart (`1 site answered nothing`), and
 they always exit 1.
 
+**One site's channel list failing costs that site, not the run.** `build` grabs
+the other sites and writes the guide from them, and counts the one whose list
+failed among the sites that answered nothing — so the guide is there, and the
+run still exits 1. `grab` counts it the same way, whether it settled the lists
+first, for a selection or a `cover`, or each site resolved its own. `epg merge`
+has no grab to count it in: it leaves the site out with a warning, and writes
+the guide from the rest. A site with a [stored
+list](./site-config.md#keeping-a-fetched-list) whose source simply did not
+answer — a network error, a timeout, a `408`, `425`, `429` or `5xx` — does not
+get this far, and is grabbed and merged with the list it stored last.
+
 A `tv_grab_*` shim reads the same field, for the same reason: it is the config's
 answer, not the command's.
 
@@ -1334,6 +1376,10 @@ Nothing is written. A list it had to fetch is **not** stored, which matters more
 than it sounds: storing one would make the next real run skip a fetch it would
 otherwise have made, so the dry run would have changed the run it was describing.
 
+A site on [another calendar](#which-day-is-today) counts its own days and says
+whose — `over 8 days of UTC's calendar` for a week's window — since covering the
+window takes one more of them. The JSON row carries it as `dayZone`.
+
 The `batching` in brackets is the resolved rule, so a surprising request count
 explains itself — 840 channel-days in 120 requests is a site batching a week at
 a time, and the other one asking per channel-day. Freshness is read from the
@@ -1354,10 +1400,10 @@ that site and grabs the other thirty-nine, so this does the same, and exits
   1 site could not be planned
 ```
 
-Each command is described as it actually behaves, which is not the same for
-both: `build` narrows to [`channels`](#keeping-only-some-channels) before it
-grabs, and `grab` does not narrow at all — so the two can report different
-counts for one config, and each is right about itself.
+Both commands apply the selection — [`channels`](#keeping-only-some-channels)
+or `--channels` — so `grab --dry-run` and `build --dry-run` report the same
+counts for one config. What the report does not apply is `cover`: a channel
+`cover` would leave to one site is counted for every site that offers it.
 
 `--format json` gives the same thing as one document, with `window`, `totals`
 (`failed` included) and a `sites` array — for a CI step that wants to fail when
@@ -1370,6 +1416,49 @@ reports the same and writes no guide.
 `grabbedAt` stamp keep using the real current time and the post-grab prune
 never removes a day inside the window. Negative values work in both the
 `--offset -1` and `--offset=-1` forms.
+
+### Which day is today
+
+A day in the cache is a calendar date, and which zone's calendar is the
+source's business — an XMLTV source files a programme under the day it falls on
+in the offset it was written in, unless its `dayZone` says otherwise. Which of
+those days is *today* is the run's, and `timezone` is how it is said:
+
+```ts
+export default defineConfig({
+  // ...
+  timezone: 'Europe/Bratislava',
+  serve: { grab: grabEvery('24h', { at: '00:30' }) },
+});
+```
+
+Today is where the window starts, which days `alwaysRefetchDays` fetches again,
+what `epg try` asks for and where a prune stops; and the window's days run
+from midnight to midnight on that clock when the guide is
+[clamped](#cleaning-up-the-output) to them. Left out, it is the process's own
+zone — what `TZ` says, and UTC in a container that sets none — and a schedule's
+`at` is read on the same clock, so the two cannot disagree. Set it when the
+machine's clock is not the guide's: a server in UTC grabbing for Bratislava
+would otherwise take half past midnight there for the day before, refetch the
+day that has just ended, and stop a day short.
+
+A source whose days are on another calendar says so with its own
+[`dayZone`](./site-config.md#reference) — Schedules Direct's are always UTC —
+and the run covers its window with that calendar's days: it fetches the ones
+the window's hours fall on, which is one more at one edge, and files their
+programmes into its own days as it merges — the one already on air as the
+window begins included, as a source on the run's calendar would have it. The
+cache keeps them as the source keyed them, and a prune keeps the extra day.
+
+Two things follow from the source's clock being elsewhere. A run east of it
+reaches a day back for the hours between its midnight and the source's, and
+once the source's own midnight has passed too, that day is the source's
+yesterday: a run starting today stops asking for it, and the guide reads what
+the cache already holds. And which of its days `alwaysRefetchDays` fetches
+again goes by the hours rather than the dates — every day of the source's that
+overlaps the run's today and the days after it. At half past midnight in
+Bratislava both UTC days its today spans are refetched, where going by the
+date would refetch only the one that is ending.
 
 ## How caching works
 
@@ -1388,11 +1477,11 @@ run a channel-day is refetched only when:
 - it was written in a shape this version does not read, or
 - the policy says to refetch the whole window (`refetchAll`, i.e. `--refresh`).
 
-That last one is what an entry's own `schema` number is for: it records what the
-entry is, beside when it was grabbed and the version that wrote it, so an upgrade
-that changes how entries are stored refetches them instead of misreading them.
-Nothing migrates — a day of listings costs one request — and no old cache has to
-be deleted by hand.
+A shape this version does not read is what an entry's own `schema` number is
+for: it records what the entry is, beside when it was grabbed and the version
+that wrote it, so an upgrade that changes how entries are stored refetches them
+instead of misreading them. Nothing migrates — a day of listings costs one
+request — and no old cache has to be deleted by hand.
 
 Everything else is served from disk. A run says how many channel-days came back
 empty (`Grab done: 42 fetched (3 empty), …`), since nothing else would: no
@@ -1485,11 +1574,12 @@ What it costs:
   channels. A `tv_grab_*` shim runs its sites in one thread whatever the config
   says, since a thread importing the config would not have the answers in the
   shim's `.conf`.
-- **A channel's `data` must be plain values.** The channel lists settled before
-  the grab (by `--channels`, `cover` or `build`) are copied to the threads. A
-  copy of an instance of a class arrives without its methods, and a date
-  without the offset kept on it, so a site whose channel data holds one is
-  refused with a message rather than failing in every parse.
+- **A channel's `data` is copied.** The channel lists settled before the grab
+  (by `--channels`, `cover` or `build`) are copied to the threads, which is one
+  reason `data` must be [plain values](./site-config.md#a-channel-list-that-has-to-be-fetched)
+  — with or without threads, since a list kept in the cache is copied too. A
+  site whose channel data holds anything else is refused with a message, rather
+  than handed a copy that has lost what made it one.
 - **Writes cost the main thread less, not more.** A thread encodes each
   channel-day with the codec its store names and sends the bytes over, and the
   main thread only stamps and saves them: 3.5ms for 3,500 programmes (2.6 MiB)
@@ -1503,11 +1593,18 @@ What it costs:
 
 What stays on the main thread: the cache, which every site's worker writes
 through, so there is still one writer and any driver works. Also the reporter,
-which hears each site's events as they happen; the channel lists, `cover` and
-`--channels` (settled before the sites start, and handed to each worker); and
-the merge. `localConcurrency` bounds the parsing in each thread, and the cache
-work of all of them together. `loopMaxMs` is the main thread's, so with threads
-it no longer counts what the sites' parsing costs.
+which hears each site's events as they happen, and the merge. The channel lists
+are settled there too, with `cover` and `--channels` applied, and handed to
+each worker — always for `build`, and for `grab` when there is a
+[`channels`](#keeping-only-some-channels) selection or a `cover` that can take
+channels away (`'first'` or a function). Otherwise a thread resolves a site's
+`channels` function itself. A list settled before the grab is fetched through
+the site's own queue, so its `rateLimit` and its hold on a `429` apply to it; a
+site grabbed on the main thread carries on with that same queue and state, but
+a site in a worker starts a queue of its own there, which knows nothing of the
+fetch. `localConcurrency` bounds the parsing in each thread, and the cache work
+of all of them together. `loopMaxMs` is the main thread's, so with threads it
+no longer counts what the sites' parsing costs.
 
 Cancelling a run with threads waits for each site to wind down — to finish the
 write it started, save its state and say what it did — so the summary it
@@ -1818,7 +1915,7 @@ export default defineConfig({
 | `xmltvId` | `string` | **required** | The new channel's id. Nothing else may produce it. |
 | `from` | `string` | **required** | The `xmltvId` it shifts — any site's channel, or another derived channel. |
 | `offset` | `number` | **required** | Minutes, and under a day. `60` is a `+1`; a negative value shifts earlier. |
-| `name` | `string` | the source's name with the shift appended | Its display name. |
+| `name` | `string` | the source's name with the shift appended | Its display name. The shift is appended only for a whole number of hours; any other offset keeps the source's name as it is, and the merge warns. |
 | `logo` | `string` | the source's | An icon of its own. |
 | `lang` | `string` | the source's | The language of `name`. |
 | `channelInfo` | `(element) => XmltvChannel` | — | The last word on the `<channel>` element, given the one this would have emitted. |

@@ -14,11 +14,7 @@
  */
 
 import { ChannelBuilder, ProgrammeBuilder, type ProgrammeOptions } from '../../xmltv/builder.js';
-import {
-  formatDdProgidEpisodeNum,
-  formatXmltvNsEpisodeNum,
-  parseDdProgidEpisodeNum,
-} from '../../xmltv/episode-num.js';
+import { formatDdProgidEpisodeNum, parseDdProgidEpisodeNum } from '../../xmltv/episode-num.js';
 import type { GrabberChannel } from '../types.js';
 import type {
   WireAiring,
@@ -947,23 +943,15 @@ export function buildProgramme(
     element.desc(description.value, description.lang);
   }
 
-  if (programme.season !== undefined && programme.episode !== undefined) {
-    // Both `xmltv_ns` and `onscreen`, in one call.
-    element.episode(programme.episode, programme.season, {
-      ...(programme.part === undefined
-        ? {}
-        : { part: programme.part.number, parts: programme.part.total }),
-    });
-  } else if (programme.season !== undefined) {
-    // A season with no episode beside it — a long-running daytime series, where
-    // the service numbers the run but not the instalment. `xmltv_ns` has a slot
-    // for exactly this: the dimensions it does not know are left empty.
-    element.episodeNum(
-      'xmltv_ns',
-      // Zero-based, as `xmltv_ns` counts: season 75 is written `74 . . `.
-      formatXmltvNsEpisodeNum({ season: { index: programme.season - 1 }, episode: {}, part: {} }),
-    );
-  }
+  // Both `xmltv_ns` and `onscreen`, in one call, and only what the service
+  // numbered: a season with no episode beside it — a long-running daytime
+  // series, where it numbers the run but not the instalment — is `74..`, the
+  // slots `xmltv_ns` does not know left empty, and no `onscreen`.
+  element.episode(programme.episode, programme.season, {
+    ...(programme.part === undefined
+      ? {}
+      : { part: programme.part.number, parts: programme.part.total }),
+  });
 
   // The service's id *is* a `dd_progid`, which is where the convention came
   // from — but only the part of it that parses as one, and never read for an

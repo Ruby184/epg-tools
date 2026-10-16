@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { HTTPError, NetworkError } from 'ky';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   CacheEntryMeta,
@@ -15,9 +16,11 @@ import {
   grab,
   resolveAllowance,
   resolveChannels,
+  resolveSites,
   SiteStateHandle,
   UnchangedError,
 } from '../src/grabber/main.js';
+import { errorMessage } from '../src/core/error.js';
 import type { EpgEvent } from '../src/core/events.js';
 import { collect } from './reporting.js';
 import type {
@@ -849,6 +852,191 @@ describe('grab', () => {
       });
     });
 
+    describe('when fetching it again fails', () => {
+      /** What ky throws for a response with this status. */
+      const refused = (status: number): HTTPError =>
+        new HTTPError(
+          new Response(null, { status }),
+          new Request('https://example.com/channels'),
+          {} as ConstructorParameters<typeof HTTPError>[2],
+        );
+
+      /** A site whose source answers its list once, and fails it after that. */
+      const refusing = (asked: string[], failure: () => unknown = () => refused(429)) =>
+        makeConfig({
+          cacheChannels: { maxAgeDays: 1 },
+          channels: () => {
+            asked.push('fetched');
+
+            if (asked.length > 1) {
+              throw failure();
+            }
+
+            return [channel('one')];
+          },
+        });
+      // Two days on, so the stored list is past its age and the source is asked.
+      const later = new Date(NOW.getTime() + 2 * 86_400_000);
+
+      /** The list stored for `config`, as a first run at `NOW` leaves it. */
+      async function stored(cache: MemoryCache, config: SiteConfig<unknown>): Promise<void> {
+        const state = SiteStateHandle.open(cache, config.site);
+
+        await resolveChannels(config, { state, now: NOW });
+        await state.save();
+      }
+
+      it('uses the list it stored, however old, and says so', async () => {
+        const cache = new MemoryCache();
+        const asked: string[] = [];
+        const warned: string[] = [];
+        const config = refusing(asked);
+        const state = SiteStateHandle.open(cache, config.site);
+
+        await stored(cache, config);
+
+        expect(
+          await resolveChannels(config, {
+            state,
+            now: later,
+            says: { log: () => {}, warn: (message) => warned.push(message) },
+          }),
+        ).toEqual([{ xmltvId: 'one', siteId: 'site-one' }]);
+        await state.save();
+
+        expect(asked).toEqual(['fetched', 'fetched']);
+        expect(warned).toEqual([
+          `could not fetch its channel list, so the one stored ${NOW.toISOString()} is used: ` +
+            'Request failed with status code 429: GET https://example.com/channels',
+        ]);
+        // Not stored again as if it were fetched now, so the next command asks
+        // the source as this one did.
+        expect(cache.state.get('example.com|channels')?.meta?.writtenAt).toBe(NOW.toISOString());
+      });
+
+      it('uses it on a refresh too, since asking is what failed', async () => {
+        const cache = new MemoryCache();
+        const config = refusing([]);
+
+        await stored(cache, config);
+
+        expect(
+          await resolveChannels(config, {
+            state: SiteStateHandle.open(cache, config.site),
+            now: NOW,
+            refresh: true,
+          }),
+        ).toEqual([{ xmltvId: 'one', siteId: 'site-one' }]);
+      });
+
+      it('lets the grab go on with it', async () => {
+        const cache = new MemoryCache();
+        const run = collect();
+        const config = refusing([]);
+
+        await stored(cache, config);
+
+        const summary = await grab([config], { cache, now: later, reporter: run.reporter });
+
+        expect(summary).toMatchObject({ fetched: 1, sitesFailed: 0 });
+        expect(run.of('site:warning').map((event) => event.message)).toEqual([
+          expect.stringContaining('could not fetch its channel list, so the one stored'),
+        ]);
+      });
+
+      // The source did not answer, whatever the site made of it on the way.
+      for (const [said, failure] of [
+        ['a 503', () => refused(503)],
+        [
+          'a network error',
+          () =>
+            new NetworkError(new Request('https://example.com/channels'), {
+              cause: new TypeError('fetch failed'),
+            }),
+        ],
+        [
+          "the site's own error over a network failure",
+          () => new Error('the lineup could not be read', { cause: new TypeError('fetch failed') }),
+        ],
+      ] as const) {
+        it(`uses it after ${said}`, async () => {
+          const cache = new MemoryCache();
+          const config = refusing([], failure);
+
+          await stored(cache, config);
+
+          expect(
+            await resolveChannels(config, {
+              state: SiteStateHandle.open(cache, config.site),
+              now: later,
+            }),
+          ).toEqual([{ xmltvId: 'one', siteId: 'site-one' }]);
+        });
+      }
+
+      // The source answered, and the answer was the trouble: a list from before
+      // it said so would hide what the site is saying.
+      for (const [said, failure, message] of [
+        ['a 404', () => refused(404), 'status code 404'],
+        [
+          "the site's own error",
+          () => new Error('lineup USA-OTA-12345 is not on the account'),
+          'is not on the account',
+        ],
+      ] as const) {
+        it(`fails the site after ${said}`, async () => {
+          const cache = new MemoryCache();
+          const config = refusing([], failure);
+
+          await stored(cache, config);
+
+          await expect(
+            resolveChannels(config, {
+              state: SiteStateHandle.open(cache, config.site),
+              now: later,
+            }),
+          ).rejects.toThrow(message);
+        });
+      }
+
+      it('fails the site when nothing was stored to fall back on', async () => {
+        const config = refusing(['already asked once']);
+
+        await expect(
+          resolveChannels(config, {
+            state: SiteStateHandle.open(new MemoryCache(), config.site),
+            now: NOW,
+          }),
+        ).rejects.toThrow('429');
+      });
+
+      it('fails rather than falls back once the run is cancelled', async () => {
+        const cache = new MemoryCache();
+        const controller = new AbortController();
+        const config = makeConfig({
+          cacheChannels: { maxAgeDays: 1 },
+          channels: () => {
+            controller.abort();
+            throw refused(503);
+          },
+        });
+
+        // A list to fall back on, which only a fetched one is: a list written
+        // out in the config is never stored.
+        await stored(cache, { ...config, channels: () => [channel('one')] });
+
+        // A cancel is not a source that failed: the run is stopping, and a list
+        // handed back here would have it carry on as if nothing had happened.
+        await expect(
+          resolveChannels(config, {
+            state: SiteStateHandle.open(cache, config.site),
+            now: later,
+            signal: controller.signal,
+          }),
+        ).rejects.toThrow('503');
+      });
+    });
+
     it('is fetched again once it is older than the site allows', async () => {
       const cache = new MemoryCache();
       const asked: string[] = [];
@@ -918,6 +1106,181 @@ describe('grab', () => {
       await grab([config], { cache, now: NOW });
 
       expect(asked).toEqual(['fetched']);
+    });
+  });
+
+  describe("a channel's data", () => {
+    /** A site whose one channel carries `data`. */
+    const carrying = (data: unknown) =>
+      makeConfig({ channels: [{ ...channel('one'), data }] as GrabberChannel[] });
+
+    it('is taken as it is when it is plain', async () => {
+      const shared = { region: 'sk' };
+      const data = {
+        name: 'One',
+        number: 1,
+        hd: true,
+        none: null,
+        missing: undefined,
+        groups: ['news', 'sport'],
+        nested: { deeper: [{ id: 'a' }] },
+        // The same object twice is fine: JSON writes it twice.
+        home: shared,
+        away: shared,
+        bare: Object.create(null) as object,
+      };
+
+      expect(await resolveChannels(carrying(data))).toEqual([{ ...channel('one'), data }]);
+    });
+
+    for (const [what, data, said] of [
+      ['a date', { since: new Date(0) }, 'an instance of Date at data.since'],
+      ['a map', { lookup: new Map() }, 'an instance of Map at data.lookup'],
+      ['a function', { parse: () => 1 }, 'a function at data.parse'],
+      ['NaN', { rating: Number.NaN }, 'NaN at data.rating'],
+      ['undefined in a list', { ids: ['a', undefined] }, 'undefined at data.ids[1]'],
+    ] as const) {
+      it(`refuses ${what}, and says where`, async () => {
+        await expect(resolveChannels(carrying(data))).rejects.toThrow(
+          `Site "example.com": channel "one" holds ${said}`,
+        );
+      });
+    }
+
+    it('refuses a circular one', async () => {
+      const data: Record<string, unknown> = {};
+
+      data['self'] = data;
+
+      await expect(resolveChannels(carrying(data))).rejects.toThrow(
+        'a circular reference at data.self',
+      );
+    });
+
+    it('fails the site it belongs to, and no other', async () => {
+      const run = collect();
+      const summary = await grab(
+        [{ ...carrying({ since: new Date(0) }), site: 'dated.example' }, makeConfig()],
+        { cache: new MemoryCache(), now: NOW, reporter: run.reporter },
+      );
+
+      expect(summary).toMatchObject({ fetched: 1, sitesFailed: 1 });
+      expect(run.of('site:failed').map((event) => event.site)).toEqual(['dated.example']);
+    });
+
+    it('refuses a fetched list before it is stored, with nothing stored standing in', async () => {
+      const cache = new MemoryCache();
+      let fetches = 0;
+      const config = makeConfig({
+        cacheChannels: { maxAgeDays: 1 },
+        channels: () => {
+          fetches += 1;
+
+          return [{ ...channel('one'), data: fetches === 1 ? {} : { lookup: new Map() } }];
+        },
+      });
+      const first = SiteStateHandle.open(cache, config.site);
+
+      await resolveChannels(config, { state: first, now: NOW });
+      await first.save();
+
+      // Past the list's age, so the source is asked again — and answers with
+      // something no copy would keep. That is an answer, not a source that did
+      // not give one, so the list from before does not stand in.
+      await expect(
+        resolveChannels(config, {
+          state: SiteStateHandle.open(cache, config.site),
+          now: new Date(NOW.getTime() + 2 * 86_400_000),
+        }),
+      ).rejects.toThrow('an instance of Map at data.lookup');
+      expect(cache.state.get('example.com|channels')?.meta?.writtenAt).toBe(NOW.toISOString());
+    });
+  });
+
+  describe('resolveSites, when one list fails', () => {
+    /** A site whose source refuses its list, counting how often it is asked. */
+    const refusing = (asked: string[]) =>
+      makeConfig({
+        site: 'broken.example',
+        channels: () => {
+          asked.push('channels');
+          throw new Error('Request failed with status code 429');
+        },
+      });
+    const fine = makeConfig({ site: 'fine.example', channels: [channel('one')] });
+
+    it('rejects, with nothing to say what to do instead', async () => {
+      await expect(resolveSites([fine, refusing([])])).rejects.toThrow('429');
+    });
+
+    it('resolves the rest, and leaves out a site it is told to', async () => {
+      const seen: string[] = [];
+      const sites = await resolveSites([fine, refusing([])], {
+        failed: (site, error) => {
+          seen.push(`${site.site}: ${errorMessage(error)}`);
+
+          return undefined;
+        },
+      });
+
+      expect(sites.map((site) => site.site)).toEqual(['fine.example']);
+      expect(seen).toEqual(['broken.example: Request failed with status code 429']);
+    });
+
+    it('puts in its place whatever it is handed', async () => {
+      const held = { ...refusing([]), channels: [channel('held')] };
+      const sites = await resolveSites([fine, refusing([])], { failed: () => held });
+
+      expect(sites.map((site) => site.site)).toEqual(['fine.example', 'broken.example']);
+      expect(sites[1]).toBe(held);
+    });
+
+    it('rejects a cancelled run, whatever it is told', async () => {
+      const controller = new AbortController();
+      const failed = vi.fn();
+      const cancelling = makeConfig({
+        channels: () => {
+          controller.abort();
+          throw new Error('aborted');
+        },
+      });
+
+      await expect(
+        resolveSites([cancelling], { signal: controller.signal, failed }),
+      ).rejects.toThrow('aborted');
+      expect(failed).not.toHaveBeenCalled();
+    });
+
+    it('is handed to a grab, which counts it and asks it nothing', async () => {
+      const asked: string[] = [];
+      const run = collect();
+      const failedSites: { site: string; error: unknown }[] = [];
+      const sites = await resolveSites([fine, refusing(asked)], {
+        failed: (site, error) => {
+          failedSites.push({ site: site.site, error });
+
+          return undefined;
+        },
+      });
+
+      const summary = await grab(sites, {
+        cache: new MemoryCache(),
+        now: NOW,
+        reporter: run.reporter,
+        failedSites,
+      });
+
+      // As a list that failed in the grab's own hands is counted and said.
+      expect(summary).toMatchObject({ fetched: 1, sitesFailed: 1 });
+      expect(
+        run.of('site:failed').map((event) => `${event.site}: ${errorMessage(event.error)}`),
+      ).toEqual(['broken.example: Request failed with status code 429']);
+      expect(run.of('site:done').find((event) => event.site === 'broken.example')).toMatchObject({
+        requests: 0,
+        fetched: 0,
+        sitesFailed: 1,
+      });
+      expect(asked).toEqual(['channels']);
     });
   });
 
@@ -1156,14 +1519,35 @@ describe('grab', () => {
       },
     });
 
-    // The channel list, two days, and the fetch each parse made.
-    expect(done[0]?.requests).toBe(5);
+    // Two days, and the fetch each parse made. Not the channel list, which is
+    // written out in the config and asks the source nothing.
+    expect(done[0]?.requests).toBe(4);
     // Spent waiting on the source, which here is the two sleeps and nothing
     // like the whole site. Not their sum: `Date.now()` rounds down and a timer
     // may fire a touch early, so two five-millisecond sleeps can measure nine
     // — the claim is that the waiting was recorded, not that it was exact.
     expect(done[0]?.requestMs).toBeGreaterThanOrEqual(5);
     expect(done[0]?.ms).toBeGreaterThanOrEqual(done[0]!.requestMs);
+  });
+
+  it('counts a channel list as a request only when it was fetched', async () => {
+    const requests = async (config: SiteConfig<unknown>, cache = new MemoryCache()) => {
+      const run = collect();
+
+      await grab([config], { cache, now: NOW, reporter: run.reporter });
+
+      return run.of('site:done')[0]?.requests;
+    };
+    const cache = new MemoryCache();
+    const fetched = makeConfig({ cacheChannels: true, channels: () => [channel('one.example')] });
+
+    // Asked of the source: one request, then the day.
+    expect(await requests(fetched, cache)).toBe(2);
+    // Still fresh in the cache the next time, so only the day: today's, which
+    // is always asked again.
+    expect(await requests(fetched, cache)).toBe(1);
+    // Written out in the config: the day alone.
+    expect(await requests(makeConfig())).toBe(1);
   });
 
   it('paces a request a parse makes in the site queue, like any other', async () => {

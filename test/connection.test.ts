@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { createRequire } from 'node:module';
 import type { AddressInfo } from 'node:net';
-import ky from 'ky';
+import ky, { type Options as KyOptions } from 'ky';
 import { describe, expect, it } from 'vitest';
 import { siteHttp } from '../src/grabber/channels.js';
 import { siteDispatcher, type UndiciSource } from '../src/grabber/connection.js';
@@ -125,6 +125,32 @@ describe('a site’s connection settings', () => {
     expect(undici.built).toEqual([
       { agent: 'Agent', options: { connect: { ciphers: 'DEFAULT:@SECLEVEL=0' } } },
     ]);
+  });
+
+  it('leaves a dispatcher the site brought through `ky` to be the one used', async () => {
+    const own = { brought: 'by the site' };
+    const seen: unknown[] = [];
+    const http = siteHttp(
+      site({
+        connection: { proxy: 'http://proxy.local:3128' },
+        // Any object will do as the dispatcher: what is checked is which one
+        // reaches `fetch`, not what it does there.
+        ky: {
+          dispatcher: own,
+          retry: 0,
+          fetch: async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+            seen.push((init as { dispatcher?: unknown } | undefined)?.dispatcher);
+
+            return new Response('{}');
+          },
+        } as unknown as KyOptions,
+      }),
+    );
+
+    await http.get('https://example.tv/listing').json();
+
+    // `connection`'s own is never built, so nothing here needs an undici.
+    expect(seen).toEqual([own]);
   });
 
   it('builds it once, however many requests ask for it', async () => {

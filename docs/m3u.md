@@ -84,6 +84,7 @@ Options:
 | `keepUnknownDirectives` | `true` | keep `#` lines the format does not define, rather than dropping them |
 | `maxLineLength` | 1 MiB | the longest line to hold — see [reading a playlist you did not write](#reading-a-playlist-you-did-not-write) |
 | `charset` | `'utf-8'` | what the bytes are encoded in (streaming entry points only) |
+| `signal` | — | stop reading: checked between chunks, handed to the file read, and what destroys an `M3uParseStream` (streaming entry points only) |
 
 RFC 8216 says an unrecognized `#` line "SHOULD be ignored", which is right for a
 player and wrong for anything that will write the playlist back out — ignoring is
@@ -381,7 +382,7 @@ So another dialect is another handler:
 ```ts
 interface M3uTokens<TEvent> {
   tag(tag: M3uTag): void;                 // a `#` line, split into name and value
-  uri(text: string, line: number): void;  // by §4.1, everything else
+  uri(uri: M3uUri): void;                 // by §4.1, everything else: { text, line }
   warn(warning: M3uWarning): void;        // a line too long, or no #EXTM3U
   end(): void;                            // report whatever is unfinished
   readonly events: TEvent[];              // drained by the scanner, per line
@@ -403,7 +404,7 @@ class HlsReader implements M3uTokens<never> {
     // …applies until the next one, so it is simply kept:
     else if (tag.name === 'EXT-X-KEY') this.key = tag.attributes({ separator: ',' });
   }
-  uri(text) { this.playlist.segments.push({ uri: text, key: this.key }); }
+  uri({ text }) { this.playlist.segments.push({ uri: text, key: this.key }); }
   warn(warning) { /* … */ }
   end() { /* EXT-X-TARGETDURATION is REQUIRED — report if it never came */ }
 }

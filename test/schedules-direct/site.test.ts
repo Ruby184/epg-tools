@@ -981,6 +981,20 @@ describe('defineSchedulesDirectSite', () => {
     expect(await cache.read({ site: SITE, channelId: idOf('101'), day: TODAY })).toHaveLength(1);
   });
 
+  it('keeps its days on UTC’s calendar, whatever it is handed', () => {
+    // The service keys its md5s by UTC date, so a run on another calendar
+    // covers its window with the UTC days around it rather than refiling them.
+    const config = defineSchedulesDirectSite({
+      site: SITE,
+      username: 'someone@example.com',
+      password: 'hunter2',
+      lineup: LINEUP,
+      ...({ dayZone: 'Europe/Bratislava' } as object),
+    });
+
+    expect(config.dayZone).toBe('utc');
+  });
+
   it('refuses a site with no way to authenticate', () => {
     expect(() =>
       defineSchedulesDirectSite({

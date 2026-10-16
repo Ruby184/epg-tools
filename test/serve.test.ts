@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { get } from 'node:http';
 import { connect } from 'node:net';
@@ -8,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/types.js';
 import type { EpgConfig } from '../src/config.js';
+import type { EpgEventMap } from '../src/core/events.js';
 import { outputFingerprint, serveGuide, type GuideServer } from '../src/serve/main.js';
 import type { GuideCached, NextGrab } from '../src/serve/schedule.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
@@ -79,6 +81,21 @@ function cacheWith(entries: Record<string, XmltvProgramme[]>): SeededCache {
 }
 
 describe('serveGuide', () => {
+  it('tells the config’s own emitter that it started, as well as the caller', async () => {
+    // What a process manager waiting for readiness listens for, from the one
+    // place a config file can listen: pm2's `wait_ready` on `serve:started`.
+    const heard: string[] = [];
+    const events = new EventEmitter<EpgEventMap>();
+    const run = collect();
+
+    events.on('serve:started', (event) => heard.push(event.url));
+
+    await serve({ ...configFor(['one']), events }, cacheWith({}), { reporter: run.reporter });
+
+    expect(heard).toEqual([expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/guide\.xml$/)]);
+    expect(run.of('serve:started')).toHaveLength(1);
+  });
+
   it('answers a poll that has the guide already with 304 and no body', async () => {
     const cache = cacheWith({ one: [programme('one', 6)] });
     await cache.seed('2026-09-03T04:00:00.000Z');

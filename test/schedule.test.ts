@@ -176,3 +176,62 @@ describe('grabEvery anchored to a time of day', () => {
     expect(() => grabEvery('often')).toThrow(/Invalid grab\.every value/);
   });
 });
+
+describe('grabEvery in a time zone', () => {
+  const BRATISLAVA = 'Europe/Bratislava';
+
+  /** When a schedule says next, as an instant, asked with what a server knows. */
+  async function nextFrom(schedule: NextGrab, from: string, timezone?: string): Promise<string> {
+    const answer = await schedule({
+      from: new Date(from),
+      runs: 1,
+      cached: holding(),
+      ...(timezone === undefined ? {} : { timezone }),
+    });
+
+    return new Date(typeof answer === 'number' ? answer : (answer as Date)).toISOString();
+  }
+
+  it('reads its time of day on that zone’s clock', async () => {
+    // 22:00 in Bratislava: half past midnight there is 22:30 UTC the same day.
+    await expect(
+      nextFrom(grabEvery('1d', { at: '00:30', timezone: BRATISLAVA }), '2026-10-15T20:00:00Z'),
+    ).resolves.toBe('2026-10-15T22:30:00.000Z');
+  });
+
+  it('takes the server’s zone where it was given none of its own', async () => {
+    const nightly = grabEvery('1d', { at: '00:30' });
+
+    await expect(nextFrom(nightly, '2026-10-15T20:00:00Z', BRATISLAVA)).resolves.toBe(
+      '2026-10-15T22:30:00.000Z',
+    );
+    // And the process's own with neither — UTC, as the suite runs.
+    await expect(nextFrom(nightly, '2026-10-15T20:00:00Z')).resolves.toBe(
+      '2026-10-16T00:30:00.000Z',
+    );
+  });
+
+  it('keeps its own zone over the server’s', async () => {
+    await expect(
+      nextFrom(
+        grabEvery('1d', { at: '00:30', timezone: 'UTC' }),
+        '2026-10-15T20:00:00Z',
+        BRATISLAVA,
+      ),
+    ).resolves.toBe('2026-10-16T00:30:00.000Z');
+  });
+
+  it('keeps its hour on a night the clocks change', async () => {
+    // Half past midnight on the night summer time starts at two: four o'clock
+    // is three hours away, not four.
+    await expect(
+      nextFrom(grabEvery('1d', { at: '04:00', timezone: BRATISLAVA }), '2026-03-28T23:30:00Z'),
+    ).resolves.toBe('2026-03-29T02:00:00.000Z');
+  });
+
+  it('refuses a zone that is not one, while the config is being read', () => {
+    expect(() => grabEvery('1d', { at: '00:30', timezone: 'Mars/Olympus' })).toThrow(
+      'grab.timezone must be an IANA time zone',
+    );
+  });
+});

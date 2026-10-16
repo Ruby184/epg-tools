@@ -4,7 +4,9 @@ The `epg-tools/xmltv` entry point is the standalone half of this package: a
 streaming XMLTV parser, a streaming serializer, a fluent builder API for
 constructing guides, and the date helpers that back both. It pulls in nothing
 else — no grabber, no cache, no config loading, and no runtime dependencies —
-so it is usable on its own.
+so it is usable on its own. The one thing it loads from the rest of the package
+is `GrabberError`, which the serializer throws for a bad
+[`baseUrl`](#serializing), and whose module imports nothing itself.
 
 ```ts
 import { parseXmltvFile, writeXmltvToFile } from 'epg-tools/xmltv';
@@ -169,8 +171,10 @@ Parsing stops **between chunks** and writing **between elements** — a check pe
 event would sit in the middle of the hot loop, and a 512 KiB read is a
 millisecond of it. What cancelling promises is that the rest of the file is
 never read: `parseXmltvFile` hands the signal to `fs`, so the descriptor closes
-with it rather than waiting to be collected, and `writeXmltvToFile` discards
-what it had written. The two `Transform`s take the signal the way any Node
+with it rather than waiting to be collected. `writeXmltvToFile` goes further: a
+write that does not finish — cancelled, or failed part way — takes the file
+with it, since half a document is not a guide and nothing should come along
+later and read it as one. The two `Transform`s take the signal the way any Node
 stream does — they are destroyed with an `AbortError` whose `cause` is the
 reason, which is what the rest of a `pipeline()` around them is waiting to hear.
 
@@ -187,7 +191,7 @@ nothing to interrupt.
 | `tolerateMissingId` | `boolean` | `false` | Keep a `<channel>` with no `id`, or a `<programme>` with no `channel`, instead of dropping it — the missing attribute is left as `""`. For a single-channel feed that omits the reference everywhere, leaving the merge layer to attach them to the one known channel. |
 | `rootScanLimit` | `number` | `1_048_576` (1 MiB) | How many characters are buffered while looking for the root `<tv>` before giving up with a `TypeError`. Guards against unbounded buffering of a non-XML or headerless stream: raise it for an unusually large preamble, lower it to fail faster on untrusted input. |
 | `channels` | `ReadonlySet<string> \| (id) => boolean` | every channel | Only these channels: a `<channel>` whose `id`, or a `<programme>` whose `channel`, is not among them is stepped over without being built — no event, and no warning about anything inside it. Building a programme is nearly all of what parsing costs, so reading one channel of a hundred takes about a tenth of the time of reading them all. An element naming no channel is handled as it always is: dropped with a warning, or kept by `tolerateMissingId` and then asked about as `""`. |
-| `timezones` | `Record<string, number>` | — | Named timezone abbreviations → UTC offset in minutes, **UPPERCASE keys**: `{ BST: 60, CET: 60, CEST: 120 }`. `GMT`/`UTC`/`UT`/`Z` are always understood; any other named zone must be listed here or the datetime is dropped with a warning naming the unknown zone, so an unmapped abbreviation is surfaced and fixed rather than silently assumed to be UTC. Numeric `±HHMM` offsets never need this. |
+| `timezones` | `XmltvTimezoneOffsets` | — | Named timezone abbreviations → UTC offset in minutes, or a `(wall: Date) => number` that works the offset out for the moment asked about — which is what [`xmltvZone()`](#named-zones) returns, for an abbreviation that names a place. **UPPERCASE keys**: `{ BST: 60, CEST: 120, CET: xmltvZone('Europe/Prague') }`. `GMT`/`UTC`/`UT`/`Z` are always understood; any other named zone must be listed here or the datetime is dropped with a warning naming the unknown zone, so an unmapped abbreviation is surfaced and fixed rather than silently assumed to be UTC. Numeric `±HHMM` offsets never need this. |
 
 ### Warnings
 
@@ -218,7 +222,9 @@ What is tolerated, and how:
   **first** value and ignores the repeat
 - truncated input is detected and reported rather than silently accepted
 
-Only a document with no root `<tv>` inside `rootScanLimit` throws.
+Only two things throw, both with a `TypeError`: a document whose root element is
+anything other than `<tv>`, as soon as that element is read, and one with no
+root `<tv>` inside `rootScanLimit`.
 
 ### Provider extensions
 
@@ -353,7 +359,9 @@ that belong to it, so nothing between them has to know about them.
 |---|---|---|---|
 | `indent` | `string \| number` | omitted — **compact** | Pretty-print with this indentation, mirroring `JSON.stringify`: a number of spaces or a literal string like `'\t'`. Compact output has no whitespace between elements at all, which is smaller and what a machine consumer like tvheadend wants. |
 | `extensions` | `boolean \| string[] \| ExtensionFilter` | `true` — **all of them** | Which [provider extensions](#provider-extensions) are written. `false` leaves every one out, which is what makes the document valid against the DTD; an array keeps only the names it lists; a filter decides one at a time. See [leaving extensions out](#leaving-extensions-out). |
-| `highWaterMark` | `number` | Node's stream default (16 KiB before Node 22, 64 KiB since) | For `writeXmltvStream`, how many characters accumulate before a chunk is yielded — one yield per batch, not per element, since a generator has no buffer of its own. For `XmltvSerializeStream` it is simply the readable `highWaterMark`. Ignored by the per-element serializers. |
+| `profile` | `'tvheadend' \| 'jellyfin' \| OutputProfile` | none — the document as it has always been written | Shape the document for the consumer that reads it: which `<episode-num>` systems go out and in what order, what a `<category>` is called, how many of a repeated element are kept, which optional elements are left out. A name this package ships, or a profile of your own — see [output profiles](./configuration.md#output-profiles). It shapes what the DTD describes, so `extensions: false` still removes a profile's `eit` code. |
+| `baseUrl` | `string \| URL` | none | Resolve every relative `<icon src>`, `<image>` and `<url>` against this. One that already says where it is (`https://`, a `data:`) is left exactly as it came, and a protocol-relative `//cdn/x.png` keeps its host and takes the base's scheme. A `URL` is taken as it is. A string must be an absolute url, and one that is not throws a `GrabberError` rather than quietly resolving nothing. See [serving the guide](./configuration.md#serving-the-guide). |
+| `highWaterMark` | `number` | Node's stream default (64 KiB) | For `writeXmltvStream`, how many characters accumulate before a chunk is yielded — one yield per batch, not per element, since a generator has no buffer of its own. For `XmltvSerializeStream` it is simply the readable `highWaterMark`. Ignored by the per-element serializers. |
 
 ```ts
 writeXmltvStream(input, { indent: 2 });     // two-space pretty-print
@@ -384,9 +392,10 @@ It reports two kinds of thing: [the warnings the parser already
 emits](#warnings), with the line and column each was found at, and what only the
 whole document shows — a `<programme>` naming a channel no `<channel>`
 describes, two programmes on one channel on at the same moment, two channels
-sharing an id, a `<programme>` with no `<title>`, a programme that stops before
-it starts, and [provider extensions](#provider-extensions), found by walking the
-model rather than by a list of the places they can hide.
+sharing an id, a `<programme>` with no `<title>` or a `<channel>` with no
+`<display-name>`, a programme that stops before it starts, and
+[provider extensions](#provider-extensions), found by walking the model rather
+than by a list of the places they can hide.
 
 Findings are grouped **by rule, not by occurrence**, and each keeps a few
 `examples` (`maxExamples`, five by default) — the *commonest* kinds it tripped
@@ -418,7 +427,8 @@ import { pipeline } from 'node:stream/promises';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { XmltvParseStream, XmltvSerializeStream } from 'epg-tools/xmltv';
 
-// Bytes → parse events ({ type: 'meta' | 'channel' | 'programme' | 'warning', value }):
+// Bytes → parse events
+// ({ type: 'meta' | 'processing-instruction' | 'channel' | 'programme' | 'warning', value }):
 await pipeline(createReadStream('guide.xml'), new XmltvParseStream(), async (events) => {
   for await (const event of events) { /* … */ }
 });
@@ -469,10 +479,30 @@ const programme = new ProgrammeBuilder({
   .stop('20260717203000 +0200')
   .desc('The day in review.')
   .category('News')
-  .episode(3, 2)                 // episode 3, season 2 → an xmltv_ns episode-num
+  .episode(3, 2)                 // episode 3, season 2 → xmltv_ns 1.2.0/1 and onscreen S02E03
   .actor('Jane Doe', { role: 'Presenter' })
   .build();
 ```
+
+The default `lang` reaches every text element but one: `.country()` is a code,
+not prose, so it carries a `lang` only when given one —
+`<country lang="sk">US</country>` would say an ISO 3166 code is Slovak.
+
+`.episode(episode, season?, options?)` writes the numbers it is given and no
+others. One the source did not give — left out, `null`, `NaN`, or not a whole
+number above zero — is left empty rather than guessed: `.episode(177)` is
+`xmltv_ns` `.176.0/1` and `onscreen` `E177`, a season alone is `74..` with no
+`onscreen` (it has no form for one), and neither writes nothing at all. A
+season made up as `1` would be a claim the source never made, and one a
+consumer shows; before 0.8.0 it was the default.
+
+A time the builder cannot read is handled by what the field is. `start` is
+required, so a bad one always throws. The rest can be done without, so the
+constructor's `warn` decides: with one, an unreadable `stop`, `date`,
+`pdc-start`, `vps-start` or previously-shown `start` is left out and reported
+through it; without one it throws, since a field that vanishes with nothing
+said is worse than one that stops the run. The `programme` factory a site's
+`parseDay` is handed already carries the site's `warn`.
 
 `XmltvDocumentBuilder` assembles a whole guide. Root `<tv>` attributes go in
 through `meta()` (merging, later calls win per field) or the shortcuts
@@ -510,7 +540,7 @@ Four ways out, so the document suits whichever consumer you have:
 
 | method | gives |
 |---|---|
-| `.build()` | `{ meta, channels, programmes }` — the input `writeXmltvStream` / `writeXmltvToFile` take |
+| `.build()` | `{ meta, processingInstructions, channels, programmes }` — the input `writeXmltvStream` / `writeXmltvToFile` take |
 | `.toXml(options?)` | the whole document as one XML string |
 | `.toStream(options?)` | a Node `Readable` of XML chunks, ready to pipe |
 | `.toEvents()` | tagged `{ type, value }` events — what `XmltvSerializeStream` consumes and the parser emits |
@@ -542,7 +572,10 @@ and shape.
 
 `DateInput` — accepted by `xmltvDate` and everywhere the builders take a time
 — is a `Date` (any preserved flags carry over), an XMLTV datetime string, or a
-**unix timestamp in seconds** (pass milliseconds as `new Date(ms)`).
+number. A number is a **unix timestamp in seconds** (pass milliseconds as
+`new Date(ms)`), except at four, six or eight digits, where it is a calendar
+date: `2025` is the year, as `'2025'` is, and `20250102` a day — which is what
+a source means when its JSON says `{ year: 2025 }`.
 
 ```ts
 import { parseXmltvDate, formatXmltvDate, xmltvDate } from 'epg-tools/xmltv';

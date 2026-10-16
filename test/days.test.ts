@@ -1,0 +1,137 @@
+import { describe, expect, it } from 'vitest';
+import {
+  dayIn,
+  daysCovering,
+  localTimeZone,
+  resolveTimeZone,
+  wallTimeIn,
+} from '../src/core/days.js';
+import { siteDayZone, siteWindow } from '../src/grabber/site.js';
+import type { SiteConfig } from '../src/grabber/types.js';
+
+const BRATISLAVA = 'Europe/Bratislava';
+
+describe('which day it is', () => {
+  // Half past midnight in Bratislava in summer, which is still the day before
+  // on UTC's calendar — the night homepi's grab started a day late.
+  const halfPastMidnight = new Date('2026-07-16T22:30:00.000Z');
+
+  it('is the day on the zone’s own calendar', () => {
+    expect(dayIn(halfPastMidnight, BRATISLAVA)).toBe('2026-07-17');
+    expect(dayIn(halfPastMidnight, 'UTC')).toBe('2026-07-16');
+  });
+
+  it('is the process’s own zone where none is said', () => {
+    // The suite runs in UTC; see `vitest.config.ts`.
+    expect(localTimeZone()).toBe('UTC');
+    expect(dayIn(halfPastMidnight)).toBe('2026-07-16');
+  });
+});
+
+describe('when a time of day happens', () => {
+  it('is that time on the zone’s clock', () => {
+    // Midnight in summer is 22:00 the evening before in UTC.
+    expect(new Date(wallTimeIn('2026-07-17', BRATISLAVA)).toISOString()).toBe(
+      '2026-07-16T22:00:00.000Z',
+    );
+    expect(new Date(wallTimeIn('2026-07-17', BRATISLAVA, 30)).toISOString()).toBe(
+      '2026-07-16T22:30:00.000Z',
+    );
+  });
+
+  it('is asked of the zone on a night the clocks change, not added to midnight', () => {
+    // The clocks went forward at two that morning, so four o'clock is three
+    // hours after midnight there, not four.
+    expect(new Date(wallTimeIn('2026-03-29', BRATISLAVA, 4 * 60)).toISOString()).toBe(
+      '2026-03-29T02:00:00.000Z',
+    );
+  });
+});
+
+describe('a zone a run is given', () => {
+  it('is taken when it is one', () => {
+    expect(resolveTimeZone(BRATISLAVA)).toBe(BRATISLAVA);
+  });
+
+  it('is the process’s own when none is given', () => {
+    expect(resolveTimeZone(undefined)).toBe(localTimeZone());
+  });
+
+  it('is refused naming the setting when it is not one', () => {
+    expect(() => resolveTimeZone('Mars/Olympus', 'serve.timezone')).toThrow(
+      'serve.timezone must be an IANA time zone such as "Europe/Bratislava" (got "Mars/Olympus")',
+    );
+  });
+});
+
+describe('the days of another calendar a run covers', () => {
+  it('reaches back a day where the other clock is behind', () => {
+    // Bratislava's 17th starts at 22:00 UTC on the 16th.
+    expect(daysCovering(['2026-07-17'], BRATISLAVA, 'UTC')).toEqual(['2026-07-16', '2026-07-17']);
+  });
+
+  it('reaches on a day where it is ahead', () => {
+    // New York's 17th ends at 04:00 UTC on the 18th.
+    expect(daysCovering(['2026-07-17'], 'America/New_York', 'UTC')).toEqual([
+      '2026-07-17',
+      '2026-07-18',
+    ]);
+  });
+
+  it('adds one day to a window, not one to each of its days', () => {
+    expect(daysCovering(['2026-07-17', '2026-07-18', '2026-07-19'], BRATISLAVA, 'UTC')).toEqual([
+      '2026-07-16',
+      '2026-07-17',
+      '2026-07-18',
+      '2026-07-19',
+    ]);
+  });
+
+  it('is the run’s own days on the run’s own calendar', () => {
+    expect(daysCovering(['2026-07-17'], BRATISLAVA, BRATISLAVA)).toEqual(['2026-07-17']);
+  });
+});
+
+describe('the days a run asks a site for', () => {
+  /** Only what the window reads of a site: which calendar it keeps. */
+  const keeping = (dayZone: string): SiteConfig<unknown> =>
+    ({ site: 'example.com', dayZone }) as SiteConfig<unknown>;
+
+  it('reaches back a day while that day is still the source’s today', () => {
+    // Half past midnight in Bratislava, 22:30 on the 16th in UTC.
+    const now = new Date('2026-07-16T22:30:00.000Z');
+
+    expect(siteWindow(keeping('utc'), '2026-07-17', 1, BRATISLAVA, now)).toEqual([
+      '2026-07-16',
+      '2026-07-17',
+    ]);
+  });
+
+  it('stops once the source’s own midnight has passed', () => {
+    const now = new Date('2026-07-17T01:00:00.000Z');
+
+    expect(siteWindow(keeping('utc'), '2026-07-17', 1, BRATISLAVA, now)).toEqual(['2026-07-17']);
+  });
+
+  it('keeps every day it covers for a window asked of the past', () => {
+    const now = new Date('2026-07-17T01:00:00.000Z');
+
+    expect(siteWindow(keeping('utc'), '2026-07-16', 1, BRATISLAVA, now)).toEqual([
+      '2026-07-15',
+      '2026-07-16',
+    ]);
+  });
+
+  it('takes another name for the run’s own zone for the run’s own calendar', () => {
+    // So the guide reads its days as a source's own, after-midnight programmes
+    // of a day that runs 06:00 to 06:00 included, rather than refiling them.
+    expect(siteDayZone(keeping('Etc/UTC'), 'UTC')).toBe('UTC');
+    expect(siteDayZone(keeping('utc'), 'Etc/UTC')).toBe('Etc/UTC');
+  });
+
+  it('reads a zone that is not one as the run’s, leaving refusing it to the site', () => {
+    expect(siteWindow(keeping('Mars/Olympus'), '2026-07-17', 1, BRATISLAVA)).toEqual([
+      '2026-07-17',
+    ]);
+  });
+});

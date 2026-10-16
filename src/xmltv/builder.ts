@@ -534,10 +534,26 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
    * `onscreen` entries. `opts` fills the `xmltv_ns` totals/parts, e.g.
    * `.episode(6, 2, { episodes: 13 })` -> `1.5/13.0/1` and `S02E06`. A
    * multi-part episode (`{ part: 1, parts: 2 }`) also shows on `onscreen` as
-   * `S02E06 (1/2)`.
+   * `S02E06 P1/2`.
+   *
+   * A number the source did not give — `undefined`, `null`, `NaN`, or nothing
+   * above zero, as an API that sends `"seasonNumber": null` gives it — is left
+   * out rather than guessed: `.episode(177)` is `.176.0/1` and `E177`, a season
+   * alone is `74..` with no `onscreen`, and neither is nothing at all. A season
+   * made up as `1` would be a claim the source never made, and one a consumer
+   * shows.
    */
-  episode(episode: number | string, season: number | string = 1, opts: EpisodeOptions = {}): this {
-    (this.#programme.episodeNum ??= []).push(...this.#episodeNumbers(episode, season, opts));
+  episode(
+    episode?: number | string | null,
+    season?: number | string | null,
+    opts: EpisodeOptions = {},
+  ): this {
+    const numbers = this.#episodeNumbers(episode, season, opts);
+
+    if (numbers.length > 0) {
+      (this.#programme.episodeNum ??= []).push(...numbers);
+    }
+
     return this;
   }
 
@@ -844,30 +860,56 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
   }
 
   /** Builds both `xmltv_ns` (0-based) and `onscreen` entries from 1-based season/episode numbers. */
+  /**
+   * A 1-based number as the 0-based index both wire formats use — or nothing,
+   * for one the source did not give: missing, `null`, not a whole number, or
+   * not above zero.
+   */
+  #index(value: number | string | null | undefined): number | undefined {
+    if (value === undefined || value === null || value === '') {
+      return undefined;
+    }
+
+    const number = Number(value);
+
+    return Number.isInteger(number) && number > 0 ? number - 1 : undefined;
+  }
+
   #episodeNumbers(
-    episode: number | string,
-    season: number | string,
+    episode: number | string | null | undefined,
+    season: number | string | null | undefined,
     opts: EpisodeOptions,
   ): XmltvEpisodeNum[] {
+    const seasonIndex = this.#index(season);
+    const episodeIndex = this.#index(episode);
+
+    if (seasonIndex === undefined && episodeIndex === undefined) {
+      return [];
+    }
+
     // The 1-based numbers a caller gives, as the 0-based indices both wire
-    // formats use. An unspecified part means "part 1 of 1" (`0/1`).
+    // formats use — and an empty slot where it gave none, which is how
+    // `xmltv_ns` says "not known". An unspecified part means "part 1 of 1"
+    // (`0/1`), of an episode: with no episode there is no part to number.
     const numbers: EpisodeNumbers = {
       season: {
-        index: Number(season) - 1,
+        ...(seasonIndex === undefined ? {} : { index: seasonIndex }),
         ...(opts.seasons === undefined ? {} : { total: opts.seasons }),
       },
       episode: {
-        index: Number(episode) - 1,
+        ...(episodeIndex === undefined ? {} : { index: episodeIndex }),
         ...(opts.episodes === undefined ? {} : { total: opts.episodes }),
       },
-      part: { index: (opts.part ?? 1) - 1, total: opts.parts ?? 1 },
+      part:
+        episodeIndex === undefined ? {} : { index: (opts.part ?? 1) - 1, total: opts.parts ?? 1 },
     };
+    // Undefined where there is no episode to name: `onscreen` has no form for a
+    // season alone.
+    const onscreen = formatOnscreenEpisodeNum(numbers);
 
     return [
       { system: 'xmltv_ns', value: formatXmltvNsEpisodeNum(numbers) },
-      // Only ever undefined for numbers that name no episode, and `episode` is
-      // this method's required argument.
-      { system: 'onscreen', value: formatOnscreenEpisodeNum(numbers)! },
+      ...(onscreen === undefined ? [] : [{ system: 'onscreen', value: onscreen }]),
     ];
   }
 }

@@ -8,8 +8,9 @@
  */
 
 import PQueue from 'p-queue';
-import { toDayString } from '../core/days.js';
+import { dayIn, resolveTimeZone } from '../core/days.js';
 import { emitter, type GrabCounts, watchEventLoop } from '../core/events.js';
+import type { SiteSession } from './session.js';
 import { SiteRun, type Run } from './site-run.js';
 import { SiteThreads, threadCount } from './thread.js';
 import type { AnySiteConfig, GrabOptions, GrabSummary } from './types.js';
@@ -23,9 +24,24 @@ import type { AnySiteConfig, GrabOptions, GrabSummary } from './types.js';
 const DEFAULT_LOCAL_CONCURRENCY = 16;
 
 export async function grab(configs: AnySiteConfig[], options: GrabOptions): Promise<GrabSummary> {
+  return grabWith(configs, options, new Map());
+}
+
+/**
+ * {@link grab}, carrying on with the sessions a run opened while it settled the
+ * sites' lists — so a list fetch and the requests after it share one queue,
+ * one hold on a `429` and one state. A site on this thread only: a session is a
+ * queue and a timer, and neither crosses to a worker.
+ */
+export async function grabWith(
+  configs: AnySiteConfig[],
+  options: GrabOptions,
+  sessions: ReadonlyMap<string, SiteSession>,
+): Promise<GrabSummary> {
   // Before anything starts, rather than once per site that then cannot — it
   // throws when there are threads to start and no module to start them on.
   const threadsWanted = threadCount(options.threads, options.configModule);
+  const timeZone = resolveTimeZone(options.timezone);
   const threads =
     threadsWanted === 0 ? undefined : SiteThreads.for(threadsWanted, options.configModule!);
   /** Every site running in a thread, so a cancelled run can wait for them — see below. */
@@ -96,13 +112,34 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
     cache,
     now,
     grabbedAt: now.toISOString(),
-    startDay: options.startDay ?? toDayString(now),
+    startDay: options.startDay ?? dayIn(now, timeZone),
+    timeZone,
     emit,
     ...(signal ? { signal } : {}),
     localWork,
     enqueue,
     tally,
   };
+
+  // Said first, and the way a site says it when its list fails in its own turn,
+  // so a run whose caller settled the lists reads the same as one that did not.
+  for (const failed of options.failedSites ?? []) {
+    tally.sitesFailed++;
+    emit({ type: 'site:failed', site: failed.site, error: failed.error });
+    emit({
+      type: 'site:done',
+      site: failed.site,
+      requests: 0,
+      ms: 0,
+      requestMs: 0,
+      fetched: 0,
+      empty: 0,
+      fromCache: 0,
+      unchanged: 0,
+      failed: 0,
+      sitesFailed: 1,
+    });
+  }
 
   const sites = new PQueue({ concurrency: Math.max(1, options.siteConcurrency ?? configs.length) });
 
@@ -114,7 +151,7 @@ export async function grab(configs: AnySiteConfig[], options: GrabOptions): Prom
           // has a queue or a client to let go of — and one in a thread rejects
           // the same way, for that or for a config its thread could not read.
           if (threads === undefined) {
-            await new SiteRun(config, run).run();
+            await new SiteRun(config, run, sessions.get(config.site)).run();
           } else {
             const site = threads.run(config, run);
 

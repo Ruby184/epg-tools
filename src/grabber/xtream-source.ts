@@ -411,6 +411,8 @@ export function defineXtreamSite(
 
   return defineSiteConfig<XtreamProgramme[], 'days', XtreamChannel>({
     ...site,
+    // The calendar its days are filed on, which a run on another covers.
+    dayZone,
     ky: kyWith(site.ky, (existing) => ({
       ...existing,
       prefix: url,

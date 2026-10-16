@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Writable } from 'node:stream';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { tryChannelDay } from '../src/cli/try.js';
 import type { EpgConfig } from '../src/config.js';
 import { defineSiteConfig, defineStreamSiteConfig } from '../src/grabber/types.js';
@@ -351,5 +351,55 @@ describe('epg try', () => {
     } as unknown as AnySiteConfig);
 
     await expect(run(config, 'example.tv', 'one')).rejects.toThrow(/must define request/);
+  });
+
+  describe('with no day given', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** The first line, naming the day tried — at `now`, for a UTC-day site in Bratislava. */
+    async function firstLine(now: string): Promise<string> {
+      // Only the clock: the site makes no request, and nothing here waits.
+      vi.useFakeTimers({ toFake: ['Date'], now: new Date(now) });
+
+      const stdout = new Sink();
+
+      await tryChannelDay(
+        {
+          ...configWith(
+            defineSiteConfig<{ day: string }>({
+              site: 'example.tv',
+              channels: [{ xmltvId: 'one.example.tv', siteId: '1', name: 'One' }],
+              dayZone: 'utc',
+              request: async ({ day }) => ({ day }),
+              parseDay: ({ payload, programme }) => [
+                programme(new Date(`${payload.day}T12:00:00.000Z`), 'Noon'),
+              ],
+            }),
+          ),
+          timezone: 'Europe/Bratislava',
+        },
+        'example.tv',
+        'one.example.tv',
+        stdout,
+      );
+
+      return stdout.text.split('\n')[0]!;
+    }
+
+    it('tries the first day a run would ask the site for', async () => {
+      // Half past midnight on the 17th in Bratislava: the run's window starts
+      // with the UTC 16th, which holds its first two hours.
+      expect(await firstLine('2026-07-16T22:30:00.000Z')).toBe(
+        'example.tv → one.example.tv on 2026-07-16',
+      );
+    });
+
+    it('tries the site’s today once UTC’s midnight has passed too', async () => {
+      expect(await firstLine('2026-07-17T01:00:00.000Z')).toBe(
+        'example.tv → one.example.tv on 2026-07-17',
+      );
+    });
   });
 });

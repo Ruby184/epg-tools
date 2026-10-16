@@ -1,5 +1,5 @@
 import { createWriteStream } from 'node:fs';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { getDefaultHighWaterMark, Readable, Transform, type TransformCallback } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -79,7 +79,7 @@ export interface SerializeOptions {
    * pushes each element and lets its readable buffer coalesce them, so there
    * this is simply the readable `highWaterMark`. Ignored by the per-element
    * {@link serializeChannel} / {@link serializeProgramme}. Defaults to Node's
-   * stream `highWaterMark` (16 KiB before Node 22, 64 KiB since).
+   * stream `highWaterMark` (64 KiB).
    */
   highWaterMark?: number;
   /**
@@ -1033,10 +1033,10 @@ export interface XmltvStreamInput {
 
 /**
  * Default streaming batch size — Node's own default stream `highWaterMark`
- * (16 KiB before Node 22, 64 KiB since), so `writeXmltvStream`'s batching and
- * `XmltvSerializeStream`'s readable buffer use one consistent size that tracks
- * the runtime. Benchmarks show throughput is flat from 16 KiB to 1 MiB, so the
- * value is about matching Node, not tuning.
+ * (64 KiB), so `writeXmltvStream`'s batching and `XmltvSerializeStream`'s
+ * readable buffer use one consistent size that tracks the runtime. Benchmarks
+ * show throughput is flat from 16 KiB to 1 MiB, so the value is about matching
+ * Node, not tuning.
  */
 const DEFAULT_HIGH_WATER_MARK = getDefaultHighWaterMark(false);
 
@@ -1209,16 +1209,29 @@ export async function* writeXmltvStream(
   if (pending) yield pending;
 }
 
-/** Stream an XMLTV document to a file (parent directories are created). */
+/**
+ * Stream an XMLTV document to a file (parent directories are created).
+ *
+ * A write that does not finish — cancelled, or failed part way — takes the file
+ * with it: half a document is not one, and nothing should come along later and
+ * read it as a guide.
+ */
 export async function writeXmltvToFile(
   filePath: string,
   input: XmltvStreamInput,
   options?: WriteOptions,
 ): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
-  await pipeline(Readable.from(writeXmltvStream(input, options)), createWriteStream(filePath), {
-    signal: options?.signal,
-  });
+
+  try {
+    await pipeline(Readable.from(writeXmltvStream(input, options)), createWriteStream(filePath), {
+      signal: options?.signal,
+    });
+  } catch (error) {
+    await rm(filePath, { force: true });
+
+    throw error;
+  }
 }
 
 export interface SerializeStreamOptions extends WriteOptions {

@@ -157,19 +157,37 @@ describe('ProgrammeBuilder', () => {
     ]);
   });
 
-  it('defaults season to 1 when omitted', () => {
-    const programme = new ProgrammeBuilder({
-      channel: 'c',
-      start: '20260717200000 +0000',
-      title: 'T',
-    })
-      .episode(5)
-      .build();
+  describe('a number the source did not give', () => {
+    const numbers = (...args: Parameters<ProgrammeBuilder['episode']>) =>
+      new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
+        .episode(...args)
+        .build().episodeNum;
 
-    expect(programme.episodeNum).toEqual([
-      { system: 'xmltv_ns', value: '0.4.0/1' },
-      { system: 'onscreen', value: 'S01E05' },
-    ]);
+    it('leaves the season out rather than making one up', () => {
+      // Season 1 was the default, which wrote S01 for every series a source
+      // numbers by episode alone — a claim the source never made.
+      expect(numbers(177)).toEqual([
+        { system: 'xmltv_ns', value: '.176.0/1' },
+        { system: 'onscreen', value: 'E177' },
+      ]);
+      // As an API sends it: `"seasonNumber": null`, `"episodeId": "177"`.
+      expect(numbers('177', null)).toEqual(numbers(177));
+    });
+
+    it('takes one that is not a whole number above zero as not given', () => {
+      for (const season of [0, -1, Number.NaN, 1.5, '', 'x']) {
+        expect(numbers(177, season)).toEqual(numbers(177));
+      }
+    });
+
+    it('writes a season alone, which onscreen has no form for', () => {
+      expect(numbers(null, 75)).toEqual([{ system: 'xmltv_ns', value: '74..' }]);
+    });
+
+    it('writes nothing for neither', () => {
+      expect(numbers(null, null)).toBeUndefined();
+      expect(numbers()).toBeUndefined();
+    });
   });
 
   it('adds xmltv_ns episode/season totals and part counts via options', () => {
@@ -240,8 +258,8 @@ describe('ProgrammeBuilder', () => {
 
     expect(programme.episodeNum).toEqual([
       { system: 'dd_progid', value: 'EP01006886.0028' },
-      { system: 'xmltv_ns', value: '0.4.0/1' },
-      { system: 'onscreen', value: 'S01E05' },
+      { system: 'xmltv_ns', value: '.4.0/1' },
+      { system: 'onscreen', value: 'E5' },
     ]);
   });
 

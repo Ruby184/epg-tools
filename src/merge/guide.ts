@@ -1,9 +1,18 @@
-import { dayRange, dayToDate, toDayString } from '../core/days.js';
-import { GrabberError } from '../core/error.js';
+import {
+  addDays,
+  dayIn,
+  dayRange,
+  daysCovering,
+  dayToDate,
+  resolveTimeZone,
+  wallTimeIn,
+} from '../core/days.js';
+import { errorMessage, GrabberError } from '../core/error.js';
 import { writeOutput, type OutputOptions, type OutputTarget } from '../core/output.js';
 import { emitter } from '../core/events.js';
 import type { Says } from '../core/events.js';
 import { channelElement, covered, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
+import { siteDayZone } from '../grabber/site.js';
 import type { GrabberChannel } from '../grabber/types.js';
 import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
 import { outputOptions } from '../xmltv/serialize.js';
@@ -29,8 +38,6 @@ import type { BuildGuideOptions, FillGapsContext, FillGapsOptions, GuideContext 
  * four by default anyway.
  */
 const DEFAULT_READ_AHEAD = 16;
-
-const DAY_MS = 86_400_000;
 
 /**
  * Yield `items` in order, with `depth` of them being read at once.
@@ -129,6 +136,21 @@ function containedCount(
   }
 
   return count;
+}
+
+/**
+ * The guide's days, as a site on another calendar has them: which of its own
+ * days each one is read from, and how many of the guide's days read each.
+ */
+interface Covering {
+  days: Map<string, string[]>;
+  uses: Map<string, number>;
+}
+
+/** One of a site's own days, read and transformed, and how many more ask. */
+interface HeldDay {
+  list: Promise<XmltvProgramme[] | undefined>;
+  left: number;
 }
 
 /** `fillGaps`, with its defaults filled in and its numbers checked. */
@@ -263,7 +285,8 @@ function titleOf(programme: XmltvProgramme): string {
 
 export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator<string> {
   const now = options.now ?? new Date();
-  const days = [...dayRange(options.startDay ?? toDayString(now), options.days ?? 7)];
+  const timeZone = resolveTimeZone(options.timezone);
+  const days = [...dayRange(options.startDay ?? dayIn(now, timeZone), options.days ?? 7)];
   const channelStrategy = options.merge?.channelStrategy ?? 'merge-programmes';
   const programmeStrategy = options.merge?.programmeStrategy ?? 'merge';
   const { cache } = options;
@@ -299,6 +322,18 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
         ...(options.signal ? { signal: options.signal } : {}),
         store: cache,
         now,
+        // Left out, and said: with no list there is nothing to read its
+        // entries by, and one source down is no reason to write no guide.
+        failed: (site, error) => {
+          emit({
+            type: 'merge:warning',
+            message:
+              `${site.site} could not resolve its channel list, so the guide has none of its ` +
+              `channels: ${errorMessage(error)}`,
+          });
+
+          return undefined;
+        },
       }),
       options.merge?.cover,
       { now, ...mergeSays },
@@ -475,13 +510,21 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
 
   const filling = channelStrategy === 'keep-all' ? undefined : gaps;
 
+  // Where each of the guide's days begins and ends, on the run's clock — the
+  // calendar its days are on — worked out once rather than per channel-day.
+  const bounds = new Map(
+    days.map((day) => [
+      day,
+      { from: wallTimeIn(day, timeZone), to: wallTimeIn(addDays(day, 1), timeZone) },
+    ]),
+  );
+
   // The guide's own bounds, for `clampToWindow`: the first day's midnight, and
-  // the midnight that ends the last one.
-  const windowStart = days.length > 0 ? dayToDate(days[0]!).getTime() : 0;
-  const windowEnd =
-    days.length > 0
-      ? dayToDate(days[days.length - 1]!).getTime() + DAY_MS
-      : Number.MAX_SAFE_INTEGER;
+  // the midnight that ends the last one. A source filing local days would
+  // otherwise lose the small hours of the first one to a UTC midnight that
+  // comes later.
+  const windowStart = days.length > 0 ? bounds.get(days[0]!)!.from : 0;
+  const windowEnd = days.length > 0 ? bounds.get(days.at(-1)!)!.to : Number.MAX_SAFE_INTEGER;
 
   /**
    * One programme as the guide will have it, given the one that follows it.
@@ -584,6 +627,153 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     return programmes;
   };
 
+  /** The zone each site's days are on, worked out once — see `siteDayZone`. */
+  const zones = new Map<ChannelSource['config'], string>();
+
+  const zoneOf = (config: ChannelSource['config']): string => {
+    let zone = zones.get(config);
+
+    if (zone === undefined) {
+      zone = siteDayZone(config, timeZone);
+      zones.set(config, zone);
+    }
+
+    return zone;
+  };
+
+  /**
+   * For sites keeping one other calendar: which of their own days each of the
+   * guide's is read from, and how many of the guide's days read each of those —
+   * worked out once per zone, since every channel-day of such a site asks.
+   */
+  const coverings = new Map<string, Covering>();
+
+  const coveringIn = (zone: string): Covering => {
+    let covering = coverings.get(zone);
+
+    if (covering === undefined) {
+      covering = { days: new Map(), uses: new Map() };
+
+      for (const day of days) {
+        const own = daysCovering([day], timeZone, zone);
+
+        covering.days.set(day, own);
+
+        for (const ownDay of own) {
+          covering.uses.set(ownDay, (covering.uses.get(ownDay) ?? 0) + 1);
+        }
+      }
+
+      coverings.set(zone, covering);
+    }
+
+    return covering;
+  };
+
+  /**
+   * A site's own days, for one on another calendar, while one of the guide's
+   * days still has to read them.
+   *
+   * Most of them cover two of the guide's days, and each is read and put
+   * through the site's transform once rather than once for each — then let go
+   * as the last of those asks. Counted by how many of the guide's days cover
+   * it, which is how many times one channel's turn asks: a channel's days are
+   * read one after another, so its turn is done with a day before a derived
+   * channel reading the same source starts on it afresh.
+   */
+  const held = new Map<ChannelSource, Map<string, HeldDay>>();
+
+  const readOwnDay = (
+    source: ChannelSource,
+    channelId: string,
+    day: string,
+    uses: number,
+  ): Promise<XmltvProgramme[] | undefined> => {
+    let days = held.get(source);
+
+    if (days === undefined) {
+      days = new Map();
+      held.set(source, days);
+    }
+
+    let entry = days.get(day);
+
+    if (entry === undefined) {
+      entry = {
+        list: cache
+          .read({ site: source.config.site, channelId, day })
+          .then((list) => (list === undefined ? undefined : contribution(source, day, list))),
+        left: uses,
+      };
+      days.set(day, entry);
+    }
+
+    entry.left -= 1;
+
+    if (entry.left === 0) {
+      days.delete(day);
+
+      if (days.size === 0) {
+        held.delete(source);
+      }
+    }
+
+    return entry.list;
+  };
+
+  /**
+   * What one site holds for one of the guide's days, its own say over it
+   * included — or `undefined` where it holds nothing.
+   *
+   * The entry for that day, for a site on the guide's calendar. A site keeping
+   * another — a source keyed by UTC date — has no entry for the guide's day: it
+   * has the entries of its own days that cover it, and the programmes from
+   * them that start within it. Each of those goes through the site's transform
+   * as the day it was kept under, which is the day the site said it was.
+   */
+  const readSource = async (
+    source: ChannelSource,
+    channelId: string,
+    day: string,
+  ): Promise<XmltvProgramme[] | undefined> => {
+    const zone = zoneOf(source.config);
+
+    if (zone === timeZone) {
+      const list = await cache.read({ site: source.config.site, channelId, day });
+
+      return list === undefined ? undefined : contribution(source, day, list);
+    }
+
+    // Asked for before anything is awaited, so the days are asked for in the
+    // order the channel-days are read: what `held` counts on.
+    const { days: own, uses } = coveringIn(zone);
+    const lists = await Promise.all(
+      own.get(day)!.map((ownDay) => readOwnDay(source, channelId, ownDay, uses.get(ownDay)!)),
+    );
+
+    if (lists.every((list) => list === undefined)) {
+      return undefined;
+    }
+
+    const { from, to } = bounds.get(day)!;
+    // The programme already on air as the guide begins, too — which a source
+    // on the guide's calendar would have in its first day, and which
+    // `clampToWindow` drops alike from either.
+    const first = day === days[0];
+
+    return lists
+      .flatMap((list) => list ?? [])
+      .filter((programme) => {
+        const start = programme.start.getTime();
+
+        return (
+          start < to &&
+          (start >= from ||
+            (first && programme.stop !== undefined && programme.stop.getTime() > from))
+        );
+      });
+  };
+
   /**
    * The window, applied to the times the guide will publish.
    *
@@ -618,23 +808,19 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     // for the derived channel exactly what it does for the channel it shifts.
     const { source: read, offsetMs } = entry.derivedFrom ?? { source: entry, offsetMs: 0 };
 
-    // The covering sites' entries for this day are read in parallel.
+    // The covering sites' entries for this day are read in parallel — each
+    // site's own say over its own programmes applied before they meet anyone
+    // else's, so what merging sees, and what the rules run on, is already what
+    // the site meant. A site's transform therefore sees the times it
+    // published, and the shift comes after it.
     const cached = await Promise.all(
-      read.sources.map((source) =>
-        cache.read({ site: source.config.site, channelId: read.xmltvId, day }),
-      ),
+      read.sources.map((source) => readSource(source, read.xmltvId, day)),
     );
 
     const lists: XmltvProgramme[][] = [];
 
-    // Each site's own say over its own programmes, before they meet anyone
-    // else's — so what merging sees, and what the rules run on, is already
-    // what the site meant. A site's transform therefore sees the times it
-    // published, and the shift comes after it.
-    for (const [index, list] of cached.entries()) {
-      if (list !== undefined) {
-        const mine = contribution(read.sources[index]!, day, list);
-
+    for (const mine of cached) {
+      if (mine !== undefined) {
         lists.push(clamped(offsetMs === 0 ? mine : shiftProgrammes(mine, offsetMs, entry.xmltvId)));
       }
     }
@@ -744,7 +930,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
 
       // Anything starting before the day just folded in: no later day can
       // reasonably claim it, so it is done.
-      const horizon = dayToDate(day).getTime();
+      const horizon = bounds.get(day)!.from;
       let held = 0;
 
       while (held < pending.length && pending[held]!.start.getTime() < horizon) {

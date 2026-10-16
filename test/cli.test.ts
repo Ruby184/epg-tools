@@ -464,6 +464,16 @@ describe('epg', () => {
     expect(stderr).toContain('ndjson, xmltv, sqlite, memory');
   });
 
+  it('refuses a time zone that is not one, as the usage error it is', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+
+    const { code, stderr } = await run(['grab', '--config', config, '--timezone', 'Mars/Olympus']);
+
+    expect(code).toBe(2);
+    expect(stderr).toContain('--timezone must be an IANA time zone such as "Europe/Bratislava"');
+  });
+
   it('refuses a thread count that is not one — the command after a bare flag included', async () => {
     const dir = await tempDir();
     const config = await plainConfig(dir);
@@ -1561,6 +1571,32 @@ describe('epg', () => {
       expect(stdout).toContain('1 of 3 channel-days to fetch, in 1 request');
     });
 
+    it('counts a site on another calendar in its own days, and says whose', async () => {
+      const dir = await tempDir();
+      const config = await configFile(
+        dir,
+        `export default {
+        sites: [{ ...${siteSource()}, dayZone: 'utc' }],
+        days: 1,
+        timezone: 'America/New_York',
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+
+      const { stdout } = await run(['grab', '--config', config, '--dry-run']);
+
+      // New York's day ends hours into the next UTC one, whenever this runs.
+      expect(stdout).toContain(
+        "example.tv — 1 channel (in the config), over 2 days of UTC's calendar",
+      );
+      expect(stdout).toContain('2 channel-days: 0 cached, 2 to fetch');
+
+      const json = await run(['grab', '--config', config, '--dry-run', '--format', 'json']);
+
+      expect(JSON.parse(json.stdout).sites[0]).toMatchObject({ days: 2, dayZone: 'UTC' });
+    });
+
     it('calls everything stale under --refresh, as the run would', async () => {
       const dir = await tempDir();
       const config = await configFile(
@@ -1665,7 +1701,7 @@ describe('epg', () => {
       expect(code).toBe(1);
     });
 
-    it('selects channels for build and not for grab, as each command does', async () => {
+    it('selects channels for grab as it does for build', async () => {
       const dir = await tempDir();
       const config = await configFile(
         dir,
@@ -1686,14 +1722,13 @@ describe('epg', () => {
       };`,
       );
 
-      // `build` narrows before it grabs; `runGrab` does not select at all, so a
-      // report that applied the selection to `grab` would name half the
-      // requests `epg grab` goes on to make.
+      // Both narrow before they grab, so a channel left out is never fetched by
+      // either — and the report counts what the run would go on to make.
       expect((await run(['build', '--config', config, '--dry-run'])).stdout).toContain(
         '1 site, 1 channel',
       );
       expect((await run(['grab', '--config', config, '--dry-run'])).stdout).toContain(
-        '1 site, 2 channels',
+        '1 site, 1 channel',
       );
     });
 

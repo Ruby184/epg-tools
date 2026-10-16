@@ -49,6 +49,7 @@ import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../confi
 import { MAX_CAUSE_DEPTH } from '../core/error.js';
 import type { EpgEventInput, GrabCounts } from '../core/events.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
+import { assertPlainData } from './channels.js';
 import { SiteRun, type Enqueue, type Run } from './site-run.js';
 import type { AnySiteConfig, GrabberChannel } from './types.js';
 
@@ -66,6 +67,8 @@ export interface SiteThreadData {
   now: string;
   grabbedAt: string;
   startDay: string;
+  /** The run's zone, for which day is today — see `GrabOptions.timezone`. */
+  timeZone?: string;
   defaults: Run['defaults'];
   localConcurrency: number;
   /** The codec the run's store keeps its entries with, when a thread has it — see `CacheManager.codecName`. */
@@ -224,55 +227,6 @@ export function threadCount(
   return count;
 }
 
-/**
- * The first thing in a channel list that a thread would be handed as something
- * else, named — or `undefined` when all of it crosses as it is.
- *
- * A copy keeps plain objects, arrays, maps, sets and dates. A function cannot
- * be copied at all; an instance of a class arrives as a plain object with none
- * of its methods, and a `Date` without the offset this package keeps on it —
- * neither of which says so, and a site's parse would only find out by failing.
- */
-function altered(value: unknown, seen = new Set<object>()): string | undefined {
-  if (typeof value === 'function' || typeof value === 'symbol') {
-    return `a ${typeof value}`;
-  }
-
-  if (typeof value !== 'object' || value === null || seen.has(value)) {
-    return undefined;
-  }
-
-  seen.add(value);
-
-  if (value instanceof Date) {
-    return Object.getOwnPropertySymbols(value).length > 0 ? 'a date carrying an offset' : undefined;
-  }
-
-  const prototype: unknown = Object.getPrototypeOf(value);
-  const inner =
-    value instanceof Map || value instanceof Set
-      ? [...value].flat()
-      : prototype === Object.prototype || prototype === null || Array.isArray(value)
-        ? Object.values(value)
-        : undefined;
-
-  if (inner === undefined) {
-    return value instanceof RegExp || ArrayBuffer.isView(value) || value instanceof ArrayBuffer
-      ? undefined
-      : `an instance of ${(value as { constructor?: { name?: string } }).constructor?.name ?? 'a class'}`;
-  }
-
-  for (const item of inner) {
-    const found = altered(item, seen);
-
-    if (found !== undefined) {
-      return found;
-    }
-  }
-
-  return undefined;
-}
-
 /** Where a pool's workers start: the source beside this one, or the built file beside its chunk. */
 const WORKER = new URL(
   import.meta.url.endsWith('.ts') ? './thread-worker.ts' : './thread-worker.js',
@@ -346,15 +300,11 @@ export class SiteThreads {
    * handed as it is — which the run reports as a site that failed.
    */
   async run(config: AnySiteConfig, run: Run): Promise<void> {
-    const odd = Array.isArray(config.channels) ? altered(config.channels) : undefined;
-
-    // Before a worker is asked for, so a site that cannot go starts nothing.
-    if (odd !== undefined) {
-      throw new TypeError(
-        `Site "${config.site}" cannot run in a thread: its channel list holds ${odd}, which a ` +
-          `thread would be handed without what makes it one. Keep a channel's data to plain ` +
-          `values, or run without threads`,
-      );
+    // Before a worker is asked for, so a site that cannot go starts nothing: a
+    // copy would hand the thread something else without saying so, and a
+    // function could not be copied at all.
+    if (Array.isArray(config.channels)) {
+      assertPlainData(config.site, config.channels);
     }
 
     const data: SiteThreadData = {
@@ -366,6 +316,7 @@ export class SiteThreads {
       now: run.now.toISOString(),
       grabbedAt: run.grabbedAt,
       startDay: run.startDay,
+      ...(run.timeZone === undefined ? {} : { timeZone: run.timeZone }),
       defaults: run.defaults,
       localConcurrency: run.localWork.concurrency,
       ...(run.cache instanceof CacheManager && run.cache.codecName !== undefined
@@ -727,6 +678,7 @@ export async function workSite(
       now: new Date(data.now),
       grabbedAt: data.grabbedAt,
       startDay: data.startDay,
+      ...(data.timeZone === undefined ? {} : { timeZone: data.timeZone }),
       emit: (event) => {
         send(port, { kind: 'event', event: plainEvent(event) });
       },

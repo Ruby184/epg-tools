@@ -483,6 +483,12 @@ export interface BuildGuideOptions {
    * Pass the same value used for the grab so both cover the same days.
    */
   startDay?: string;
+  /**
+   * The time zone whose calendar the window's days are on: which day is today
+   * when `startDay` is not given, and where each day starts and ends when the
+   * guide is clamped to them. UTC's when left out. See `EpgConfig.timezone`.
+   */
+  timezone?: string;
   merge?: MergeOptions;
   /**
    * Channels that are other channels shifted — see {@link DerivedChannel}. They

@@ -172,6 +172,8 @@ export function defineXmltvSite<TData = XmltvChannel>(
     cacheChannels: true,
     conditionalGet: true,
     ...site,
+    // The calendar its days are filed on, which a run on another covers.
+    dayZone,
     channels:
       channels ??
       (async ({ http, signal }): Promise<GrabberChannel<TData>[]> => {

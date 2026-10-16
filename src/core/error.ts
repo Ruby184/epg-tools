@@ -43,6 +43,74 @@ export function errorMessage(error: unknown): string {
 export const MAX_CAUSE_DEPTH = 8;
 
 /**
+ * Statuses that say "not now" rather than "no": asked too often or too early,
+ * or a request that took too long. A 5xx says the same, and is read as such
+ * below.
+ */
+const NOT_NOW = new Set([408, 425, 429]);
+
+/** What a refused, dropped or unresolvable connection is called by Node. */
+const NETWORK_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EPIPE',
+]);
+
+/**
+ * Whether an error means the source did not answer — the network failed, the
+ * request timed out, or the source said "not now" (408, 425, 429, a 5xx) —
+ * rather than that it answered and what it said was wrong.
+ *
+ * Read down the `cause` chain, so a site that wraps a failed request in an
+ * error of its own is still read for what happened underneath. And by name and
+ * shape rather than `instanceof`: a site may bring a ky of its own, whose error
+ * classes are not the ones this package imports.
+ */
+export function unanswered(error: unknown): boolean {
+  let current = error;
+
+  for (let depth = 0; depth <= MAX_CAUSE_DEPTH; depth++) {
+    if (typeof current !== 'object' || current === null) {
+      return false;
+    }
+
+    const candidate = current as {
+      name?: unknown;
+      message?: unknown;
+      code?: unknown;
+      response?: { status?: unknown };
+      cause?: unknown;
+    };
+
+    if (candidate.name === 'NetworkError' || candidate.name === 'TimeoutError') {
+      return true;
+    }
+
+    // An answer, whatever else is below it: its status says which kind.
+    if (typeof candidate.response?.status === 'number') {
+      return NOT_NOW.has(candidate.response.status) || candidate.response.status >= 500;
+    }
+
+    if (
+      (candidate.name === 'TypeError' && candidate.message === 'fetch failed') ||
+      (typeof candidate.code === 'string' &&
+        (NETWORK_CODES.has(candidate.code) || candidate.code.startsWith('UND_ERR_')))
+    ) {
+      return true;
+    }
+
+    current = candidate.cause;
+  }
+
+  return false;
+}
+
+/**
  * The same, with what caused it, and what caused that.
  *
  * {@link errorMessage} reads `.message` and nothing else, which makes a chain
