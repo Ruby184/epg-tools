@@ -9,7 +9,7 @@
 
 import { DEFAULT_STALENESS } from '../cache/main.js';
 import type { StalenessPolicy } from '../cache/types.js';
-import { dayRange } from '../core/days.js';
+import { dayIn, dayRange, daysCovering, resolveTimeZone } from '../core/days.js';
 import { resolveBatching, type ResolvedBatching } from './planner.js';
 import type {
   AnySiteConfig,
@@ -42,8 +42,16 @@ export const DEFAULT_DAYS = 7;
 interface ResolvedSiteBase {
   /** Cache namespace and log prefix. */
   site: string;
-  /** The days this run covers for this site, ascending. */
+  /**
+   * The days this run covers for this site, ascending — on the site's own
+   * calendar, which is the run's unless {@link dayZone} says otherwise.
+   */
   window: string[];
+  /**
+   * The zone the site's days are on: the run's own, or the one its `dayZone`
+   * names. Absent only where the caller gave no zone for the run.
+   */
+  dayZone: string | undefined;
   /** How wide a request may be along each axis, and the context shape it gets. */
   batching: ResolvedBatching;
   /** When a cached day counts as stale: run policy under site override. */
@@ -114,6 +122,10 @@ export function resolveSite(
   config: AnySiteConfig,
   defaults: Pick<GrabOptions, 'days' | 'staleness'>,
   startDay: string,
+  /** The zone the run's days are on — see `GrabOptions.timezone`. */
+  timeZone?: string,
+  /** The run's "now", which decides a leading day the site is not asked for — see {@link siteWindow}. */
+  now?: Date,
 ): ResolvedSite {
   if (typeof config.site !== 'string' || config.site === '') {
     throw new TypeError(
@@ -129,9 +141,23 @@ export function resolveSite(
     );
   }
 
+  // Refused here, where it fails this site alone: everywhere else a run reads
+  // its sites, a zone that is not one reads as the run's, so one site's mistake
+  // cannot stop the others.
+  if (config.dayZone !== undefined && config.dayZone !== 'source' && config.dayZone !== 'utc') {
+    resolveTimeZone(config.dayZone, `Site "${config.site}" dayZone`);
+  }
+
   const common = {
     site: config.site,
-    window: [...dayRange(startDay, config.days ?? defaults.days ?? DEFAULT_DAYS)],
+    window: siteWindow(
+      config,
+      startDay,
+      config.days ?? defaults.days ?? DEFAULT_DAYS,
+      timeZone,
+      now,
+    ),
+    dayZone: siteDayZone(config, timeZone),
     staleness: { ...DEFAULT_STALENESS, ...defaults.staleness, ...config.staleness },
   };
 
@@ -188,4 +214,112 @@ export function resolveSite(
     isStreaming: false,
     config,
   };
+}
+
+/**
+ * The zone a site's channel-days are on: the run's own unless its `dayZone`
+ * names another — `'utc'`, or an IANA zone.
+ *
+ * `'source'`, the default, is taken for the run's: a source filing a programme
+ * under the day its own offset says is assumed to keep the calendar the guide
+ * is for, which nothing about it could confirm or deny.
+ *
+ * Another name for the run's own zone — `Etc/UTC` beside `UTC` — is the run's,
+ * so the two are not taken for different calendars. And a name that is not a
+ * zone at all reads as the run's too: this is asked wherever a run reads its
+ * sites, and one site's mistake must not stop the others. {@link resolveSite}
+ * is where that site is refused, alone.
+ */
+export function siteDayZone(config: AnySiteConfig, timeZone: string): string;
+export function siteDayZone(
+  config: AnySiteConfig,
+  timeZone: string | undefined,
+): string | undefined;
+export function siteDayZone(
+  config: AnySiteConfig,
+  timeZone: string | undefined,
+): string | undefined {
+  const zone = config.dayZone === 'utc' ? 'UTC' : config.dayZone;
+
+  if (zone === undefined || zone === 'source' || timeZone === undefined) {
+    return timeZone;
+  }
+
+  const canonical = canonicalZone(zone);
+
+  return canonical === undefined || canonical === canonicalZone(timeZone) ? timeZone : zone;
+}
+
+/** The name `Intl` knows a zone by, or nothing for a name that is not one. */
+function canonicalZone(timeZone: string): string | undefined {
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone }).resolvedOptions().timeZone;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The days a run asks a site for: `days` of them from `startDay`, or — for a
+ * site keeping another calendar — the days of that calendar that cover them,
+ * so no hour of the run's falls in a day nobody asked for.
+ *
+ * Less one. A run east of a source's clock reaches a day back for the hours
+ * between its midnight and the source's, and once the source's midnight has
+ * passed that day is the source's yesterday — which many cannot be asked for,
+ * and none needs asking for again. So a run starting today, given `now`, does
+ * not ask for a leading day behind the site's own today. One already cached is
+ * still read by the merge and kept by a prune; a run asked for the past, with
+ * a negative offset, gets every day it covers.
+ *
+ * The one rule for a site's days, for the grab, for what a server counts and
+ * for what a prune keeps alike.
+ */
+export function siteWindow(
+  config: AnySiteConfig,
+  startDay: string,
+  days: number,
+  timeZone: string | undefined,
+  now?: Date,
+): string[] {
+  const own = [...dayRange(startDay, days)];
+  const zone = siteDayZone(config, timeZone);
+
+  if (timeZone === undefined || zone === undefined || zone === timeZone) {
+    return own;
+  }
+
+  const covering = daysCovering(own, timeZone, zone);
+  const leading = covering[0]!;
+
+  return now === undefined ||
+    startDay < dayIn(now, timeZone) ||
+    own.includes(leading) ||
+    leading >= dayIn(now, zone)
+    ? covering
+    : covering.slice(1);
+}
+
+/**
+ * The first day a run still needs of any of its sites — `day` on the run's own
+ * calendar, or earlier where a site keeping another calendar starts its window
+ * the day before, which a prune must not take even once it is no longer asked
+ * for.
+ */
+export function earliestDay(
+  sites: readonly AnySiteConfig[],
+  day: string,
+  timeZone: string,
+): string {
+  let earliest = day;
+
+  for (const site of sites) {
+    const first = siteWindow(site, day, 1, timeZone)[0]!;
+
+    if (first < earliest) {
+      earliest = first;
+    }
+  }
+
+  return earliest;
 }

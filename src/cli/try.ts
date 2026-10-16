@@ -46,7 +46,12 @@ import type { XmltvProgramme } from '../xmltv/types.js';
 const PAYLOAD_PREVIEW = 2000;
 
 export interface TryOptions {
-  /** The day, as `YYYY-MM-DD`. Defaults to today. */
+  /**
+   * The day, as `YYYY-MM-DD` on the site's own calendar. Defaults to the first
+   * day a run would ask the site for: today, or — for a site keeping another
+   * calendar — the day of that calendar the run's today begins on, until that
+   * day is over there too.
+   */
   day?: string;
   /** Show the payload whole, however long it is. */
   raw?: boolean;
@@ -325,13 +330,20 @@ export async function tryChannelDay(
   options: TryOptions = {},
 ): Promise<number> {
   const config = await resolveConfigSource(source);
-  // Today on the run's calendar, which is the day a run would ask for first.
-  const day = options.day ?? dayIn(new Date(), config.timezone);
   const site = siteNamed(config.sites, siteName);
+  const now = new Date();
 
   // The same reading a run makes, so a site that a run would refuse is refused
   // here in the same words — one day of window, since that is what this is.
-  const resolved = resolveSite(site, { days: 1 }, day);
+  const resolved = resolveSite(
+    site,
+    { days: 1 },
+    dayIn(now, config.timezone),
+    config.timezone,
+    now,
+  );
+  // The day a run would ask for first, on the site's own calendar.
+  const day = options.day ?? resolved.window[0]!;
 
   const calls: Call[] = [];
   const http: KyInstance = siteHttp(

@@ -53,6 +53,12 @@ export interface PlanSite {
   channels: { count: number; from: ChannelsFrom };
   /** This site's own window, which it may have shortened. */
   days: number;
+  /**
+   * Whose calendar `days` are on, where the site keeps one other than the
+   * run's: then they are the days covering the run's window, one more at an
+   * edge.
+   */
+  dayZone?: string;
   /** Channel-days in this site's window — always `fresh + stale`. */
   entries: number;
   /** Cached and recent enough that a run would not ask again. */
@@ -138,8 +144,10 @@ async function planSite(
       ...(options.staleness ? { staleness: options.staleness } : {}),
     },
     options.startDay,
+    options.timeZone,
+    options.now,
   );
-  const { window, staleness, batching } = resolved;
+  const { window, dayZone, staleness, batching } = resolved;
 
   // Counted rather than worked out from the site's `cacheChannels` and the age
   // of what is stored: whether the source was asked is exactly whether this
@@ -175,7 +183,7 @@ async function planSite(
     );
 
     for (const [index, day] of window.entries()) {
-      if (isStale(day, metas[index], staleness, options.now, options.timeZone)) {
+      if (isStale(day, metas[index], staleness, options.now, options.timeZone, dayZone)) {
         stale.push({ channel, day });
       }
     }
@@ -187,6 +195,7 @@ async function planSite(
     site: resolved.site,
     channels: { count: channels.length, from },
     days: window.length,
+    ...(dayZone === undefined || dayZone === options.timeZone ? {} : { dayZone }),
     entries: channels.length * window.length,
     fresh: channels.length * window.length - stale.length,
     stale: stale.length,
@@ -317,8 +326,13 @@ export async function writePlanReport(
     lines.push(
       `  ${site.site} — ${count(site.channels.count, 'channel')} (${FROM[site.channels.from]})` +
         // Only when it differs, since repeating the heading on every row would
-        // bury the one site that shortened its window.
-        (site.days === window.days ? '' : `, over its own ${count(site.days, 'day')}`),
+        // bury the one site that shortened its window. A site on another
+        // calendar always does, and says whose days it counted.
+        (site.dayZone !== undefined
+          ? `, over ${count(site.days, 'day')} of ${site.dayZone}'s calendar`
+          : site.days === window.days
+            ? ''
+            : `, over its own ${count(site.days, 'day')}`),
       `      ${count(site.entries, 'channel-day')}: ${site.fresh} cached, ` +
         `${site.stale} to fetch in ${count(site.requests, 'request')} (${site.batching})`,
     );

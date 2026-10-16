@@ -6,6 +6,7 @@ import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import type { CacheEntryMeta, CacheStore, StalenessPolicy } from '../cache/types.js';
 import type { GrabCounts, Reporter, Says } from '../core/events.js';
 import type { SiteConnection } from './connection.js';
+import type { XmltvDayZone } from './xmltv-document.js';
 
 /**
  * A channel to grab: maps an output XMLTV id to a site-specific id.
@@ -591,13 +592,27 @@ export interface BaseSiteConfig<TData = unknown> {
    * added to a source then turns up on the next run rather than a day later.
    * `--refresh` fetches it whatever this says.
    *
-   * It goes through JSON, so a channel's `data` must survive that: a `Date` or a
-   * `Map` in there comes back a string or `{}`, and every run but the one that
-   * fetched it sees the round-tripped form.
+   * It goes through JSON, which is one reason a channel's `data` must be plain
+   * values — anything else is refused before it is stored.
    */
   cacheChannels?: boolean | { maxAgeDays?: number };
   /** Override the number of days to grab for this site. */
   days?: number;
+  /**
+   * Which calendar this site's channel-days are on: `'source'`, the default,
+   * for the run's own; `'utc'`; or an IANA zone such as `'America/New_York'`.
+   *
+   * What lets a run cover its window with a site whose days are not its own. A
+   * source keyed by UTC date, in a run on Bratislava's calendar, is fetched over
+   * the UTC days that cover the run's days and merged into them — rather than
+   * the window's first hours being left in a UTC day nobody asked for. The
+   * XMLTV, Xtream and command adapters pass theirs through; Schedules Direct's
+   * days are always UTC.
+   *
+   * Another name for the run's own zone is the run's calendar, and a name that
+   * is not a zone fails this site alone.
+   */
+  dayZone?: XmltvDayZone;
   /** Max concurrent requests for this site. Defaults to 1. */
   concurrency?: number;
   /**

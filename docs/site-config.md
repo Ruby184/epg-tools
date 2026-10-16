@@ -47,6 +47,7 @@ it cannot leave a half-built site's output in the cache.
 | `lineups` | `(channels, metadata) => LineupConfig[]` | one `List` lineup of every channel | How this site's channels divide into reception platforms, for a `tv_grab_*`'s [`lineups` capability](./tv-grab.md#channel-lineups). Handed the resolved list and the [metadata stored with it](#keeping-a-fetched-list), so it costs no request. |
 | `transform` | `(programme, ctx) => XmltvProgramme \| null` | — | A last say over each of this site's programmes as the cache is **read** — see [fixing up one source](#fixing-up-one-source). |
 | `days` | `number` | the config's `days`, then `7` | Override how many days this site grabs. |
+| `dayZone` | `'source' \| 'utc' \| string` | `'source'` — the run's own calendar | Which calendar this site's channel-days are on: `'utc'` for a source keyed by UTC date, or an IANA zone. A run on another calendar fetches the days of this one that cover its window and files their programmes into its own days as it merges — see [which day is today](./configuration.md#which-day-is-today). The XMLTV, Xtream and command adapters pass theirs through, so a zone there other than the run's is a calendar of the site's own rather than a way to move the guide's days: that is the run's [`timezone`](./configuration.md#which-day-is-today). |
 | `concurrency` | `number` | `1` | How many requests this site may have in flight at once. |
 | `rateLimit` | `{ requests, perMs, strict? }` | unset — no pacing | How often this site may be asked. `strict` defaults to `true` (sliding window). |
 | `backoff` | `false \| SiteBackoff` | on: `{ statuses: [429, 503], fallbackMs: 5000, maxMs: 60000, adapt: true }` | What to do when the source says slow down. |
@@ -1013,7 +1014,7 @@ rather than a download.
 |---|---|---|
 | `url` | **required** | Where the document is — or a function `({ http, signal }) => string`, which may be async, for a url that has to be looked up first. |
 | `channels` | every channel the document declares | The channels to take, mapping `siteId` (its `<channel id>`) to the id you want out. A list narrows *and* renames. |
-| `dayZone` | `'source'` | Which day a programme belongs to: the day it falls on in the offset the document wrote it with (`source`), the day of its UTC instant (`utc`), or the day in a named zone (`Europe/Bratislava`). |
+| `dayZone` | `'source'` | Which day a programme belongs to: the day it falls on in the offset the document wrote it with (`source`), the day of its UTC instant (`utc`), or the day in a named zone (`Europe/Bratislava`). A zone other than the run's puts the site's days on [that calendar](./configuration.md#which-day-is-today), and the run covers its window with them; to move the guide's own days, set the run's `timezone`. |
 | `compression` | sniffed | `'gzip'`, `'brotli'`, `'zstd'`, or `false` for none. |
 | `parse` | — | `Omit<XmltvParseOptions, 'channels'>`: `timezones` for a document using named zones, `tolerateMissingId`. Not `channels`, since which channels are kept is what `channels` above says. |
 | `order` | `'grouped'` | Whether the document groups each channel's programmes together — see below. |
@@ -1119,10 +1120,14 @@ while that is fresh neither the account nor its lineups are asked about, so a
 changed `lineup` takes effect when the stored list is past its day, or at once
 with `--refresh`.
 
-**Days are UTC, and there is deliberately no `dayZone`** as the other adapters
-have. The service keys its md5s by `(stationID, UTC date)`; filing a programme
-under any other day would store a hash against a day that never held it, and the
-guide would quietly stop updating around midnight.
+**Days are UTC, and there is deliberately no `dayZone`** option as the other
+adapters have. The service keys its md5s by `(stationID, UTC date)`; filing a
+programme under any other day would store a hash against a day that never held
+it, and the guide would quietly stop updating around midnight. The site says
+`dayZone: 'utc'` instead, so a run on another [calendar](./configuration.md#which-day-is-today)
+fetches the UTC days that cover its window — one more at one edge — and files
+their programmes into its own days as it merges, leaving the cache keyed as the
+service keys it.
 
 **It writes everything the service sends.** Every rating board's opinion, the
 whole call sheet in billing order, both descriptions, the programme's own

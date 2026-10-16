@@ -192,7 +192,7 @@ export class SiteRun {
   constructor(config: AnySiteConfig, run: Run, session?: SiteSession) {
     // Before its queue exists, let alone a request: a site that cannot be
     // resolved is one nothing else here can be asked about.
-    const resolved = resolveSite(config, run.defaults, run.startDay);
+    const resolved = resolveSite(config, run.defaults, run.startDay, run.timeZone, run.now);
 
     this.#run = run;
     this.#config = config;
@@ -363,11 +363,14 @@ export class SiteRun {
     // The one thing said before the work rather than after it, and the only
     // place a run's shape is known in advance: the channel list has arrived, the
     // cache has been swept, and what is left is exactly this many requests.
+    const { dayZone } = this.#resolved;
+
     this.#run.emit({
       type: 'site:started',
       site: this.#site,
       channels: this.#channels.length,
       days: this.#resolved.window.length,
+      ...(dayZone === undefined || dayZone === this.#run.timeZone ? {} : { dayZone }),
       entries: stale.length,
       requests: requests.length,
     });
@@ -430,7 +433,16 @@ export class SiteRun {
           return this.#resolved.window.flatMap((day, index) => {
             const cached = metas[index];
 
-            if (isStale(day, cached, this.#resolved.staleness, now, this.#run.timeZone)) {
+            if (
+              isStale(
+                day,
+                cached,
+                this.#resolved.staleness,
+                now,
+                this.#run.timeZone,
+                this.#resolved.dayZone,
+              )
+            ) {
               // The meta goes with it: what a conditional request asks with, and
               // what it would keep. Read once here rather than again later.
               return [{ channel, day, ...(cached === undefined ? {} : { cached }) }];

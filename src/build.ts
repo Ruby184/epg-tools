@@ -9,6 +9,7 @@ import type { CacheDriver, CacheStore } from './cache/main.js';
 import { resolveSessions } from './grabber/channels.js';
 import { grabWith } from './grabber/grab.js';
 import { covered, coverageOf } from './grabber/main.js';
+import { earliestDay } from './grabber/site.js';
 import { openSession, type SiteSession } from './grabber/session.js';
 import { threadCount } from './grabber/thread.js';
 import type { AnySiteConfig, GrabberChannel, GrabSummary } from './grabber/types.js';
@@ -453,9 +454,10 @@ async function grabInto(
   // wanted.
   if (config.cache?.prune !== false && options.signal?.aborted !== true) {
     // Never prune inside the window we just grabbed: a negative offset puts
-    // the window start before today, and those days must survive.
+    // the window start before today, and those days must survive — as must the
+    // day before it, for a site keeping a calendar whose window starts there.
     const today = dayIn(now, timeZone);
-    const before = startDay < today ? startDay : today;
+    const before = earliestDay(config.sites, startDay < today ? startDay : today, timeZone);
     const removed = await cache.prune({ before });
 
     if (removed > 0) {

@@ -112,3 +112,28 @@ export function wallTimeIn(day: string, timeZone = localTimeZone(), minutes = 0)
 
   return zonedXmltvDate(`${day} ${hours}:${rest}`, timeZone).getTime();
 }
+
+/**
+ * The days of another calendar that a run's days cover — for a source whose
+ * days are kept on a calendar other than the run's.
+ *
+ * A run's days run midnight to midnight on its own clock; a source keyed by UTC
+ * date has its own midnights, hours away. The days it would have to be asked
+ * for, to cover every hour of the run's, are the ones those hours fall on by
+ * its clock — one more than the run's at one edge or the other, depending on
+ * which way the two clocks differ.
+ */
+export function daysCovering(
+  days: readonly string[],
+  timeZone: string,
+  otherZone: string,
+): string[] {
+  if (days.length === 0 || otherZone === timeZone) {
+    return [...days];
+  }
+
+  const first = dayIn(new Date(wallTimeIn(days[0]!, timeZone)), otherZone);
+  const last = dayIn(new Date(wallTimeIn(addDays(days.at(-1)!, 1), timeZone) - 1), otherZone);
+
+  return [...dayRange(first, diffDays(last, first) + 1)];
+}

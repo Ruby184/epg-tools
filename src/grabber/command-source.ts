@@ -491,6 +491,8 @@ export function defineCommandSite<TData = XmltvChannel>(
     // rarely as a published guide's. The same default, for the same reason.
     cacheChannels: true,
     ...site,
+    // The calendar its days are filed on, which a run on another covers.
+    dayZone,
 
     channels:
       channels ??

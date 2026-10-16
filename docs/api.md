@@ -119,7 +119,7 @@ the whole answer to "what does the default verbosity show?".
 | group | types |
 |---|---|
 | the run | `run:cancelled`, `grab:done` |
-| a site | `site:started`, `site:done` (its counts plus what it cost: `requests`, `ms`, `requestMs`), `site:failed`, `site:note`, `site:warning` (the last two carrying whatever [fields the site attached](./site-config.md#saying-something)) |
+| a site | `site:started` (with `dayZone` for a site on [another calendar](./configuration.md#which-day-is-today), whose days `days` then counts), `site:done` (its counts plus what it cost: `requests`, `ms`, `requestMs`), `site:failed`, `site:note`, `site:warning` (the last two carrying whatever [fields the site attached](./site-config.md#saying-something)) |
 | one channel-day | `entry:cached`, `entry:fetched`, `entry:appended`, `entry:unchanged`, `entry:failed` |
 | one request | `request:started`, `request:done` (with `ms`), `request:failed` |
 | a whole-document source | `stream:gaps`, `stream:ignored` |

@@ -243,6 +243,18 @@ describe('render', () => {
     ],
     [
       {
+        type: 'site:started',
+        site: 'sd.tv',
+        channels: 50,
+        days: 8,
+        dayZone: 'UTC',
+        entries: 400,
+        requests: 1,
+      },
+      "[sd.tv] 50 channel(s) × 8 day(s) of UTC's calendar: 400 to fetch in 1 request(s)",
+    ],
+    [
+      {
         type: 'grab:done',
         loopMaxMs: 0,
         fetched: 1,

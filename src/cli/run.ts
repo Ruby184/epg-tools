@@ -20,6 +20,7 @@ import {
 import { build, createCacheStore, runGrab, runMerge } from '../build.js';
 import { CACHE_DRIVER_NAMES } from '../cache/main.js';
 import { fellShort, resolveAllowance } from '../grabber/main.js';
+import { earliestDay } from '../grabber/site.js';
 import { grabEvery, resolveInterval, resolveTimeOfDay } from '../serve/schedule.js';
 import type { MissingAllowance } from '../grabber/main.js';
 import { GrabberError } from '../core/error.js';
@@ -918,7 +919,11 @@ async function execute(
       });
     }
     case 'prune': {
-      const before = values.before ?? dayIn(new Date(), config.timezone);
+      // Today, or the day before it for a site keeping a calendar whose window
+      // starts there — which the guide still reads once it has been grabbed.
+      const before =
+        values.before ??
+        earliestDay(config.sites, dayIn(new Date(), config.timezone), config.timezone);
 
       await using cache = await createCacheStore(config, signal);
       const removed = await cache.prune({ before });

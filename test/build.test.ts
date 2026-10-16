@@ -409,6 +409,227 @@ describe('a run with a time zone', () => {
     ]);
   });
 
+  describe('and a site keyed by UTC date', () => {
+    /** A source whose days are UTC days: 20:00 and 22:15 UTC on each. */
+    function utc(fetchedDays: string[]): SiteConfig<unknown> {
+      return {
+        ...site(fetchedDays),
+        dayZone: 'utc',
+        parseDay({ day }): XmltvProgramme[] {
+          return [
+            {
+              channel: 'one.example',
+              start: new Date(`${day}T20:00:00.000Z`),
+              title: [{ value: `evening ${day}` }],
+            },
+            {
+              channel: 'one.example',
+              start: new Date(`${day}T22:15:00.000Z`),
+              title: [{ value: `small hours after ${day}` }],
+            },
+          ];
+        },
+      };
+    }
+
+    it('is grabbed over the UTC days that cover the window, and merged into its days', async () => {
+      const dir = await tempDir();
+      const fetchedDays: string[] = [];
+
+      await build(config(dir, { sites: [utc(fetchedDays)], timezone: 'Europe/Bratislava' }), {
+        now: LATE,
+      });
+
+      // Bratislava's 17th is 22:00 UTC on the 16th to 22:00 UTC on the 17th.
+      expect(fetchedDays).toEqual(['2026-07-16', '2026-07-17']);
+
+      const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+      // The small hours of the 17th come from the UTC 16th; the 17th's own
+      // late programme is the 18th there, and outside the window.
+      expect(guide.programmes.map((programme) => programme.title[0]?.value)).toEqual([
+        'small hours after 2026-07-16',
+        'evening 2026-07-17',
+      ]);
+    });
+
+    it('keeps the UTC day before the window through the prune after the grab', async () => {
+      const dir = await tempDir();
+
+      await runGrab(config(dir, { sites: [utc([])], timezone: 'Europe/Bratislava' }), {
+        now: LATE,
+      });
+
+      const cache = await createCacheStore(config(dir));
+
+      expect(
+        await cache.getMeta({ site: 'example.com', channelId: 'one.example', day: '2026-07-16' }),
+      ).toMatchObject({ programmeCount: 2 });
+    });
+
+    it('says whose days it counts as it starts', async () => {
+      const dir = await tempDir();
+      const started: unknown[] = [];
+
+      await runGrab(config(dir, { sites: [utc([])], timezone: 'Europe/Bratislava' }), {
+        now: LATE,
+        reporter: (event) => {
+          if (event.type === 'site:started') {
+            started.push(event);
+          }
+        },
+      });
+
+      expect(started).toEqual([expect.objectContaining({ days: 2, dayZone: 'UTC' })]);
+    });
+
+    it('refetches both UTC days the zone’s today spans, the later one too', async () => {
+      const dir = await tempDir();
+      const fetchedDays: string[] = [];
+      const epgConfig = config(dir, { sites: [utc(fetchedDays)], timezone: 'Europe/Bratislava' });
+
+      await runGrab(epgConfig, { now: LATE });
+      fetchedDays.length = 0;
+      await runGrab(epgConfig, { now: new Date(LATE.getTime() + 60_000) });
+
+      // UTC's today is still the 16th, but most of Bratislava's is the 17th.
+      expect(fetchedDays).toEqual(['2026-07-16', '2026-07-17']);
+    });
+
+    it('stops asking for the UTC day before once UTC’s midnight has passed too', async () => {
+      const dir = await tempDir();
+      const fetchedDays: string[] = [];
+      const epgConfig = config(dir, { sites: [utc(fetchedDays)], timezone: 'Europe/Bratislava' });
+
+      await runGrab(epgConfig, { now: LATE });
+      fetchedDays.length = 0;
+      // Three in the morning in Bratislava, one in UTC: the 16th is behind both.
+      await build(epgConfig, { now: new Date('2026-07-17T01:00:00.000Z') });
+
+      expect(fetchedDays).toEqual(['2026-07-17']);
+
+      // What the cache already held of it is still in the guide.
+      const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+      expect(guide.programmes.map((programme) => programme.title[0]?.value)).toEqual([
+        'small hours after 2026-07-16',
+        'evening 2026-07-17',
+      ]);
+    });
+
+    it('reads and transforms each UTC day once, though two of its days cover it', async () => {
+      const dir = await tempDir();
+      const seen: string[] = [];
+
+      await build(
+        config(dir, {
+          sites: [
+            {
+              ...utc([]),
+              transform(programme, { day }) {
+                seen.push(`${day} ${programme.title[0]?.value}`);
+
+                return programme;
+              },
+            },
+          ],
+          days: 2,
+          timezone: 'Europe/Bratislava',
+        }),
+        { now: LATE },
+      );
+
+      // The 17th covers both the guide's 17th and its 18th.
+      expect(seen.toSorted()).toEqual([
+        '2026-07-16 evening 2026-07-16',
+        '2026-07-16 small hours after 2026-07-16',
+        '2026-07-17 evening 2026-07-17',
+        '2026-07-17 small hours after 2026-07-17',
+        '2026-07-18 evening 2026-07-18',
+        '2026-07-18 small hours after 2026-07-18',
+      ]);
+    });
+
+    describe('with a programme on air as the window begins', () => {
+      /** A film from 21:30 to 23:00 UTC each day: across Bratislava's midnight. */
+      const film: SiteConfig<unknown> = {
+        ...utc([]),
+        parseDay({ day }): XmltvProgramme[] {
+          return [
+            {
+              channel: 'one.example',
+              start: new Date(`${day}T21:30:00.000Z`),
+              stop: new Date(`${day}T23:00:00.000Z`),
+              title: [{ value: `film ${day}` }],
+            },
+          ];
+        },
+      };
+
+      it('keeps it, as a source on the guide’s calendar would', async () => {
+        const dir = await tempDir();
+
+        await build(config(dir, { sites: [film], timezone: 'Europe/Bratislava' }), { now: LATE });
+
+        const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+        expect(guide.programmes.map((programme) => programme.title[0]?.value)).toEqual([
+          'film 2026-07-16',
+          'film 2026-07-17',
+        ]);
+      });
+
+      it('drops it when the guide is clamped to its window', async () => {
+        const dir = await tempDir();
+
+        await build(
+          config(dir, {
+            sites: [film],
+            timezone: 'Europe/Bratislava',
+            merge: { clampToWindow: true },
+          }),
+          { now: LATE },
+        );
+
+        const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+        expect(guide.programmes.map((programme) => programme.title[0]?.value)).toEqual([
+          'film 2026-07-17',
+        ]);
+      });
+    });
+
+    it('fails a site whose dayZone is not a zone, and the guide comes from the rest', async () => {
+      const dir = await tempDir();
+      const failed: unknown[] = [];
+
+      const summary = await build(
+        config(dir, {
+          sites: [site([]), { ...utc([]), site: 'mars.example', dayZone: 'Mars/Olympus' }],
+          timezone: 'Europe/Bratislava',
+        }),
+        {
+          now: LATE,
+          reporter: (event) => {
+            if (event.type === 'site:failed') {
+              failed.push(event.error);
+            }
+          },
+        },
+      );
+
+      expect(summary).toMatchObject({ fetched: 1, sitesFailed: 1 });
+      expect(failed).toHaveLength(1);
+      expect(String(failed[0])).toContain(
+        'Site "mars.example" dayZone must be an IANA time zone such as "Europe/Bratislava"',
+      );
+
+      const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+      expect(guide.programmes).toHaveLength(1);
+    });
+  });
+
   it('refuses a zone that is not one, before anything is asked', async () => {
     const dir = await tempDir();
     const fetchedDays: string[] = [];

@@ -570,6 +570,10 @@ epg try example.tv one.example.tv 2026-09-05
 epg try example.tv 1 --raw                 # by site id, whole payload
 ```
 
+The day is the site's: for one that keeps [another calendar](#which-day-is-today) it
+is a day by that calendar's date, and the one tried by default is the first a
+run would ask it for.
+
 ```
 example.tv → one.example.tv on 2026-09-03
 
@@ -1372,6 +1376,10 @@ Nothing is written. A list it had to fetch is **not** stored, which matters more
 than it sounds: storing one would make the next real run skip a fetch it would
 otherwise have made, so the dry run would have changed the run it was describing.
 
+A site on [another calendar](#which-day-is-today) counts its own days and says
+whose — `over 8 days of UTC's calendar` for a week's window — since covering the
+window takes one more of them. The JSON row carries it as `dayZone`.
+
 The `batching` in brackets is the resolved rule, so a surprising request count
 explains itself — 840 channel-days in 120 requests is a site batching a week at
 a time, and the other one asking per channel-day. Freshness is read from the
@@ -1433,6 +1441,24 @@ zone — what `TZ` says, and UTC in a container that sets none — and a schedul
 machine's clock is not the guide's: a server in UTC grabbing for Bratislava
 would otherwise take half past midnight there for the day before, refetch the
 day that has just ended, and stop a day short.
+
+A source whose days are on another calendar says so with its own
+[`dayZone`](./site-config.md#reference) — Schedules Direct's are always UTC —
+and the run covers its window with that calendar's days: it fetches the ones
+the window's hours fall on, which is one more at one edge, and files their
+programmes into its own days as it merges — the one already on air as the
+window begins included, as a source on the run's calendar would have it. The
+cache keeps them as the source keyed them, and a prune keeps the extra day.
+
+Two things follow from the source's clock being elsewhere. A run east of it
+reaches a day back for the hours between its midnight and the source's, and
+once the source's own midnight has passed too, that day is the source's
+yesterday: a run starting today stops asking for it, and the guide reads what
+the cache already holds. And which of its days `alwaysRefetchDays` fetches
+again goes by the hours rather than the dates — every day of the source's that
+overlaps the run's today and the days after it. At half past midnight in
+Bratislava both UTC days its today spans are refetched, where going by the
+date would refetch only the one that is ending.
 
 ## How caching works
 

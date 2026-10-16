@@ -1571,6 +1571,32 @@ describe('epg', () => {
       expect(stdout).toContain('1 of 3 channel-days to fetch, in 1 request');
     });
 
+    it('counts a site on another calendar in its own days, and says whose', async () => {
+      const dir = await tempDir();
+      const config = await configFile(
+        dir,
+        `export default {
+        sites: [{ ...${siteSource()}, dayZone: 'utc' }],
+        days: 1,
+        timezone: 'America/New_York',
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+      );
+
+      const { stdout } = await run(['grab', '--config', config, '--dry-run']);
+
+      // New York's day ends hours into the next UTC one, whenever this runs.
+      expect(stdout).toContain(
+        "example.tv — 1 channel (in the config), over 2 days of UTC's calendar",
+      );
+      expect(stdout).toContain('2 channel-days: 0 cached, 2 to fetch');
+
+      const json = await run(['grab', '--config', config, '--dry-run', '--format', 'json']);
+
+      expect(JSON.parse(json.stdout).sites[0]).toMatchObject({ days: 2, dayZone: 'UTC' });
+    });
+
     it('calls everything stale under --refresh, as the run would', async () => {
       const dir = await tempDir();
       const config = await configFile(

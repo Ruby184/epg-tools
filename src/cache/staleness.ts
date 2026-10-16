@@ -1,4 +1,4 @@
-import { dayIn, diffDays } from '../core/days.js';
+import { addDays, dayIn, diffDays, wallTimeIn } from '../core/days.js';
 import type { CacheEntryMeta, StalenessPolicy } from './types.js';
 
 const DAY_MS = 86_400_000;
@@ -16,8 +16,10 @@ const DAY_MS = 86_400_000;
  *   day that came back empty is as likely to be a source that was briefly
  *   broken as it is a channel with nothing on.
  *
- * Today is `now`'s day on the calendar of `timeZone`, UTC's without one — the
- * run's, so the days it always refetches are the ones it means by today.
+ * Today is `now`'s day on the calendar of `timeZone`, the process's own without
+ * one — the run's, so the days it always refetches are the ones it means by
+ * today. `dayZone` is the calendar `day` is on, where a site keeps another: see
+ * {@link alwaysRefetched}.
  */
 export function isStale(
   day: string,
@@ -25,6 +27,7 @@ export function isStale(
   policy: StalenessPolicy,
   now: Date,
   timeZone?: string,
+  dayZone?: string,
 ): boolean {
   // Ahead of the entry itself: a run asked to refetch everything is not asking
   // about this entry at all.
@@ -32,9 +35,7 @@ export function isStale(
     return true;
   }
 
-  const offset = diffDays(day, dayIn(now, timeZone));
-
-  if (offset >= 0 && offset < policy.alwaysRefetchDays) {
+  if (alwaysRefetched(day, policy.alwaysRefetchDays, now, timeZone, dayZone)) {
     return true;
   }
 
@@ -44,4 +45,39 @@ export function isStale(
   const maxAgeDays = meta.programmeCount === 0 ? policy.emptyMaxAgeDays : policy.maxAgeDays;
 
   return Number.isNaN(age) || age > maxAgeDays * DAY_MS;
+}
+
+/**
+ * Whether a day is one the policy always fetches again: today, and the days
+ * after it up to `days` — the run's today.
+ *
+ * A day of another calendar — a source keyed by UTC date, in a run on
+ * Bratislava's — counts where it overlaps those days rather than by its date.
+ * At half past midnight there, UTC's today is the day that has just ended, and
+ * the UTC day holding most of the run's today is tomorrow by its date: going by
+ * dates would refetch the one and leave the other as cached for a week.
+ */
+function alwaysRefetched(
+  day: string,
+  days: number,
+  now: Date,
+  timeZone: string | undefined,
+  dayZone: string | undefined,
+): boolean {
+  if (days <= 0) {
+    return false;
+  }
+
+  const today = dayIn(now, timeZone);
+
+  if (dayZone === undefined || dayZone === timeZone) {
+    const offset = diffDays(day, today);
+
+    return offset >= 0 && offset < days;
+  }
+
+  return (
+    wallTimeIn(day, dayZone) < wallTimeIn(addDays(today, days), timeZone) &&
+    wallTimeIn(addDays(day, 1), dayZone) > wallTimeIn(today, timeZone)
+  );
 }

@@ -163,8 +163,9 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       );
     case 'site:started':
       return (
-        `${at(event.site, prefix)}${event.channels} channel(s) × ${event.days} day(s): ` +
-        `${event.entries} to fetch in ${event.requests} request(s)`
+        `${at(event.site, prefix)}${event.channels} channel(s) × ${event.days} day(s)` +
+        (event.dayZone === undefined ? '' : ` of ${event.dayZone}'s calendar`) +
+        `: ${event.entries} to fetch in ${event.requests} request(s)`
       );
     case 'site:done':
       return `${at(event.site, prefix)}${counts(event)} — ${cost(event)}`;

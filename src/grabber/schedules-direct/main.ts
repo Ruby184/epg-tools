@@ -30,7 +30,10 @@
  * option as the other two adapters have. The service keys its md5s by
  * `(stationID, UTC date)`; filing a programme under any other day would store an
  * md5 against a day that never held it, and the guide would quietly stop
- * updating around midnight.
+ * updating around midnight. The site says `dayZone: 'utc'` instead, so a run on
+ * another calendar fetches the UTC days that cover its own and files their
+ * programmes into its days as it merges, leaving the cache keyed as the service
+ * keys it.
  */
 
 import ky, { type KyInstance } from 'ky';
@@ -76,7 +79,10 @@ const MAPPING_VERSION = 1;
 
 export interface SchedulesDirectSiteOptions
   extends
-    Omit<StreamSiteConfig<SchedulesDirectStation>, 'stream' | 'channels' | 'conditionalGet'>,
+    Omit<
+      StreamSiteConfig<SchedulesDirectStation>,
+      'stream' | 'channels' | 'conditionalGet' | 'dayZone'
+    >,
     SchedulesDirectMapOptions {
   username: string;
   /** Hashed here and never kept; give {@link passwordSha1} instead to keep it out of the config. */
@@ -436,6 +442,10 @@ export function defineSchedulesDirectSite(
     // skips them, so a day is as long as this may go unverified.
     cacheChannels: { maxAgeDays: 1 },
     ...site,
+    // Not the caller's to choose: the service keys its md5s by UTC date — see
+    // the note at the top. A run on another calendar covers its window with
+    // the UTC days around it instead.
+    dayZone: 'utc',
     ky: kyWith(site.ky, (existing) => ({
       ...existing,
       hooks: schedulesDirectHooks(existing?.hooks),

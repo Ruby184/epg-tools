@@ -29,6 +29,7 @@ import { errorMessage } from '../core/error.js';
 import { emitter, reportingTo, type Reporter, type Says } from '../core/events.js';
 import { compressor, type CompressionFormat } from '../core/output.js';
 import { covered, resolveSites } from '../grabber/channels.js';
+import { siteWindow } from '../grabber/site.js';
 import { threadCount } from '../grabber/thread.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import { generateGuide } from '../merge/guide.js';
@@ -480,12 +481,22 @@ interface Fingerprint {
  * its own otherwise, and a site whose `channels` is a function would make a
  * request on every poll.
  */
-function keysFor(sites: AnySiteConfig[], days: string[]): ChannelDayKey[] {
+function keysFor(
+  sites: AnySiteConfig[],
+  window: { startDay: string; days: string[] },
+  timeZone: string,
+): ChannelDayKey[] {
   const keys: ChannelDayKey[] = [];
 
   for (const site of sites) {
+    // The guide's window for every site, whatever its own `days`, since that is
+    // what the merge reads — on the site's own calendar where it keeps another,
+    // its leading day included: one already cached is read whether or not a
+    // grab would still ask for it.
+    const own = siteWindow(site, window.startDay, window.days.length, timeZone);
+
     for (const channel of site.channels as GrabberChannel[]) {
-      for (const day of days) {
+      for (const day of own) {
         keys.push({ site: site.site, channelId: channel.xmltvId, day });
       }
     }
@@ -1144,7 +1155,7 @@ export async function createGuideHandler(
           }));
 
     return {
-      print: await fingerprintOf(cache, keysFor(sites, window.days), window.id, shape),
+      print: await fingerprintOf(cache, keysFor(sites, window, timeZone), window.id, shape),
       sites,
       derived: selection?.derived ?? derived,
       meta,
