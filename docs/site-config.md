@@ -1237,7 +1237,9 @@ the programs anyone points this at spell differently, and guessing would be a
 silently wrong window. `args` may be a function, and is given `days` (the days
 wanted, **not necessarily contiguous** — a day fresh in the cache is left out),
 `span` (how long a stretch reaches from the first to the last, which is what a
-`--days`-style option means), `startDay`, and `offset` from today.
+`--days`-style option means), `startDay`, and `offset` from today — the
+program's today, which is the process's local date, since it inherits `TZ`
+and counts its own `--offset` from there.
 
 **The exit code decides whether the document finished.** A child's stdout ends
 *cleanly* when the process dies, and a Perl grabber that fails a fetch part way

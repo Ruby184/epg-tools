@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/main.js';
 import { grab } from '../src/grabber/main.js';
-import { defineCommandSite, runCommand } from '../src/grabber/command-source.js';
+import { commandWindow, defineCommandSite, runCommand } from '../src/grabber/command-source.js';
 import { resolveChannels } from '../src/grabber/channels.js';
 import { cutShort, documentFor, startControl, type Control } from './fixtures/control.js';
 import { collect } from './reporting.js';
@@ -385,5 +385,46 @@ describe('defineCommandSite', () => {
     expect(report.failures.map((one) => (one.error as Error).message).join(' ')).toMatch(
       /called off|abort/i,
     );
+  });
+});
+
+describe('the window a program is asked for', () => {
+  /** Run `check` with the process in `zone`, as a server with `TZ` set is. */
+  function inZone(zone: string, check: () => void): void {
+    const was = process.env['TZ'];
+
+    process.env['TZ'] = zone;
+
+    try {
+      check();
+    } finally {
+      if (was === undefined) {
+        delete process.env['TZ'];
+      } else {
+        process.env['TZ'] = was;
+      }
+    }
+  }
+
+  it('counts its offset from the program’s own today, which is the process’s', () => {
+    // Half past midnight in Bratislava, still the 16th in UTC. The run wants
+    // the 17th, and the program — which counts from its own local today — has
+    // to be told 0 for it, not 1.
+    inZone('Europe/Bratislava', () => {
+      expect(commandWindow(['2026-07-17', '2026-07-18'], new Date('2026-07-16T22:30:00Z'))).toEqual(
+        {
+          days: ['2026-07-17', '2026-07-18'],
+          startDay: '2026-07-17',
+          offset: 0,
+          span: 2,
+        },
+      );
+    });
+  });
+
+  it('is today when it is asked for no days', () => {
+    inZone('Europe/Bratislava', () => {
+      expect(commandWindow([], new Date('2026-07-16T22:30:00Z')).startDay).toBe('2026-07-17');
+    });
   });
 });

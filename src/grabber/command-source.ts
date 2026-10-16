@@ -25,7 +25,7 @@ import { createInterface } from 'node:readline';
 import { Readable } from 'node:stream';
 import { GrabberError } from '../core/error.js';
 import type { Says } from '../core/events.js';
-import { toDayString } from '../core/days.js';
+import { dayIn } from '../core/days.js';
 import type { CompressionFormat } from '../core/output.js';
 import { parseXmltvStream } from '../xmltv/main.js';
 import type { XmltvChannel, XmltvParseOptions } from '../xmltv/types.js';
@@ -419,7 +419,7 @@ function complaint(tail: readonly string[]): string {
  * see {@link CommandWindow.span}.
  */
 export function commandWindow(days: readonly string[], today: Date): CommandWindow {
-  const startDay = days[0] ?? toDayString(today);
+  const startDay = days[0] ?? dayIn(today);
   const last = days.at(-1) ?? startDay;
 
   return {
@@ -430,10 +430,15 @@ export function commandWindow(days: readonly string[], today: Date): CommandWind
   };
 }
 
-/** How many whole days `day` is from `from`. */
+/**
+ * How many whole days `day` is from `from`'s day — on the process's calendar,
+ * since that is the program's: it inherits the process's `TZ` and counts its
+ * `--offset` from its own today. Counted from UTC's, a grab between local
+ * midnight and UTC's would be asked for tomorrow when it meant today.
+ */
 function offsetOf(day: string, from: Date): number {
   const wanted = Date.parse(`${day}T00:00:00Z`);
-  const today = Date.parse(`${toDayString(from)}T00:00:00Z`);
+  const today = Date.parse(`${dayIn(from)}T00:00:00Z`);
 
   return Number.isNaN(wanted) ? 0 : Math.round((wanted - today) / 86_400_000);
 }
@@ -498,7 +503,7 @@ export function defineCommandSite<TData = XmltvChannel>(
         const run = await running(channelsArgs ?? args, {
           // Today, one day of it: the list is what is being asked for, and a
           // program with no cheaper way of answering runs a grab to give it.
-          ...commandWindow([toDayString(now)], now),
+          ...commandWindow([dayIn(now)], now),
           state,
           warn,
           log,
