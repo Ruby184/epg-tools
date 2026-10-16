@@ -115,7 +115,14 @@ function dispatching(
   brought: KyOptions['fetch'],
 ): NonNullable<KyOptions['fetch']> {
   return async (input, init) => {
-    const withDispatcher = { ...init, dispatcher: await dispatcher() } as unknown as RequestInit;
+    // One the site brought through `ky: { dispatcher }` is the one it asked for
+    // by name, and is left to win: `connection` is the shorthand for a site
+    // that did not.
+    const own = (init as { dispatcher?: unknown } | undefined)?.dispatcher;
+    const withDispatcher = {
+      ...init,
+      dispatcher: own ?? (await dispatcher()),
+    } as unknown as RequestInit;
 
     return (brought ?? globalThis.fetch)(input, withDispatcher);
   };
