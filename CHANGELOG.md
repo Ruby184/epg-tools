@@ -11,6 +11,40 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.8.0](https://github.com/Ruby184/epg-tools/compare/v0.7.0...v0.8.0) (2026-10-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* **grabber:** on the XMLTV, Xtream and command adapters, a `dayZone` naming a zone other than the run's now puts the site on that calendar, so a run fetches one more of its days and refiles their programmes by when they start. Where it was set to move the guide's days to that zone, set the run's `timezone` to it instead.
+* **xmltv:** `ProgrammeBuilder.episode(episode, season?)` no longer defaults the season to 1. A call that relied on that writes no season now, so pass `1` where the source means season 1.
+* with no `timezone` set, which day is today follows the process's time zone (`TZ`) instead of UTC, so a server running with `TZ` set starts its window, refetches and prunes by its local date. Set `timezone: 'UTC'` to keep the old days. `resolveConfigSource` now returns the config with its `timezone` filled in.
+* **grabber:** a channel's `data` must hold only plain values (strings, finite numbers, booleans, null, arrays and plain objects), whether or not the list is cached or run in a thread. A site whose channel data holds a `Date`, a `Map`, a class instance, a function, `NaN` or a circular reference now fails with a message saying where. Keep such values as strings or numbers, or build them in `parseDay` from what the channel carries.
+
+### Features
+
+* a run's days are on a time zone's calendar ([b8847f6](https://github.com/Ruby184/epg-tools/commit/b8847f68dbcd8d5de5bd78ff81586874f146c2c8))
+* **grabber:** a site's days on its own calendar, its window covered by a run ([8243ccc](https://github.com/Ruby184/epg-tools/commit/8243cccd7c9eef9b8e862cda31c480f110fc950d))
+
+
+### Bug Fixes
+
+* **grabber:** `epg grab --channels` grabs only the channels it selects ([db8d890](https://github.com/Ruby184/epg-tools/commit/db8d89069aa8a71a564966e5b3a0a440ed79c30c))
+* **grabber:** a channel's data holds plain values, or the site is refused ([c5fa652](https://github.com/Ruby184/epg-tools/commit/c5fa652a8a9ba1afb01c400bdc02b67094f494ae))
+* **grabber:** a dispatcher a site brings through ky wins over `connection` ([4b56476](https://github.com/Ruby184/epg-tools/commit/4b5647632de4ebbf3ea46f8b6b05a84b63837498))
+* **grabber:** a list settled before the grab is fetched as its requests are ([2ca8f38](https://github.com/Ruby184/epg-tools/commit/2ca8f38b6e6135970c11c3e9710f80a00df1e0c5))
+* **grabber:** a program is asked for days counted from its own today ([5208f67](https://github.com/Ruby184/epg-tools/commit/5208f67d606d09dcc748de4f8d907bc3ded3b3b3))
+* **grabber:** a stored channel list stands in only when the source did not answer ([0aa55d0](https://github.com/Ruby184/epg-tools/commit/0aa55d0d094df5146e81ae230e6b3ba3052431f1))
+* **grabber:** one site's channel list failing costs that site, not the run ([d40d934](https://github.com/Ruby184/epg-tools/commit/d40d9348cc81bfc5e9c573f7d392de7068a954ad))
+* **serve:** a config's `events` hears that the server started ([968c6c6](https://github.com/Ruby184/epg-tools/commit/968c6c6c2716106e53c5461b14eb98128430ee4a))
+* **xmltv:** a file write that does not finish leaves no file behind ([b731727](https://github.com/Ruby184/epg-tools/commit/b73172785186b2b4d8376d7d9dfbe652aabe7435))
+* **xmltv:** an episode number the source did not give is left out ([9f768dc](https://github.com/Ruby184/epg-tools/commit/9f768dcb9f61d0d89087bedef5b519ef831819f9))
+
+
+### Documentation
+
+* the documentation as 0.7.1 behaves ([e185bad](https://github.com/Ruby184/epg-tools/commit/e185baddca8699b127f5575dc43b8f440bdaf3ff))
+
 ## [0.7.0](https://github.com/Ruby184/epg-tools/compare/v0.6.0...v0.7.0) (2026-10-15)
 
 
