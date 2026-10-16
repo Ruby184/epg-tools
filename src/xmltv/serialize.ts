@@ -79,7 +79,7 @@ export interface SerializeOptions {
    * pushes each element and lets its readable buffer coalesce them, so there
    * this is simply the readable `highWaterMark`. Ignored by the per-element
    * {@link serializeChannel} / {@link serializeProgramme}. Defaults to Node's
-   * stream `highWaterMark` (16 KiB before Node 22, 64 KiB since).
+   * stream `highWaterMark` (64 KiB).
    */
   highWaterMark?: number;
   /**
@@ -1033,10 +1033,10 @@ export interface XmltvStreamInput {
 
 /**
  * Default streaming batch size — Node's own default stream `highWaterMark`
- * (16 KiB before Node 22, 64 KiB since), so `writeXmltvStream`'s batching and
- * `XmltvSerializeStream`'s readable buffer use one consistent size that tracks
- * the runtime. Benchmarks show throughput is flat from 16 KiB to 1 MiB, so the
- * value is about matching Node, not tuning.
+ * (64 KiB), so `writeXmltvStream`'s batching and `XmltvSerializeStream`'s
+ * readable buffer use one consistent size that tracks the runtime. Benchmarks
+ * show throughput is flat from 16 KiB to 1 MiB, so the value is about matching
+ * Node, not tuning.
  */
 const DEFAULT_HIGH_WATER_MARK = getDefaultHighWaterMark(false);
 

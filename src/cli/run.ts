@@ -63,11 +63,12 @@ Options:
                         a number of channel-days, or a share like 5%
       --dry-run         grab/build only: say what a run would fetch, and stop.
                         --format json for a machine-readable one
-      --extensions <names>  build/merge only: keep only these provider
+      --extensions <names>  build/merge/serve/filter: keep only these provider
                         extensions, comma-separated (e.g. lcn,uniqueID)
-      --no-extensions   build/merge only: leave every provider extension out,
-                        for a guide that validates against the DTD
-      --indent <n|str>  build/merge/filter: pretty-print with this indentation
+      --no-extensions   build/merge/serve/filter: leave every provider
+                        extension out, for a guide that validates against the DTD
+      --indent <n|str>  build/merge/serve/filter: pretty-print with this
+                        indentation
       --profile <name>  Shape the guide for one consumer: tvheadend or jellyfin.
                         build/merge/serve/filter. Changes the guide, never the
                         cache, so switching it refetches nothing

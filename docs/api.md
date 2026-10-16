@@ -6,6 +6,7 @@ Everything the `epg` CLI does is available as a library. The package is
 - [Running a build](#running-a-build)
 - [Reporting what a run is doing](#reporting-what-a-run-is-doing)
 - [Streaming a guide](#streaming-a-guide)
+- [Serving a guide](#serving-a-guide)
 - [Entry points](#entry-points)
 - [Export map](#export-map)
 
@@ -25,7 +26,7 @@ console.log(summary); // { fetched, fromCache, failed, ... }
 | `runGrab(source, options?)` | Grab only — fills the cache, writes no guide. |
 | `runMerge(source, options?)` | Write the guide from the cache only. |
 | `guideStream(source, options?)` | The merged guide as an async generator of XML chunks. |
-| `createCacheStore(config)` | The cache a config describes: a `CacheManager` over the driver its `driver` names or builds. |
+| `createCacheStore(config, signal?)` | The cache a config describes: a `CacheManager` over the driver its `driver` names or builds — built with `signal`, where the driver takes one. |
 
 `GrabSummary` counts `fetched` (channel-days that went to the network),
 `fromCache` (skipped because the cache was fresh), `empty`, `unchanged`,
@@ -34,11 +35,14 @@ of the guide.
 
 `failed` is a **count** of channel-days that did not come back. `sitesFailed`
 counts sites that answered nothing at all — one that could not be read, or whose
-channel list never arrived. `build` counts a list that failed before its grab
-began the same way, and grabs and merges the other sites. They are apart because a site has no grid to spread
-it over: a site that could not be read has no channel list, so what it *would*
-have covered is not knowable, and adding one to a count of channel-days would
-make a dead source look like a rounding error beside a guide of thousands.
+channel list never arrived. A list can also fail before the grab begins:
+`build` settles every list first, and so does `runGrab` whenever it has a
+selection (`channels`) or a `cover` that narrows. Either counts a list that
+failed there the same way, and grabs the other sites — and `build` merges them.
+The two counts are apart because a site has no grid to spread it over: a site
+that could not be read has no channel list, so what it *would* have covered is
+not knowable, and adding one to a count of channel-days would make a dead
+source look like a rounding error beside a guide of thousands.
 
 Which is the difference [`allowMissing`](./configuration.md#allowing-some-of-the-guide-to-be-missing)
 turns on: a threshold forgives scattered channel-days, and never a site that
@@ -120,7 +124,7 @@ the whole answer to "what does the default verbosity show?".
 | a whole-document source | `stream:gaps`, `stream:ignored` |
 | pacing | `pacing:held`, `pacing:slowed`, `pacing:recovered`, `pacing:rateLimit` |
 | merging, tidying | `merge:channel`, `merge:summary` (what the sources made of each other), `merge:done`, `merge:note`, `merge:warning`, `prune:done` |
-| [serving](./configuration.md#serving-the-guide) | `serve:started` (with the `url`), `serve:response` (`method`, `path`, `status`, `ms`), `serve:reloaded`, `serve:disconnected`, `serve:failed`, `serve:stopped` |
+| [serving](./configuration.md#serving-the-guide) | `serve:started` (with the `url`), `serve:response` (`method`, `path`, `status`, `ms`), `serve:reloaded`, `serve:disconnected`, `serve:failed`, `serve:grabFailed` (a scheduled grab that threw outright, rather than one of its sites failing), `serve:stopped` |
 
 ### What a run cost, and what the merge made of it
 
@@ -146,7 +150,9 @@ as every other site slowing while it runs, not as a large `loopMaxMs`.
 `site:done` says what the site **cost**, beside what it fetched. `requests` is
 how many times the source was asked — every slot the site's queue gave out, a
 `ctx.paced` fetch inside a parse included, which is why it is not the same as
-counting `request:done` events. `ms` is how long the site took; `requestMs` is
+counting `request:done` events. A channel list is one of them only when it was
+fetched: one written out in the config, or still fresh in the cache, asks the
+source nothing and counts as nothing. `ms` is how long the site took; `requestMs` is
 how long its requests spent waiting on the source. A site whose `ms` is close
 to its `requestMs` is waiting on the source. One whose `ms` is far above it is
 waiting on something of its own: its `rateLimit`, or the parsing and writing
@@ -313,6 +319,7 @@ HTTP response with constant memory:
 ```ts
 import { guideStream } from 'epg-tools';
 import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 await pipeline(Readable.from(guideStream(config, { offset: 1 })), process.stdout, { end: false });
 ```
@@ -378,10 +385,14 @@ await server.closed;          // resolves when it stops
 ```
 
 It resolves once listening, and gives back `{ url, port, reload, close, closed }`.
-`options` takes `port`, `host`, `path`, `compress`, `cors`, `concurrency`,
-`keepAliveMs`, `revalidateMs`, `sitesMaxAgeMs`, `reloadOn`, and the `signal`,
-`reporter`, `now`, `offset` and `cache` a run takes — a `cache` handed in stays
-the caller's, and one it opened is closed by `close()`.
+`options` takes `port`, `host`, `path`, `health`, `compress`, `cors`,
+`concurrency`, `keepAliveMs`, `revalidateMs`, `sitesMaxAgeMs`, `reloadOn`,
+`grab` (a [schedule](./configuration.md#grabbing-on-a-schedule) to grab on
+while serving), `server` (a server of your own to listen with — see below),
+`shutdown`, and the `signal`, `reporter`, `now`, `offset`, `cache` and
+`configModule` a run takes — a `cache` handed in stays the caller's, and one it
+opened is closed by `close()`. Each overrides the config's `serve` field of the
+same name, where there is one.
 
 The validator is the cache's, not the document's: a guide is a generator, so
 hashing its bytes would mean buffering it. What is read per poll is the window's
@@ -405,7 +416,7 @@ that costs and saves.
 an app that already has a port of its own:
 
 ```ts
-import { createGuideHandler } from 'epg-tools/serve';
+import { createGuideHandler, grabEvery } from 'epg-tools/serve';
 
 const handler = await createGuideHandler(config, { grab: grabEvery('4h') });
 
@@ -417,11 +428,12 @@ await handler.close();                                          // yours to clos
 ```
 
 It gives back `{ answer, node, fastify, fetch, guidePath, healthPath, config, reload, close }`
-and takes everything `serveGuide` does except `port`, `host` and `keepAliveMs`,
-plus `shutdown` — a hook run while stopping, after the scheduled grab has been
-called off and before the cache is let go of, which is where ending the
-requests still in flight belongs. `serveGuide` is this plus a socket, and
-passes its own shutdown there.
+and takes everything `serveGuide` does except `port`, `host`, `keepAliveMs` and
+`server`, which are about the listening. `shutdown`, which both take, is a hook
+run while stopping, after the scheduled grab has been called off and before the
+cache is let go of, which is where ending the requests still in flight belongs.
+`serveGuide` is this plus a socket: it calls yours first and then closes the
+socket in the same place.
 
 `node(route?)`, `fastify(route?)` and `fetch(route?)` build a handler for one
 answer — `'guide'` or `'health'` — wherever it is mounted; a builder rather
@@ -507,8 +519,9 @@ The root re-exports most of the subpaths, so a single import usually does. Two
 reasons to reach for a subpath: `epg-tools/xmltv`, `epg-tools/m3u` and
 `epg-tools/channels` pull in **no dependencies and none of the machinery** — no
 grabber, no cache, no config loading — so they are the ones to use if all you
-want is to read or write those formats; and a handful of
-names live only on a subpath (marked below).
+want is to read or write those formats; and a handful of names live only on a
+subpath — marked `*` below. `epg-tools/tv-grab` and `epg-tools/cache/sqlite`
+are not re-exported at all.
 
 ## Export map
 
@@ -519,25 +532,33 @@ names live only on a subpath (marked below).
 | Config | `defineConfig`, `resolveConfigSource` |
 | Answers | `createConfigContext`, `defaultsReader`, `envReader` |
 | Errors | `GrabberError`, `errorMessage`, `errorChain` |
-| Events | `LEVELS`, `EVENT_KINDS`, `atLevel` |
-| Reporters | `textReporter`, `jsonReporter`, `render`, `renderFailure`, `isFailure`, `reporterFor`, `REPORTER_NAMES`, `DEFAULT_FAILURE_CAP` |
+| Events | `LEVELS`, `PHASES`, `EVENT_KINDS`, `atLevel`, `emitter` |
+| Reporters | `textReporter`, `jsonReporter`, `progressReporter`, `loggerReporter`, `emitterReporter`, `combineReporters`, `render`, `renderFailure`, `isFailure`, `reporterFor`, `REPORTER_NAMES`, `FAILURE_MODES`, `DEFAULT_FAILURE_CAP` |
 | Runners | `build`, `runGrab`, `runMerge`, `guideStream`, `createCacheStore` |
+| Allowance | `fellShort`, `resolveAllowance` — whether a summary is short more than `allowMissing` forgives |
+| Serve | `serveGuide`, `createGuideHandler`, `grabEvery` — the `DEFAULT_*` values and `outputFingerprint` are on [`epg-tools/serve`](#epg-toolsserve) only |
 | Days | `toDayString`, `dayToDate`, `addDays`, `diffDays`, `dayRange` |
 | Options parsing | `parseOptions`, `OptionError` |
-| XMLTV | `escapeXml`, `escapeXmlText`, `escapeXmlAttribute`, `serializeChannel`, `serializeProgramme`, `writeXmltvStream`, `writeXmltvToFile`, `parseXmltvStream`, `parseXmltvFile`, every [date helper](./xmltv.md#dates) and the [zone helpers](./xmltv.md#named-zones) |
+| XMLTV | `escapeXml`, `escapeXmlText`, `escapeXmlAttribute`, `serializeChannel`, `serializeProgramme`, `writeXmltvStream`, `writeXmltvToFile`, `parseXmltvStream`, `parseXmltvFile`, `validateXmltv`, every [date helper](./xmltv.md#dates) and the [zone helpers](./xmltv.md#named-zones) |
+| Episode numbers, genres | `parseXmltvNsEpisodeNum`, `formatXmltvNsEpisodeNum`, `parseOnscreenEpisodeNum`, `formatOnscreenEpisodeNum`, `parseDdProgidEpisodeNum`, `formatDdProgidEpisodeNum`, `DVB_GENRES`, `genreKey`, `genreOf` |
+| Output profiles | `OUTPUT_PROFILE_NAMES`, `OUTPUT_PROFILES`, `resolveProfile` |
 | M3U | `parseM3uStream`, `parseM3uFile`, `parseM3uString`, `serializeM3uEntry`, `serializeM3uHeader`, `writeM3uStream`, `writeM3uToFile`, `M3uParseStream`, `M3uSerializeStream` |
 | Channels | `parseChannelsXml`, `serializeChannelsXml`, `serializeChannelsXmlEntry`, `matchChannels`, `timeshiftOf`, `timeshiftName` |
-| Cache | `CacheManager`, `CACHE_SCHEMA`, `CODECS`, `FsCacheDriver`, `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`, `MemoryCacheDriver`, `NoCacheDriver`, `isStale`, `DEFAULT_STALENESS` |
-| Grabber | `grab`, `defineSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `defineXtreamSite`, `defineSchedulesDirectSite`, `schedulesDirectAccount`, `defineCommandSite`, `defineTvGrabCommandSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`, `xtreamChannelExtras`, `xtreamProgrammeExtras`, `schedulesDirectChannelExtras`, `schedulesDirectProgrammeExtras`, `channelElement`, `siteHttp`, `kyWith`, `sitePacing`, `retryAfterMs` |
+| Cache | `CacheManager`, `CODECS`, `toRecord`, `fromRecord`, `FsCacheDriver`, `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`, `isStale`, `DEFAULT_STALENESS`, `CACHE_DRIVER_NAMES` |
+| Grabber | `grab`, `defineSiteConfig`, `defineStreamSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `defineXtreamSite`, `defineSchedulesDirectSite`, `schedulesDirectAccount`, `defineCommandSite`, `defineTvGrabCommandSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`, `xtreamChannelExtras`, `xtreamProgrammeExtras`, `schedulesDirectChannelExtras`, `schedulesDirectProgrammeExtras`, `SCHEDULES_DIRECT_CHANNEL_ID`, `channelElement`, `siteHttp`, `kyWith`, `sitePacing`, `retryAfterMs`, `isUnchanged`, `UnchangedError` |
+| Site state | `SiteStateHandle`, `StateKey`, `TrackedMap`, `channelsMaxAgeMs`, `DEFAULT_CHANNELS_MAX_AGE_DAYS` — see [what a site remembers](#what-a-site-remembers-between-runs) |
 | Selection | `channelSelection`, `unmatched` — what `channels` means once `derived` is taken into account, and what it asked for that nothing produced |
 | Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `backfillInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
 
 Plus the types for all of the above (`EpgConfig`, `SiteConfig`,
-`GrabberChannel`, `XmltvProgramme`, `XmltvChannel`, …).
+`GrabberChannel`, `XmltvProgramme`, `XmltvChannel`, `GuideServer`, …), and
+`ProgrammeBuilder`, `ChannelBuilder` and `ProgrammeOptions` as types — the
+builders themselves are values on `epg-tools/xmltv` only.
 
 ### `epg-tools/xmltv`
 
-Zero dependencies, and nothing else in the package is loaded. Full detail in
+Zero dependencies, and nothing else in the package is loaded but the error
+class its serializer throws, whose module imports nothing. Full detail in
 [XMLTV parser, serializer and builders](./xmltv.md).
 
 - **Parse** — `parseXmltvFile`, `parseXmltvStream`, `parseXmltvString`*, `XmltvParseStream`*
@@ -545,10 +566,17 @@ Zero dependencies, and nothing else in the package is loaded. Full detail in
 - **Builders*** — `ProgrammeBuilder`, `ChannelBuilder`, `XmltvDocumentBuilder`
 - **Dates** — `parseXmltvDate`, `formatXmltvDate`, `xmltvDate`, `getXmltvOffset`, `setXmltvOffset`, `getXmltvPrecision`, `setXmltvPrecision`, `XMLTV_OFFSET`, `XMLTV_PRECISION`, `XmltvDateError`
 - **Zones** — `zonedXmltvDate`, `xmltvZone`, `setXmltvZone`, `xmltvZoneOffset` — see [named zones](./xmltv.md#named-zones)
+- **Episode numbers** — `parseXmltvNsEpisodeNum`, `formatXmltvNsEpisodeNum`, `parseOnscreenEpisodeNum`, `formatOnscreenEpisodeNum`, `parseDdProgidEpisodeNum`, `formatDdProgidEpisodeNum` — see [episode numbers](./xmltv.md#episode-numbers)
+- **Genres** — `DVB_GENRES`, `genreOf`, and `genreKey`, the folding `genreOf` matches by — see [genres](./xmltv.md#genres)
+- **Output profiles** — `OUTPUT_PROFILES`, `OUTPUT_PROFILE_NAMES`, `resolveProfile` — see [output profiles](./configuration.md#output-profiles)
 - **Validate** — `validateXmltv` — see [validating a guide](./configuration.md#validating-a-guide)
 - **Other** — `escapeXml` and the two named forms it takes its rule from, `escapeXmlText` and `escapeXmlAttribute` — text escapes `&`, `<` and `>`, an attribute those and `"`; `escapeXml(value, quotes)` says which quotes would end the value where it is going
 
-`*` this subpath only — not re-exported from the root.
+`*` this subpath only — not re-exported from the root. For the builders that
+means the classes: since 0.7.0 `ProgrammeBuilder`, `ChannelBuilder` and
+`ProgrammeOptions` are re-exported *as types* from the root and from
+`epg-tools/grabber`, so a helper a site splits out of its `parseDay` can say
+what it takes.
 
 ### `epg-tools/m3u`
 
@@ -581,13 +609,16 @@ M3U one above.
 ### `epg-tools/cache`
 
 `CacheManager`, the drivers `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`,
-`MemoryCacheDriver` and `NoCacheDriver` with the abstract `FsCacheDriver` the
+`MemoryCacheDriver`* and `NoCacheDriver`* with the abstract `FsCacheDriver` the
 file ones build on, the codecs a driver names in `CODECS` and the `toRecord` /
-`fromRecord` pair they build on, `CACHE_SCHEMA`, `STATE_SCHEMA`, `isStale`,
+`fromRecord` pair they build on, `CACHE_SCHEMA`*, `STATE_SCHEMA`*, `isStale`,
 `DEFAULT_STALENESS`, `CACHE_DRIVER_NAMES`, and the `CacheStore` / `CacheDriver` /
-`CacheCodec` / `CodecName` / `ChannelDayKey` / `CacheEntryMeta` /
-`StoredEntryMeta` / `StoredProgramme` / `StateEntry` / `StoredStateMeta` /
-`FoundState` / `StalenessPolicy` / `CacheDriverName` types.
+`CacheManagerOptions` / `FsCacheDriverOptions` / `CacheCodec` / `CodecName` /
+`ChannelDayKey` / `CacheEntryMeta` / `StoredEntryMeta` / `StoredProgramme` /
+`FoundMeta` / `FoundEntry` / `StateEntry` / `StoredStateMeta` / `FoundState` /
+`StalenessPolicy` / `CacheDriverName` types.
+
+`*` this subpath only — not re-exported from the root.
 
 A cache is two pieces. A **driver** answers for one store — a directory of
 files, a database, a bucket — and holds no policy of its own. The
@@ -806,7 +837,8 @@ supports — Node 22.5 behind `--experimental-sqlite`, unflagged from Node 24 �
 nothing loads the module until something asks for it. `cache: { driver:
 'sqlite' }` is the short way to ask, and puts `cache.sqlite` in the cache
 directory; `new SqliteCacheDriver({ dir, file?, signal? })` is the long way, where
-`file` names the database yourself (`':memory:'` included).
+`file` names the database yourself (`':memory:'` included). Those options are
+the `SqliteCacheDriverOptions` type, exported beside it.
 
 One row per channel-day: the meta columns, and the programmes as the `json`
 codec's bytes, a BLOB — bound as bytes, which is 0.55ms for 1.45 MiB where
@@ -827,16 +859,20 @@ again.
 
 `grab`, `defineSiteConfig`, `defineStreamSiteConfig`, `defineXmltvSite`,
 `defineM3uSite`, `defineXtreamSite`, `defineCommandSite`,
-`defineTvGrabCommandSite`, `runCommand`, `splitXmltvDocument`, `streamBytes`,
-`defineSchedulesDirectSite`,
-`schedulesDirectAccount`, `resolveChannels`, `resolveSites`,
-`channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`,
-`xtreamChannelExtras`, `xtreamProgrammeExtras`, `schedulesDirectChannelExtras`,
-`schedulesDirectProgrammeExtras`, `siteHttp`, `kyWith`, `sitePacing`,
-`retryAfterMs`, `channelElement`, `defaultChannelInfo`, `SiteStateHandle`,
-`StateKey`, `TrackedMap`, `channelsMaxAgeMs`,
+`defineTvGrabCommandSite`, `runCommand`*, `splitXmltvDocument`*,
+`streamBytes`*, `documentBytes`*, `dayOf`*, `asGrabberChannel`*,
+`xmltvChannelInfo`*, `defineSchedulesDirectSite`, `schedulesDirectAccount`,
+`SCHEDULES_DIRECT_CHANNEL_ID`, `resolveChannels`, `resolveSites`,
+`coverageOf`*, `covered`*, `channelsFromM3u`, `channelsFromChannelsXml`,
+`guideUrlsFromM3u`, `xtreamChannelExtras`, `xtreamProgrammeExtras`,
+`schedulesDirectChannelExtras`, `schedulesDirectProgrammeExtras`, `siteHttp`,
+`kyWith`, `sitePacing`, `retryAfterMs`, `channelElement`, `defaultChannelInfo`,
+`SiteStateHandle`, `StateKey`, `TrackedMap`, `channelsMaxAgeMs`,
 `DEFAULT_CHANNELS_MAX_AGE_DAYS`, `UnchangedError`, `isUnchanged`,
-`fellShort`, `resolveAllowance`.
+`fellShort`, `resolveAllowance`, and `ProgrammeBuilder` / `ChannelBuilder` /
+`ProgrammeOptions` as types.
+
+`*` this subpath only — not re-exported from the root.
 
 A site comes in two shapes and `grab` takes either: `defineSiteConfig` for one
 that fetches a request at a time and parses each channel-day out of it, and
@@ -844,31 +880,53 @@ that fetches a request at a time and parses each channel-day out of it, and
 pass](./site-config.md#sites-that-answer-in-one-pass). `AnySiteConfig` is the
 union, which is what a list of sites holds.
 
-`resolveChannels(site, { http?, signal?, state?, refresh?, now?, says? })`
-returns a site's channels whichever form they came in — a list or a fetched one
-— and `resolveSites(sites, { signal?, concurrency?, store?, refresh?, now?,
-emit?, failed? })` does it for several, which is what `build` uses to fix the
-list across the grab and the merge. One site's list failing rejects the whole
-call unless `failed(site, error)` says what to do with that site instead: answer
-a site to use in its place, or `undefined` to leave it out. `build`, `serve` and
-the merge all pass one, so one source down costs that source and nothing else;
-a cancelled run rejects either way. Settling the lists and then grabbing, as
-`build` does, hand what failed to `grab` as `failedSites: [{ site, error }]`:
-each is reported and counted as a list that failed in the grab's own hands —
-`site:failed`, `site:done`, one more in `sitesFailed` — and asked nothing. A site's own `log` and `warn` go to `says` (or, for
-several sites, to `emit` as the events they are) and are **dropped without
-one** — which is what a caller writing a channel list to stdout wants, and a
-surprise to anyone else. Given a `store`, both honour a site's
-[`cacheChannels`](./site-config.md#keeping-a-fetched-list): a list still inside
-its max age comes back without the source being asked, and a site's `channels`
-function is handed that handle's bag as its `state` — an empty one of its own
-where there is no store. `siteHttp(config,
-signal?)` builds the site's ky instance — from its `ky` options, or by
-extending a ky instance it brought — and `kyWith(ky, compose)` is how an
-adapter built on another adds options of its own to either form, and `sitePacing(config, { signal?, emit?
-})` its queue. `channelElement(config, channel)` is what every `<channel>` in the
-output goes through — the site's `channelInfo` if it has one,
-`defaultChannelInfo` if not.
+`resolveChannels(site, { http?, signal?, state?, refresh?, now?, says?,
+select?, paced? })` returns a site's channels whichever form they came in — a
+list or a fetched one — and `resolveSites(sites, { signal?, concurrency?,
+store?, refresh?, now?, emit?, select?, failed? })` does it for several, which
+is what `build` uses to fix the list across the grab and the merge. `select`
+keeps only the channels whose `xmltvId` it holds, and is applied after the
+cache, so what a site stores is still its whole list. `paced(fetch)` is how a
+fetch of the list is sent: through the site's request queue, so its
+`rateLimit`, `concurrency` and hold on a `429` apply to the list as they do to
+the days after it. Only a fetch goes through it: a list written out in the
+config, or still fresh in the cache, sends nothing. Without it the site's
+`channels` is simply called.
+
+One site's list failing rejects the whole call unless `failed(site, error)`
+says what to do with that site instead: answer a site to use in its place, or
+`undefined` to leave it out. `build`, `runGrab`, `serve` and the merge all pass
+one, so one source down costs that source and nothing else; a cancelled run
+rejects either way. Settling the lists and then grabbing, as `build` does — and
+`runGrab` too, whenever it has a selection (`channels`) or a `cover` that
+narrows — hand what failed to `grab` as `failedSites: [{ site, error }]`: each
+is reported and counted as a list that failed in the grab's own hands —
+`site:failed`, `site:done`, one more in `sitesFailed` — and asked nothing. A
+list those two settle is fetched through the site's own queue, and the grab
+carries on with the same queue, client and state, so `rateLimit`, the hold on a
+`429` and whatever `channels` put in `state` apply as they do in a plain grab.
+A site running in a worker thread starts a queue of its own for the grab.
+
+A site's own `log` and `warn` go to `says` (or, for several sites, to `emit` as
+the events they are) and are **dropped without one** — which is what a caller
+writing a channel list to stdout wants, and a surprise to anyone else. Given
+somewhere to keep it — a `state` handle, or for several sites a `store` — both
+honour a site's [`cacheChannels`](./site-config.md#keeping-a-fetched-list): a
+list still inside its max age comes back without the source being asked, and a
+site's `channels` function is handed that handle's bag as its `state` — an
+empty one of its own where there is none. When fetching the list again fails
+because the source did not answer — a network error, a timeout, or a `408`,
+`425`, `429` or `5xx` — the list stored last is used whatever its age, with a
+warning, and is not stored again. An error the site throws about an answer it
+did get — a lineup the account no longer has, a service saying it is offline —
+fails the site instead, since a list from before it said so would hide it.
+
+`siteHttp(config, signal?)` builds the site's ky instance — from its `ky`
+options, or by extending a ky instance it brought — and `kyWith(ky, compose)`
+is how an adapter built on another adds options of its own to either form, and
+`sitePacing(config, { signal?, emit? })` its queue. `channelElement(config,
+channel)` is what every `<channel>` in the output goes through — the site's
+`channelInfo` if it has one, `defaultChannelInfo` if not.
 
 **`channelsFromM3u(source, options?)`** reads an M3U playlist as a channel list,
 taking a path or what [`epg-tools/m3u`](./m3u.md) produces. It returns the
@@ -931,8 +989,11 @@ a `Map` that records which keys were touched so nothing untouched is rewritten.
 ### `epg-tools/merge`
 
 `generateGuide`, `writeGuide`, `mergeProgrammes`, `mergeProgrammeLists`,
-`mergeInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`,
-`mergeChannels`*, `defaultChannelInfo`.
+`mergeInto`, `backfillInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`,
+`DEFAULT_MATCH`, `DEFAULT_FILL_STOP_MS`*, `mergeChannels`*,
+`defaultChannelInfo`, `channelSelection`, `unmatched`.
+
+`*` this subpath only — not re-exported from the root.
 
 `writeGuide({ ...options, output, compress? })` writes where `output` says — a
 path renamed into place, a Unix socket, or a stream — and compresses when asked
@@ -941,11 +1002,17 @@ or when the name says so, `.gz` / `.br` / `.zst`. See
 costs on a real one. `generateGuide` yields the document itself, so a caller
 piping it somewhere compresses it however they like.
 
-`mergeProgrammeLists(lists, strategy, match?)` combines per-site lists in
-priority order; `match` is a `ProgrammeMatch` object, or a predicate of
-your own — see [what counts as the same
-broadcast](./configuration.md#what-counts-as-the-same-broadcast).
-`mergeInto(target, incoming, resolveMatch(match))` is the piece underneath it:
+`mergeProgrammeLists(lists, strategy, match?, fillStopMs?)` combines per-site
+lists in priority order; `match` is a `ProgrammeMatch` object, a predicate of
+your own, or `{ windowMs, matches }` — a predicate with the reach it needs. A
+bare predicate is taken to reach any distance (`windowMs: Infinity`), so it is
+asked about every pair; giving it a window is what keeps a merge linear. See
+[what counts as the same
+broadcast](./configuration.md#what-counts-as-the-same-broadcast). `fillStopMs`
+is for the `backfill` strategy: how long a programme with no `stop` is taken to
+cover, `DEFAULT_FILL_STOP_MS` (six hours) unless given.
+`mergeInto(target, incoming, resolveMatch(match))` is the piece underneath
+`mergeProgrammeLists`:
 one source's list folded into a sorted accumulator, which is also how the guide
 carries a day across the boundary into the next.
 
@@ -962,11 +1029,28 @@ channels](./configuration.md#derived-channels).
 
 ### `epg-tools/serve`
 
-`serveGuide` and `createGuideHandler`, the `GuideServer` / `ServeOptions` /
-`EpgServeConfig` / `GuideHandler` / `GuideHandlerOptions` / `GuideRequest` /
-`GuideAnswer` types, with `DEFAULT_SERVE_PORT`, `DEFAULT_SERVE_HOST`, `DEFAULT_SERVE_PATH`,
-`DEFAULT_REVALIDATE_MS`, `DEFAULT_KEEP_ALIVE_MS` and `DEFAULT_SITES_MAX_AGE_MS`. Loaded only when named, so nothing else pulls in
-`node:http`.
+`serveGuide`, `createGuideHandler`, `grabEvery`, `outputFingerprint`*, the
+`GuideServer` / `ServeOptions` / `EpgServeConfig` / `GuideListening` /
+`GuideHandler` / `GuideHandlerOptions` / `GuideRequest` / `GuideRoute` /
+`GuideAnswer` / `GuideHealth` / `Replying` / `ReplyingRequest` / `NextGrab` /
+`GrabEveryOptions` / `GrabScheduleContext` / `GuideCached` types, with
+`DEFAULT_SERVE_PORT`*, `DEFAULT_SERVE_HOST`*, `DEFAULT_SERVE_PATH`*,
+`DEFAULT_HEALTH_PATH`*, `DEFAULT_REVALIDATE_MS`*, `DEFAULT_KEEP_ALIVE_MS`* and
+`DEFAULT_SITES_MAX_AGE_MS`*.
+
+`*` this subpath only — not re-exported from the root.
+
+A `NextGrab` is the schedule `grab` takes: a function of `({ from, runs,
+cached })` answering when the next grab is due, which `grabEvery` builds for an
+interval — see [grabbing on a
+schedule](./configuration.md#grabbing-on-a-schedule).
+
+The server is loaded by this entry point and by the root, which re-exports
+`serveGuide`, `createGuideHandler` and `grabEvery` — so importing `epg-tools`
+loads `node:http` whether or not anything is served. The other subpaths leave
+the server out. `epg-tools/xmltv`, `m3u`, `channels`, `cache` and
+`cache/sqlite` load no `node:http` at all; `grabber`, `merge` and `tv-grab`
+still reach it through Node's own `fetch`, which ky is built on.
 
 ### `epg-tools/tv-grab`
 

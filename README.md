@@ -23,7 +23,7 @@ Memory-efficient EPG toolkit for building [XMLTV](https://github.com/XMLTV/xmltv
 - **Serve it and check it** — [`epg serve`](./docs/configuration.md#serving-the-guide) holds the guide behind HTTP for a consumer that polls, answering `304 Not Modified` from cache metadata rather than by merging again, and [`epg validate`](./docs/configuration.md#validating-a-guide) reads a guide back and reports what is wrong with it, grouped by rule so the report stays the same size whatever the guide's
 - **An XMLTV grabber, from the same config** — [`epg init-grabber`](./docs/tv-grab.md) turns it into a `tv_grab_*` executable that tvheadend and `tv_find_grabbers` can drive
 
-Requires Node.js >= 22 (Node >= 23.6 to load `epg.config.ts` directly via native type stripping).
+Requires Node.js >= 22 (22.18 or newer — 23.6 or newer on the 23 line — to load `epg.config.ts` directly via native type stripping).
 
 ## Install
 
@@ -181,6 +181,9 @@ into place, so a reader never sees half a guide.
 | `--cache-dir <dir>` | override the cache directory |
 | `--cache-driver <name>` | override where cached days are kept: `ndjson`, `xmltv`, `sqlite` or `memory` |
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
+| `--channels <what>` | `build`/`grab`/`merge`/`serve`/`filter`: [keep only these channels](./docs/configuration.md#keeping-only-some-channels), and fetch nothing for the rest — ids, or a playlist, `*.channels.xml`, guide or plain list naming them; repeatable |
+| `--allow-missing <n>` | exit 0 with up to this much of the guide missing — a number of channel-days, or a share like `5%`; [a site that answered nothing is never forgiven](./docs/configuration.md#allowing-some-of-the-guide-to-be-missing) |
+| `--dry-run` | `grab`/`build` only: [say what a run would fetch](./docs/configuration.md#what-a-run-would-do), and stop — `--format json` for a machine-readable one |
 | `--threads[=n]` | `build`/`grab`/`serve`: run the sites in [worker threads](./docs/configuration.md#sites-in-threads-of-their-own), one per core or at most `n`; `--no-threads` overrides a config that asks for them |
 | `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
@@ -191,9 +194,11 @@ into place, so a reader never sees half a guide.
 | `-h, --help` | print the usage |
 | `--description`, `--grabber-version`, `--force` | `init-grabber` only — see [XMLTV grabber](./docs/tv-grab.md) |
 
-It exits **0** on success, **1** when the run failed or the guide is short a
-channel-day, and **2** for anything you typed wrong — an unknown option,
-command, or `--before` value, each printed with the usage.
+It exits **0** on success, **1** when the run failed or the guide is short more
+channel-days than `--allow-missing` forgives, **2** for anything you typed
+wrong — an unknown option, command, or `--before` value, each printed with the
+usage — and **130** when it was cancelled by `SIGINT` or `SIGTERM`. `epg serve`
+is the exception: stopping is how it ends, so a server asked to stop exits 0.
 
 Full option semantics, every config field and its default, and how the cache
 decides what to refetch are in [Configuration and CLI](./docs/configuration.md).

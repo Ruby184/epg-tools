@@ -26,6 +26,9 @@ it cannot leave a half-built site's output in the cache.
   - [The `<channel>` element](#the-channel-element)
   - [Saying something](#saying-something)
 - [Batching](#batching-how-much-one-request-covers)
+- [Asking only when it is worth it](#asking-only-when-it-is-worth-it)
+- [A published guide as a source](#a-published-guide-as-a-source)
+- [Sites that answer in one pass](#sites-that-answer-in-one-pass)
 - [HTTP settings and proxies](#http-settings-and-proxies)
 - [Rate limits and backoff](#rate-limits-and-backoff)
 
@@ -39,8 +42,9 @@ it cannot leave a half-built site's output in the cache.
 | `conditionalGet` | `boolean` | off | Ask the source whether anything has changed, and keep what is cached when it says no — see [asking only when it is worth it](#asking-only-when-it-is-worth-it). No code changes in the site. |
 | `request` | `(ctx) => Promise<TRaw>` | **required**\* | Fetch one request's raw data. The context's shape comes from `batching`. |
 | `parseDay` | `(ctx) => ParsedProgramme[] \| Promise<…>` | **required**\* | Turn part of a response into one channel-day's programmes. Called once per channel-day. May return builders, plain objects, or a mix. |
-| `stream` | `(ctx) => AsyncIterable<StreamedChannelDay>` | — | \*Instead of `request` and `parseDay`: answer the whole window in one pass, yielding each channel-day as it is complete — see [sites that answer in one pass](#sites-that-answer-in-one-pass). |
+| `stream` | `(ctx) => AsyncIterable<StreamedChannelDay>` | — | \*Instead of `request` and `parseDay`: answer the whole window in one pass, yielding each channel-day as it is complete — see [sites that answer in one pass](#sites-that-answer-in-one-pass). Such a site is written with `defineStreamSiteConfig` rather than `defineSiteConfig`. |
 | `channelInfo` | `(channel, element) => XmltvChannel \| ChannelBuilder` | `defaultChannelInfo` — id, display name and logo | Build the `<channel>` element for a channel. |
+| `lineups` | `(channels, metadata) => LineupConfig[]` | one `List` lineup of every channel | How this site's channels divide into reception platforms, for a `tv_grab_*`'s [`lineups` capability](./tv-grab.md#channel-lineups). Handed the resolved list and the [metadata stored with it](#keeping-a-fetched-list), so it costs no request. |
 | `transform` | `(programme, ctx) => XmltvProgramme \| null` | — | A last say over each of this site's programmes as the cache is **read** — see [fixing up one source](#fixing-up-one-source). |
 | `days` | `number` | the config's `days`, then `7` | Override how many days this site grabs. |
 | `concurrency` | `number` | `1` | How many requests this site may have in flight at once. |
@@ -58,7 +62,7 @@ it cannot leave a half-built site's output in the cache.
 | `xmltvId` | `string` | **Required.** The channel id used in the generated XMLTV output. |
 | `siteId` | `string` | **Required.** The channel id the source site understands. |
 | `name` | `string` | Display name, used by the default `channelInfo`. |
-| `lang` | `string` | The language this channel broadcasts in. Used as the **default `lang` for every text element** the scoped [`programme` builder](#building-programmes) creates, so a site says it once here instead of on every title and description. |
+| `lang` | `string` | The language this channel broadcasts in. Used as the **default `lang` for every text element** the scoped [`programme` builder](#building-programmes) creates but `<country>`, so a site says it once here instead of on every title and description. |
 | `logo` | `string` | Icon URL, used by the default `channelInfo`. |
 | `preset` | `string` | The number this channel appears on. Written as a lineup entry's `<preset>` by the [`lineups` capability](./tv-grab.md#channel-lineups); ignored by the guide. |
 | `data` | `TData` | Anything else the site knows about this channel, kept as it came and handed back to `channelInfo` and `parseDay`. Its type is inferred from what `channels` returns. |
@@ -106,7 +110,13 @@ const example = defineSiteConfig({
 ```
 
 `data` is per channel and so optional; read it as `data?.x` unless you know
-every channel in your list carries one. The grabber never looks inside it.
+every channel in your list carries one. The grabber never looks inside it — but
+under [`threads`](./configuration.md#sites-in-threads-of-their-own) it is
+copied. A list written out in the config, or settled before the grab, is handed
+to the site's thread, so its `data` must be plain values: a list holding a
+class instance, a function or a date carrying an offset is refused with a
+message, rather than arriving without what made it one and failing in every
+parse.
 
 Beside `http` the function is handed `log`, `warn`, `signal` and `state` — the
 site's own bag, [the same one](#remembering-something-between-runs) every
@@ -127,10 +137,26 @@ async channels({ http, state }) {
 The function is called only when channels are actually wanted, so
 `--capabilities`, `--description` and `--version` still answer without touching
 the network, and `--configure` resolves the list *after* asking for the
-password — which is what lets the account decide what is on offer. Fetching
-the list is a request to the same source as the rest, so it goes through the
-site's own queue: a `rateLimit` spaces the first day fetched after it instead
-of the two landing together.
+password — which is what lets the account decide what is on offer.
+
+When a grab or a build fetches the list, it is a request to the same source as
+the rest, so it goes through the site's own queue and client: `concurrency`
+counts it, a `rateLimit` spaces the first day fetched after it instead of the
+two landing together, and a `429` it meets holds the site. The same goes for a
+list settled before the grab — by `build`, or by a grab with a `channels`
+selection or a narrowing `cover` — since the grab carries on with the queue the
+list went through. A list that sends nothing — written out in the config, or
+still fresh in the cache — takes no slot, and is not counted among the
+[`requests`](./api.md#what-a-run-cost-and-what-the-merge-made-of-it) the site
+reports when it is done.
+
+Two cases fall outside that. A site in a [worker
+thread](./configuration.md#sites-in-threads-of-their-own) whose list was settled
+before the grab has it fetched through a queue on the main thread, and starts a
+queue of its own in the thread for its days, so the two are not spaced against
+each other. And a command that wants only the list — `epg merge` on its own,
+`--list-channels`, a server re-reading its lists — sends that one request on its
+own, having no queue to put it in.
 
 A build resolves it **once** and hands the same list to both halves, for the
 reason it resolves a `defineConfig` factory once — the merge reads what the
@@ -168,14 +194,29 @@ run but the one that fetched it sees the round-tripped form. And `--refresh`
 fetches the list whatever is cached, because asking the source is what that flag
 means.
 
-**When fetching it again fails, the stored list is used, however old.** A
+**When the source does not answer, the stored list is used, however old.** A
 source that answers `429` or is down for an hour should not take the site's
 whole lineup with it, so a site with a list stored is grabbed and merged with
 that list, and says so: `could not fetch its channel list, so the one stored
-<when> is used`. It is not stored again, so the next command asks the source as
-this one did. That goes for `--refresh` too, since asking is what it wanted and
-asking is what failed. With nothing stored, the site fails as any other would.
-A cancelled run is not a failed source, and stops rather than falling back.
+<when> is used`. Not answering means a network error, a timeout, or a `408`,
+`425`, `429` or `5xx` status, read down the error's `cause` chain — so a site
+that wraps a failed request in an error of its own is still read for what
+happened underneath. The list is not stored again, so the next command asks the
+source as this one did. That goes for `--refresh` too, since asking is what it
+wanted and asking is what failed. A cancelled run is not a failed source, and
+stops rather than falling back.
+
+An error the site throws about an answer it *did* get is different, and fails
+the site whatever is stored: a lineup missing from the account, a service
+saying it is offline, a `404`. That is the source telling you something, and a
+list from before it said so would hide it.
+
+A site left with no list — nothing stored, or an answer like those — costs what
+the command makes of it. `epg grab` and `epg build` grab the other sites and
+count this one as a site that failed, having answered nothing; `epg merge`
+writes the guide without its channels, with a warning saying so; and `epg
+serve` keeps the list it resolved last, or leaves the site's channels out until
+it resolves one.
 
 **When the list is past its age, the site is handed the old one.** Plenty of
 sources can say cheaply that nothing has changed — a lineup with a `modified`
@@ -255,6 +296,7 @@ What a `parseDay` call is given:
 | `paced` | `<T>(task) => Promise<T>` | Run a request through the site's queue, so its `concurrency`, `rateLimit` and backoff apply to it. |
 | `state` | `Map<string, unknown>` | What this site [remembers between runs](#remembering-something-between-runs). |
 | `signal` | `AbortSignal \| undefined` | Already applied to `http`; here for work that does not go through it. |
+| `log`, `warn` | `(message, fields?) => void` | Somewhere to [say something](#saying-something), under the site's name. |
 
 ```ts
 const example = defineSiteConfig({
@@ -267,7 +309,7 @@ const example = defineSiteConfig({
   },
   parseDay({ payload, programme }) {
     // `programme` is the XMLTV builder, already bound to this channel-day —
-    // no channel id, and text elements take the channel's `lang`.
+    // no channel id, and text elements but `<country>` take the channel's `lang`.
     return payload.items.map((item) => {
       const p = programme(new Date(item.start), item.title).stop(new Date(item.end));
       return item.desc ? p.desc(item.desc) : p;
@@ -314,14 +356,19 @@ async request({ channel, day, http, state }) {
 ```
 
 For what a site would otherwise fetch again to get back to where it was: a
-token, a cursor, a page count, an id it has already dealt with. Four things are
+token, a cursor, a page count, an id it has already dealt with. Five things are
 worth knowing.
 
 - It is **one `Map` per site for the whole run**, not one per channel-day. A
   value written by one request is there for every later request and for every
   `parseDay`, and two of this site's pipelines running at once share it. A
   fetched [channel list](#a-channel-list-that-has-to-be-fetched) is handed the
-  same one, and goes first — so what it learns is there for all of them.
+  same one, and goes first — so what it learns is there for all of them, a list
+  settled before the grab included, even under a store that remembers nothing.
+  The exception is a site in a [worker
+  thread](./configuration.md#sites-in-threads-of-their-own) whose list was
+  settled before the grab: the thread reads the bag back from the cache, so what
+  the list taught it arrives only where the store keeps it.
 - A list served from `cacheChannels` does **not** call `channels`, so whatever
   that function would have put there is not put there on that run. What an
   earlier run stored is still in the bag, which is usually the point; a value
@@ -366,6 +413,13 @@ the making of it — which is also why the wait is out here rather than inside
 the client: a request that sat out a rate-limit window inside `ky` would have
 that wait counted against its `timeout` and be aborted for taking the turn it
 was told to wait for.
+
+While it waits, the parse gives up its share of the run's local work — the
+[`localConcurrency`](./configuration.md#how-caching-works) slots that parsing
+and writing take across every site — and takes it back when the answer comes,
+ahead of work that has not started. A site fetching a detail per programme
+would otherwise fill every slot with parses waiting on its own pacing, and
+leave every other site's parses queued behind them.
 
 A request straight through `http` works too and still aborts with the run — it
 is simply not queued, so nothing paces it. Requests a `request` makes itself
@@ -490,13 +544,14 @@ and before `fillStop` and `clipOverlaps`, so a gap it leaves behind is
 
 Return the programme, a different one, or `null`/`undefined` to leave it out.
 Build a new object rather than changing the one handed in: it may be a cache
-store's own, and a memory-backed store hands out the same object every read.
+store's own.
 
 ### Building programmes
 
 `parseDay` hands you `programme`, the [XMLTV builder](./xmltv.md#builders) with
 the parts a parse should not have to repeat already filled in — the channel is
-the one being parsed, and every text element defaults to its `lang`:
+the one being parsed, and every text element defaults to its `lang` except
+`<country>`, whose code reads the same in every language:
 
 ```ts
 channels: [{ xmltvId: 'one.example.tv', siteId: '101', lang: 'sk' }],
@@ -521,10 +576,20 @@ The channel's `lang` is only a *default*: pass a language to any text method
 that is not in the channel's usual language.
 
 `programme(start, title, options?)` takes the two required fields positionally
-and the rest of `ProgrammeBuilderBase` in `options`. `start` is a `DateInput`:
-a `Date`, unix **seconds**, or an XMLTV datetime string. A bare ISO timestamp
-out of a JSON API is none of those and **throws `XmltvDateError`** — it goes in
-as `new Date(item.start)`, exactly as it would in a plain object.
+and the rest in `options`, a `ProgrammeOptions` — exported as a type from
+`epg-tools/grabber`, beside `ProgrammeBuilder` and `ChannelBuilder`. `start` is
+a `DateInput`: a `Date`, an XMLTV datetime string, or a number, which is unix
+**seconds** except at four, six or eight digits — `2025`, `202503`, `20250102`
+are read as the calendar date they spell, as the same string would be. A bare
+ISO timestamp out of a JSON API is none of those and **throws
+`XmltvDateError`** — it goes in as `new Date(item.start)`, exactly as it would
+in a plain object.
+
+`start` is the only date that throws. An optional one the builder cannot read —
+`stop`, `date`, `pdc-start`, `vps-start`, a previously-shown `start` — is left
+out and said through the site's `warn`, since a programme short a `<date>` is
+still a programme, and one lost over it is a hole in the listings. That is this
+builder's doing: one made on its own, with nowhere to say so, throws instead.
 
 The whole builder is available, so the provider extensions the parser preserves
 can be written back out the same way: `.extra()` for non-DTD child elements,
@@ -545,6 +610,8 @@ fully is a matter of adding to it rather than restating it:
 // Display names in every language the source had, and the channel number as
 // an extension tvheadend can pick up.
 channelInfo({ data }, element) {
+  if (data === undefined) return element();   // `data` is optional per channel
+
   return element()
     .displayName(data.callSign)
     .url(data.page)
@@ -575,7 +642,8 @@ const example = defineSiteConfig({
   async request({ channel, day, http, log }) {
     log(`asking for ${channel.siteId}`);
 
-    return http.get(`epg/${channel.siteId}/${day}`).json();
+    return http.get(`epg/${channel.siteId}/${day}`)
+      .json<{ items: { start?: string; title: string }[] }>();
   },
   parseDay({ payload, programme, warn }) {
     return payload.items.flatMap((item) => {
@@ -652,6 +720,11 @@ async request({ channelDays, http }) {
 },
 ```
 
+Each entry also carries `cached` — what the cache already holds for that
+channel-day, its `grabbedAt` and `programmeCount`, and absent where it holds
+nothing — since a stale channel-day is usually there and merely old enough to
+ask about again.
+
 Sources that return many channels' schedules in one call
 (`?channels=a,b,c&date=…`) want `'channels'`:
 
@@ -703,6 +776,11 @@ The bare string form (`batching: 'days'`) is the same thing with no caps. Each
 mode accepts only the caps it can use — `daysPerRequest` under `'channels'` is
 a type error rather than a number that is silently ignored — and the context is
 typed from the mode, so a `'days'` site destructuring `day` does not compile.
+Where the types do not reach, as in a config written in plain JavaScript, the
+same mistakes are refused when the site is read: a `batching` object without a
+`mode`, a misspelt mode, or a cap the mode does not read throws a `TypeError`
+that fails the site, rather than being read as `'none'` — one channel-day a
+request, and nothing said.
 
 Caching stays per channel-day whatever the mode, so a run only ever asks for
 the channel-days that are missing or stale: fresh ones are dropped before the
@@ -820,10 +898,15 @@ import { defineM3uSite } from 'epg-tools/grabber';
 sites: [defineM3uSite({ site: 'iptv-org', url: 'https://iptv-org.github.io/iptv/index.m3u' })],
 ```
 
-It reads the playlist once and hands the rest to `defineXmltvSite`, so
-everything below applies unchanged. `tvg-id` becomes both `siteId` and
-`xmltvId`, which is what makes the playlist and the guide agree. See
-[a playlist as a whole source](./m3u.md#a-playlist-as-a-whole-source).
+It reads the playlist once and hands the rest to `defineXmltvSite`, so [what
+that does with the document](#what-it-does-with-the-document) applies here too,
+save for where the channels come from: the playlist rather than the guide's
+head. `tvg-id` becomes both `siteId` and `xmltvId`, which is what makes the
+playlist and the guide agree, and each `<channel>` element is built from what
+the playlist said — its name and its `tvg-logo` — rather than kept from the
+guide. `url` is the playlist's, and `channels` says how its entries become
+channels rather than which of the guide's to take. See [a playlist as a whole
+source](./m3u.md#a-playlist-as-a-whole-source).
 
 ### From an Xtream Codes panel
 
@@ -922,17 +1005,17 @@ rather than a download.
 
 | option | default | what it is |
 |---|---|---|
-| `url` | **required** | Where the document is. |
+| `url` | **required** | Where the document is — or a function `({ http, signal }) => string`, which may be async, for a url that has to be looked up first. |
 | `channels` | every channel the document declares | The channels to take, mapping `siteId` (its `<channel id>`) to the id you want out. A list narrows *and* renames. |
 | `dayZone` | `'source'` | Which day a programme belongs to: the day it falls on in the offset the document wrote it with (`source`), the day of its UTC instant (`utc`), or the day in a named zone (`Europe/Bratislava`). |
 | `compression` | sniffed | `'gzip'`, `'brotli'`, `'zstd'`, or `false` for none. |
-| `parse` | — | `XmltvParseOptions`: `timezones` for a document using named zones, `tolerateMissingId`. |
+| `parse` | — | `Omit<XmltvParseOptions, 'channels'>`: `timezones` for a document using named zones, `tolerateMissingId`. Not `channels`, since which channels are kept is what `channels` above says. |
 | `order` | `'grouped'` | Whether the document groups each channel's programmes together — see below. |
 
 Everything a site config takes is taken here too: `days`, `staleness`,
-`concurrency`, `rateLimit`, `backoff`, `ky`, `transform`, `channelInfo`, and both
-`cacheChannels` and `conditionalGet`, which are **on by default** here because a
-published guide is one file that changes at most daily.
+`concurrency`, `rateLimit`, `backoff`, `ky`, `connection`, `transform`,
+`channelInfo`, and both `cacheChannels` and `conditionalGet`, which are **on by
+default** here because a published guide is one file that changes at most daily.
 
 **Compression is sniffed, not asked about.** `Content-Encoding` says what the
 origin claimed rather than what the bytes are: `fetch` decodes gzip, `br` and
@@ -981,11 +1064,13 @@ and the other 290 never asked about at all, because
 **No `lineup` takes every lineup on the account**, which the service already
 lists, so the usual account with one needs nothing here. Name one — `lineup:
 'GBR-1000014-DEFAULT'` — or several, to take only those. A lineup the account
-does not have **fails the site** naming the ones it does; nothing here adds one,
-because six adds a day with no cheap way back is not a thing a grab should spend
-on your behalf. A lineup its headend has **deleted** is skipped with a warning:
-it keeps answering with what it last had, so a guide built from it thins out
-rather than failing.
+does not have **fails the site** naming the ones it does — a stored list is
+not used in its place. Nothing here adds one, because six adds a day with no
+cheap way back is not a thing a grab should spend on your behalf. A lineup its
+headend has **deleted** is warned about either way, since it keeps answering
+with what it last had: with no `lineup` named it is left out of "every lineup
+on the account", and named, it is still grabbed — a guide built from it thins
+out rather than failing.
 
 **The account's lineups are offered as lineups.** A `tv_grab_*` with the
 [`lineups` capability](./tv-grab.md#channel-lineups) lists them one by one, named
@@ -1022,7 +1107,11 @@ lineup's `modified` stamp and the account check reads it anyway, so a run whose
 lineups are all unchanged keeps the channel list it already had — 223 KiB and a
 request saved for one lineup, and a second run measured at 221ms against 5,049.
 A changed stamp, a different `lineup`, or an option that would build different
-channels all fetch it again.
+channels all fetch it again — once the list is asked for at all. The site keeps
+its channel list a day by default (`cacheChannels: { maxAgeDays: 1 }`), and
+while that is fresh neither the account nor its lineups are asked about, so a
+changed `lineup` takes effect when the stored list is past its day, or at once
+with `--refresh`.
 
 **Days are UTC, and there is deliberately no `dayZone`** as the other adapters
 have. The service keys its md5s by `(stationID, UTC date)`; filing a programme
@@ -1073,10 +1162,12 @@ run. It is a bearer credential in a directory on your disk, which is why
 `persistToken: false` exists. The password is hashed once at startup and the
 plaintext is never written anywhere; errors are scrubbed of both.
 
-**When the service says it is offline, the run stops** with the reason, rather
+**When the service says it is offline, the site fails** with the reason, rather
 than being refused call by call — its own instruction to clients, and it is
 given at HTTP 200 with a token in hand, so nothing but the code says anything is
-wrong.
+wrong. That is an answer rather than a source that did not give one, so a
+stored channel list is [not used in its place](#keeping-a-fetched-list); the
+run's other sites grab as usual.
 
 #### Before there is a config
 
@@ -1277,17 +1368,20 @@ A source that answers in one document has one fetch and little to gain from it;
 one that pages, or asks per batch, has everything — this is the difference
 between a `rateLimit` the source actually sees and one it does not.
 `defineXmltvSite` sends its document fetch through it, so that request is spaced
-against the channel list fetched before it.
+against a channel list fetched before it in the same run — save in a [worker
+thread](./configuration.md#sites-in-threads-of-their-own), where a list settled
+before the grab went through a queue on the main thread rather than the
+thread's own.
 
 Only the fetch belongs inside `paced`, not the work its answer feeds: a slot is
 one request to the source, and holding one for the length of a pass would be
 holding it for the length of the run.
 
 Everything else about a site is the same: `channels`, `cacheChannels`,
-`concurrency`, `rateLimit`, `backoff`, `ky`, `staleness`, `transform`,
-`channelInfo` and `state` all mean what they mean anywhere else, and caching
-stays per channel-day, so a run still only asks about what is missing or stale.
-A site cannot do both — `stream` is what makes it this shape.
+`concurrency`, `rateLimit`, `backoff`, `ky`, `connection`, `staleness`,
+`transform`, `channelInfo` and `state` all mean what they mean anywhere else,
+and caching stays per channel-day, so a run still only asks about what is
+missing or stale. A site cannot do both — `stream` is what makes it this shape.
 
 ## HTTP settings and proxies
 
@@ -1462,11 +1556,14 @@ rather than waited out. A site's own code is the one part that has to help — t
 `signal` on both contexts is there to be passed to whatever it waits on.
 
 All of it applies to **every** request a site makes through the queue, not just
-the planned ones: the fetch of a channel list that has to be fetched, and a
-follow-up request a parse makes with
+the planned ones: the fetch of a channel list that has to be fetched, when a
+grab or a build fetches it ([with two
+exceptions](#a-channel-list-that-has-to-be-fetched)), and a follow-up request a
+parse makes with
 [`paced`](#a-parse-that-needs-another-request). A queue task is one request and
-nothing more — parsing and writing hold no slot — which is what lets a parse
-ask for one while the response it is parsing has already let its own go.
+nothing more — parsing and writing hold no slot, and nor does a channel list
+that sends nothing — which is what lets a parse ask for one while the response
+it is parsing has already let its own go.
 Pass `backoff: false` to leave the whole business to `ky`.
 
 Both are per site, like everything else here: one source's rate limit never

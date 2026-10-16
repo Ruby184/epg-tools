@@ -9,14 +9,17 @@ there is no build step to run before tests, and nothing to configure.
 npm ci
 ```
 
-Node **>= 20** is required, and >= 23.6 if you want to run `epg.config.ts`
-files directly via native type stripping. CI runs the suite on 20, 22 and 24.
+Node **>= 22** is the floor — what `engines` says, and what the bundle targets.
 
-`npm run build` asks for more — **>= 22.18**, which is what
-[tsdown](https://tsdown.dev) needs. That is a bound on building the package,
-not on using it: the bundle targets Node 20 and the suite runs against the
-sources, so the floor above is what the tests and the published package hold
-to. CI builds once, on 22.
+Working on the package asks for a little more — **>= 22.18**, the first 22 that
+strips TypeScript types without a flag. The suite needs it, since its `threads`
+project starts real workers on the `.ts` sources (see below); it is also what
+runs an `epg.config.ts` directly, and what [tsdown](https://tsdown.dev) needs
+for `npm run build`. That is a bound on developing the package, not on using
+it: what is published is plain JavaScript, and holds to the floor above.
+
+CI runs typecheck and the suite on 22, 24 and 26, and builds once, on whatever
+LTS is current.
 
 ## The loop
 
@@ -32,6 +35,7 @@ to. CI builds once, on 22.
 | `npm run build` | bundle to `dist/` with [tsdown](https://tsdown.dev) |
 | `npm run bench` | speed benchmarks (`vitest bench`) |
 | `npm run bench:memory` | memory benchmarks — builds first, then runs isolated processes |
+| `npm run bench:memory:m3u` | the same for the M3U parser, over a generated playlist |
 
 Formatting and linting are the Oxc tools, so both finish in well under a
 second over the whole tree. Their configuration is `.oxfmtrc.json` (100
@@ -42,15 +46,26 @@ plugins).
 Two rules are deliberately off or suppressed, both explained where they are
 set: `unicorn/no-useless-spread`, because `...(cond ? { x } : {})` is how
 `exactOptionalPropertyTypes` lets a possibly-undefined value be omitted rather
-than set to `undefined`; and `typescript/no-unsafe-declaration-merging` at one
-site in `src/xmltv/serialize.ts`, where merging an interface into the class is
-how a stream's `on('warning', …)` overload gets typed.
+than set to `undefined`; and `typescript/no-unsafe-declaration-merging` at two
+sites, `src/xmltv/serialize.ts` and `src/m3u/serialize.ts`, where merging an
+interface into the class is how a stream's `on('warning', …)` overload gets
+typed.
 
 `prepublishOnly` runs format:check, lint, typecheck, test and build.
 
 Tests live in `test/**/*.test.ts` and benchmarks in `bench/**/*.bench.ts` —
 `vitest.config.ts` keeps the two apart, so a benchmark never runs as part of
 `npm test`.
+
+The tests are two Vitest projects. `unit` is every test file but one, run by
+Vitest as usual. `threads` is `test/threads.test.ts`, which starts real worker
+threads on the TypeScript source — and a worker loads its files with Node
+itself, not through Vitest, so the project starts each one under
+[`test/fixtures/source-loader.mjs`](test/fixtures/source-loader.mjs). That maps
+the source's `.js` specifiers to the `.ts` files they stand for and defines the
+two constants the build bakes in; the types it leaves to Node's own stripping,
+which is why the suite needs 22.18. `npm test` runs both, and one on its own is
+`npm test -- --project unit` (or `threads`).
 
 ### Benchmarks compare against the arm beside them, and against your last run
 
@@ -101,8 +116,9 @@ licensing. They are used only by tests and are not shipped (`files` in
 ## Documentation is typechecked
 
 [`test/readme-examples.ts`](test/readme-examples.ts) re-declares the code
-blocks from `README.md` and `docs/*.md` against the real `src/` imports. It is
-not a test — nothing in it runs — but it is typechecked with everything else,
+blocks from `README.md` and `docs/*.md` against the real `src/` imports — all
+but `docs/m3u.md` and `docs/channels.md`, whose blocks it does not cover yet. It
+is not a test — nothing in it runs — but it is typechecked with everything else,
 so an API change that would make a documented example wrong **fails
 `npm run typecheck`** instead of being discovered by whoever copies it out.
 
@@ -119,6 +135,8 @@ Where the documentation lives:
 | `docs/configuration.md` | `EpgConfig`, the cache, the CLI, merge strategies |
 | `docs/site-config.md` | `SiteConfig` — channels, requests, parsing, batching, pacing |
 | `docs/xmltv.md` | the standalone parser, serializer, builders and dates |
+| `docs/m3u.md` | the standalone M3U parser and serializer, and a playlist as a source |
+| `docs/channels.md` | `*.channels.xml` files, matching two channel lists, `epg channels` |
 | `docs/tv-grab.md` | the XMLTV grabber protocol and capabilities |
 | `docs/api.md` | the programmatic API and the export map |
 
@@ -134,11 +152,11 @@ hooks:
 |---|---|---|
 | `pre-commit` | `lint-staged` — oxfmt and `oxlint --fix` over staged files | nothing unformatted lands, and it only touches what you staged |
 | `commit-msg` | `commitlint` | the changelog is generated from these messages, so a malformed one is a problem later |
-| `pre-push` | `npm run typecheck && npm test` | the suite is ~2s; better here than in CI |
+| `pre-push` | `npm run typecheck && npm test` | the suite is ~10s; better here than in CI |
 
 All three are bypassable with `--no-verify`, so CI checks the same things
-independently — formatting, lint and commit messages in one `check` job,
-typecheck/test/build across Node 20, 22 and 24.
+independently — formatting, lint, the build and commit messages in one `check`
+job, typecheck and test across Node 22, 24 and 26.
 
 Markdown is deliberately outside oxfmt's reach (see `.oxfmtrc.json`): it
 formats fenced code blocks, and the documentation's examples are fragments
@@ -165,9 +183,9 @@ refactor(cli): share the stream-writing helpers between entry points
 ```
 
 Scopes are enforced by [`commitlint.config.js`](./commitlint.config.js): one
-per module — `xmltv`, `grabber`, `cache`, `merge`, `tv-grab`, `cli`, `core` —
-plus `build` and `deps` for the toolchain. A scope is optional, since a `docs:`
-or `test:` change is rarely one module's.
+per module — `xmltv`, `m3u`, `channels`, `grabber`, `cache`, `merge`, `serve`,
+`tv-grab`, `cli`, `core` — plus `build` and `deps` for the toolchain. A scope is
+optional, since a `docs:` or `test:` change is rarely one module's.
 
 The type decides what the release does: `feat` bumps the minor, `fix` the
 patch, and a `!` after the scope (`feat(grabber)!:`) or a `BREAKING CHANGE:`
