@@ -15,7 +15,7 @@ import { createServer } from 'node:http';
 import type { ServerHttp2Session } from 'node:http2';
 import type { AddressInfo } from 'node:net';
 import type { ListeningServer } from './config.js';
-import { emitter } from '../core/events.js';
+import { emitter, reportingTo } from '../core/events.js';
 import type { ConfigSource } from '../config.js';
 import type { GuideListening } from './config.js';
 import {
@@ -160,7 +160,6 @@ export async function serveGuide(
   source: ConfigSource,
   options: ServeOptions = {},
 ): Promise<GuideServer> {
-  const emit = emitter(options);
   /**
    * What the work in flight is stopped by, which is not the caller's signal.
    *
@@ -213,6 +212,10 @@ export async function serveGuide(
     },
   });
 
+  // The config's `events` as well as the caller's reporter, as the handler says
+  // everything else — `serve:started` is the one thing said here, and it is
+  // what a process manager waiting for readiness listens for.
+  const emit = emitter(reportingTo(options, handler.config.events));
   const where = {
     port: options.port ?? handler.config.serve?.port ?? DEFAULT_SERVE_PORT,
     host: options.host ?? handler.config.serve?.host ?? DEFAULT_SERVE_HOST,
