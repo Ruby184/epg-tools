@@ -35,6 +35,7 @@ function hosting(cache: CacheStore, signal?: AbortSignal): { run: Run; events: E
     now: NOW,
     grabbedAt: NOW.toISOString(),
     startDay: DAY,
+    timeZone: 'UTC',
     emit: (event) => {
       events.push(event);
     },
@@ -55,6 +56,7 @@ function started(site: string, extra: Partial<SiteThreadData> = {}): SiteThreadD
     now: NOW.toISOString(),
     grabbedAt: NOW.toISOString(),
     startDay: DAY,
+    timeZone: 'UTC',
     defaults: { days: 1 },
     localConcurrency: 4,
     ...extra,

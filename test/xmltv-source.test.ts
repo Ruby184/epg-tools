@@ -4,7 +4,13 @@ import { brotliCompressSync, gzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/main.js';
-import { defineXmltvSite, grab, resolveChannels } from '../src/grabber/main.js';
+import {
+  dayOf,
+  defineXmltvSite,
+  grab,
+  resolveChannels,
+  splitXmltvDocument,
+} from '../src/grabber/main.js';
 import type { GrabberChannel } from '../src/grabber/main.js';
 import type { XmltvChannel } from '../src/xmltv/types.js';
 import { collect } from './reporting.js';
@@ -109,6 +115,34 @@ function store(): CacheStore {
 function entries(cache: CacheStore, channelId: string, day: string) {
   return cache.read({ site: 'published.example', channelId, day });
 }
+
+describe('filing by the run’s zone', () => {
+  // Half past midnight on the 30th in Bratislava, still the 29th in UTC.
+  const late = new Date('2026-08-29T22:30:00.000Z');
+
+  it('is the day in the zone handed beside it', () => {
+    expect(dayOf(late, 'run', 'Europe/Bratislava')).toBe('2026-08-30');
+    expect(() => dayOf(late, 'run')).toThrow("dayZone 'run' files by the run's zone");
+  });
+
+  it('is refused before a document is read, where no zone is handed', async () => {
+    let read = false;
+
+    async function* document(): AsyncGenerator<string> {
+      read = true;
+      yield '<tv></tv>';
+    }
+
+    const split = splitXmltvDocument(document(), {
+      channelDays: [],
+      warn: () => {},
+      dayZone: 'run',
+    });
+
+    await expect(split.next()).rejects.toThrow("dayZone 'run' files by the run's zone");
+    expect(read).toBe(false);
+  });
+});
 
 describe('defineXmltvSite', () => {
   it('grabs a published guide with nothing written down', async () => {
@@ -254,6 +288,29 @@ describe('defineXmltvSite', () => {
     // 00:30 +0200 is 22:30 UTC the day before.
     expect(await entries(cache, 'a', TODAY)).toHaveLength(1);
     expect(await entries(cache, 'a', TOMORROW)).toHaveLength(0);
+  });
+
+  it('files it by the run’s own days when told to, whatever offset it is written in', async () => {
+    // A source in +0300 for a guide in Bratislava. Half past midnight there is
+    // still the evening before in Bratislava; half past one is past midnight in
+    // both, and still the day before in UTC.
+    const source = await serveGzip(
+      document(
+        programme('a', '20260830003000', '+0300') + programme('a', '20260830013000', '+0300'),
+        ['a'],
+      ),
+    );
+    const cache = store();
+
+    await grab([defineXmltvSite({ site: 'published.example', url: source.url, dayZone: 'run' })], {
+      cache,
+      now: NOW,
+      days: 2,
+      timeZone: 'Europe/Bratislava',
+    });
+
+    expect(await entries(cache, 'a', TODAY)).toHaveLength(1);
+    expect(await entries(cache, 'a', TOMORROW)).toHaveLength(1);
   });
 
   it('reassembles a document that is not grouped by channel, and says so', async () => {

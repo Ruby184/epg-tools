@@ -12,7 +12,7 @@
  * nothing here knows what a `SiteRun` is.
  */
 
-import { dayToDate } from '../core/days.js';
+import { dayToDate, wallClock } from '../core/days.js';
 import type { Says } from '../core/events.js';
 import { ProgrammeBuilder } from '../xmltv/builder.js';
 import type { Request } from './planner.js';
@@ -38,6 +38,10 @@ export interface ContextDeps {
   /** Where `ctx.log` and `ctx.warn` go. */
   says: Says;
   signal?: AbortSignal;
+  /** The run's zone — see `GrabOptions.timeZone`. */
+  timeZone: string;
+  /** The zone the site's days are on: the run's, or the one its `dayZone` names. */
+  dayZone: string;
 }
 
 /** What every request context carries, whichever shape the rest of it takes. */
@@ -53,6 +57,22 @@ export function baseContext(request: Request, deps: ContextDeps): BaseRequestCon
     state: deps.state,
     ...deps.says,
     ...(deps.signal ? { signal: deps.signal } : {}),
+    timeZone: deps.timeZone,
+    dayZone: deps.dayZone,
+  };
+}
+
+/**
+ * A context's `at`, for a day given or the one assumed — none, on a context
+ * holding several days, which the types say by making `day` required there.
+ */
+function clock(deps: ContextDeps, assumed?: string): (time: string, day?: string) => Date {
+  return (time, day = assumed) => {
+    if (day === undefined) {
+      throw new TypeError(`at("${time}") needs a day: this context covers more than one`);
+    }
+
+    return wallClock(day, time, deps.dayZone, deps.timeZone);
   };
 }
 
@@ -67,12 +87,14 @@ export function baseContext(request: Request, deps: ContextDeps): BaseRequestCon
  */
 export function manyDays(
   request: Request,
-): Pick<ChannelsDaysRequestContext, 'days' | 'dates' | 'from' | 'to'> {
+  deps: ContextDeps,
+): Pick<ChannelsDaysRequestContext, 'days' | 'dates' | 'from' | 'to' | 'at'> {
   return {
     days: request.days,
     dates: request.days.map(dayToDate),
     from: dayToDate(request.days[0]!),
     to: dayToDate(request.days[request.days.length - 1]!),
+    at: clock(deps),
   };
 }
 
@@ -89,8 +111,12 @@ export function requestContext(
     ...baseContext(request, deps),
     ...(batching.manyChannels ? { channels: request.channels } : { channel: request.channels[0]! }),
     ...(batching.manyDays
-      ? manyDays(request)
-      : { day: request.days[0]!, date: dayToDate(request.days[0]!) }),
+      ? manyDays(request, deps)
+      : {
+          day: request.days[0]!,
+          date: dayToDate(request.days[0]!),
+          at: clock(deps, request.days[0]!),
+        }),
   };
 
   // The mode and this shape were chosen together right here; the compiler
@@ -110,7 +136,7 @@ export function requestContext(
 export function streamContext(request: Request, deps: PacedDeps): StreamContext {
   return {
     ...baseContext(request, deps),
-    ...manyDays(request),
+    ...manyDays(request, deps),
     channels: request.channels,
     paced: deps.paced,
   };
@@ -150,12 +176,17 @@ export function parseContext<TRaw>(
     ...deps.says,
     ...(deps.signal ? { signal: deps.signal } : {}),
     paced: deps.paced,
+    timeZone: deps.timeZone,
+    dayZone: deps.dayZone,
+    at: clock(deps, day),
     programme: (start, title, options) =>
       new ProgrammeBuilder({
         channel: channel.xmltvId,
         start,
         title,
         ...(channel.lang === undefined ? {} : { lang: channel.lang }),
+        // The guide's clock, so an instant a source gives as one reads locally.
+        timeZone: deps.timeZone,
         // The site's own `warn`, which is what lets a bad optional field be
         // left out and said rather than take the programme with it. A caller
         // can still pass its own through `options`.

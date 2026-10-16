@@ -30,12 +30,16 @@ import type { ChannelDay, ChannelElement, GrabberChannel, StreamedChannelDay } f
  * - `source` — the day it falls on in the offset the document wrote it with,
  *   which is the day the broadcaster means and what a hand-written site's
  *   `parseDay` would file it under.
+ * - `run` — the day it falls on in the run's zone: the guide's own days,
+ *   whatever offset the document wrote. Known only once a run starts, so
+ *   {@link dayOf} and {@link splitXmltvDocument} are handed that zone beside
+ *   it — a context's `timeZone`.
  * - `utc` — the day of its UTC instant, which is literally what a cache key
  *   says. A guide written in `+0200` then files its small hours a day early.
  * - an IANA zone (`Europe/Bratislava`) — the day it falls on there, for a source
  *   that writes everything in UTC but means a local schedule.
  */
-export type XmltvDayZone = 'source' | 'utc' | (string & {});
+export type XmltvDayZone = 'source' | 'run' | 'utc' | (string & {});
 
 /** How many bytes {@link sniff} needs to decide: the longest magic number below. */
 const MAGIC_BYTES = 4;
@@ -284,14 +288,31 @@ export function documentBytes(
  * listings carry an offset derived from the panel rather than read from a
  * document.
  */
-export function dayOf(start: XmltvProgramme['start'], zone: XmltvDayZone): string {
+export function dayOf(
+  start: XmltvProgramme['start'],
+  zone: XmltvDayZone,
+  /** The run's zone, which `run` files by — a context's `timeZone`. */
+  timeZone?: string,
+): string {
   if (zone === 'utc') {
     return toDayString(start);
   }
 
-  const offset = zone === 'source' ? getXmltvOffset(start) : xmltvZoneOffset(zone, start);
+  const offset =
+    zone === 'source'
+      ? getXmltvOffset(start)
+      : xmltvZoneOffset(zone === 'run' ? runZone(timeZone) : zone, start);
 
   return toDayString(new Date(start.getTime() + offset * 60_000));
+}
+
+/** The run's zone, for a `dayZone` of `run` — which cannot be filed by without one. */
+function runZone(timeZone: string | undefined): string {
+  if (timeZone === undefined) {
+    throw new TypeError("dayZone 'run' files by the run's zone: pass it as timeZone");
+  }
+
+  return timeZone;
 }
 
 /** One `<channel>` as a channel to grab, keeping the element for the output. */
@@ -336,6 +357,8 @@ export interface SplitXmltvOptions<TData> {
   signal?: AbortSignal;
   /** Which day a programme belongs to. Defaults to `source`. */
   dayZone?: XmltvDayZone;
+  /** The run's zone, which a {@link dayZone} of `run` files by — a context's `timeZone`. */
+  timeZone?: string;
   /** Whether the document groups each channel's programmes together. */
   order?: 'grouped' | 'any';
   /**
@@ -350,6 +373,9 @@ export async function* splitXmltvDocument<TData>(
   options: SplitXmltvOptions<TData>,
 ): AsyncGenerator<StreamedChannelDay<TData>> {
   const { channelDays, warn, signal, dayZone = 'source', order, parse } = options;
+  // Settled before a byte is read, so a `run` with no zone to file by is
+  // refused here rather than at the first programme it would have filed.
+  const zone = dayZone === 'run' ? runZone(options.timeZone) : dayZone;
   // What was asked for, and who to hand it back as. A source channel may map
   // to more than one output channel — the same feed under two ids — so this
   // is a list.
@@ -455,7 +481,7 @@ export async function* splitXmltvDocument<TData>(
       current = siteId;
     }
 
-    const day = dayOf(programme.start, dayZone);
+    const day = dayOf(programme.start, zone);
 
     // Only what was asked for is kept: a channel-day outside the window, or
     // one already fresh in the cache, is dropped here rather than held and

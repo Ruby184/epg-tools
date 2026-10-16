@@ -5,6 +5,7 @@ import {
   daysCovering,
   dayToDate,
   resolveTimeZone,
+  wallClock,
   wallTimeIn,
 } from '../core/days.js';
 import { errorMessage, GrabberError } from '../core/error.js';
@@ -285,7 +286,7 @@ function titleOf(programme: XmltvProgramme): string {
 
 export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator<string> {
   const now = options.now ?? new Date();
-  const timeZone = resolveTimeZone(options.timezone);
+  const timeZone = resolveTimeZone(options.timeZone);
   const days = [...dayRange(options.startDay ?? dayIn(now, timeZone), options.days ?? 7)];
   const channelStrategy = options.merge?.channelStrategy ?? 'merge-programmes';
   const programmeStrategy = options.merge?.programmeStrategy ?? 'merge';
@@ -322,6 +323,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
         ...(options.signal ? { signal: options.signal } : {}),
         store: cache,
         now,
+        timeZone,
         // Left out, and said: with no list there is nothing to read its
         // entries by, and one source down is no reason to write no guide.
         failed: (site, error) => {
@@ -352,6 +354,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   const guideContext: GuideContext = {
     channels: sites.flatMap((site) => site.channels),
     now,
+    timeZone,
     ...mergeSays,
   };
   const declarations = await configured(options.derived, guideContext);
@@ -572,8 +575,12 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     }
 
     return (
-      transform(result, { xmltvId, ...mergeSays, ...(next === undefined ? {} : { next }) }) ??
-      undefined
+      transform(result, {
+        xmltvId,
+        timeZone,
+        ...mergeSays,
+        ...(next === undefined ? {} : { next }),
+      }) ?? undefined
     );
   };
 
@@ -611,11 +618,15 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     let programmes = list;
 
     if (siteTransform) {
+      const dayZone = zoneOf(source.config);
       const context = {
         channel: source.channel,
         day,
         date: dayToDate(day),
         ...saysFor(source.config.site),
+        timeZone,
+        dayZone,
+        at: (time: string, on = day) => wallClock(on, time, dayZone, timeZone),
       };
 
       programmes = programmes.flatMap((programme) => {

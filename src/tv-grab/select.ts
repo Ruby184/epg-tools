@@ -1,5 +1,6 @@
 import type { EpgConfig } from '../config.js';
 import { resolveChannels } from '../grabber/channels.js';
+import { resolveTimeZone } from '../core/days.js';
 import type { GrabberChannel } from '../grabber/types.js';
 import { resolveDeclarations } from '../merge/derive.js';
 import { configured } from '../merge/select.js';
@@ -24,9 +25,10 @@ export async function resolveChannelIds(config: EpgConfig): Promise<string[]> {
   // is the two things the ids are wanted for.
   const ids = new Set<string>();
   const channels: GrabberChannel[] = [];
+  const timeZone = resolveTimeZone(config.timeZone);
 
   for (const site of config.sites) {
-    const listed = await resolveChannels(site);
+    const listed = await resolveChannels(site, { timeZone });
 
     channels.push(...listed);
 
@@ -40,6 +42,7 @@ export async function resolveChannelIds(config: EpgConfig): Promise<string[]> {
   const declarations = await configured(config.derived, {
     channels,
     now: new Date(),
+    timeZone,
     log: () => {},
     warn: () => {},
   });

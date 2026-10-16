@@ -168,8 +168,8 @@ export interface GuideHandlerOptions {
   now?: Date;
   /** Shift the window, as a run's `offset` does. */
   offset?: number;
-  /** The zone whose calendar says which day is today, over the config's `timezone`. */
-  timezone?: string;
+  /** The zone whose calendar says which day is today, over the config's `timeZone`. */
+  timeZone?: string;
   /** The module the config came from, as a run's `configModule` is — for `threads`. */
   configModule?: string | URL;
   /**
@@ -939,7 +939,7 @@ export async function createGuideHandler(
   const sitesMaxAgeMs = options.sitesMaxAgeMs ?? DEFAULT_SITES_MAX_AGE_MS;
   // The caller's, checked here, or the config's, checked as it was loaded.
   const timeZone =
-    options.timezone === undefined ? config.timezone : resolveTimeZone(options.timezone);
+    options.timeZone === undefined ? config.timeZone : resolveTimeZone(options.timeZone);
   const schedule = options.grab ?? config.serve?.grab;
   const declaredBase = config.serve?.baseUrl;
 
@@ -1083,6 +1083,7 @@ export async function createGuideHandler(
       ...(options.signal ? { signal: options.signal } : {}),
       store: cache,
       now,
+      timeZone,
       failed: (site, error) => {
         const last = lastResolved.get(site.site);
 
@@ -1136,6 +1137,7 @@ export async function createGuideHandler(
     const guideContext: GuideContext = {
       channels: resolved.flatMap((site) => site.channels as GrabberChannel[]),
       now,
+      timeZone,
       ...mergeSays,
     };
     const derived = await configured(config.derived, guideContext);
@@ -1264,7 +1266,7 @@ export async function createGuideHandler(
       cache,
       startDay: window.startDay,
       now,
-      timezone: timeZone,
+      timeZone,
       ...(config.days !== undefined ? { days: config.days } : {}),
       ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
       ...(config.localConcurrency !== undefined ? { readAhead: config.localConcurrency } : {}),
@@ -1652,7 +1654,7 @@ export async function createGuideHandler(
         cache,
         ...(options.reporter ? { reporter: options.reporter } : {}),
         ...(options.offset === undefined ? {} : { offset: options.offset }),
-        timezone: timeZone,
+        timeZone,
         ...(options.configModule === undefined ? {} : { configModule: options.configModule }),
         signal: stops.signal,
       });
@@ -1691,7 +1693,7 @@ export async function createGuideHandler(
           from,
           runs,
           cached: () => cachedFor(from),
-          timezone: timeZone,
+          timeZone,
         });
       } catch (error) {
         // A schedule that threw has said nothing about when to run again, and

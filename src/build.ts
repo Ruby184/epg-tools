@@ -61,9 +61,9 @@ export interface RunOptions {
   offset?: number;
   /**
    * The time zone whose calendar says which day is today, in place of the
-   * config's `timezone` — see there.
+   * config's `timeZone` — see there.
    */
-  timezone?: string;
+  timeZone?: string;
   /**
    * Where this run's events go — see {@link Reporter}.
    *
@@ -260,6 +260,7 @@ async function settled(
 ): Promise<Settled> {
   const failures: Settled['failures'] = [];
   const sessions = new Map<string, SiteSession>();
+  const timeZone = zoneOf(config, options);
 
   // For a site whose list is fetched, and only those: the fetch goes through the
   // queue its requests will, and the grab carries on with the same one.
@@ -292,6 +293,7 @@ async function settled(
       // source says.
       ...(config.cache?.staleness?.refetchAll === true ? { refresh: true } : {}),
       now,
+      timeZone,
       // One source down is not every source down: the rest are settled and
       // grabbed, and this one is counted.
       failed: (site, error) => {
@@ -310,6 +312,7 @@ async function settled(
   const declarations = await configured(config.derived, {
     channels: sites.flatMap((site) => site.channels as GrabberChannel[]),
     now,
+    timeZone,
     ...saysOf(emit),
   });
   // Only the two fields a selection reads, so a `derived` that is still a
@@ -352,9 +355,9 @@ async function settled(
  * anything is fetched, else the config's, checked as it was loaded.
  */
 function zoneOf(config: EpgConfig, options: RunOptions): string {
-  return options.timezone === undefined
-    ? (config.timezone ?? localTimeZone())
-    : resolveTimeZone(options.timezone);
+  return options.timeZone === undefined
+    ? (config.timeZone ?? localTimeZone())
+    : resolveTimeZone(options.timeZone);
 }
 
 /** First day of the window implied by `now` + `offset`, on the run's calendar. */
@@ -377,7 +380,7 @@ function guideOptions(
     cache,
     startDay: startDayOf(options, now, timeZone),
     now,
-    timezone: timeZone,
+    timeZone,
     ...(config.days !== undefined ? { days: config.days } : {}),
     ...(config.siteConcurrency !== undefined ? { siteConcurrency: config.siteConcurrency } : {}),
     // The same bound the grab gives its own local work, for the same resource:
@@ -433,7 +436,7 @@ async function grabInto(
         : {}),
       ...(config.cache?.staleness ? { staleness: config.cache.staleness } : {}),
       now,
-      timezone: timeZone,
+      timeZone,
       ...reported(options),
       ...(options.signal ? { signal: options.signal } : {}),
       ...(config.threads === undefined ? {} : { threads: config.threads }),

@@ -47,11 +47,8 @@ interface ResolvedSiteBase {
    * calendar, which is the run's unless {@link dayZone} says otherwise.
    */
   window: string[];
-  /**
-   * The zone the site's days are on: the run's own, or the one its `dayZone`
-   * names. Absent only where the caller gave no zone for the run.
-   */
-  dayZone: string | undefined;
+  /** The zone the site's days are on: the run's own, or the one its `dayZone` names. */
+  dayZone: string;
   /** How wide a request may be along each axis, and the context shape it gets. */
   batching: ResolvedBatching;
   /** When a cached day counts as stale: run policy under site override. */
@@ -122,8 +119,8 @@ export function resolveSite(
   config: AnySiteConfig,
   defaults: Pick<GrabOptions, 'days' | 'staleness'>,
   startDay: string,
-  /** The zone the run's days are on — see `GrabOptions.timezone`. */
-  timeZone?: string,
+  /** The zone the run's days are on — see `GrabOptions.timeZone`. */
+  timeZone: string,
   /** The run's "now", which decides a leading day the site is not asked for — see {@link siteWindow}. */
   now?: Date,
 ): ResolvedSite {
@@ -144,7 +141,12 @@ export function resolveSite(
   // Refused here, where it fails this site alone: everywhere else a run reads
   // its sites, a zone that is not one reads as the run's, so one site's mistake
   // cannot stop the others.
-  if (config.dayZone !== undefined && config.dayZone !== 'source' && config.dayZone !== 'utc') {
+  if (
+    config.dayZone !== undefined &&
+    config.dayZone !== 'source' &&
+    config.dayZone !== 'run' &&
+    config.dayZone !== 'utc'
+  ) {
     resolveTimeZone(config.dayZone, `Site "${config.site}" dayZone`);
   }
 
@@ -230,18 +232,10 @@ export function resolveSite(
  * sites, and one site's mistake must not stop the others. {@link resolveSite}
  * is where that site is refused, alone.
  */
-export function siteDayZone(config: AnySiteConfig, timeZone: string): string;
-export function siteDayZone(
-  config: AnySiteConfig,
-  timeZone: string | undefined,
-): string | undefined;
-export function siteDayZone(
-  config: AnySiteConfig,
-  timeZone: string | undefined,
-): string | undefined {
+export function siteDayZone(config: AnySiteConfig, timeZone: string): string {
   const zone = config.dayZone === 'utc' ? 'UTC' : config.dayZone;
 
-  if (zone === undefined || zone === 'source' || timeZone === undefined) {
+  if (zone === undefined || zone === 'source' || zone === 'run') {
     return timeZone;
   }
 
@@ -279,13 +273,13 @@ export function siteWindow(
   config: AnySiteConfig,
   startDay: string,
   days: number,
-  timeZone: string | undefined,
+  timeZone: string,
   now?: Date,
 ): string[] {
   const own = [...dayRange(startDay, days)];
   const zone = siteDayZone(config, timeZone);
 
-  if (timeZone === undefined || zone === undefined || zone === timeZone) {
+  if (zone === timeZone) {
     return own;
   }
 

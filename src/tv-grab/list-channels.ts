@@ -1,4 +1,5 @@
 import type { EpgConfig } from '../config.js';
+import { resolveTimeZone } from '../core/days.js';
 import { channelElement, resolveChannels } from '../grabber/channels.js';
 import type { GrabberChannel } from '../grabber/types.js';
 import { derivedChannelElement, resolveDeclarations } from '../merge/derive.js';
@@ -27,8 +28,10 @@ async function collectChannels(
   const byId = new Map<string, XmltvChannel>();
   const all: GrabberChannel[] = [];
 
+  const timeZone = resolveTimeZone(config.timeZone);
+
   for (const site of config.sites) {
-    const channels: GrabberChannel[] = await resolveChannels(site);
+    const channels: GrabberChannel[] = await resolveChannels(site, { timeZone });
 
     all.push(...channels);
 
@@ -52,6 +55,7 @@ async function collectChannels(
   const context: GuideContext = {
     channels: all,
     now: new Date(),
+    timeZone,
     log: () => {},
     warn: () => {},
   };

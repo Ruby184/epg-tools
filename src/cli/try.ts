@@ -338,8 +338,8 @@ export async function tryChannelDay(
   const resolved = resolveSite(
     site,
     { days: 1 },
-    dayIn(now, config.timezone),
-    config.timezone,
+    dayIn(now, config.timeZone),
+    config.timeZone,
     now,
   );
   // The day a run would ask for first, on the site's own calendar.
@@ -373,6 +373,7 @@ export async function tryChannelDay(
     http,
     says,
     state,
+    timeZone: config.timeZone,
     ...(options.signal ? { signal: options.signal } : {}),
   });
   const channel = channelNamed(channels, channelName);
@@ -402,6 +403,8 @@ export async function tryChannelDay(
     // queue to pace it against, since this is the only thing happening.
     paced: <T>(task: (o: { signal?: AbortSignal | undefined }) => Promise<T>): Promise<T> =>
       task({ ...(options.signal ? { signal: options.signal } : {}) }),
+    timeZone: config.timeZone,
+    dayZone: resolved.dayZone,
   };
 
   const began = Date.now();

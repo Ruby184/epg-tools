@@ -6,6 +6,7 @@ import { parseM3uFile } from '../m3u/parse.js';
 import type { ChannelListEntry, ChannelListWarning } from '../channels/types.js';
 import type { ChannelCoverage } from '../merge/types.js';
 import type { CacheStore } from '../cache/types.js';
+import { localTimeZone } from '../core/days.js';
 import { errorMessage, unanswered } from '../core/error.js';
 import type { Emit, Says } from '../core/events.js';
 import type { SiteSession } from './session.js';
@@ -22,6 +23,7 @@ import type { XmltvChannel } from '../xmltv/types.js';
 import { revalidationHooks } from './revalidate.js';
 import { siteDispatcher, type SiteDispatcher } from './connection.js';
 import { channelsMaxAgeMs, SiteStateHandle } from './state.js';
+import { siteDayZone } from './site.js';
 import type {
   AnySiteConfig,
   ChannelOffer,
@@ -145,6 +147,11 @@ export interface ResolveChannelsOptions {
   refresh?: boolean;
   /** "Now", for reckoning how old a cached list is. Defaults to the real one. */
   now?: Date;
+  /**
+   * The run's zone, for the `timeZone` and `dayZone` a `channels` function is
+   * handed — see `GrabOptions.timeZone`. Defaults to the process's own.
+   */
+  timeZone?: string;
   /**
    * Where the site's own `log` and `warn` go.
    *
@@ -306,6 +313,7 @@ export async function resolveChannels(
 
   /** What the site said about the list it just built — see `ChannelsAnswer`. */
   let metadata: unknown;
+  const timeZone = options.timeZone ?? localTimeZone();
 
   const fromSource = async (
     /** Last run's list, for a site that can tell it is still right. */
@@ -331,6 +339,8 @@ export async function resolveChannels(
         ...(options.says ?? SILENT),
         state,
         ...(held === undefined ? {} : { cached: held }),
+        timeZone,
+        dayZone: siteDayZone(config, timeZone),
       });
     const answer = await (options.paced ? options.paced(fetch) : fetch());
 
@@ -588,6 +598,8 @@ export interface ResolveSitesOptions {
   /** Fetch every list whatever is cached — `--refresh`. */
   refresh?: boolean;
   now?: Date;
+  /** The run's zone — see {@link ResolveChannelsOptions.timeZone}. */
+  timeZone?: string;
   /**
    * Where each site's own `log` and `warn` go, as the events they are.
    *
@@ -650,6 +662,7 @@ export async function resolveSessions(
             ...(state ? { state } : {}),
             ...(options.refresh === undefined ? {} : { refresh: options.refresh }),
             ...(options.now ? { now: options.now } : {}),
+            ...(options.timeZone ? { timeZone: options.timeZone } : {}),
             ...(options.select ? { select: options.select } : {}),
             ...(emit
               ? {

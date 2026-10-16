@@ -72,6 +72,17 @@ export function setXmltvOffset(date: Date, offsetMinutes: number): Date & WithXm
 }
 
 /**
+ * {@link setXmltvOffset}, keeping a zero offset rather than clearing it — for a
+ * date whose zone was named, which a builder must tell from a bare instant
+ * (see {@link isBareInstant}). It formats the same either way.
+ */
+export function keepXmltvOffset(date: Date, offsetMinutes: number): Date & WithXmltvOffset {
+  (date as WithXmltvOffset)[XMLTV_OFFSET] = offsetMinutes;
+
+  return date;
+}
+
+/**
  * The source precision as a digit count (`4`/`6`/`8`/`10`/`12`/`14`); defaults
  * to `14` (full second precision) when nothing was stored. See
  * {@link XMLTV_PRECISION}.
@@ -115,6 +126,22 @@ export interface XmltvDateOptions {
 const CALENDAR = /^(?:\d{4}|\d{6}|\d{8})$/;
 
 /**
+ * Whether a date input names an instant and nothing about how to write it: a
+ * `Date` with no offset preserved, or a unix timestamp. Not a string, and not a
+ * calendar-date number, which say what they say.
+ *
+ * A date whose zone was named — {@link zonedXmltvDate}, {@link setXmltvZone} —
+ * keeps even a zero offset, so London in winter is not bare. One parsed from a
+ * `+0000` string is: the parser leaves UTC unmarked, which is most of what it
+ * reads, so a source's string is better handed on as the string.
+ */
+export function isBareInstant(value: DateInput): boolean {
+  return value instanceof Date
+    ? (value as WithXmltvOffset)[XMLTV_OFFSET] === undefined
+    : typeof value === 'number' && !CALENDAR.test(String(value));
+}
+
+/**
  * Create a Date carrying XMLTV {@link XMLTV_OFFSET offset} and
  * {@link XMLTV_PRECISION precision} flags in one call — the convenience
  * alternative to `new Date()` followed by {@link setXmltvOffset} /
@@ -133,8 +160,10 @@ export function xmltvDate(value: DateInput, options: XmltvDateOptions = {}): Xml
   if (value instanceof Date) {
     date = new Date(value.getTime());
 
+    // Kept as it was, a zero included: a copy of a date whose zone was named
+    // is still one.
     const offset = (value as WithXmltvOffset)[XMLTV_OFFSET];
-    if (offset !== undefined) setXmltvOffset(date, offset);
+    if (offset !== undefined) keepXmltvOffset(date, offset);
 
     const precision = (value as WithXmltvPrecision)[XMLTV_PRECISION];
     if (precision !== undefined) setXmltvPrecision(date, precision);

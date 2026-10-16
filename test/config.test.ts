@@ -184,21 +184,21 @@ describe('a config as it is loaded', () => {
 
   it('settles the time zone it left out as the process’s own', async () => {
     // The suite runs in UTC; see `vitest.config.ts`.
-    expect((await resolveConfigSource(plain)).timezone).toBe('UTC');
+    expect((await resolveConfigSource(plain)).timeZone).toBe('UTC');
   });
 
   it('keeps one it was given, from a factory as from an object', async () => {
-    const zone = { ...plain, timezone: 'Europe/Bratislava' };
+    const zone = { ...plain, timeZone: 'Europe/Bratislava' };
 
-    expect((await resolveConfigSource(zone)).timezone).toBe('Europe/Bratislava');
-    expect((await resolveConfigSource(defineConfig(() => zone))).timezone).toBe(
+    expect((await resolveConfigSource(zone)).timeZone).toBe('Europe/Bratislava');
+    expect((await resolveConfigSource(defineConfig(() => zone))).timeZone).toBe(
       'Europe/Bratislava',
     );
   });
 
   it('refuses one that is not a zone, before anything reads it', async () => {
-    await expect(resolveConfigSource({ ...plain, timezone: 'Mars/Olympus' })).rejects.toThrow(
-      'timezone must be an IANA time zone such as "Europe/Bratislava" (got "Mars/Olympus")',
+    await expect(resolveConfigSource({ ...plain, timeZone: 'Mars/Olympus' })).rejects.toThrow(
+      'timeZone must be an IANA time zone such as "Europe/Bratislava" (got "Mars/Olympus")',
     );
   });
 });

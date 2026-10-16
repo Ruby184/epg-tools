@@ -208,7 +208,7 @@ export function defineXmltvSite<TData = XmltvChannel>(
       }),
     channelInfo: site.channelInfo ?? xmltvChannelInfo,
     async *stream(ctx): AsyncGenerator<StreamedChannelDay<TData>> {
-      const { channelDays, http, signal, warn } = ctx;
+      const { channelDays, http, signal, warn, timeZone } = ctx;
 
       // Through the queue, so the site's `rateLimit` spaces this against
       // whatever else it is doing and a slow-down holds it — and only the fetch,
@@ -223,6 +223,7 @@ export function defineXmltvSite<TData = XmltvChannel>(
         warn,
         ...(signal ? { signal } : {}),
         dayZone,
+        timeZone,
         ...(order === undefined ? {} : { order }),
         ...(parse === undefined ? {} : { parse }),
       });

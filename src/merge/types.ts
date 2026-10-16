@@ -150,6 +150,11 @@ export interface TransformContext extends Says {
   /** The output channel it belongs to. */
   xmltvId: string;
   /**
+   * The guide's zone, an IANA name — see `EpgConfig.timeZone`. The offset to
+   * write a time in for the guide to read locally.
+   */
+  timeZone: string;
+  /**
    * The programme that follows it on this channel, if the guide has one — the
    * same one `fillStop` and `clipOverlaps` used. Read-only: change it when its
    * own turn comes.
@@ -400,6 +405,8 @@ export interface DerivedChannel {
 export interface GuideContext extends Says {
   channels: readonly GrabberChannel[];
   now: Date;
+  /** The guide's zone, an IANA name — see `EpgConfig.timeZone`. */
+  timeZone: string;
 }
 
 /**
@@ -486,9 +493,10 @@ export interface BuildGuideOptions {
   /**
    * The time zone whose calendar the window's days are on: which day is today
    * when `startDay` is not given, and where each day starts and ends when the
-   * guide is clamped to them. UTC's when left out. See `EpgConfig.timezone`.
+   * guide is clamped to them. The process's own when left out. See
+   * `EpgConfig.timeZone`.
    */
-  timezone?: string;
+  timeZone?: string;
   merge?: MergeOptions;
   /**
    * Channels that are other channels shifted — see {@link DerivedChannel}. They

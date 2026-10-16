@@ -109,7 +109,7 @@ flag.
 | `output` | `string` | **required** | Where the guide is written: a path, replaced atomically once complete, or a Unix socket to stream it into. |
 | `compress` | `'gzip' \| 'brotli' \| 'zstd' \| false \| { format, level? }` | what the output's name says | Compress the guide — see [Compressing the guide](#compressing-the-guide). A `.gz`, `.br` or `.zst` output already asks for it; this is for a socket, for a plain document under a compressed-sounding name, or for choosing a level. |
 | `days` | `number` | `7` | How many days to grab and include in the guide. A site may override it. |
-| `timezone` | `string` | the process's zone — `TZ`, UTC where unset | Whose calendar says which day is today, as an IANA name like `'Europe/Bratislava'` — see [which day is today](#which-day-is-today). `--timezone` overrides it. |
+| `timeZone` | `string` | the process's zone — `TZ`, UTC where unset | Whose calendar says which day is today, as an IANA name like `'Europe/Bratislava'` — see [which day is today](#which-day-is-today). `--timezone` overrides it. |
 | `cache` | `EpgCacheConfig` | see [below](#cache-reference) | Where and how cached days are kept. |
 | `siteConcurrency` | `number` | all sites at once | How many sites grab in parallel. Lower it when many sites would otherwise open too many connections at once. |
 | `localConcurrency` | `number` | `16` | How much cache work and parsing runs at once **across every site** — see [How caching works](#how-caching-works) — and, on the way back out, how many channel-days a merge [reads ahead of the writer](#across-the-day-boundary). Bounds open files rather than pacing any source; a parse waiting on its own `ctx.paced` request does not count against it. |
@@ -158,7 +158,7 @@ Non-DTD attributes go in `extraAttributes` and are emitted verbatim.
 
 `meta` may also be a **function**, asked the same question [`derived`](#derived-channels)
 is and given the same context — the channels the sites resolved to, this run's
-`now`, and `log`/`warn`. It is for what cannot be written down ahead of a run
+`now` and `timeZone`, and `log`/`warn`. It is for what cannot be written down ahead of a run
 that decides it:
 
 ```ts
@@ -236,7 +236,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--health <p>` | `serve` only: the path that answers a health check, default `/health` |
 | `--no-health` | `serve` only: do not answer one at all |
 | `--grab-every <d>` | `serve` only: also grab on this interval — `6h`, `30m`, `1d`. Off unless said — see [grabbing on a schedule](#grabbing-on-a-schedule) |
-| `--grab-at <t>` | `serve` only: a time of day to line `--grab-every` up with, as `04:00`, on the clock of [`timezone`](#which-day-is-today). On its own it means once a day, at that time |
+| `--grab-at <t>` | `serve` only: a time of day to line `--grab-every` up with, as `04:00`, on the clock of [`timeZone`](#which-day-is-today). On its own it means once a day, at that time |
 | `--raw` | `try` only: print the whole payload, not the first 2000 characters |
 | `--format <how>` | `validate`, `channels` and `--dry-run`: `text` (default) or `json` |
 | `--strict` | `validate` only: count warnings as failures too |
@@ -987,9 +987,9 @@ export default defineConfig({
 });
 ```
 
-`at` is a time on the clock of the config's [`timezone`](#which-day-is-today) —
+`at` is a time on the clock of the config's [`timeZone`](#which-day-is-today) —
 the process's own zone where there is none — and `grabEvery('1d', { at: '04:00',
-timezone: 'Europe/Bratislava' })` reads it in a zone of its own. Asked of the
+timeZone: 'Europe/Bratislava' })` reads it in a zone of its own. Asked of the
 zone rather than added to its midnight, so a night the clocks change still
 grabs at four.
 
@@ -1021,7 +1021,7 @@ type NextGrab = (context: {
   from: Date;
   runs: number;
   cached(): Promise<{ present: number; expected: number; grabbedAt?: Date }>;
-  timezone?: string;   // the server's, for a schedule that reads a time of day
+  timeZone?: string;   // the server's, for a schedule that reads a time of day
 }) => Date | number | undefined | Promise<Date | number | undefined>;
 ```
 
@@ -1422,12 +1422,12 @@ never removes a day inside the window. Negative values work in both the
 A day in the cache is a calendar date, and which zone's calendar is the
 source's business — an XMLTV source files a programme under the day it falls on
 in the offset it was written in, unless its `dayZone` says otherwise. Which of
-those days is *today* is the run's, and `timezone` is how it is said:
+those days is *today* is the run's, and `timeZone` is how it is said:
 
 ```ts
 export default defineConfig({
   // ...
-  timezone: 'Europe/Bratislava',
+  timeZone: 'Europe/Bratislava',
   serve: { grab: grabEvery('24h', { at: '00:30' }) },
 });
 ```
@@ -1449,6 +1449,10 @@ the window's hours fall on, which is one more at one edge, and files their
 programmes into its own days as it merges — the one already on air as the
 window begins included, as a source on the run's calendar would have it. The
 cache keeps them as the source keyed them, and a prune keeps the extra day.
+
+A site's own code is told both: every context it is handed carries the run's
+`timeZone` and the site's `dayZone`, and reads a wall clock with
+[`at`](./site-config.md#times-of-day).
 
 Two things follow from the source's clock being elsewhere. A run east of it
 reaches a day back for the hours between its midnight and the source's, and
@@ -1735,7 +1739,7 @@ fix both because it has the programme that follows:
 | `dropContainers` | `true` | Drop a programme that wholly contains two or more others — a magazine block published beside its own parts. `clipOverlaps` cannot reach it, and without this the guide genuinely overlaps. |
 | `clampToWindow` | `false` | Leave out programmes starting outside the guide's window. Off, because a source handing back a few hours past the last day is giving you something. |
 | `fillGaps` | `false` | Put a placeholder where the schedule says nothing — see [filling the gaps](#filling-the-gaps). The one rule here that **invents**, which is why it is off. |
-| `transform` | — | The last word on every programme: `(programme, { xmltvId, next, log, warn }) => programme \| null`. |
+| `transform` | — | The last word on every programme: `(programme, { xmltvId, next, timeZone, log, warn }) => programme \| null`. |
 
 A programme with no end is what a consumer can do least with — tvheadend shows
 a zero-length event, some players nothing at all — and two programmes claiming

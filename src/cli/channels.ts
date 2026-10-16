@@ -14,6 +14,7 @@
  */
 
 import type { Writable } from 'node:stream';
+import { resolveTimeZone } from '../core/days.js';
 import { matchChannels } from '../channels/match.js';
 import type { ChannelMatchKind } from '../channels/types.js';
 import type { EpgConfig } from '../config.js';
@@ -191,8 +192,10 @@ export async function reportChannelsCommand(
   // goes back into it are all its own business — see `readChannelList`.
   const list = await readChannelList(options.against);
   const wanted = list.channels;
+  const timeZone = resolveTimeZone(config.timeZone);
   const resolved = await resolveSites(config.sites as AnySiteConfig[], {
     ...(options.signal ? { signal: options.signal } : {}),
+    timeZone,
   });
   const available = resolved.flatMap((site) => site.channels as GrabberChannel[]);
 
@@ -216,6 +219,7 @@ export async function reportChannelsCommand(
   const declarations = await configured(config.derived, {
     channels: available,
     now: new Date(),
+    timeZone,
     log: () => {},
     warn: (message) => {
       // Not `stdout`: that is the report, and `--format json` means something

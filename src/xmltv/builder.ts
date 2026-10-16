@@ -1,5 +1,6 @@
 import { Readable } from 'node:stream';
-import { xmltvDate } from './date.js';
+import { isBareInstant, xmltvDate } from './date.js';
+import { setXmltvZone } from './zone.js';
 import type { DateInput, XmltvDate, XmltvDateOptions } from './date.js';
 import { formatOnscreenEpisodeNum, formatXmltvNsEpisodeNum } from './episode-num.js';
 import type { EpisodeNumbers } from './episode-num.js';
@@ -101,6 +102,19 @@ export interface ProgrammeBuilderBase {
   title: string | [string, TextOptions];
   /** Default `lang` applied by every method below unless it's given its own. */
   lang?: string;
+  /**
+   * The zone a bare instant is written in — a `Date` with no offset of its own,
+   * or a unix timestamp — so the guide reads in local time rather than UTC: its
+   * offset there, at that instant. `ctx.programme` passes the run's.
+   *
+   * A `Date` whose zone was named (`zonedXmltvDate`, `setXmltvZone`, a
+   * context's `at`) and an XMLTV string are written as they say. So is a `Date`
+   * parsed from a string with an offset other than `+0000` — a parsed UTC one
+   * is bare, since the parser leaves UTC unmarked, so hand the string on
+   * instead, or pass `timeZone: 'UTC'`. Not `<date>`, which has no offset to
+   * write.
+   */
+  timeZone?: string;
   /**
    * Where a value this cannot use is reported.
    *
@@ -351,6 +365,8 @@ abstract class XmltvElementBuilder extends ExtraAttributesBuilder {
  */
 export class ProgrammeBuilder extends XmltvElementBuilder {
   readonly #programme: XmltvProgramme;
+  /** See {@link ProgrammeBuilderBase.timeZone}. */
+  readonly #timeZone: string | undefined;
 
   /** Positional shorthand for `new ProgrammeBuilder({ channel, start, title, ...options })`. */
   static of(
@@ -364,10 +380,11 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
 
   constructor(base: ProgrammeBuilderBase) {
     super(base.lang, base.warn);
+    this.#timeZone = base.timeZone;
 
     this.#programme = {
       channel: base.channel,
-      start: xmltvDate(base.start),
+      start: this.#zoned(base.start, xmltvDate(base.start)),
       title: [this.textValue(base.title)],
     };
 
@@ -379,9 +396,26 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     if (base.clumpidx) this.clumpidx(base.clumpidx);
   }
 
+  /**
+   * A bare instant in {@link ProgrammeBuilderBase.timeZone}'s offset — unless
+   * the call named an offset of its own.
+   */
+  #zoned<T extends Date | undefined>(value: DateInput, date: T, options?: XmltvDateOptions): T {
+    if (
+      date !== undefined &&
+      this.#timeZone !== undefined &&
+      options?.offset === undefined &&
+      isBareInstant(value)
+    ) {
+      setXmltvZone(date, this.#timeZone);
+    }
+
+    return date;
+  }
+
   /** Sets the `stop` time (end of the programme). */
   stop(value: DateInput, options?: XmltvDateOptions): this {
-    const stop = this.dated('stop', value, options);
+    const stop = this.#zoned(value, this.dated('stop', value, options), options);
 
     if (stop !== undefined) {
       this.#programme.stop = stop;
@@ -392,7 +426,7 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
 
   /** Sets the `pdc-start` (Programme Delivery Control) time. */
   pdcStart(value: DateInput, options?: XmltvDateOptions): this {
-    const pdcStart = this.dated('pdc-start', value, options);
+    const pdcStart = this.#zoned(value, this.dated('pdc-start', value, options), options);
 
     if (pdcStart !== undefined) {
       this.#programme.pdcStart = pdcStart;
@@ -403,7 +437,7 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
 
   /** Sets the `vps-start` (Video Programme System) time. */
   vpsStart(value: DateInput, options?: XmltvDateOptions): this {
-    const vpsStart = this.dated('vps-start', value, options);
+    const vpsStart = this.#zoned(value, this.dated('vps-start', value, options), options);
 
     if (vpsStart !== undefined) {
       this.#programme.vpsStart = vpsStart;
@@ -594,7 +628,10 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
         ...(opts.start === undefined
           ? {}
           : (() => {
-              const start = this.dated('previously-shown start', opts.start);
+              const start = this.#zoned(
+                opts.start,
+                this.dated('previously-shown start', opts.start),
+              );
 
               return start === undefined ? {} : { start };
             })()),

@@ -21,7 +21,7 @@
  * ```
  */
 
-import { dayIn, resolveTimeZone, wallTimeIn } from '../core/days.js';
+import { dayIn, resolveTimeZone, timeOfDay, wallTimeIn } from '../core/days.js';
 import { GrabberError } from '../core/error.js';
 
 /**
@@ -65,10 +65,10 @@ export interface GrabScheduleContext {
    */
   cached(): Promise<GuideCached>;
   /**
-   * The zone the server's days are on — its `timezone` — for a schedule that
+   * The zone the server's days are on — its `timeZone` — for a schedule that
    * reads a time of day. Absent where none was given.
    */
-  timezone?: string;
+  timeZone?: string;
 }
 
 /**
@@ -93,7 +93,7 @@ export type NextGrab = (
 export interface GrabEveryOptions {
   /**
    * A wall-clock time of day to line the interval up with, as `HH:MM` on the
-   * clock of {@link timezone}.
+   * clock of {@link timeZone}.
    *
    * Without one the interval is measured from startup and from each grab's
    * finish, and the **first run is at startup** — which is what "every six
@@ -119,15 +119,12 @@ export interface GrabEveryOptions {
   whenEmpty?: boolean;
   /**
    * The zone {@link at} is read in — an IANA name such as
-   * `'Europe/Bratislava'`. Defaults to the server's own `timezone`, so a
+   * `'Europe/Bratislava'`. Defaults to the server's own `timeZone`, so a
    * config that says it once has its grabs at that zone's half past midnight,
    * and to the process's local time where neither says.
    */
-  timezone?: string;
+  timeZone?: string;
 }
-
-/** `HH:MM`, and a real time of day rather than merely the shape of one. */
-const TIME_OF_DAY = /^(\d{1,2}):(\d{2})$/;
 
 /** A duration, as digits and an optional unit. */
 const DURATION = /^(\d+(?:\.\d+)?)(ms|s|m|h|d)?$/;
@@ -171,15 +168,15 @@ export function resolveInterval(interval: number | string, label: string): numbe
  * would be free to disagree.
  */
 export function resolveTimeOfDay(at: string, label: string): number {
-  const match = TIME_OF_DAY.exec(at.trim());
-  const hours = Number(match?.[1]);
-  const minutes = Number(match?.[2]);
+  // A listing's `25:30` runs on into the next morning; a schedule's time is a
+  // time on the clock, to the minute.
+  const time = timeOfDay(at);
 
-  if (match === null || hours > 23 || minutes > 59) {
+  if (time === undefined || time.hours > 23 || time.seconds !== undefined) {
     throw new GrabberError(`Invalid ${label} value: ${at} (expected a time of day like 04:00)`);
   }
 
-  return hours * 60 + minutes;
+  return time.hours * 60 + time.minutes;
 }
 
 /**
@@ -213,9 +210,9 @@ export function grabEvery(interval: number | string, options: GrabEveryOptions =
   // Only one given here is checked here: left out, it is the server's, which
   // the server has checked already.
   const zone =
-    options.timezone === undefined ? undefined : resolveTimeZone(options.timezone, 'grab.timezone');
+    options.timeZone === undefined ? undefined : resolveTimeZone(options.timeZone, 'grab.timeZone');
 
-  return async ({ from, runs, cached, timezone }) => {
+  return async ({ from, runs, cached, timeZone: serverZone }) => {
     if (at === undefined) {
       // Unanchored: at startup, now — and after that, spaced from each finish,
       // which drifts by however long a grab takes but can never pile up.
@@ -233,7 +230,7 @@ export function grabEvery(interval: number | string, options: GrabEveryOptions =
     // so the anchor follows the calendar rather than being a fixed instant —
     // and asked of the zone rather than added to its midnight, since a night
     // the clocks change is not 24 hours long.
-    const timeZone = zone ?? timezone;
+    const timeZone = zone ?? serverZone;
     const anchor = wallTimeIn(dayIn(from, timeZone), timeZone, at);
     const elapsed = from.getTime() - anchor;
 

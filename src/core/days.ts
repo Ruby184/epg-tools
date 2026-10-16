@@ -8,7 +8,8 @@
  * the same whatever the answer.
  */
 
-import { xmltvZoneOffset, zonedXmltvDate } from '../xmltv/zone.js';
+import { XmltvDateError } from '../xmltv/date.js';
+import { setXmltvZone, xmltvZoneOffset, zonedXmltvDate } from '../xmltv/zone.js';
 
 /** Format a Date as a UTC `YYYY-MM-DD` day string. */
 export function toDayString(date: Date): string {
@@ -70,7 +71,7 @@ export function localTimeZone(): string {
  * name `Intl` does not know would otherwise fail part way through a run, with an
  * error that does not say which setting was wrong.
  */
-export function resolveTimeZone(timeZone: string | undefined, field = 'timezone'): string {
+export function resolveTimeZone(timeZone: string | undefined, field = 'timeZone'): string {
   if (timeZone === undefined) {
     return localTimeZone();
   }
@@ -107,10 +108,86 @@ export function dayIn(instant: Date, timeZone = localTimeZone()): string {
  * or 25 hours long, so `04:00` is not always four hours after midnight.
  */
 export function wallTimeIn(day: string, timeZone = localTimeZone(), minutes = 0): number {
-  const hours = String(Math.floor(minutes / 60)).padStart(2, '0');
-  const rest = String(minutes % 60).padStart(2, '0');
+  return zonedTime(day, timeZone, Math.floor(minutes / 60), minutes % 60).getTime();
+}
 
-  return zonedXmltvDate(`${day} ${hours}:${rest}`, timeZone).getTime();
+/**
+ * That wall clock on a day in a zone, precise to the second only where one is
+ * given — and an hour past 23 carried into the days after it.
+ */
+function zonedTime(
+  day: string,
+  timeZone: string,
+  hours: number,
+  minutes: number,
+  seconds?: number,
+): Date {
+  const two = (n: number) => String(n).padStart(2, '0');
+
+  return zonedXmltvDate(
+    `${addDays(day, Math.floor(hours / 24))} ${two(hours % 24)}:${two(minutes)}` +
+      (seconds === undefined ? '' : `:${two(seconds)}`),
+    timeZone,
+  );
+}
+
+/** `20:00`, `6:05`, `20:00:30` — and past `24:00`, for a listing that runs on. */
+const TIME_OF_DAY = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/;
+
+/**
+ * A time of day as its fields, or nothing for one that is not: `HH:MM` or
+ * `HH:MM:SS`, minutes and seconds under 60. The hour is as written, past 23
+ * included, and how far it may go is the caller's to say — a listing runs on,
+ * a schedule's `at` does not.
+ */
+export function timeOfDay(
+  text: string,
+): { hours: number; minutes: number; seconds?: number } | undefined {
+  const fields = TIME_OF_DAY.exec(text.trim());
+
+  if (fields === null) {
+    return undefined;
+  }
+
+  const [, hours, minutes, seconds] = fields;
+
+  if (Number(minutes) > 59 || Number(seconds ?? 0) > 59) {
+    return undefined;
+  }
+
+  return {
+    hours: Number(hours),
+    minutes: Number(minutes),
+    ...(seconds === undefined ? {} : { seconds: Number(seconds) }),
+  };
+}
+
+/**
+ * A time of day on a day — what a context's `at` answers: read on `dayZone`'s
+ * clock, the calendar the day is on, and written in `timeZone`'s offset, the
+ * guide's.
+ *
+ * Hours past 23 run on into the days after, as listings that carry a night on
+ * past midnight write it: `25:30` is half past one the next morning. Precise to
+ * the minute, or to the second where the time gives one.
+ */
+export function wallClock(day: string, time: string, dayZone: string, timeZone: string): Date {
+  // A string checked for, since this is handed whatever a source sent: a
+  // `null` or a number out of JSON is a time it did not give, and says so in
+  // the same words as one it gave wrong.
+  const fields = typeof time === 'string' ? timeOfDay(time) : undefined;
+
+  if (fields === undefined) {
+    throw new XmltvDateError(
+      String(time),
+      'expected a time of day such as "20:00" or "20:00:30"',
+      0,
+    );
+  }
+
+  const instant = zonedTime(day, dayZone, fields.hours, fields.minutes, fields.seconds);
+
+  return dayZone === timeZone ? instant : setXmltvZone(instant, timeZone);
 }
 
 /**

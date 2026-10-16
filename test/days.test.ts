@@ -4,8 +4,10 @@ import {
   daysCovering,
   localTimeZone,
   resolveTimeZone,
+  wallClock,
   wallTimeIn,
 } from '../src/core/days.js';
+import { getXmltvOffset, getXmltvPrecision, XmltvDateError } from '../src/xmltv/main.js';
 import { siteDayZone, siteWindow } from '../src/grabber/site.js';
 import type { SiteConfig } from '../src/grabber/types.js';
 
@@ -48,6 +50,47 @@ describe('when a time of day happens', () => {
   });
 });
 
+describe('a time of day on a day', () => {
+  /** When it is, and in what offset it is written. */
+  const read = (day: string, time: string, dayZone = BRATISLAVA, timeZone = BRATISLAVA) => {
+    const date = wallClock(day, time, dayZone, timeZone);
+
+    return { at: date.toISOString(), offset: getXmltvOffset(date) };
+  };
+
+  it('is that time on the day’s clock, written in its offset', () => {
+    expect(read('2026-07-17', '20:00')).toEqual({ at: '2026-07-17T18:00:00.000Z', offset: 120 });
+    expect(read('2026-07-17', '6:05').at).toBe('2026-07-17T04:05:00.000Z');
+  });
+
+  it('is precise to the second only where the time gives one', () => {
+    expect(getXmltvPrecision(wallClock('2026-07-17', '20:00', BRATISLAVA, BRATISLAVA))).toBe(12);
+    expect(getXmltvPrecision(wallClock('2026-07-17', '20:00:30', BRATISLAVA, BRATISLAVA))).toBe(14);
+  });
+
+  it('runs on into the next day past 23, and 24:00 is the next midnight', () => {
+    expect(read('2026-07-17', '25:30').at).toBe('2026-07-17T23:30:00.000Z');
+    expect(read('2026-07-17', '24:00').at).toBe('2026-07-17T22:00:00.000Z');
+    expect(read('2026-07-17', '00:00').at).toBe('2026-07-16T22:00:00.000Z');
+  });
+
+  it('is read on the day’s calendar and written on the guide’s where the two differ', () => {
+    // Eight in the evening of a UTC day, as a Bratislava guide shows it.
+    expect(read('2026-07-17', '20:00', 'UTC', BRATISLAVA)).toEqual({
+      at: '2026-07-17T20:00:00.000Z',
+      offset: 120,
+    });
+  });
+
+  it('refuses what is not a time of day, whatever a source sent in its place', () => {
+    for (const time of ['7pm', '20:60', '20:00:60', '2026-07-17 20:00', '', null, 2000]) {
+      expect(() => wallClock('2026-07-17', time as string, BRATISLAVA, BRATISLAVA)).toThrow(
+        XmltvDateError,
+      );
+    }
+  });
+});
+
 describe('a zone a run is given', () => {
   it('is taken when it is one', () => {
     expect(resolveTimeZone(BRATISLAVA)).toBe(BRATISLAVA);
@@ -58,8 +101,8 @@ describe('a zone a run is given', () => {
   });
 
   it('is refused naming the setting when it is not one', () => {
-    expect(() => resolveTimeZone('Mars/Olympus', 'serve.timezone')).toThrow(
-      'serve.timezone must be an IANA time zone such as "Europe/Bratislava" (got "Mars/Olympus")',
+    expect(() => resolveTimeZone('Mars/Olympus', 'serve.timeZone')).toThrow(
+      'serve.timeZone must be an IANA time zone such as "Europe/Bratislava" (got "Mars/Olympus")',
     );
   });
 });

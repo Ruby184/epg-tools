@@ -41,7 +41,7 @@ export async function grabWith(
   // Before anything starts, rather than once per site that then cannot — it
   // throws when there are threads to start and no module to start them on.
   const threadsWanted = threadCount(options.threads, options.configModule);
-  const timeZone = resolveTimeZone(options.timezone);
+  const timeZone = resolveTimeZone(options.timeZone);
   const threads =
     threadsWanted === 0 ? undefined : SiteThreads.for(threadsWanted, options.configModule!);
   /** Every site running in a thread, so a cancelled run can wait for them — see below. */

@@ -103,6 +103,10 @@ export interface CommandArgsContext extends CommandWindow {
   warn: Says['warn'];
   /** And where what was learnt on the way goes — which grabber this turned out to be. */
   log: Says['log'];
+  /** The run's zone, for a program that takes one — see `EpgConfig.timeZone`. */
+  timeZone: string;
+  /** The zone the site's days are on: {@link timeZone}, unless its `dayZone` names another. */
+  dayZone: string;
 }
 
 /**
@@ -496,7 +500,14 @@ export function defineCommandSite<TData = XmltvChannel>(
 
     channels:
       channels ??
-      (async ({ state, warn, log, signal }): Promise<GrabberChannel<TData>[]> => {
+      (async ({
+        state,
+        warn,
+        log,
+        signal,
+        timeZone,
+        dayZone: zone,
+      }): Promise<GrabberChannel<TData>[]> => {
         // The DTD puts every `<channel>` before the first `<programme>`, so the
         // head of the document is the whole channel list — and a program given
         // `--list-channels` writes nothing else at all. Either way this stops
@@ -510,6 +521,8 @@ export function defineCommandSite<TData = XmltvChannel>(
           warn,
           log,
           ...(signal ? { signal } : {}),
+          timeZone,
+          dayZone: zone,
         });
         const found: GrabberChannel<XmltvChannel>[] = [];
         let enough = false;
@@ -572,6 +585,8 @@ export function defineCommandSite<TData = XmltvChannel>(
         warn,
         log: ctx.log,
         ...(signal ? { signal } : {}),
+        timeZone: ctx.timeZone,
+        dayZone: ctx.dayZone,
       };
 
       // Asked with the same context an argument list is worked out from, and
@@ -637,6 +652,7 @@ export function defineCommandSite<TData = XmltvChannel>(
             warn,
             ...(signal ? { signal } : {}),
             dayZone,
+            timeZone: ctx.timeZone,
             ...(order === undefined ? {} : { order }),
             ...(parse === undefined ? {} : { parse }),
           });

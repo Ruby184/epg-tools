@@ -176,6 +176,8 @@ describe('channelsFromM3u, from a path', () => {
     await channelsFromM3u(parseM3uString('#EXTINF:-1 tvg-id="a",A\nhttp://e/a\n'))({
       http: undefined as never,
       state: new Map(),
+      timeZone: 'UTC',
+      dayZone: 'UTC',
       log: () => {},
       warn: (message) => said.push(message),
     });

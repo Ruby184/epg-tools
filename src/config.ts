@@ -72,7 +72,8 @@ export interface EpgConfig {
   days?: number;
   /**
    * The time zone whose calendar decides which day is today — an IANA name such
-   * as `'Europe/Bratislava'`. UTC's when left out.
+   * as `'Europe/Bratislava'`. The process's own when left out: what `TZ` says,
+   * and UTC where nothing does.
    *
    * Today is where the window starts, which days are always fetched again, and
    * where the guide is clamped to: the window's days run from midnight to
@@ -81,11 +82,11 @@ export interface EpgConfig {
    * that has just ended and stop a day short. It is the sources that say which
    * day a programme is filed under — see each one's `dayZone` — so this does
    * not move a programme from one day to another; it says which days the run is
-   * about.
+   * about. A site's own code is handed it as `timeZone`, the guide's clock.
    *
    * `--timezone` overrides it.
    */
-  timezone?: string;
+  timeZone?: string;
   /**
    * Where the guide is written: a path, replaced atomically once complete, or
    * a Unix socket to stream it into — which is how tvheadend's *External
@@ -323,14 +324,14 @@ export interface ResolvableConfig<S extends readonly StageDefaults[] = readonly 
 export type ConfigSource = EpgConfig | ResolvableConfig;
 
 /** A config as a run reads it: what was said, with what was left to the machine settled. */
-export type ResolvedConfig = EpgConfig & { timezone: string };
+export type ResolvedConfig = EpgConfig & { timeZone: string };
 
 /**
  * Resolve either shape, offering whatever sources the caller has: the grabber
  * hands in a reader over the configuration file it loaded, `epg build` hands in
  * nothing and the environment answers instead.
  *
- * Also where `timezone` is checked and settled, since every way into a run
+ * Also where `timeZone` is checked and settled, since every way into a run
  * passes here: a zone that is not one is refused before anything is asked of a
  * source, and one left out is the process's own from here on — so whatever
  * reads the config afterwards reads one answer.
@@ -341,7 +342,7 @@ export async function resolveConfigSource(
 ): Promise<ResolvedConfig> {
   const config = typeof source === 'function' ? await source(...supplied) : source;
 
-  return { ...config, timezone: resolveTimeZone(config.timezone) };
+  return { ...config, timeZone: resolveTimeZone(config.timeZone) };
 }
 
 /** Identity helper for type inference in `epg.config.ts` files. */
