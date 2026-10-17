@@ -359,9 +359,11 @@ and `at('24:00')`.
 
 `dayZone` is the run's zone unless the site says otherwise, so **a source whose
 times are on a fixed clock names it**: `dayZone: 'Europe/Bratislava'` for a
-Slovak broadcaster. In a Bratislava run that changes nothing, and in any other
-run `at` still reads the source's clock rather than the run's — as do the days
-the site is asked for. A full local datetime, `2026-07-17 20:00`, is
+Slovak broadcaster. In a Bratislava run that changes nothing — nor in one on
+the same clock under another name, such as a machine set to Prague, since zones
+are compared by their offsets rather than their names — and in any other run
+`at` still reads the source's clock rather than the run's, as do the days the
+site is asked for. A full local datetime, `2026-07-17 20:00`, is
 [`zonedXmltvDate`](./xmltv.md#named-zones)'s, given the same zone:
 
 ```ts

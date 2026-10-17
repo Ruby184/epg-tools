@@ -172,6 +172,18 @@ describe('the days a run asks a site for', () => {
     expect(siteDayZone(keeping('utc'), 'Etc/UTC')).toBe('Etc/UTC');
   });
 
+  it('takes a zone on the run’s clock for the run’s calendar, whatever it is called', () => {
+    // A link to Prague, which `Intl` still names as itself.
+    expect(siteDayZone(keeping(BRATISLAVA), 'Europe/Prague')).toBe('Europe/Prague');
+    // Not a link, and on the same rules.
+    expect(siteDayZone(keeping('Europe/Vienna'), 'Europe/Prague')).toBe('Europe/Prague');
+  });
+
+  it('keeps a zone that agrees with the run’s only for part of the year', () => {
+    // Lagos is +0100 all year, Prague only in winter.
+    expect(siteDayZone(keeping('Africa/Lagos'), 'Europe/Prague')).toBe('Africa/Lagos');
+  });
+
   it('reads a zone that is not one as the run’s, leaving refusing it to the site', () => {
     expect(siteWindow(keeping('Mars/Olympus'), '2026-07-17', 1, BRATISLAVA)).toEqual([
       '2026-07-17',

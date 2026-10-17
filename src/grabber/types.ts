@@ -658,7 +658,8 @@ export interface BaseSiteConfig<TData = unknown> {
    * XMLTV, Xtream and command adapters pass theirs through; Schedules Direct's
    * days are always UTC.
    *
-   * Another name for the run's own zone is the run's calendar, and a name that
+   * A zone on the run's own clock is the run's calendar, whatever it is
+   * called — `Europe/Bratislava` in a run on `Europe/Prague` — and a name that
    * is not a zone fails this site alone.
    */
   dayZone?: XmltvDayZone;

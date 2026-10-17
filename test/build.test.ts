@@ -558,6 +558,51 @@ describe('a run with a time zone', () => {
     ]);
   });
 
+  it('reads a site on the run’s clock under another name as on the run’s calendar', async () => {
+    // A machine whose zone is Prague, and a Slovak source that says Bratislava:
+    // the same clock, under two names. Its days run on past midnight, which a
+    // run taking it for another calendar would refile by start and lose.
+    const dir = await tempDir();
+    const started: unknown[] = [];
+
+    await build(
+      config(dir, {
+        sites: [
+          {
+            ...site([]),
+            dayZone: 'Europe/Bratislava',
+            parseDay({ day, at, programme }) {
+              return [
+                programme(at('20:00'), `evening ${day}`),
+                programme(at('24:30'), `after midnight ${day}`),
+              ];
+            },
+          },
+        ],
+        days: 2,
+        timeZone: 'Europe/Prague',
+      }),
+      {
+        now: LATE,
+        reporter: (event) => {
+          if (event.type === 'site:started') {
+            started.push(event);
+          }
+        },
+      },
+    );
+
+    const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+    expect(guide.programmes.map((programme) => programme.title[0]?.value)).toEqual([
+      'evening 2026-07-17',
+      'after midnight 2026-07-17',
+      'evening 2026-07-18',
+      'after midnight 2026-07-18',
+    ]);
+    expect(started).toEqual([expect.not.objectContaining({ dayZone: expect.anything() })]);
+  });
+
   describe('and a site keyed by UTC date', () => {
     /** A source whose days are UTC days: 20:00 and 22:15 UTC on each. */
     function utc(fetchedDays: string[]): SiteConfig<unknown> {
