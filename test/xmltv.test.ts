@@ -2877,6 +2877,31 @@ describe('named time zones', () => {
       );
     });
 
+    // The hour after each change, on the hour, is the change's own instant — and
+    // a change found even a second late reads it on the wrong side, an hour out.
+    it.each([
+      [bratislava, '2026-10-25 03:00', '2026-10-25T02:00:00.000Z', '202610250300 +0100'],
+      [bratislava, '2026-10-25 02:59', '2026-10-25T00:59:00.000Z', '202610250259 +0200'],
+      [bratislava, '2026-03-29 03:00', '2026-03-29T01:00:00.000Z', '202603290300 +0200'],
+      // The first minute the clocks skipped, moved past the gap like the rest.
+      [bratislava, '2026-03-29 02:00', '2026-03-29T01:00:00.000Z', '202603290300 +0200'],
+      ['America/New_York', '2026-03-08 03:00', '2026-03-08T07:00:00.000Z', '202603080300 -0400'],
+    ])('reads %s %s on the right side of the change', (zone, local, instant, formatted) => {
+      const date = zonedXmltvDate(local, zone);
+
+      expect(date.toISOString()).toBe(instant);
+      expect(formatXmltvDate(date)).toBe(formatted);
+    });
+
+    it('changes offset at the very instant the clocks do', () => {
+      const at = (instant: string) => xmltvZoneOffset(bratislava, new Date(instant));
+
+      expect(at('2026-10-25T00:59:59.999Z')).toBe(120);
+      expect(at('2026-10-25T01:00:00.000Z')).toBe(60);
+      expect(at('2026-03-29T00:59:59.999Z')).toBe(60);
+      expect(at('2026-03-29T01:00:00.000Z')).toBe(120);
+    });
+
     it.each([
       ['America/New_York', '2026-11-01 01:30', '2026-11-01T05:30:00.000Z', -240],
       ['America/New_York', '2026-03-08 02:30', '2026-03-08T07:30:00.000Z', -240],

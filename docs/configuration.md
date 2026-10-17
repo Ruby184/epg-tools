@@ -1446,9 +1446,11 @@ A source whose days are on another calendar says so with its own
 [`dayZone`](./site-config.md#reference) — Schedules Direct's are always UTC —
 and the run covers its window with that calendar's days: it fetches the ones
 the window's hours fall on, which is one more at one edge, and files their
-programmes into its own days as it merges — the one already on air as the
-window begins included, as a source on the run's calendar would have it. The
-cache keeps them as the source keyed them, and a prune keeps the extra day.
+programmes into its own days as it merges, each in the day it starts in — what
+a source's day runs on into past its own midnight included, and the one
+already on air as the window begins, as a source on the run's calendar would
+have it. The cache keeps them as the source keyed them, and a prune keeps the
+extra day.
 
 A site's own code is told both: every context it is handed carries the run's
 `timeZone` and the site's `dayZone`, and reads a wall clock with

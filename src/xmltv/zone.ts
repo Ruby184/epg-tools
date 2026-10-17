@@ -78,7 +78,13 @@ const zoneDays = new Map<string, ZoneDay>();
 
 /** The offset a zone was in at an instant, from what is known of that day. */
 function offsetAt(timeZone: string, instant: number): number {
-  const day = Math.floor(instant / DAY);
+  const known = zoneDay(timeZone, Math.floor(instant / DAY));
+
+  return typeof known === 'number' ? known : instant < known.at ? known.before : known.after;
+}
+
+/** What a zone did on one UTC day, asked once. */
+function zoneDay(timeZone: string, day: number): ZoneDay {
   const key = `${timeZone}|${day}`;
   let known = zoneDays.get(key);
 
@@ -87,7 +93,52 @@ function offsetAt(timeZone: string, instant: number): number {
     zoneDays.set(key, known);
   }
 
-  return typeof known === 'number' ? known : instant < known.at ? known.before : known.after;
+  return known;
+}
+
+/** Pairs of zones already compared — see {@link sameClock}. */
+const sameClocks = new Map<string, boolean>();
+
+/**
+ * Whether two zones keep the same clock: the same offset at every instant for
+ * a year either side of now. A link and the zone it names — `Europe/Bratislava`
+ * and `Europe/Prague` — and two zones on the same rules, as Vienna and Prague
+ * are, do; a zone that only agrees for the winter does not.
+ *
+ * By what the zones do rather than by what they are called, since nothing in
+ * `Intl` resolves a link: it names Bratislava as Bratislava. Compared a UTC day
+ * at a time from what is known of each, so a change is matched to the
+ * millisecond, and a pair that differs stops at the first day it does —
+ * at once, for any two zones a run is likely to be asked about. A pair that
+ * agrees costs a year of days, once.
+ */
+export function sameClock(a: string, b: string): boolean {
+  if (a === b) {
+    return true;
+  }
+
+  const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+  let same = sameClocks.get(key);
+
+  if (same === undefined) {
+    const today = Math.floor(Date.now() / DAY);
+
+    same = true;
+
+    for (let day = today - 366; day <= today + 366 && same; day++) {
+      const one = zoneDay(a, day);
+      const other = zoneDay(b, day);
+
+      same =
+        typeof one === 'number' || typeof other === 'number'
+          ? one === other
+          : one.at === other.at && one.before === other.before && one.after === other.after;
+    }
+
+    sameClocks.set(key, same);
+  }
+
+  return same;
 }
 
 /** Two lookups, and a search for the moment between them when they differ. */
@@ -101,12 +152,17 @@ function surveyDay(timeZone: string, day: number): ZoneDay {
     return before;
   }
 
-  // The clocks changed somewhere in here. Halving the day to the minute finds
-  // when — seventeen more questions, once, for the two days a year it happens.
+  // The clocks changed somewhere in here. Halving the day to the millisecond
+  // finds when — twenty-seven more questions, once, for the two days a year it
+  // happens. To the millisecond rather than the minute: `at` is where the new
+  // offset starts, and one found a few seconds late puts the change's own
+  // instant on the wrong side of it — which is every time on the hour after
+  // it, since the clocks change on the hour. 03:00 on the night they go back
+  // would be read in summer time, an hour early.
   let held = start;
   let changed = end;
 
-  while (changed - held > MINUTE) {
+  while (changed - held > 1) {
     const middle = held + Math.floor((changed - held) / 2);
 
     if (rawOffsetAt(timeZone, middle) === before) {

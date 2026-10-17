@@ -9,6 +9,7 @@
 
 import { DEFAULT_STALENESS } from '../cache/main.js';
 import type { StalenessPolicy } from '../cache/types.js';
+import { sameClock } from '../xmltv/zone.js';
 import { dayIn, dayRange, daysCovering, resolveTimeZone } from '../core/days.js';
 import { resolveBatching, type ResolvedBatching } from './planner.js';
 import type {
@@ -226,11 +227,14 @@ export function resolveSite(
  * under the day its own offset says is assumed to keep the calendar the guide
  * is for, which nothing about it could confirm or deny.
  *
- * Another name for the run's own zone — `Etc/UTC` beside `UTC` — is the run's,
- * so the two are not taken for different calendars. And a name that is not a
- * zone at all reads as the run's too: this is asked wherever a run reads its
- * sites, and one site's mistake must not stop the others. {@link resolveSite}
- * is where that site is refused, alone.
+ * A zone on the run's own clock is the run's, whatever it is called: another
+ * name for it — `Europe/Bratislava` beside `Europe/Prague` — or another zone on
+ * the same rules. Taken for another calendar, it would have the guide file its
+ * programmes by when they start, and lose a source's after-midnight programmes
+ * from a day that runs on past midnight — for days that are the run's own
+ * anyway. And a name that is not a zone at all reads as the run's too: this is
+ * asked wherever a run reads its sites, and one site's mistake must not stop
+ * the others. {@link resolveSite} is where that site is refused, alone.
  */
 export function siteDayZone(config: AnySiteConfig, timeZone: string): string {
   const zone = config.dayZone === 'utc' ? 'UTC' : config.dayZone;
@@ -239,17 +243,17 @@ export function siteDayZone(config: AnySiteConfig, timeZone: string): string {
     return timeZone;
   }
 
-  const canonical = canonicalZone(zone);
-
-  return canonical === undefined || canonical === canonicalZone(timeZone) ? timeZone : zone;
+  return !isZone(zone) || sameClock(zone, timeZone) ? timeZone : zone;
 }
 
-/** The name `Intl` knows a zone by, or nothing for a name that is not one. */
-function canonicalZone(timeZone: string): string | undefined {
+/** Whether `Intl` knows a name as a zone. */
+function isZone(timeZone: string): boolean {
   try {
-    return new Intl.DateTimeFormat('en-US', { timeZone }).resolvedOptions().timeZone;
+    new Intl.DateTimeFormat('en-US', { timeZone });
+
+    return true;
   } catch {
-    return undefined;
+    return false;
   }
 }
 
