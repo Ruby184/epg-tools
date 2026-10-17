@@ -11,6 +11,27 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.10.0](https://github.com/Ruby184/epg-tools/compare/v0.9.0...v0.10.0) (2026-10-17)
+
+
+### ⚠ BREAKING CHANGES
+
+* **merge:** a guide built from several sources writes one of two texts that say the same thing rather than both, so it changes on upgrade: fewer titles, categories and descriptions, none of them rewritten. Set `merge.union: 'exact'` to write every text as the sources gave them, as before.
+
+### Features
+
+* **grabber:** a site remembers a programme's details between runs ([83438e7](https://github.com/Ruby184/epg-tools/commit/83438e7842afb5e04faa3a62c3a5e40aa0b7d897))
+* **grabber:** a site remembers a programme's details between runs ([d2e0dca](https://github.com/Ruby184/epg-tools/commit/d2e0dca7a4594954633d69c3e537a57f03d498f5))
+* **merge:** texts two sources spell differently are written once ([a1ebee5](https://github.com/Ruby184/epg-tools/commit/a1ebee5b16f675bee958b6cf8734db86dadd342a))
+
+
+### Bug Fixes
+
+* **grabber:** a zone on the run's clock under another name is the run's calendar ([add3748](https://github.com/Ruby184/epg-tools/commit/add374893eb91c44d706f6e636adce1456278bb9))
+* **merge:** a day on another clock keeps what it runs on into past its midnight ([6f13fe1](https://github.com/Ruby184/epg-tools/commit/6f13fe1bb98233338a7d93863ac3d57e5f65af9f))
+* three time-zone fixes: the hour the clocks change, the run's clock under another name, and days that run past midnight ([c6c1b57](https://github.com/Ruby184/epg-tools/commit/c6c1b5730b1c16a4bb0fcc646364f99b30fb959f))
+* **xmltv:** a time on the hour the clocks change is read on the right side ([b932ab9](https://github.com/Ruby184/epg-tools/commit/b932ab96f07174cf85206494527364f4e2da2f0f))
+
 ## [0.9.0](https://github.com/Ruby184/epg-tools/compare/v0.8.0...v0.9.0) (2026-10-16)
 
 
