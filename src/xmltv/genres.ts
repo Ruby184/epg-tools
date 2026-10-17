@@ -473,7 +473,12 @@ export const DVB_GENRES: readonly Genre[] = [
  * `'sci-fi'` in a hand-written table matches a source writing `Sci Fi`.
  */
 export function genreKey(value: string): string {
-  return value.toLowerCase().replace(/[\s_-]+/gu, '');
+  // In one Unicode form first: a source writing `Dráma` decomposed means the
+  // genre a precomposed one names.
+  return value
+    .normalize('NFC')
+    .toLowerCase()
+    .replace(/[\s_-]+/gu, '');
 }
 
 /** Built once, at module load, since a guide asks this per category. */

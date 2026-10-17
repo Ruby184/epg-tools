@@ -27,6 +27,7 @@ import {
   resolveMatch,
   type MergeWatch,
 } from './programme.js';
+import { resolveUnion } from './union.js';
 import type { ChannelSource, RegistryEntry } from './registry.js';
 import { channelSelection, configured, unmatched, unmatchedMessage } from './select.js';
 import type { BuildGuideOptions, FillGapsContext, FillGapsOptions, GuideContext } from './types.js';
@@ -483,6 +484,28 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
 
   const listStrategy = channelStrategy === 'merge-programmes' ? programmeStrategy : 'concat';
   const match = resolveMatch(options.merge?.match);
+  // Which texts of a programme say the same thing, applied as each is written.
+  // A loaded config's is settled already — refused, if it had to be, before
+  // anything was grabbed — and taken as it is; a caller's own is settled here.
+  const textUnion = resolveUnion(options.merge?.union, match.normalizeTitle);
+  /**
+   * A programme with its texts as the union leaves them, worked out once: one
+   * handed to a transform as `next` is finished itself straight after, and the
+   * union is asked of it once rather than twice. By identity, so one merged
+   * again in the meantime — held across midnight, and joined by the next day —
+   * is a programme of its own and asked anew.
+   */
+  const unioned = new WeakMap<XmltvProgramme, XmltvProgramme>();
+  const written = (programme: XmltvProgramme): XmltvProgramme => {
+    let result = unioned.get(programme);
+
+    if (result === undefined) {
+      result = textUnion.apply(programme);
+      unioned.set(programme, result);
+    }
+
+    return result;
+  };
   const {
     fillStop = true,
     clipOverlaps = true,
@@ -496,10 +519,10 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       ? undefined
       : ((typeof fillStop === 'object' ? fillStop.maxMs : undefined) ?? DEFAULT_FILL_STOP_MS);
 
-  // Checked rather than trusted, which nothing else in `merge` needs to be: a
-  // `blockMs` of zero or a NaN makes the loop that lays blocks out never reach
-  // the end of a gap, inside a generator a file is being written from. A wedged
-  // merge is worse than a rejected option.
+  // Checked rather than trusted, as `union` is: a `blockMs` of zero or a NaN
+  // makes the loop that lays blocks out never reach the end of a gap, inside a
+  // generator a file is being written from. A wedged merge is worse than a
+  // rejected option.
   const gaps = fillGaps === false ? undefined : resolveFillGaps(fillGaps === true ? {} : fillGaps);
 
   // Two entries share an `xmltvId` under `keep-all`, so each would fill the
@@ -543,7 +566,7 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     next: XmltvProgramme | undefined,
     xmltvId: string,
   ): XmltvProgramme | undefined => {
-    let result = programme;
+    let result = written(programme);
 
     if (next !== undefined) {
       const start = programme.start.getTime();
@@ -579,7 +602,10 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
         xmltvId,
         timeZone,
         ...mergeSays,
-        ...(next === undefined ? {} : { next }),
+        // With its texts as the union leaves them, as the guide will write
+        // them — unless it is the last of a day, held for the next one, which
+        // may yet merge more into it.
+        ...(next === undefined ? {} : { next: written(next) }),
       }) ?? undefined
     );
   };

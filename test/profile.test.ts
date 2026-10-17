@@ -264,8 +264,8 @@ describe('categories', () => {
   });
 
   it('says the language it rewrote into, rather than keeping a false one', () => {
-    // A `lang="de"` left on English text is a lie the merge would believe: its
-    // dedup key is `(lang, value)`.
+    // A `lang="de"` left on English text is a lie the merge would believe: it
+    // compares texts within a language.
     expect(categories({ categories: true }, [{ value: 'Film', lang: 'de' }])).toEqual([
       { value: 'Movie / Drama', lang: 'en' },
     ]);
@@ -280,8 +280,9 @@ describe('categories', () => {
   });
 
   it('emits a genre once when two categories canonicalise onto it', () => {
-    // The merge deduped on `(lang, value)` before any of this ran, so the
-    // rewrite has to dedupe its own output.
+    // The merge took two categories for one only within a language and by
+    // their words, before any of this ran — `Movie` and `Film` are two to it —
+    // so the rewrite has to dedupe its own output.
     expect(
       categories({ categories: true }, [
         { value: 'Movie', lang: 'en' },

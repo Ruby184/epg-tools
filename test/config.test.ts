@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { defineConfig, resolveConfigSource, type EpgConfig } from '../src/config.js';
+import { ResolvedUnion } from '../src/merge/union.js';
 import {
   createConfigContext,
   defaultsReader,
@@ -200,5 +201,37 @@ describe('a config as it is loaded', () => {
     await expect(resolveConfigSource({ ...plain, timeZone: 'Mars/Olympus' })).rejects.toThrow(
       'timeZone must be an IANA time zone such as "Europe/Bratislava" (got "Mars/Olympus")',
     );
+  });
+
+  it('carries merge.union settled, with its own match, for the merge to take', async () => {
+    const loaded = await resolveConfigSource({
+      ...plain,
+      merge: {
+        union: { title: 'match' },
+        match: { normalizeTitle: (title) => title.replace(/\s+[IVX]+\.?$/, '') },
+      },
+    });
+    const union = loaded.merge?.union;
+
+    expect(union).toBeInstanceOf(ResolvedUnion);
+    expect(
+      (union as ResolvedUnion).apply({
+        channel: 'X',
+        start: new Date(0),
+        title: [{ value: 'Priatelia I.' }, { value: 'Priatelia' }],
+      }).title,
+    ).toEqual([{ value: 'Priatelia I.' }]);
+  });
+
+  it('loads a config whose merge is null, as everything that reads it does', async () => {
+    const loaded = await resolveConfigSource({ ...plain, merge: null as never });
+
+    expect(loaded.merge).toBeNull();
+  });
+
+  it('refuses a merge.union it cannot read, before a grab would run', async () => {
+    await expect(
+      resolveConfigSource({ ...plain, merge: { union: { desc: 'containd' as never } } }),
+    ).rejects.toThrow("merge.union.desc must be 'exact', 'caseless', 'match', 'contained'");
   });
 });

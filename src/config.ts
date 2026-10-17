@@ -13,6 +13,8 @@ import {
   type StageDefaults,
 } from './core/answers.js';
 import { resolveTimeZone } from './core/days.js';
+import { resolveMatch } from './merge/programme.js';
+import { resolveUnion } from './merge/union.js';
 import type { CompressionFormat, CompressionOptions } from './core/output.js';
 import type { MissingAllowance } from './grabber/missing.js';
 import type { EpgServeConfig } from './serve/config.js';
@@ -342,7 +344,22 @@ export async function resolveConfigSource(
 ): Promise<ResolvedConfig> {
   const config = typeof source === 'function' ? await source(...supplied) : source;
 
-  return { ...config, timeZone: resolveTimeZone(config.timeZone) };
+  // `merge.union` here as the zone is, rather than where the merge reads it: a
+  // misspelt field found by `epg build` would be found after the whole grab.
+  // Settled with the config's own match, and carried settled for the merge.
+  const merge =
+    config.merge === undefined || config.merge === null
+      ? undefined
+      : {
+          ...config.merge,
+          union: resolveUnion(config.merge.union, resolveMatch(config.merge.match).normalizeTitle),
+        };
+
+  return {
+    ...config,
+    ...(merge === undefined ? {} : { merge }),
+    timeZone: resolveTimeZone(config.timeZone),
+  };
 }
 
 /** Identity helper for type inference in `epg.config.ts` files. */

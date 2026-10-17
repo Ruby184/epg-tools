@@ -549,7 +549,7 @@ are not re-exported at all.
 | Grabber | `grab`, `defineSiteConfig`, `defineStreamSiteConfig`, `defineXmltvSite`, `defineM3uSite`, `defineXtreamSite`, `defineSchedulesDirectSite`, `schedulesDirectAccount`, `defineCommandSite`, `defineTvGrabCommandSite`, `resolveChannels`, `resolveSites`, `channelsFromM3u`, `channelsFromChannelsXml`, `guideUrlsFromM3u`, `xtreamChannelExtras`, `xtreamProgrammeExtras`, `schedulesDirectChannelExtras`, `schedulesDirectProgrammeExtras`, `SCHEDULES_DIRECT_CHANNEL_ID`, `channelElement`, `siteHttp`, `kyWith`, `sitePacing`, `retryAfterMs`, `isUnchanged`, `UnchangedError` |
 | Site state | `SiteStateHandle`, `StateKey`, `TrackedMap`, `channelsMaxAgeMs`, `DEFAULT_CHANNELS_MAX_AGE_DAYS` — see [what a site remembers](#what-a-site-remembers-between-runs) |
 | Selection | `channelSelection`, `unmatched` — what `channels` means once `derived` is taken into account, and what it asked for that nothing produced |
-| Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `backfillInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
+| Merge | `mergeProgrammes`, `mergeProgrammeLists`, `mergeInto`, `backfillInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`, `DEFAULT_MATCH`, `resolveUnion`, `ResolvedUnion`, `DEFAULT_UNION`, `generateGuide`, `writeGuide`, `defaultChannelInfo` |
 
 Plus the types for all of the above (`EpgConfig`, `SiteConfig`,
 `GrabberChannel`, `XmltvProgramme`, `XmltvChannel`, `GuideServer`, …), and
@@ -991,6 +991,7 @@ a `Map` that records which keys were touched so nothing untouched is rewritten.
 
 `generateGuide`, `writeGuide`, `mergeProgrammes`, `mergeProgrammeLists`,
 `mergeInto`, `backfillInto`, `resolveMatch`, `normalizeTitle`, `titlesMatch`,
+`resolveUnion`, `ResolvedUnion`, `DEFAULT_UNION`,
 `DEFAULT_MATCH`, `DEFAULT_FILL_STOP_MS`*, `mergeChannels`*,
 `defaultChannelInfo`, `channelSelection`, `unmatched`.
 
@@ -1003,15 +1004,24 @@ or when the name says so, `.gz` / `.br` / `.zst`. See
 costs on a real one. `generateGuide` yields the document itself, so a caller
 piping it somewhere compresses it however they like.
 
-`mergeProgrammeLists(lists, strategy, match?, fillStopMs?)` combines per-site
-lists in priority order; `match` is a `ProgrammeMatch` object, a predicate of
+`mergeProgrammeLists(lists, strategy, match?, fillStopMs?, union?)` combines
+per-site lists in priority order; `match` is a `ProgrammeMatch` object, a predicate of
 your own, or `{ windowMs, matches }` — a predicate with the reach it needs. A
 bare predicate is taken to reach any distance (`windowMs: Infinity`), so it is
 asked about every pair; giving it a window is what keeps a merge linear. See
 [what counts as the same
 broadcast](./configuration.md#what-counts-as-the-same-broadcast). `fillStopMs`
 is for the `backfill` strategy: how long a programme with no `stop` is taken to
-cover, `DEFAULT_FILL_STOP_MS` (six hours) unless given.
+cover, `DEFAULT_FILL_STOP_MS` (six hours) unless given. `union` is
+`merge.union`, applied to each programme of the result — see [texts that say
+the same thing](./configuration.md#texts-that-say-the-same-thing); the pieces
+below it leave every text in, and
+`resolveUnion(union, resolveMatch(match).normalizeTitle).apply(programme)` is
+what applies it to one programme, its titles compared as the match compares
+them. A loaded config carries its `merge.union` already settled, as a
+`ResolvedUnion` — whose own fields are the union it was settled from, so a
+copy of it is that union — which `resolveUnion` takes as it is for the same
+match and settles again for another.
 `mergeInto(target, incoming, resolveMatch(match))` is the piece underneath
 `mergeProgrammeLists`:
 one source's list folded into a sorted accumulator, which is also how the guide

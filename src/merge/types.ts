@@ -44,8 +44,9 @@ export type ChannelCoverage = 'all' | 'first' | CoverageRule;
  * (only relevant for `merge-programmes`).
  *
  * - `merge`: programmes with the same start time are merged into one —
- *   multi-language fields (title, desc, category, ...) are unioned by
- *   `(lang, value)`, scalar fields come from the highest-priority site.
+ *   multi-language fields (title, desc, category, ...) are unioned within
+ *   each language as {@link MergeUnion} says, scalar fields come from the
+ *   highest-priority site.
  * - `concat`: all programmes are emitted, sorted by start time, without
  *   deduplication.
  * - `backfill`: the highest-priority site contributes everything it has, and a
@@ -248,6 +249,64 @@ export interface FillGapsContext {
   index: number;
 }
 
+/**
+ * How one field's texts are told apart as a programme is written — within a
+ * language, the higher-priority source's text kept, and nothing rewritten:
+ *
+ * - `'exact'` — the texts as the sources gave them; only an identical text from
+ *   two sources merged into one is ever one, as before.
+ * - `'caseless'` — the same but for case, spacing, hyphens and underscores,
+ *   as a profile compares a category to a genre: "Film" and "film", "Sci-Fi"
+ *   and "Sci Fi".
+ * - `'match'` — the same by the match's `normalizeTitle`, which by default
+ *   folds case and accents and collapses spacing — "DJ Mixes premiere" and
+ *   "Dj Mixes Premiere" — and which a config can loosen further: "Priatelia
+ *   I." and "Priatelia" with one that drops a numeral.
+ * - `'contained'` — a text another one contains as whole words, compared but
+ *   for case, spacing and a trailing "…", says nothing new and is dropped; the
+ *   one containing it takes its place, so a fuller description from a
+ *   lower-priority source stands where the teaser it completes stood. A teaser
+ *   cut off with "…" may end part way through a word; "Krimi" beside
+ *   "Krimiseriál o …" is not the same thing said again.
+ * - `{ contained: fn }` — the same, after `fn`: for a source that ends its
+ *   descriptions with a suffix of its own to take off first.
+ * - a function — the same when it answers the same for both.
+ */
+export type TextUnion =
+  | 'exact'
+  | 'caseless'
+  | 'match'
+  | 'contained'
+  | { contained: (value: string) => string }
+  | ((value: string) => string);
+
+/**
+ * Which of each language-tagged field's texts the guide writes. A field left
+ * out has its default.
+ *
+ * Applied as each programme is written rather than as two are merged, so
+ * matching still sees every title: one a later source's matches is not gone
+ * because an earlier merge kept another spelling.
+ *
+ * ```ts
+ * merge: { union: { desc: { contained: (value) => value.replace(/\s*\(skryté titulky\)$/, '') } } }
+ * ```
+ */
+export interface MergeUnion {
+  /** `'match'` unless said. */
+  title?: TextUnion;
+  /** `'match'` unless said. */
+  subTitle?: TextUnion;
+  /** `'contained'` unless said. */
+  desc?: TextUnion;
+  /** `'caseless'` unless said. */
+  category?: TextUnion;
+  /** `'caseless'` unless said. */
+  keyword?: TextUnion;
+  /** `'caseless'` unless said. */
+  country?: TextUnion;
+}
+
 export interface MergeOptions {
   channelStrategy?: ChannelStrategy;
   /**
@@ -266,6 +325,14 @@ export interface MergeOptions {
    * describe.
    */
   match?: ProgrammeMatch | ProgrammeMatcher | WindowedMatcher;
+  /**
+   * Which of a programme's texts say the same thing, field by field — see
+   * {@link MergeUnion}. By default a title by the match's `normalizeTitle`, a
+   * description another contains, and a category, keyword or country but for
+   * case, spacing, hyphens and underscores. `'exact'` on a field, or on its
+   * own for every field, is the old behaviour.
+   */
+  union?: MergeUnion | 'exact';
   /**
    * Give a programme with no `stop` the next one's start, capped at
    * {@link FillStopOptions.maxMs} (six hours). On by default.

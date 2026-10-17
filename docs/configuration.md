@@ -1632,7 +1632,7 @@ questions: **who grabs** the channel, and **how what was grabbed is combined**.
   - `first-wins` — one `<channel>`, programmes only from the first covering site. The others are still grabbed, so switching to a strategy that uses them costs no refetch
   - `keep-all` — no deduplication
 - `programmeStrategy` (for `merge-programmes`)
-  - `merge` (default) — programmes describing the same broadcast become one element; language-tagged fields (`title`, `desc`, `category`, …) are unioned by `(lang, value)` — grab the same channel from a Slovak and an English source and get both languages in one programme
+  - `merge` (default) — programmes describing the same broadcast become one element; language-tagged fields (`title`, `desc`, `category`, …) are unioned within each language — grab the same channel from a Slovak and an English source and get both languages in one programme, and two spellings of one Slovak title as one; see [texts that say the same thing](#texts-that-say-the-same-thing)
   - `concat` — keep all programmes sorted by start
   - `backfill` — the first covering site contributes everything it has, and a lower-priority one only what falls in a hole it left; nothing is combined — see [filling the gaps](#filling-the-gaps)
 
@@ -1728,6 +1728,47 @@ custom matcher stops being quick — the window is what keeps the walk short.
 ```ts
 merge: { match: (a, b) => … }   // correct, and linear in nothing
 ```
+
+### Texts that say the same thing
+
+Two programmes that are one broadcast become one element, and their titles,
+descriptions and categories come together within each language. Two sources
+rarely write them the same to the letter — `DJ Mixes premiere` and
+`Dj Mixes Premiere`, `Film` and `film`, a teaser cut off with `…` beside the
+whole of it — so the guide takes such texts for one and writes the
+higher-priority source's:
+
+| field | default | the same when |
+|---|---|---|
+| `title`, `subTitle` | `'match'` | the match's `normalizeTitle` makes them the same — by default case, accents and spacing aside, so a title rule that loosens what is one broadcast loosens what is one title too |
+| `desc` | `'contained'` | one contains the other as whole words, but for case, spacing and a trailing `…` — a teaser cut off with `…` may end part way through one; the one containing it stands where the other stood, so a fuller description from a lower-priority source replaces the teaser it completes, while `Krimi` beside `Krimiseriál o …` stays |
+| `category`, `keyword`, `country` | `'caseless'` | they are the same but for case, spacing, hyphens and underscores — as a [profile](#output-profiles) finds a category's genre, so `Sci-Fi` and `Sci Fi` are one |
+
+`merge.union` sets any of them to another mode: `'exact'` for the texts as
+the sources gave them, as every field had them before, any of the others,
+`{ contained: fn }` to take a source's own suffix off a description before it
+is compared as `'contained'` compares, or a function of your own, under which
+two texts are one when it answers the same for both. `union: 'exact'` sets
+every field exact at once.
+
+```ts
+merge: {
+  union: {
+    // A source that signs off every description with its own note.
+    desc: { contained: (value) => value.replace(/\s*\(skryté titulky\)$/, '') },
+    // Two sources that number seasons differently: `Priatelia I.` and `Priatelia`.
+    title: (value) => value.replace(/\s+[IVX]+\.?$/, '').toLowerCase(),
+  },
+}
+```
+
+It applies as each programme is written, whatever sources it came from, and
+not as two are merged: matching decides what is one broadcast by its titles,
+so it sees every one of them, and a later source's spelling still matches the
+spelling a texts rule will leave out. Different languages are never compared
+— a missing language and an empty one are the same — and nothing a programme
+carries is rewritten: a text is kept or left out whole. A field or a mode it
+does not know is refused as the config is loaded, before anything is grabbed.
 
 ### Cleaning up the output
 

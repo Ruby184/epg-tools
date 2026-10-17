@@ -92,6 +92,27 @@ async function handlerFor(
   return handler;
 }
 
+describe('a guide’s validators and its merge.union', () => {
+  it('change when the union does, though it is carried settled', async () => {
+    const cache = await cacheWith({ one: [programme('one', 6)] });
+    const etag = async (merge: EpgConfig['merge']) => {
+      const handler = await handlerFor(
+        { ...configFor(['one']), ...(merge ? { merge } : {}) },
+        cache,
+      );
+
+      return (await handler.answer({ headers: {}, route: 'guide' })).headers['etag'];
+    };
+
+    const categories = await etag({ union: { category: 'exact' } });
+
+    // Two unions a server would write differently from, which a fingerprint of
+    // the settled union's own keys could not tell apart.
+    expect(await etag({ union: { desc: 'exact' } })).not.toBe(categories);
+    expect(await etag({ union: { category: 'exact' } })).toBe(categories);
+  });
+});
+
 /** An app of somebody's own: a few routes, one of which is the guide. */
 async function mount(handler: GuideHandler, routes: (handler: GuideHandler) => Server) {
   const server = routes(handler);
