@@ -656,6 +656,17 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
    * For sites keeping one other calendar: which of their own days each of the
    * guide's is read from, and how many of the guide's days read each of those —
    * worked out once per zone, since every channel-day of such a site asks.
+   *
+   * The days that cover it, and the one either side where the window covers
+   * that too. A source's day is the source's to draw: one that runs on to five
+   * the next morning, or that opens with the evening before, holds programmes
+   * of a day it does not cover, and read only where it covers they would be in
+   * no day of the guide. A neighbour inside the window is one some other day
+   * of the guide reads anyway, so this reads nothing more than the window's
+   * own days — each once, and held a day or two longer. Outside it, nothing:
+   * a source on the guide's calendar shows nothing of the day before its
+   * window either, and this keeps a zone on the guide's clock reading exactly
+   * as one would.
    */
   const coverings = new Map<string, Covering>();
 
@@ -665,8 +676,13 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     if (covering === undefined) {
       covering = { days: new Map(), uses: new Map() };
 
+      const window = new Set(daysCovering(days, timeZone, zone));
+
       for (const day of days) {
-        const own = daysCovering([day], timeZone, zone);
+        const covered = daysCovering([day], timeZone, zone);
+        const own = [addDays(covered[0]!, -1), ...covered, addDays(covered.at(-1)!, 1)].filter(
+          (ownDay) => window.has(ownDay),
+        );
 
         covering.days.set(day, own);
 
