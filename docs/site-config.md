@@ -305,6 +305,7 @@ What a `parseDay` call is given:
 | `programme` | `(start, title, options?) => ProgrammeBuilder` | A [builder bound to this channel-day](#building-programmes). |
 | `http` | `KyInstance` | The site's client — the very instance `request` was handed. See [a parse that needs another request](#a-parse-that-needs-another-request). |
 | `paced` | `<T>(task) => Promise<T>` | Run a request through the site's queue, so its `concurrency`, `rateLimit` and backoff apply to it. |
+| `remember` | `(key, { until, miss? }, task) => Promise<T>` | What an earlier run kept under `key`, or `task`'s answer, kept until `until` — see [a programme's details, asked once](#a-programmes-details-asked-once). |
 | `state` | `Map<string, unknown>` | What this site [remembers between runs](#remembering-something-between-runs). |
 | `signal` | `AbortSignal \| undefined` | Already applied to `http`; here for work that does not go through it. |
 | `log`, `warn` | `(message, fields?) => void` | Somewhere to [say something](#saying-something), under the site's name. |
@@ -423,6 +424,68 @@ worth knowing.
 Nothing else in the package reads it, and it is stored [beside the
 listings](./api.md#what-a-site-remembers-between-runs) — `state.json` in the
 site's cache directory.
+
+### A programme's details, asked once
+
+A source that wants a request per programme for its details makes a nightly
+refetch expensive: today is fetched again every run, and with it every detail
+call for programmes already asked about. `remember` asks once and keeps the
+answer for the runs after:
+
+```ts
+async parseDay({ payload, http, paced, remember, programme }) {
+  return Promise.all(payload.items.map(async (item) => {
+    const details = await remember(
+      `detail:${item.id}|${item.start}`,
+      {
+        // Asked about while its day can be fetched again, and no longer.
+        until: Date.parse(item.end) + 86_400_000,
+        // "This one has no details" is an answer, and worth keeping.
+        miss: (error) => error instanceof HTTPError && error.response.status === 404,
+      },
+      async () => {
+        const full = await paced(({ signal }) =>
+          http.get(`detail/${item.id}`, { signal }).json<Detail>());
+
+        return { desc: full.description, cast: full.cast };   // only what the parse uses
+      },
+    );
+
+    const p = programme(new Date(item.start), item.title);
+    return details ? p.desc(details.desc) : p;
+  }));
+}
+```
+
+It hands back what an earlier run kept under the key, or the task's answer,
+kept until `until` — a `Date` or epoch milliseconds, always given, since how
+long something is worth keeping is the site's to say. Only an answer is kept: a
+failure `miss` matches is kept as `null`, and any other is thrown and kept by
+nobody, so the next run asks again. A kept "none" is an answer only to an ask
+with a `miss` of its own; one without asks again, and its type has no `null`
+in it.
+
+Two asks of one key while the first is still on its way are one task — a
+broadcast past midnight is in two days' listings — and each reads what that
+task came to with its own `miss`. A parse waiting on another's lets its slot go
+meanwhile, as it does for `paced`. A request cannot let its queue slot go, so
+one asks for itself instead.
+
+Each caller is handed a copy, so changing what it was given changes nothing
+kept. Like `state`, a value must be plain; a `Date` or a `Map` is refused
+rather than coming back as a string or `{}` on the next run. An `until` already
+past keeps the value for this run only, and says so once — usually an `until`
+in seconds where milliseconds were meant.
+
+It is kept in a group of its own beside `state`, written whole when anything in
+it changes, and what has passed its `until` is dropped at the end of every
+run. So keep only what the parse uses, and pick keys that change when what they
+are about does — a programme moved to another start is worth asking about
+again. `--refresh` reads nothing an earlier run kept, as it reads no cached
+listings, and still keeps what it is answered. Every context has it: a
+request, a parse, and a pass over a whole document. A mark that lasts — "this
+channel has no details, ask again in a week" — is a value remembered for a
+week.
 
 ### A parse that needs another request
 
@@ -772,8 +835,8 @@ channel-day, its `grabbedAt` and `programmeCount`, and absent where it holds
 nothing — since a stale channel-day is usually there and merely old enough to
 ask about again.
 
-And every mode gets `timeZone`, `dayZone` and [`at`](#times-of-day), as a parse
-does. Under `'days'` and `'both'` there is no one day to assume, so `at` takes
+And every mode gets `timeZone`, `dayZone`, [`at`](#times-of-day) and
+[`remember`](#a-programmes-details-asked-once), as a parse does. Under `'days'` and `'both'` there is no one day to assume, so `at` takes
 the day as well — from the first day's midnight to the end of the last is the
 stretch a range API wants, on the clock of the site's days, where `from` and
 `to` are only UTC midnights:

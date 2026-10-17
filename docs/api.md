@@ -687,6 +687,12 @@ leaves it free to keep a group however it likes, an append-log replayed on read
 included, so long as `readState` answers with what the last `writeState` was
 given.
 
+The package keeps four for a site: `channels`, a list it fetched; `validators`,
+what each url last answered with; `state`, the site's own bag; and
+`remembered`, what a context's
+[`remember`](./site-config.md#a-programmes-details-asked-once) kept, each
+value with when it is forgotten. `StateKey` names them.
+
 `FsCacheDriver` puts each group in `<dir>/<site>/<key>.json`, beside the
 channel directories of the same site; a prune only ever looks at the day files,
 so state outlives every listing a site has. `SqliteCacheDriver` keeps a row per

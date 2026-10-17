@@ -169,6 +169,39 @@ interface SiteZones {
   dayZone: string;
 }
 
+/** How long a remembered value is kept, and which failures are an answer. */
+export interface RememberOptions {
+  /**
+   * When it is forgotten: a `Date`, or epoch milliseconds. For a programme's
+   * details, a while after it ends — once its day has left the window nothing
+   * asks for them again.
+   */
+  until: Date | number;
+  /**
+   * A failure that is an answer — a 404 for a programme with no details — kept
+   * as `null`, so the next run does not ask again. Any other is thrown and kept
+   * by nobody, and the next run does ask.
+   */
+  miss?: (error: unknown) => boolean;
+}
+
+/**
+ * What a site kept under `key` on an earlier run, or `task`'s answer, kept for
+ * the next — see {@link ParseContext.remember}.
+ *
+ * `null` is in the answer exactly when the ask says some failure is one — has
+ * a `miss`, or options typed as possibly having one. A "none" kept for an ask
+ * with a `miss` is never handed to one without: it asks for itself.
+ */
+export interface Remember {
+  <T>(
+    key: string,
+    options: RememberOptions & { miss?: undefined },
+    task: () => T | Promise<T>,
+  ): Promise<T>;
+  <T>(key: string, options: RememberOptions, task: () => T | Promise<T>): Promise<T | null>;
+}
+
 /**
  * What every context carries, whichever shape the rest of it takes: the
  * channel-days it is for, the site's client, its state, and the run's signal.
@@ -196,6 +229,8 @@ export interface BaseRequestContext<TData = unknown> extends Says, SiteZones {
   signal?: AbortSignal;
   /** What this site remembers between runs — see {@link SiteState}. */
   state: SiteState;
+  /** Something kept between runs, with a time to forget it — see {@link ParseContext.remember}. */
+  remember: Remember;
 }
 
 /**
@@ -510,6 +545,30 @@ export interface ParseContext<TRaw, TData = unknown> extends Says, SiteZones {
    * morning. Anything else throws `XmltvDateError`.
    */
   at(time: string, day?: string): Date;
+  /**
+   * What the site kept under `key` on an earlier run, or `task`'s answer, kept
+   * for the next — a programme's details, fetched once rather than every time
+   * its day is fetched again.
+   *
+   * ```ts
+   * const details = await remember(
+   *   `detail:${item.id}|${item.start}`,
+   *   {
+   *     until: new Date(item.stop).getTime() + 86_400_000,
+   *     miss: (error) => error instanceof HTTPError && error.response.status === 404,
+   *   },
+   *   async () => trim(await paced(({ signal }) => http.get(`detail/${item.id}`, { signal }).json())),
+   * );
+   * ```
+   *
+   * Kept until `until`, and only an answer is kept: a failure `miss` does not
+   * match is thrown, and the next run asks again. Two asks of one key at once
+   * are one task, each reading what it came to with its own `miss`, and each
+   * handed a copy. What is kept must be plain — it is stored as JSON — so keep only what
+   * the parse uses: the site's memory is one group, written whole when it
+   * changes.
+   */
+  remember: Remember;
   /**
    * What {@link SiteConfig.request} handed back, whole and unchanged. A request
    * covering several channel-days is parsed once for each of them, and every

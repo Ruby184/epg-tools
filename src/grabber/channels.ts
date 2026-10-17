@@ -8,6 +8,7 @@ import type { ChannelCoverage } from '../merge/types.js';
 import type { CacheStore } from '../cache/types.js';
 import { localTimeZone } from '../core/days.js';
 import { errorMessage, unanswered } from '../core/error.js';
+import { unplain } from '../core/plain.js';
 import type { Emit, Says } from '../core/events.js';
 import type { SiteSession } from './session.js';
 import type {
@@ -184,65 +185,6 @@ export interface ResolveChannelsOptions {
    * site's `channels` is simply called.
    */
   paced?: <T>(fetch: () => Promise<T>) => Promise<T>;
-}
-
-/**
- * The first thing in a channel's `data` that is not a plain value, named with
- * where it is — or nothing, when all of it is.
- *
- * Plain is what JSON gives back as it was given: strings, finite numbers,
- * booleans, `null`, arrays and plain objects. A property holding `undefined` is
- * fine, since leaving it out is all JSON does with it and reading it gives the
- * same. Anything else comes back as something else — a `Date` a string, a `Map`
- * an empty object, an instance of a class without its methods, `NaN` a `null` —
- * or not at all, as a function does.
- */
-function unplain(value: unknown, at: string, ancestors = new Set<object>()): string | undefined {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
-    return undefined;
-  }
-
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? undefined : `${String(value)} at ${at}`;
-  }
-
-  if (typeof value !== 'object') {
-    return `${typeof value === 'undefined' ? 'undefined' : `a ${typeof value}`} at ${at}`;
-  }
-
-  // The objects above this one, not every one seen: the same object twice in
-  // a list is fine — JSON writes it twice — and only one inside itself is not.
-  if (ancestors.has(value)) {
-    return `a circular reference at ${at}`;
-  }
-
-  const prototype: unknown = Object.getPrototypeOf(value);
-
-  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
-    const name = (value as { constructor?: { name?: string } }).constructor?.name;
-
-    return `${name ? `an instance of ${name}` : 'an object of a class'} at ${at}`;
-  }
-
-  ancestors.add(value);
-
-  try {
-    for (const [key, item] of Object.entries(value)) {
-      const where = Array.isArray(value) ? `${at}[${key}]` : `${at}.${key}`;
-      // `undefined` as a property is left out, which reads the same; in an
-      // array it becomes `null`, which does not.
-      const found =
-        item === undefined && !Array.isArray(value) ? undefined : unplain(item, where, ancestors);
-
-      if (found !== undefined) {
-        return found;
-      }
-    }
-
-    return undefined;
-  } finally {
-    ancestors.delete(value);
-  }
 }
 
 /**

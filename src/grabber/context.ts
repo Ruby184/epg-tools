@@ -15,6 +15,7 @@
 import { dayToDate, wallClock } from '../core/days.js';
 import type { Says } from '../core/events.js';
 import { ProgrammeBuilder } from '../xmltv/builder.js';
+import type { Away, Memory } from './remember.js';
 import type { Request } from './planner.js';
 import type { ResolvedBatching } from './planner.js';
 import type {
@@ -24,6 +25,8 @@ import type {
   GrabberChannel,
   PacedRequest,
   ParseContext,
+  Remember,
+  RememberOptions,
   RequestContextFor,
   SiteState,
   StreamContext,
@@ -42,6 +45,16 @@ export interface ContextDeps {
   timeZone: string;
   /** The zone the site's days are on: the run's, or the one its `dayZone` names. */
   dayZone: string;
+  /** What the site remembers between runs, for a context's `remember`. */
+  memory: Memory;
+  /**
+   * How this context waits on something another one started — an ask of
+   * `remember`'s — without holding a slot meanwhile: a parse lends its
+   * `localWork` slot, as `paced` does, and a stream holds none. Absent where
+   * the context holds one it cannot lend, a request its site's queue slot, so
+   * it asks for itself rather than wait.
+   */
+  away?: Away;
 }
 
 /** What every request context carries, whichever shape the rest of it takes. */
@@ -59,6 +72,7 @@ export function baseContext(request: Request, deps: ContextDeps): BaseRequestCon
     ...(deps.signal ? { signal: deps.signal } : {}),
     timeZone: deps.timeZone,
     dayZone: deps.dayZone,
+    remember: remembering(deps),
   };
 }
 
@@ -74,6 +88,20 @@ function clock(deps: ContextDeps, assumed?: string): (time: string, day?: string
 
     return wallClock(day, time, deps.dayZone, deps.timeZone);
   };
+}
+
+/**
+ * A context's `remember`: the site's memory, and how this context waits on an
+ * ask another one started.
+ *
+ * The same on every context, whatever days it covers, since how long a value
+ * is worth keeping is the site's to say — a programme's details for a while
+ * after it ends, a mark that a channel has none for a week. The options are
+ * the memory's to check, which knows whose site it is and says so.
+ */
+function remembering(deps: ContextDeps): Remember {
+  return ((key: string, options: RememberOptions, task: () => unknown) =>
+    deps.memory.remember(key, options, task, deps.away)) as Remember;
 }
 
 /**
@@ -179,6 +207,7 @@ export function parseContext<TRaw>(
     timeZone: deps.timeZone,
     dayZone: deps.dayZone,
     at: clock(deps, day),
+    remember: remembering(deps),
     programme: (start, title, options) =>
       new ProgrammeBuilder({
         channel: channel.xmltvId,

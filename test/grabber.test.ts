@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { HTTPError, NetworkError } from 'ky';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type {
   CacheEntryMeta,
   CacheStore,
@@ -10,6 +10,7 @@ import type {
   StateEntry,
   StoredStateMeta,
 } from '../src/cache/types.js';
+import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
 import {
   fellShort,
@@ -30,6 +31,8 @@ import type {
   ChannelsContext,
   GrabberChannel,
   GrabSummary,
+  Remember,
+  RememberOptions,
   SiteConfig,
   StreamedChannelDay,
   StreamSiteConfig,
@@ -1382,9 +1385,10 @@ describe('grab', () => {
       await grab([config], { cache, now: NOW });
 
       // A site that never touches its bag costs no write — the group is read
-      // once per site run and left as it was.
+      // once per site run and left as it was. So is what it remembers, read at
+      // the end to drop what has passed, and finding nothing to drop.
       expect(cache.stateWrites).toEqual([]);
-      expect(cache.stateReads).toEqual(['example.com|state']);
+      expect(cache.stateReads).toEqual(['example.com|state', 'example.com|remembered']);
     });
 
     it('is empty for a store that remembers nothing, and still works', async () => {
@@ -3691,6 +3695,424 @@ describe('a stream that says nothing has changed', () => {
     expect(
       cache.get({ site: 'stream.example', channelId: 'b', day: TODAY })?.programmes,
     ).toHaveLength(1);
+  });
+});
+
+describe('what a site remembers between runs', () => {
+  const LATER = new Date(NOW.getTime() + 3_600_000);
+  const UNTIL = NOW.getTime() + 86_400_000;
+
+  /** A site asking for one programme's details through `remember`, saying how often it asked. */
+  function detailed(
+    asked: string[],
+    answer: () => unknown = () => ({ desc: 'Details' }),
+    options: Partial<RememberOptions> = {},
+  ): SiteConfig<unknown> {
+    return makeConfig({
+      async parseDay({ day, remember }) {
+        const details = await remember(`detail:${day}`, { until: UNTIL, ...options }, () => {
+          asked.push(day);
+
+          return answer();
+        });
+
+        return [
+          {
+            ...programme(`${day}T06:00:00.000Z`),
+            ...(details === null ? {} : { desc: [{ value: JSON.stringify(details) }] }),
+          },
+        ];
+      },
+    });
+  }
+
+  it('asks once, and the next run is handed what it kept', async () => {
+    const cache = new MemoryCache();
+    const asked: string[] = [];
+
+    await grab([detailed(asked)], { cache, now: NOW });
+    // Today is fetched again every run, and parsed again with it.
+    await grab([detailed(asked)], { cache, now: LATER });
+
+    expect(asked).toEqual([TODAY]);
+    expect(
+      cache.get({ site: 'example.com', channelId: 'one.example', day: TODAY })?.programmes,
+    ).toMatchObject([{ desc: [{ value: '{"desc":"Details"}' }] }]);
+  });
+
+  it('keeps it in a group of its own, leaving the site’s state alone', async () => {
+    const cache = new MemoryCache();
+
+    await grab([detailed([])], { cache, now: NOW });
+
+    expect(cache.stateWrites).toEqual(['example.com|remembered']);
+    expect(cache.state.get('example.com|remembered')?.data).toEqual([
+      [`detail:${TODAY}`, { until: UNTIL, value: { desc: 'Details' } }],
+    ]);
+  });
+
+  it('keeps a failure `miss` matches as null, and asks again after one it does not', async () => {
+    const cache = new MemoryCache();
+    const asked: string[] = [];
+    const missing = Object.assign(new Error('404'), { status: 404 });
+    const miss = (error: unknown) => (error as { status?: number }).status === 404;
+
+    await grab([detailed(asked, () => Promise.reject(missing), { miss })], { cache, now: NOW });
+    await grab([detailed(asked, () => Promise.reject(missing), { miss })], { cache, now: LATER });
+
+    // Answered "none" once, and remembered as that.
+    expect(asked).toEqual([TODAY]);
+
+    const failing = new MemoryCache();
+    const tried: string[] = [];
+    const down = () => Promise.reject(new Error('the source is down'));
+
+    const first = await grab([detailed(tried, down, { miss })], { cache: failing, now: NOW });
+    await grab([detailed(tried, down, { miss })], { cache: failing, now: LATER });
+
+    expect(first.failed).toBe(1);
+    expect(tried).toEqual([TODAY, TODAY]);
+  });
+
+  it('forgets a value once its until has passed', async () => {
+    const cache = new MemoryCache();
+    const asked: string[] = [];
+    const until = NOW.getTime() + 60_000;
+
+    await grab([detailed(asked, undefined, { until })], { cache, now: NOW });
+    await grab([detailed(asked, undefined, { until })], { cache, now: LATER });
+
+    expect(asked).toEqual([TODAY, TODAY]);
+  });
+
+  it('drops what has passed from what it stores, though nothing is asked', async () => {
+    const cache = new MemoryCache();
+
+    cache.seedState('example.com', 'remembered', [
+      ['old', { until: NOW.getTime() - 1, value: 'gone' }],
+      ['current', { until: UNTIL, value: 'kept' }],
+    ]);
+
+    // A site that no longer remembers anything.
+    await grab([makeConfig()], { cache, now: NOW });
+
+    expect(cache.state.get('example.com|remembered')?.data).toEqual([
+      ['current', { until: UNTIL, value: 'kept' }],
+    ]);
+  });
+
+  it('asks once for two asks of one key at the same time', async () => {
+    const cache = new MemoryCache();
+    let asked = 0;
+    const answers: unknown[] = [];
+
+    await grab(
+      [
+        makeConfig({
+          async parseDay({ day, remember }) {
+            // A broadcast past midnight is in both days' listings, and both
+            // ask about it while the first answer is still on its way.
+            const ask = () =>
+              remember('shared', { until: UNTIL }, async () => {
+                asked++;
+                await new Promise((resolve) => setTimeout(resolve, 20));
+
+                return 'once';
+              });
+
+            answers.push(...(await Promise.all([ask(), ask()])));
+
+            return [programme(`${day}T06:00:00.000Z`)];
+          },
+        }),
+      ],
+      { cache, now: NOW },
+    );
+
+    expect(asked).toBe(1);
+    expect(answers).toEqual(['once', 'once']);
+  });
+
+  it('refuses a value JSON would bring back as something else', async () => {
+    const cache = new MemoryCache();
+    const report = collect();
+
+    await grab([detailed([], () => new Date(NOW))], { cache, now: NOW, reporter: report.reporter });
+
+    expect(errorMessage(report.of('entry:failed')[0]?.error)).toContain(
+      'remember("detail:2026-07-17") was answered with an instance of Date at value',
+    );
+  });
+
+  it('refuses to keep anything without an until', async () => {
+    const cache = new MemoryCache();
+    const report = collect();
+
+    await grab([detailed([], undefined, { until: undefined as unknown as number })], {
+      cache,
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    expect(errorMessage(report.of('entry:failed')[0]?.error)).toContain(
+      'remember("detail:2026-07-17") needs an until',
+    );
+  });
+
+  it('keeps what it was answered, not what a caller made of it afterwards', async () => {
+    // A store that keeps state as JSON, as every real one does.
+    const cache = new CacheManager({ driver: new MemoryCacheDriver() });
+    const seen: unknown[] = [];
+    const site = () =>
+      makeConfig({
+        async parseDay({ day, remember }) {
+          // An answer the site holds on to, and a copy it was handed: changing
+          // either afterwards changes neither what is kept nor the next answer.
+          const answer = { cast: ['Ann'], year: 2001 };
+          const ask = () => remember('details', { until: UNTIL }, () => answer);
+          const first = await ask();
+
+          answer.year = 1999;
+          first.cast.push('changed by the parse');
+          seen.push(await ask());
+
+          return [programme(`${day}T06:00:00.000Z`)];
+        },
+      });
+
+    await grab([site()], { cache, now: NOW });
+    await grab([site()], { cache, now: LATER });
+
+    expect(seen).toEqual([
+      { cast: ['Ann'], year: 2001 },
+      { cast: ['Ann'], year: 2001 },
+    ]);
+  });
+
+  it('reads nothing kept by an earlier run under --refresh, and still keeps', async () => {
+    const cache = new MemoryCache();
+    const asked: string[] = [];
+    const site = () =>
+      makeConfig({
+        async parseDay({ day, remember }) {
+          for (const _ of [1, 2]) {
+            await remember('details', { until: UNTIL }, () => {
+              asked.push(day);
+
+              return 'fresh';
+            });
+          }
+
+          return [programme(`${day}T06:00:00.000Z`)];
+        },
+      });
+
+    await grab([site()], { cache, now: NOW });
+    await grab([site()], { cache, now: LATER, staleness: { refetchAll: true } });
+
+    // Asked again under --refresh, once: what this run asked it may read.
+    expect(asked).toEqual([TODAY, TODAY]);
+  });
+
+  it('hands a kept "none" only to an ask that takes a failure for one', async () => {
+    const cache = new MemoryCache();
+    const missing = Object.assign(new Error('404'), { status: 404 });
+    const miss = (error: unknown) => (error as { status?: number }).status === 404;
+    let asked = 0;
+    const answers: unknown[] = [];
+
+    await grab(
+      [
+        makeConfig({
+          async parseDay({ day, remember }) {
+            const task = () => {
+              asked++;
+
+              return Promise.reject(missing);
+            };
+
+            // Both at once: the second joins the first, and reads its failure
+            // with its own options.
+            const both = await Promise.allSettled([
+              remember('details', { until: UNTIL, miss }, task),
+              remember('details', { until: UNTIL }, task),
+            ]);
+
+            answers.push(...both.map((one) => (one.status === 'fulfilled' ? one.value : 'thrown')));
+            // And after: kept as "none", which this ask does not take for an answer.
+            answers.push(await remember('details', { until: UNTIL }, () => 'its own'));
+
+            return [programme(`${day}T06:00:00.000Z`)];
+          },
+        }),
+      ],
+      { cache, now: NOW },
+    );
+
+    expect(answers).toEqual([null, 'thrown', 'its own']);
+    expect(asked).toBe(1);
+  });
+
+  it('keeps a value whose until has already passed for this run only, and says so', async () => {
+    const cache = new MemoryCache();
+    const report = collect();
+    let asked = 0;
+
+    await grab(
+      [
+        makeConfig({
+          async parseDay({ day, remember }) {
+            for (const key of ['one', 'one', 'two']) {
+              // In seconds, where milliseconds were meant.
+              await remember(key, { until: UNTIL / 1000 }, () => ++asked);
+            }
+
+            return [programme(`${day}T06:00:00.000Z`)];
+          },
+        }),
+      ],
+      { cache, now: NOW, reporter: report.reporter },
+    );
+
+    expect(asked).toBe(2);
+    expect(cache.stateWrites).toEqual([]);
+    expect(
+      report.of('site:warning').filter(({ message }) => message.includes('already past')),
+    ).toHaveLength(1);
+  });
+
+  it('names the site and the key when the options are not ones', async () => {
+    const cache = new MemoryCache();
+    const report = collect();
+
+    await grab(
+      [
+        makeConfig({
+          channels: [channel('one.example'), channel('two.example')],
+          async parseDay({ channel: { xmltvId }, day, remember }) {
+            await (xmltvId === 'one.example'
+              ? remember('a', { until: '2026-07-18' as unknown as number }, () => 1)
+              : (
+                  remember as (key: string, options: unknown, task: () => number) => Promise<number>
+                )('b', undefined, () => 1));
+
+            return [programme(`${day}T06:00:00.000Z`)];
+          },
+        }),
+      ],
+      { cache, now: NOW, reporter: report.reporter },
+    );
+
+    expect(report.of('entry:failed').map(({ error }) => errorMessage(error))).toEqual([
+      'Site "example.com": remember("a") needs an until, a Date or epoch milliseconds (got "2026-07-18")',
+      'Site "example.com": remember("b") needs an until, a Date or epoch milliseconds (got none)',
+    ]);
+  });
+
+  it('asks again after a read of what it kept failed, and finishes the run', async () => {
+    const cache = new MemoryCache();
+    const report = collect();
+    const read = cache.getState.bind(cache);
+    let failures = 1;
+
+    cache.getState = async (site, key) => {
+      if (key === 'remembered' && failures-- > 0) {
+        throw Object.assign(new Error('EMFILE: too many open files'), { code: 'EMFILE' });
+      }
+
+      return read(site, key);
+    };
+
+    const summary = await grab(
+      [
+        makeConfig({
+          channels: [channel('one.example'), channel('two.example')],
+          async parseDay({ day, remember }) {
+            await remember('details', { until: UNTIL }, () => 'answer');
+
+            return [programme(`${day}T06:00:00.000Z`)];
+          },
+        }),
+      ],
+      { cache, now: NOW, reporter: report.reporter, localConcurrency: 1 },
+    );
+
+    // The first channel-day met the failed read; the second asked again.
+    expect(summary).toMatchObject({ fetched: 1, failed: 1, sitesFailed: 0 });
+    expect(report.of('site:done')).toHaveLength(1);
+    expect(report.of('site:failed')).toHaveLength(0);
+  });
+
+  it('lets a parse waiting on another parse’s ask give up its slot meanwhile', async () => {
+    // One local slot, and one request covering two days whose listings both
+    // name a broadcast past midnight: the second day's parse waits on the
+    // first's ask, whose detail request needs the slot back to finish.
+    const cache = new MemoryCache();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    let asked = 0;
+
+    try {
+      const summary = await grab(
+        [
+          makeDaysConfig({
+            days: 2,
+            async parseDay({ day, remember, paced }) {
+              await remember('past midnight', { until: UNTIL }, () =>
+                paced(async () => {
+                  asked++;
+                  await new Promise((resolve) => setTimeout(resolve, 20));
+
+                  return 'details';
+                }),
+              );
+
+              return [programme(`${day}T06:00:00.000Z`)];
+            },
+          }),
+        ],
+        { cache, now: NOW, localConcurrency: 1, signal: controller.signal },
+      );
+
+      expect(controller.signal.aborted).toBe(false);
+      expect(summary.fetched).toBe(2);
+      expect(asked).toBe(1);
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+
+  it('types an answer as possibly null only where a failure may be one', () => {
+    // Typechecked, never run: what each way of asking is promised.
+    const typed = (remember: Remember, held: RememberOptions) => {
+      expectTypeOf(remember('k', { until: 1 }, () => 1)).toEqualTypeOf<Promise<number>>();
+      expectTypeOf(remember('k', { until: 1, miss: () => true }, () => 1)).toEqualTypeOf<
+        Promise<number | null>
+      >();
+      expectTypeOf(remember('k', held, () => 1)).toEqualTypeOf<Promise<number | null>>();
+    };
+
+    expect(typed).toBeTypeOf('function');
+  });
+
+  it('is there for a request too', async () => {
+    const cache = new MemoryCache();
+    const asked: string[] = [];
+    const site = () =>
+      makeConfig({
+        async request({ day, remember }) {
+          return remember(`token:${day}`, { until: UNTIL }, () => {
+            asked.push(day);
+
+            return 'token';
+          });
+        },
+      });
+
+    await grab([site()], { cache, now: NOW });
+    await grab([site()], { cache, now: LATER });
+
+    expect(asked).toEqual([TODAY]);
   });
 });
 
