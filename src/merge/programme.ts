@@ -1,16 +1,13 @@
+import type { XmltvCredits, XmltvPersonValue, XmltvProgramme } from '../xmltv/types.js';
 import type {
-  XmltvCredits,
-  XmltvPersonValue,
-  XmltvProgramme,
-  XmltvTextValue,
-  XmltvUrlValue,
-} from '../xmltv/types.js';
-import type {
+  MergeUnion,
   ProgrammeMatch,
   ProgrammeMatcher,
   ProgrammeStrategy,
   WindowedMatcher,
 } from './types.js';
+import { normalizeTitle, textKey, unionBy, urlKey } from './text.js';
+import { resolveUnion } from './union.js';
 
 /**
  * How two programmes are paired up when nothing says otherwise: five minutes
@@ -22,46 +19,6 @@ export const DEFAULT_MATCH: Required<ProgrammeMatch> = {
   titles: 'when-shifted',
   normalizeTitle,
 };
-
-/** Union two optional arrays, keeping first occurrence per dedup key. */
-export function unionBy<T>(
-  base: T[] | undefined,
-  extra: T[] | undefined,
-  key: (item: T) => string,
-): T[] {
-  const result: T[] = [];
-  const seen = new Set<string>();
-
-  // Iterate the two sources directly rather than spreading them into a
-  // throwaway concat array — this is the merge hot path.
-  for (let s = 0; s < 2; s++) {
-    const items = s === 0 ? base : extra;
-
-    if (!items) {
-      continue;
-    }
-
-    for (const item of items) {
-      const k = key(item);
-
-      if (!seen.has(k)) {
-        seen.add(k);
-        result.push(item);
-      }
-    }
-  }
-
-  return result;
-}
-
-export function textKey(item: XmltvTextValue): string {
-  return `${item.lang ?? ''}|${item.value}`;
-}
-
-/** Dedup key for `<url>` values (string or object with `system`). */
-export function urlKey(item: XmltvUrlValue): string {
-  return typeof item === 'string' ? `|${item}` : `${item.system ?? ''}|${item.value}`;
-}
 
 function personKey(item: XmltvPersonValue): string {
   return typeof item === 'string' ? item : item.value;
@@ -244,25 +201,6 @@ export function mergeProgrammes(base: XmltvProgramme, extra: XmltvProgramme): Xm
   return merged;
 }
 
-/**
- * A title as it is compared: case folded, accents dropped and whitespace
- * collapsed, so `Správy  ` and `spravy` are one title.
- *
- * Accents go because the two sources being merged are very often one local
- * feed and one international one, and the international one is the one that
- * spells `Vecernicek` — while a source that drops accents rarely reinstates
- * them for a different programme. It is a comparison only: what a programme
- * carries is never rewritten.
- */
-export function normalizeTitle(value: string): string {
-  return value
-    .normalize('NFKD')
-    .replace(/\p{M}+/gu, '')
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 /** Do these two programmes share a title, in any language either offers? */
 export function titlesMatch(
   a: XmltvProgramme,
@@ -293,6 +231,12 @@ function duration(programme: XmltvProgramme): number | undefined {
 export interface ResolvedMatch {
   windowMs: number;
   matches: ProgrammeMatcher;
+  /**
+   * How it compares titles — a match's own `normalizeTitle`, or the default
+   * for a matcher of one's own, which says nothing about titles. What a
+   * `merge.union` of titles compares by too.
+   */
+  normalizeTitle: (title: string) => string;
 }
 
 /**
@@ -301,23 +245,31 @@ export interface ResolvedMatch {
  * pairs up, so every candidate is offered to it.
  */
 export function resolveMatch(
-  match?: ProgrammeMatch | ProgrammeMatcher | WindowedMatcher,
+  match?: ProgrammeMatch | ProgrammeMatcher | WindowedMatcher | null,
 ): ResolvedMatch {
   if (typeof match === 'function') {
     // Everything, because a function that never said how far it looks might
     // look anywhere — and the cost of that is in `WindowedMatcher`, which is
     // how a matcher says.
-    return { windowMs: Number.POSITIVE_INFINITY, matches: match };
+    return { windowMs: Number.POSITIVE_INFINITY, matches: match, normalizeTitle };
   }
 
-  if (match !== undefined && 'matches' in match) {
-    return { windowMs: match.windowMs, matches: match.matches };
+  if (match !== undefined && match !== null && 'matches' in match) {
+    return { windowMs: match.windowMs, matches: match.matches, normalizeTitle };
   }
 
-  const { startToleranceMs, titles, normalizeTitle: normalize } = { ...DEFAULT_MATCH, ...match };
+  const {
+    startToleranceMs,
+    titles,
+    normalizeTitle: normalize,
+  } = {
+    ...DEFAULT_MATCH,
+    ...match,
+  };
 
   return {
     windowMs: startToleranceMs,
+    normalizeTitle: normalize,
     matches: (a, b) => {
       const shift = Math.abs(a.start.getTime() - b.start.getTime());
 
@@ -670,12 +622,22 @@ export function mergeProgrammeLists(
   strategy: ProgrammeStrategy,
   match?: ProgrammeMatch | ProgrammeMatcher | WindowedMatcher,
   fillStopMs: number | undefined = DEFAULT_FILL_STOP_MS,
+  /**
+   * Which texts of a programme say the same thing — see {@link MergeUnion}.
+   * Applied to each programme of the result, as the guide applies it to each
+   * one it writes.
+   */
+  union?: MergeUnion | 'exact',
 ): XmltvProgramme[] {
+  const resolved = resolveMatch(match);
+  const texts = resolveUnion(union, resolved.normalizeTitle);
+  const written = (programmes: XmltvProgramme[]) =>
+    programmes.map((programme) => texts.apply(programme));
+
   if (strategy === 'concat') {
-    return lists.flat().sort((a, b) => a.start.getTime() - b.start.getTime());
+    return written(lists.flat().sort((a, b) => a.start.getTime() - b.start.getTime()));
   }
 
-  const resolved = resolveMatch(match);
   const merged: XmltvProgramme[] = [];
 
   // A branch of its own rather than falling through to the merge: they take the
@@ -686,12 +648,12 @@ export function mergeProgrammeLists(
       backfillInto(merged, list, { match: resolved, fillStopMs });
     }
 
-    return merged;
+    return written(merged);
   }
 
   for (const list of lists) {
     mergeInto(merged, list, resolved);
   }
 
-  return merged;
+  return written(merged);
 }

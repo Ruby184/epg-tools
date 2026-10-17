@@ -1,5 +1,5 @@
 import type { XmltvChannel } from '../xmltv/types.js';
-import { textKey, unionBy, urlKey } from './programme.js';
+import { textKey, unionBy, urlKey } from './text.js';
 
 /**
  * Merge two `<channel>` descriptions of the same channel from different

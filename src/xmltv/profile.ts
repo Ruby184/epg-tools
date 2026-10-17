@@ -11,9 +11,10 @@
  * All of it applies as the document is **written**, never to what was grabbed.
  * One cache therefore serves every consumer, and changing profile costs no
  * refetch — the same property that makes `--no-extensions` cheap. It is also
- * the only safe place for a genre code: the merge dedupes categories on
- * `(lang, value)` and ignores their attributes, so an `eit` attached earlier
- * would be discarded depending on which source happened to be the base.
+ * the only safe place for a genre code: the merge keeps one of two categories
+ * that are the same text and ignores their attributes, so an `eit` attached
+ * earlier would be discarded depending on which source happened to be the
+ * base.
  */
 
 import {

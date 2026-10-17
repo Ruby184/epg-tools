@@ -98,6 +98,8 @@ describe('genreOf', () => {
 
     // Which is also why only one spelling of these needs to be listed.
     expect(genreOf('Sci-Fi')?.eit).toBe('0x13');
+    // Written decomposed, as some sources write their accents: one genre still.
+    expect(genreKey('Dráma'.normalize('NFD'))).toBe(genreKey('Dráma'));
     expect(genreOf('SciFi')?.eit).toBe('0x13');
     expect(genreOf('sci fi')?.eit).toBe('0x13');
   });

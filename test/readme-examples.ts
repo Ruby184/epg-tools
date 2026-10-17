@@ -970,6 +970,20 @@ export const coveredPerChannel = defineConfig({
   },
 });
 
+// --- docs/configuration.md: Texts that say the same thing ------------------
+export const unionedTexts = defineConfig({
+  sites: [example],
+  output: 'public/epg.xml',
+  merge: {
+    union: {
+      // A source that signs off every description with its own note.
+      desc: { contained: (value) => value.replace(/\s*\(skryté titulky\)$/, '') },
+      // Two sources that number seasons differently: `Priatelia I.` and `Priatelia`.
+      title: (value) => value.replace(/\s+[IVX]+\.?$/, '').toLowerCase(),
+    },
+  },
+});
+
 // --- docs/site-config.md: A source that is not UTF-8 ----------------------
 export const notUtf8 = defineSiteConfig({
   site: 'cp1250.example.tv',

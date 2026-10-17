@@ -7,9 +7,11 @@ import type { CacheStore, ChannelDayKey } from '../src/cache/types.js';
 import type { EpgEvent } from '../src/core/events.js';
 import type { GrabberChannel, SiteConfig } from '../src/grabber/types.js';
 import { mergeChannels } from '../src/merge/channel.js';
-import { mergeProgrammeLists, mergeProgrammes } from '../src/merge/programme.js';
+import { mergeProgrammeLists, mergeProgrammes, resolveMatch } from '../src/merge/programme.js';
+import { normalizeTitle } from '../src/merge/text.js';
+import { DEFAULT_UNION, ResolvedUnion, resolveUnion } from '../src/merge/union.js';
 import { parseXmltvDate } from '../src/xmltv/main.js';
-import type { BuildGuideOptions } from '../src/merge/types.js';
+import type { BuildGuideOptions, MergeUnion } from '../src/merge/types.js';
 import type { XmltvChannel, XmltvProgramme } from '../src/xmltv/types.js';
 import { collect as collectEvents } from './reporting.js';
 
@@ -262,6 +264,372 @@ describe('mergeProgrammes', () => {
       shared: 'from-base',
       onlyExtra: 'x',
     });
+  });
+});
+
+describe('merge.union', () => {
+  const at = new Date('2026-01-15T20:00:00Z');
+  /** Two programmes for one broadcast, carrying `base` and `extra`'s texts. */
+  const merge = (
+    base: Partial<XmltvProgramme>,
+    extra: Partial<XmltvProgramme>,
+    union?: MergeUnion | 'exact',
+  ): XmltvProgramme =>
+    resolveUnion(union).apply(
+      mergeProgrammes(
+        { channel: 'X', start: at, title: [{ value: 'A' }], ...base },
+        { channel: 'X', start: at, title: [{ value: 'A' }], ...extra },
+      ),
+    );
+  const values = (texts: { value: string }[] | undefined) => texts?.map(({ value }) => value);
+
+  it('takes titles the same by the match’s comparison for one, the first kept', () => {
+    const merged = merge(
+      { title: [{ value: 'Správy', lang: 'sk' }] },
+      {
+        title: [
+          { value: 'SPRAVY  ', lang: 'sk' },
+          { value: 'News', lang: 'en' },
+        ],
+      },
+    );
+
+    expect(merged.title).toEqual([
+      { value: 'Správy', lang: 'sk' },
+      { value: 'News', lang: 'en' },
+    ]);
+  });
+
+  it('takes categories, keywords and countries the same but for case for one', () => {
+    const merged = merge(
+      { category: [{ value: 'Film' }], keyword: [{ value: 'Drama' }], country: [{ value: 'SK' }] },
+      { category: [{ value: 'film' }], keyword: [{ value: 'drama ' }], country: [{ value: 'sk' }] },
+    );
+
+    expect([values(merged.category), values(merged.keyword), values(merged.country)]).toEqual([
+      ['Film'],
+      ['Drama'],
+      ['SK'],
+    ]);
+  });
+
+  it('drops a description another contains, the fuller one taking its place', () => {
+    const merged = merge(
+      {
+        desc: [
+          { value: 'Príbeh o láske…', lang: 'sk' },
+          { value: 'A story of love.', lang: 'en' },
+        ],
+      },
+      {
+        desc: [
+          { value: 'Príbeh o láske a vojne na Slovensku.', lang: 'sk' },
+          // In another language, so nothing to compare it with.
+          { value: 'Príbeh o láske', lang: 'cs' },
+        ],
+      },
+    );
+
+    expect(values(merged.desc)).toEqual([
+      'Príbeh o láske a vojne na Slovensku.',
+      'A story of love.',
+      'Príbeh o láske',
+    ]);
+  });
+
+  it('keeps every spelling a field is set to exact on', () => {
+    const merged = merge(
+      { category: [{ value: 'Film' }] },
+      { category: [{ value: 'film' }] },
+      { category: 'exact' },
+    );
+
+    expect(values(merged.category)).toEqual(['Film', 'film']);
+  });
+
+  it('compares as a function of its own says', () => {
+    const merged = merge(
+      { title: [{ value: 'Priatelia I.' }] },
+      { title: [{ value: 'Priatelia' }] },
+      { title: (value) => value.replace(/\s+[IVX]+\.?$/, '') },
+    );
+
+    expect(values(merged.title)).toEqual(['Priatelia I.']);
+  });
+
+  it('finds one description inside another as a function of its own compares them', () => {
+    const merged = merge(
+      { desc: [{ value: 'Správy dňa. (skryté titulky)' }] },
+      { desc: [{ value: 'Správy dňa. Počasie a šport.' }] },
+      { desc: { contained: (value) => value.replace(/\s*\(skryté titulky\)$/, '') } },
+    );
+
+    expect(values(merged.desc)).toEqual(['Správy dňa. Počasie a šport.']);
+  });
+
+  it('takes titles for one by a match’s own normalizeTitle', () => {
+    const loose = (title: string) => title.toLowerCase().replace(/[^\p{L}]+/gu, '');
+    const [merged] = mergeProgrammeLists(
+      [
+        [prog('X', '2026-01-15T20:00:00Z', 'DJ Mixes premiere')],
+        [prog('X', '2026-01-15T20:00:00Z', 'Dj-Mixes Premiere!')],
+      ],
+      'merge',
+      { normalizeTitle: loose },
+    );
+
+    expect(values(merged?.title)).toEqual(['DJ Mixes premiere']);
+  });
+
+  it('applies to a source’s own rows for one broadcast, as configured', () => {
+    // Two rows at one instant in one source's list are pooled into one programme.
+    const [pooled] = mergeProgrammeLists(
+      [
+        [
+          prog('X', '2026-01-15T20:00:00Z', 'Film', undefined, { category: [{ value: 'Film' }] }),
+          prog('X', '2026-01-15T20:00:00Z', 'Film', undefined, { category: [{ value: 'film' }] }),
+        ],
+      ],
+      'merge',
+      undefined,
+      undefined,
+      { category: 'exact' },
+    );
+
+    expect(values(pooled?.category)).toEqual(['Film', 'film']);
+  });
+
+  it('leaves a numeral the default comparison keeps', () => {
+    // Folding case, accents and spacing is all the default does; a numeral
+    // takes a looser normalizeTitle, or a title function of its own.
+    const merged = merge(
+      { title: [{ value: 'Priatelia I.' }] },
+      { title: [{ value: 'Priatelia' }] },
+    );
+
+    expect(values(merged.title)).toEqual(['Priatelia I.', 'Priatelia']);
+  });
+
+  it('still merges a third source whose title only the dropped spelling matches', () => {
+    // A title rule looser than the match: had the second spelling been dropped
+    // as A and B merged, C's shifted start would have had nothing to match.
+    const merged = mergeProgrammeLists(
+      [
+        [prog('X', '2026-01-15T20:00:00Z', 'Priatelia I.')],
+        [prog('X', '2026-01-15T20:00:00Z', 'Priatelia')],
+        [prog('X', '2026-01-15T20:03:00Z', 'Priatelia')],
+      ],
+      'merge',
+      undefined,
+      undefined,
+      { title: (value) => value.replace(/\s+[IVX]+\.?$/, '') },
+    );
+
+    expect(merged.map((programme) => values(programme.title))).toEqual([['Priatelia I.']]);
+  });
+
+  it('compares descriptions as contained does after a function of its own', () => {
+    const merged = merge(
+      { desc: [{ value: 'Správy dňa…' }] },
+      { desc: [{ value: 'SPRÁVY DŇA. Počasie a šport. (skryté titulky)' }] },
+      { desc: { contained: (value) => value.replace(/\s*\(skryté titulky\)$/, '') } },
+    );
+
+    expect(values(merged.desc)).toEqual(['SPRÁVY DŇA. Počasie a šport. (skryté titulky)']);
+  });
+
+  it('takes a text with no language and one with an empty one as in one language', () => {
+    const merged = merge(
+      { desc: [{ value: 'Príbeh o láske…', lang: '' }] },
+      { desc: [{ value: 'Príbeh o láske a vojne.' }] },
+    );
+
+    expect(values(merged.desc)).toEqual(['Príbeh o láske a vojne.']);
+  });
+
+  it('compares letters written in either Unicode form as one', () => {
+    const merged = merge(
+      { category: [{ value: 'Dráma'.normalize('NFC') }] },
+      { category: [{ value: 'Dráma'.normalize('NFD') }] },
+    );
+
+    expect(merged.category).toHaveLength(1);
+  });
+
+  it('takes categories one genre is for one, as a profile does', () => {
+    const merged = merge({ category: [{ value: 'Sci-Fi' }] }, { category: [{ value: 'Sci Fi' }] });
+
+    expect(values(merged.category)).toEqual(['Sci-Fi']);
+  });
+
+  it('keeps every spelling of every field under exact on its own', () => {
+    const merged = merge(
+      { title: [{ value: 'Správy' }], category: [{ value: 'Film' }] },
+      { title: [{ value: 'správy' }], category: [{ value: 'film' }] },
+      'exact',
+    );
+
+    expect([values(merged.title), values(merged.category)]).toEqual([
+      ['Správy', 'správy'],
+      ['Film', 'film'],
+    ]);
+  });
+
+  it('refuses a field it does not have, and a union that is no object', () => {
+    expect(() => resolveUnion({ description: 'exact' } as never)).toThrow(
+      'merge.union has no field "description": its fields are title, subTitle, desc, category, keyword, country',
+    );
+    expect(() => resolveUnion(null as never)).toThrow("merge.union must be 'exact' or an object");
+  });
+
+  it('takes one already settled as it is, for the match it was settled with', () => {
+    const loose = (title: string) => title.replace(/\s+[IVX]+\.?$/, '');
+    const settled = resolveUnion({ title: 'match' }, loose);
+
+    expect(resolveUnion(settled, loose)).toBe(settled);
+    expect(
+      settled.apply({
+        ...prog('X', '2026-01-15T20:00:00Z', 'Priatelia I.'),
+        title: [{ value: 'Priatelia I.' }, { value: 'Priatelia' }],
+      }).title,
+    ).toEqual([{ value: 'Priatelia I.' }]);
+  });
+
+  it('takes its titles by a match of options, and by the default for a matcher of its own', () => {
+    const own = (title: string) => title;
+
+    expect(resolveMatch({ normalizeTitle: own }).normalizeTitle).toBe(own);
+    expect(resolveMatch(() => true).normalizeTitle).toBe(normalizeTitle);
+    expect(resolveMatch({ windowMs: 1, matches: () => true }).normalizeTitle).toBe(normalizeTitle);
+  });
+
+  it('settles one already settled again for a match that has changed since', () => {
+    const settled = resolveUnion({ title: 'match' });
+    const loose = (title: string) => title.replace(/\s+[IVX]+\.?$/, '');
+    const again = resolveUnion(settled, loose);
+
+    expect(again).not.toBe(settled);
+    expect(
+      again.apply({
+        ...prog('X', '2026-01-15T20:00:00Z', 'Priatelia I.'),
+        title: [{ value: 'Priatelia I.' }, { value: 'Priatelia' }],
+      }).title,
+    ).toEqual([{ value: 'Priatelia I.' }]);
+  });
+
+  it('takes one settled by another copy of the package for one', () => {
+    // What another install's would look like from here: its own class, the
+    // same registered brand holding its comparison, and the fields it was
+    // settled from as its own.
+    class Theirs {
+      readonly desc = 'exact';
+
+      apply(programme: XmltvProgramme): XmltvProgramme {
+        return programme;
+      }
+    }
+
+    const theirs = Object.defineProperty(new Theirs(), Symbol.for('epg-tools.ResolvedUnion'), {
+      value: normalizeTitle,
+    });
+
+    expect(theirs instanceof ResolvedUnion).toBe(true);
+    expect(resolveUnion(theirs as never)).toBe(theirs);
+    // Settled again for another comparison, from its own fields.
+    expect(
+      resolveUnion(theirs as never, (title) => title).apply({
+        ...prog('X', '2026-01-15T20:00:00Z', 'A'),
+        desc: [{ value: 'Príbeh…' }, { value: 'Príbeh o láske.' }],
+      }).desc,
+    ).toHaveLength(2);
+  });
+
+  it('takes a copy of a settled one for the union it was settled from', () => {
+    const settled = resolveUnion({ category: 'exact' });
+    const programme = {
+      ...prog('X', '2026-01-15T20:00:00Z', 'A'),
+      category: [{ value: 'Film' }, { value: 'film' }],
+      desc: [{ value: 'Príbeh…' }, { value: 'Príbeh o láske.' }],
+    };
+
+    // A spread keeps what it was settled from and none of what it was settled into.
+    const changed = resolveUnion({ ...settled, desc: 'exact' });
+
+    expect(values(changed.apply(programme).category)).toEqual(['Film', 'film']);
+    expect(values(changed.apply(programme).desc)).toEqual(['Príbeh…', 'Príbeh o láske.']);
+    expect(resolveUnion(structuredClone({ ...settled })).apply(programme).category).toHaveLength(2);
+  });
+
+  it('refuses what a union cannot be, naming it by what it is', () => {
+    expect(() => resolveUnion(new Map([['desc', 'exact']]) as never)).toThrow(
+      '(got an instance of Map)',
+    );
+    expect(() => new ResolvedUnion({ description: 'exact' } as never)).toThrow(
+      'merge.union has no field "description"',
+    );
+  });
+
+  it('keeps its defaults as they are, whoever holds them', () => {
+    expect(Object.isFrozen(DEFAULT_UNION)).toBe(true);
+  });
+
+  it('keeps a short description that is a word of a longer one rather than the same', () => {
+    const merged = merge(
+      { desc: [{ value: 'Krimi' }] },
+      { desc: [{ value: 'Krimiseriál o vyšetrovateľovi.' }] },
+    );
+
+    expect(values(merged.desc)).toEqual(['Krimi', 'Krimiseriál o vyšetrovateľovi.']);
+  });
+
+  it('takes a teaser cut off part way through a word for the whole of it', () => {
+    const merged = merge(
+      { desc: [{ value: 'Príbeh o lás…' }] },
+      { desc: [{ value: 'Príbeh o láske a vojne.' }] },
+    );
+
+    expect(values(merged.desc)).toEqual(['Príbeh o láske a vojne.']);
+  });
+
+  it('leaves texts as the sources gave them under exact, a source’s own repeats included', () => {
+    const programme = {
+      ...prog('X', '2026-01-15T20:00:00Z', 'Film'),
+      category: [{ value: 'Film' }, { value: 'Film' }],
+    };
+
+    expect(resolveUnion('exact').apply(programme)).toBe(programme);
+  });
+
+  it('takes a language tag in any case for one language', () => {
+    const merged = merge(
+      { title: [{ value: 'Správy', lang: 'sk' }] },
+      { title: [{ value: 'SPRÁVY', lang: 'SK' }] },
+    );
+
+    expect(merged.title).toEqual([{ value: 'Správy', lang: 'sk' }]);
+  });
+
+  it('refuses a mode said as null, and names what it got whatever it is', () => {
+    expect(() => resolveUnion({ desc: null as never })).toThrow(
+      "merge.union.desc must be 'exact', 'caseless', 'match', 'contained', { contained: fn } or a function (got null)",
+    );
+    expect(() => resolveUnion(((value: string) => value) as never)).toThrow('(got a function)');
+  });
+
+  it('merges lists under concat with no match to speak of', () => {
+    const merged = mergeProgrammeLists(
+      [[prog('X', '2026-01-15T20:00:00Z', 'A')], [prog('X', '2026-01-15T19:00:00Z', 'B')]],
+      'concat',
+      null as never,
+    );
+
+    expect(merged.map((programme) => values(programme.title))).toEqual([['B'], ['A']]);
+  });
+
+  it('refuses a mode it does not know, naming the field', () => {
+    expect(() => resolveUnion({ desc: 'containd' as never })).toThrow(
+      "merge.union.desc must be 'exact', 'caseless', 'match', 'contained', { contained: fn } or a function (got \"containd\")",
+    );
   });
 });
 
@@ -658,6 +1026,85 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     const { generateGuide } = await import('../src/merge/guide.js');
     return collect(generateGuide(options));
   }
+
+  it('hands a transform the next programme as it will be written', async () => {
+    const cache = createFakeCache({
+      [`site-a.sk|X|${DAY}`]: [
+        prog('X', '2026-01-15T10:00:00Z', 'Správy', 'sk'),
+        prog('X', '2026-01-15T11:00:00Z', 'Film', 'sk', {
+          category: [{ value: 'Film' }, { value: 'film' }],
+        }),
+      ],
+    });
+    const seen: unknown[] = [];
+
+    await generate({
+      sites: [siteA],
+      cache,
+      days: 1,
+      startDay: DAY,
+      now: NOW,
+      merge: {
+        transform: (programme, { next }) => {
+          if (next) seen.push(next.category);
+
+          return programme;
+        },
+      },
+    });
+
+    expect(seen).toEqual([[{ value: 'Film' }]]);
+  });
+
+  it('takes them for one under backfill, and across the day boundary', async () => {
+    const DAY2 = '2026-01-16';
+    // One source, a broadcast across midnight in both days' entries, with its
+    // category spelt two ways: merged as the days meet, written once.
+    const cache = createFakeCache({
+      [`site-a.sk|X|${DAY}`]: [
+        prog('X', '2026-01-15T23:00:00Z', 'Film', 'sk', { category: [{ value: 'Film' }] }),
+      ],
+      [`site-a.sk|X|${DAY2}`]: [
+        prog('X', '2026-01-15T23:00:00Z', 'Film', 'sk', { category: [{ value: 'film' }] }),
+      ],
+    });
+    const categories = async (programmeStrategy: 'merge' | 'backfill') =>
+      [
+        ...(
+          await generate({
+            sites: [siteA],
+            cache,
+            days: 2,
+            startDay: DAY,
+            now: NOW,
+            merge: { programmeStrategy },
+          })
+        ).matchAll(/<category[^>]*>([^<]*)<\/category>/g),
+      ].map((found) => found[1]);
+
+    expect(await categories('merge')).toEqual(['Film']);
+    expect(await categories('backfill')).toEqual(['Film']);
+  });
+
+  it('takes texts two sites spell differently for one, as merge.union says', async () => {
+    const cache = createFakeCache({
+      [`site-a.sk|X|${DAY}`]: [
+        prog('X', '2026-01-15T10:00:00Z', 'Správy', 'sk', { category: [{ value: 'News' }] }),
+      ],
+      [`site-b.com|X|${DAY}`]: [
+        prog('X', '2026-01-15T10:00:00Z', 'Správy', 'sk', { category: [{ value: 'news' }] }),
+      ],
+    });
+    const categories = async (merge: NonNullable<BuildGuideOptions['merge']>) =>
+      [
+        ...(
+          await generate({ sites: [siteA, siteB], cache, days: 1, startDay: DAY, now: NOW, merge })
+        ).matchAll(/<category[^>]*>([^<]*)<\/category>/g),
+      ].map((found) => found[1]);
+
+    expect(await categories({})).toEqual(['News']);
+    expect(await categories({ union: { category: 'exact' } })).toEqual(['News', 'news']);
+  });
 
   describe('dropContainers', () => {
     const site = makeSite('site-a.sk', [{ xmltvId: 'X', siteId: 'a-x' }]);
