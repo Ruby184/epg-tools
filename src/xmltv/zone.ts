@@ -101,12 +101,17 @@ function surveyDay(timeZone: string, day: number): ZoneDay {
     return before;
   }
 
-  // The clocks changed somewhere in here. Halving the day to the minute finds
-  // when — seventeen more questions, once, for the two days a year it happens.
+  // The clocks changed somewhere in here. Halving the day to the millisecond
+  // finds when — twenty-seven more questions, once, for the two days a year it
+  // happens. To the millisecond rather than the minute: `at` is where the new
+  // offset starts, and one found a few seconds late puts the change's own
+  // instant on the wrong side of it — which is every time on the hour after
+  // it, since the clocks change on the hour. 03:00 on the night they go back
+  // would be read in summer time, an hour early.
   let held = start;
   let changed = end;
 
-  while (changed - held > MINUTE) {
+  while (changed - held > 1) {
     const middle = held + Math.floor((changed - held) / 2);
 
     if (rawOffsetAt(timeZone, middle) === before) {
