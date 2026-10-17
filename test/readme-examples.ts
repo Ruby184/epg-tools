@@ -508,6 +508,47 @@ export const remembering = defineSiteConfig({
   parseDay: () => [],
 });
 
+// --- docs/site-config.md: A programme's details, asked once -----------------
+interface Detail {
+  description: string;
+  cast: string[];
+}
+
+export const askedOnce = defineSiteConfig<{
+  items: { id: string; start: string; end: string; title: string }[];
+}>({
+  site: 'example.tv',
+  channels: [],
+  async request({ channel, day, http }) {
+    return http.get(`epg/${channel.siteId}/${day}`).json();
+  },
+  async parseDay({ payload, http, paced, remember, programme }) {
+    return Promise.all(
+      payload.items.map(async (item) => {
+        const details = await remember(
+          `detail:${item.id}|${item.start}`,
+          {
+            // Asked about while its day can be fetched again, and no longer.
+            until: Date.parse(item.end) + 86_400_000,
+            // "This one has no details" is an answer, and worth keeping.
+            miss: (error) => error instanceof HTTPError && error.response.status === 404,
+          },
+          async () => {
+            const full = await paced(({ signal }) =>
+              http.get(`detail/${item.id}`, { signal }).json<Detail>(),
+            );
+
+            return { desc: full.description, cast: full.cast }; // only what the parse uses
+          },
+        );
+
+        const p = programme(new Date(item.start), item.title);
+        return details ? p.desc(details.desc) : p;
+      }),
+    );
+  },
+});
+
 // The mode decides which caps are accepted, and the shape of the context.
 export const wrongCap = defineSiteConfig({
   site: 'example.tv',

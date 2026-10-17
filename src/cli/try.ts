@@ -36,6 +36,7 @@ import { kyWith, resolveChannels, siteHttp } from '../grabber/channels.js';
 import { parseContext, requestContext, streamContext } from '../grabber/context.js';
 import { planRequests } from '../grabber/planner.js';
 import { resolveSite } from '../grabber/site.js';
+import { Memory } from '../grabber/remember.js';
 import { SiteStateHandle } from '../grabber/state.js';
 import type { AnySiteConfig, GrabberChannel, ParsedProgramme } from '../grabber/types.js';
 import { ProgrammeBuilder } from '../xmltv/builder.js';
@@ -405,6 +406,10 @@ export async function tryChannelDay(
       task({ ...(options.signal ? { signal: options.signal } : {}) }),
     timeZone: config.timeZone,
     dayZone: resolved.dayZone,
+    // Over a store that keeps nothing, as `state` is: remembered for as long
+    // as this command, so a parse asking twice sees the first answer, and by
+    // no run after it.
+    memory: new Memory(state, site.site, now),
   };
 
   const began = Date.now();

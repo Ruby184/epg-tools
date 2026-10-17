@@ -31,6 +31,8 @@ export const StateKey = {
   VALIDATORS: 'validators',
   /** Whatever the site itself put there. */
   SITE: 'state',
+  /** What a site's `remember` kept, each value with when it is forgotten. */
+  REMEMBERED: 'remembered',
 } as const;
 
 /**
@@ -448,7 +450,16 @@ export class SiteStateHandle {
     let pending = this.#groups.get(key);
 
     if (pending === undefined) {
-      pending = this.#store.getState(this.#site, key).then(make);
+      const reading = this.#store.getState(this.#site, key).then(make);
+
+      // A read that failed is not remembered as the group: a store that was
+      // briefly out of descriptors is asked again by whoever asks next.
+      reading.catch(() => {
+        if (this.#groups.get(key) === reading) {
+          this.#groups.delete(key);
+        }
+      });
+      pending = reading;
       this.#groups.set(key, pending);
     }
 

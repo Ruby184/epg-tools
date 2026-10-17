@@ -29,6 +29,7 @@ import { resolveChannels } from './channels.js';
 import { parseContext, requestContext, streamContext, type ContextDeps } from './context.js';
 import { LocalSlot } from './local-slot.js';
 import { planRequests, type Pair, type Request } from './planner.js';
+import { Memory } from './remember.js';
 import {
   forget,
   isUnchanged,
@@ -186,6 +187,8 @@ export class SiteRun {
 
   /** Filled in by {@link run}, since each of them has to be waited for. */
   #siteState: SiteState = new Map();
+  /** What the site remembers between runs — opened the first time it asks. */
+  readonly #memory: Memory;
   #validators: TrackedMap<Validator> = new TrackedMap();
   #channels: GrabberChannel[] = [];
 
@@ -222,6 +225,10 @@ export class SiteRun {
       });
     this.#http = this.#session.pacing.http;
     this.#state = this.#session.state;
+    this.#memory = new Memory(this.#state, this.#site, run.now, {
+      refresh: this.#resolved.staleness.refetchAll,
+      warn: this.#says.warn,
+    });
 
     /**
      * What this bounds is how many responses the site has in hand at once:
@@ -301,7 +308,9 @@ export class SiteRun {
       // Beside `dispose`, and for the same reason: a site that threw, or was
       // cancelled part way, has as much to hand back as one that finished — the
       // channel list it fetched, and whatever its own code remembered. Only the
-      // groups that changed are written.
+      // groups that changed are written. What the site remembered is pruned
+      // first, so a site that no longer asks stops keeping what it kept.
+      await this.#memory.prune();
       await this.#state.save();
       // For a failed site too, where every count is nought — which is the truth,
       // and reads correctly beside the `site:failed` that says why.
@@ -508,6 +517,7 @@ export class SiteRun {
       ...(signal ? { signal } : {}),
       timeZone: this.#run.timeZone,
       dayZone: this.#resolved.dayZone,
+      memory: this.#memory,
     };
   }
 
@@ -640,6 +650,7 @@ export class SiteRun {
           // the request being parsed did — ahead of the planned ones, so a
           // channel-day in hand is finished rather than joined by another.
           paced: (task) => slot.away(() => this.#sending(task, { priority: 1 })),
+          away: (wait) => slot.away(wait),
         }),
       );
 
@@ -901,6 +912,8 @@ export class SiteRun {
             // As a parse's is, and ahead of the planned ones for the same
             // reason: a pass already under way is finished rather than joined.
             paced: (task) => this.#sending(task, { priority: 1 }),
+            // A pass holds no slot while it runs, so it waits as it is.
+            away: (wait) => wait(),
           }),
         )) {
           // Between emissions, which is as often as this has anything to say: a
