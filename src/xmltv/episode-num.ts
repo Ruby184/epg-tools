@@ -156,6 +156,12 @@ export function formatXmltvNsEpisodeNum(numbers: EpisodeNumbers): string {
   return [numbers.season, numbers.episode, numbers.part].map(dimension).join('.');
 }
 
+/** The `S1/3 ` that may start an `onscreen` value — its season, of how many. */
+const ONSCREEN_SEASON = String.raw`S(?<season>\d{1,4})(?:\/(?<seasons>\d{1,4}))?[\s._]*`;
+
+/** The `E2/10 P1/2` an `onscreen` value ends in — its episode, of how many, and its part. */
+const ONSCREEN_EPISODE = String.raw`EP?\s*(?<episode>\d{1,5})(?:\/(?<episodes>\d{1,5}))?(?:[\s._]*P(?<part>\d{1,3})(?:\/(?<parts>\d{1,3}))?)?`;
+
 /**
  * The one `onscreen` grammar worth reading, which is WebGrab+Plus's:
  * `[Sn[/St]] En[/Et] [Pn[/Pt]]` — letters required, spaces optional.
@@ -181,8 +187,15 @@ export function formatXmltvNsEpisodeNum(numbers: EpisodeNumbers): string {
  * - **Anything trailing** — `S1E2 1` is not a real form, and Kodi's
  *   strip-then-match approach would silently read it as episode 21.
  */
-const ONSCREEN =
-  /^(?:S(?<season>\d{1,4})(?:\/(?<seasons>\d{1,4}))?[\s._]*)?EP?\s*(?<episode>\d{1,5})(?:\/(?<episodes>\d{1,5}))?(?:[\s._]*P(?<part>\d{1,3})(?:\/(?<parts>\d{1,3}))?)?$/i;
+const ONSCREEN = new RegExp(`^(?:${ONSCREEN_SEASON})?${ONSCREEN_EPISODE}$`, 'i');
+
+/**
+ * The `onscreen` grammar as a title ends in it, unanchored, for
+ * `parseTitleNumbering`: the season required, since an `E` and a digit at the
+ * end of a title with no `S` before them is as often a road — "Poprask na
+ * silnici E4" — as an episode. Its groups are the numbers' own names.
+ */
+export const ONSCREEN_IN_TITLE = `${ONSCREEN_SEASON}${ONSCREEN_EPISODE}`;
 
 /**
  * A 1-based number from an `onscreen` value, as a 0-based index.

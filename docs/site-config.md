@@ -701,6 +701,23 @@ out and said through the site's `warn`, since a programme short a `<date>` is
 still a programme, and one lost over it is a hole in the listings. That is this
 builder's doing: one made on its own, with nowhere to say so, throws instead.
 
+Some sources write the episode into the title: "Duel S01E99", "Komisár Rex III
+(13)". For those, pass `numbered`:
+
+```ts
+parseDay({ payload, programme }) {
+  return payload.items.map((item) =>
+    programme(new Date(item.start), item.title, { numbered: true }).episode(item.episode));
+}
+```
+
+The title is written without its numbering, and the numbers and any sub-title
+after them are written too. What the source gives in fields of its own wins,
+and the title fills in the rest: `.episode(item.episode)` above writes the
+source's episode in the season the title said. A source with its own words for a season passes them as
+`{ numbered: { patterns } }`. See [Numbering in
+titles](./xmltv.md#numbering-in-titles).
+
 The whole builder is available, so the provider extensions the parser preserves
 can be written back out the same way: `.extra()` for non-DTD child elements,
 `.extraAttributes()` for attributes, and the trailing `extraAttributes`

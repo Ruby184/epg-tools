@@ -18,6 +18,7 @@ import {
   writeXmltvStream,
   zonedXmltvDate,
 } from '../src/xmltv/main.js';
+import type { NumberedOptions } from '../src/xmltv/main.js';
 
 async function collect(input: Parameters<typeof writeXmltvStream>[0]): Promise<string> {
   let out = '';
@@ -192,6 +193,347 @@ describe('ProgrammeBuilder', () => {
     });
   });
 
+  describe('a title with its numbering in it', () => {
+    const start = '20260717200000 +0000';
+
+    it('is written as its numbers, its sub-title and the title left', () => {
+      const built = new ProgrammeBuilder({
+        channel: 'c',
+        start,
+        title: 'Morning Season 2 Episode 5 - Monday',
+        lang: 'en',
+        numbered: true,
+      }).build();
+
+      expect(built.title).toEqual([{ value: 'Morning', lang: 'en' }]);
+      expect(built.subTitle).toEqual([{ value: 'Monday', lang: 'en' }]);
+      expect(built.episodeNum).toEqual([
+        { system: 'xmltv_ns', value: '1.4.0/1' },
+        { system: 'onscreen', value: 'S02E05' },
+      ]);
+    });
+
+    it('keeps what the title says of itself, and gives the sub-title its language', () => {
+      const built = new ProgrammeBuilder({
+        channel: 'c',
+        start,
+        title: ['Duel - S01E02 - Pilot', { lang: 'en', extraAttributes: { id: '7' } }],
+        lang: 'sk',
+        numbered: true,
+      }).build();
+
+      expect(built.title).toEqual([{ value: 'Duel', lang: 'en', extraAttributes: { id: '7' } }]);
+      expect(built.subTitle).toEqual([{ value: 'Pilot', lang: 'en' }]);
+    });
+
+    it('reads a title with space around it', () => {
+      const built = ProgrammeBuilder.of('c', start, '  Duel S01E99  ', { numbered: true }).build();
+
+      expect(built.title).toEqual([{ value: 'Duel' }]);
+    });
+
+    it('writes how many episodes there are', () => {
+      const built = ProgrammeBuilder.of('c', start, 'Filter (6/12)', { numbered: true }).build();
+
+      expect(built.title).toEqual([{ value: 'Filter' }]);
+      expect(built.subTitle).toBeUndefined();
+      expect(built.episodeNum).toEqual([
+        { system: 'xmltv_ns', value: '.5/12.0/1' },
+        { system: 'onscreen', value: 'E6' },
+      ]);
+    });
+
+    it("reads a source's own patterns before the built-in ones", () => {
+      const patterns = [/^(?<title>.+?)\s+(?<season>\d+)\.\s*évad$/u];
+      const built = ProgrammeBuilder.of('c', start, 'Herbárium 2. évad', {
+        numbered: { patterns },
+      }).build();
+
+      expect(built.title).toEqual([{ value: 'Herbárium' }]);
+      expect(built.episodeNum).toEqual([{ system: 'xmltv_ns', value: '1..' }]);
+    });
+
+    it('leaves a title alone where nothing reads it, or it is not asked to', () => {
+      const spinalTap = ProgrammeBuilder.of('c', start, 'Spinal Tap II', {
+        numbered: true,
+      }).build();
+      const duel = ProgrammeBuilder.of('c', start, 'Duel S01E99', { numbered: false }).build();
+
+      expect(spinalTap).toEqual(ProgrammeBuilder.of('c', start, 'Spinal Tap II').build());
+      expect(duel.title).toEqual([{ value: 'Duel S01E99' }]);
+      expect(duel.episodeNum).toBeUndefined();
+    });
+
+    it('leaves a title nothing reads as it was given, untrimmed and unmade', () => {
+      const spaced = ProgrammeBuilder.of('c', start, '  News  ', { numbered: true }).build();
+      // As a JS caller can hand it over, from an API that sent `"title": null`.
+      const missing = ProgrammeBuilder.of('c', start, null as unknown as string, {
+        numbered: true,
+      }).build();
+
+      expect(spaced.title).toEqual([{ value: '  News  ' }]);
+      expect(missing.title).toEqual([{ value: null }]);
+    });
+
+    it("gives the source's own numbers and sub-title over the title's", () => {
+      const built = ProgrammeBuilder.of('c', start, 'Duel - S01E02 - Pilot', { numbered: true })
+        .episode(3, 1)
+        .subTitle('The Pilot')
+        .build();
+
+      expect(built.title).toEqual([{ value: 'Duel' }]);
+      expect(built.subTitle).toEqual([{ value: 'The Pilot' }]);
+      expect(built.episodeNum).toEqual([
+        { system: 'xmltv_ns', value: '0.2.0/1' },
+        { system: 'onscreen', value: 'S01E03' },
+      ]);
+    });
+
+    it("writes none of the title's beside an xmltv_ns or onscreen entry of the site's", () => {
+      const built = ProgrammeBuilder.of('c', start, 'Duel S01E02', { numbered: true })
+        .episodeNum('xmltv_ns', '0.4.')
+        .build();
+
+      expect(built.episodeNum).toEqual([{ system: 'xmltv_ns', value: '0.4.' }]);
+    });
+
+    it("writes the title's where the source's own say something else", () => {
+      const built = ProgrammeBuilder.of('c', start, 'Duel S01E02', { numbered: true })
+        .episodeNum('dd_progid', 'EP01006886.0028')
+        .build();
+
+      expect(built.episodeNum).toEqual([
+        { system: 'dd_progid', value: 'EP01006886.0028' },
+        { system: 'xmltv_ns', value: '0.1.0/1' },
+        { system: 'onscreen', value: 'S01E02' },
+      ]);
+    });
+
+    it("fills in what the source's own numbers leave out from the title's", () => {
+      const rex = ProgrammeBuilder.of('c', start, 'Komisár Rex III (13)', { numbered: true });
+      const show = ProgrammeBuilder.of('c', start, 'Show (13/20)', { numbered: true });
+      const part = ProgrammeBuilder.of('c', start, 'Duel S01E02 P1/2', { numbered: true });
+
+      // The season the title no longer says.
+      expect(rex.episode(13, null).build().episodeNum).toEqual([
+        { system: 'xmltv_ns', value: '2.12.0/1' },
+        { system: 'onscreen', value: 'S03E13' },
+      ]);
+      // The episode, and how many there are.
+      expect(show.episode(null, 3).build().episodeNum).toEqual([
+        { system: 'xmltv_ns', value: '2.12/20.0/1' },
+        { system: 'onscreen', value: 'S03E13' },
+      ]);
+      // A number the call gives wins, and one it gives as nothing is not given.
+      expect(
+        ProgrammeBuilder.of('c', start, 'Show (13/20)', { numbered: true })
+          .episode(13, 3, { episodes: 26 })
+          .build().episodeNum,
+      ).toEqual([
+        { system: 'xmltv_ns', value: '2.12/26.0/1' },
+        { system: 'onscreen', value: 'S03E13' },
+      ]);
+      expect(
+        ProgrammeBuilder.of('c', start, 'Komisár Rex III (13)', { numbered: true })
+          .episode(13, 0)
+          .build().episodeNum,
+      ).toEqual(rex.build().episodeNum);
+      // The episode, and its part.
+      expect(part.episode(null, 1).build().episodeNum).toEqual([
+        { system: 'xmltv_ns', value: '0.1.0/2' },
+        { system: 'onscreen', value: 'S01E02 P1/2' },
+      ]);
+    });
+
+    it("fills in only what belongs with the call's own numbers", () => {
+      const numbers = (title: string, ...args: Parameters<ProgrammeBuilder['episode']>) =>
+        ProgrammeBuilder.of('c', start, title, { numbered: true })
+          .episode(...args)
+          .build().episodeNum;
+
+      // Not part 1 of 2 of S02E03, which was S01E02's.
+      expect(numbers('Duel S01E02 P1/2', 3, 2)).toEqual([
+        { system: 'xmltv_ns', value: '1.2.0/1' },
+        { system: 'onscreen', value: 'S02E03' },
+      ]);
+      // Not episode 13 of season 4, which was season 3's.
+      expect(numbers('Komisár Rex III (13)', null, 4)).toEqual([
+        { system: 'xmltv_ns', value: '3..' },
+      ]);
+      // Not season 1's total of 10 episodes for season 2 — but the series'
+      // 3 seasons.
+      expect(numbers('Duel S1/3E2/10', 5, 2)).toEqual([
+        { system: 'xmltv_ns', value: '1/3.4.0/1' },
+        { system: 'onscreen', value: 'S02E05' },
+      ]);
+      // The season, for an episode numbered across the whole series.
+      expect(numbers('Komisár Rex III (13)', 113)).toEqual([
+        { system: 'xmltv_ns', value: '2.112.0/1' },
+        { system: 'onscreen', value: 'S03E113' },
+      ]);
+      // The season, and not S01E02's part for S01E03.
+      expect(numbers('Duel S01E02 P1/2', 3)).toEqual([
+        { system: 'xmltv_ns', value: '0.2.0/1' },
+        { system: 'onscreen', value: 'S01E03' },
+      ]);
+      // How many episodes the season has, for another of its episodes.
+      expect(numbers('Show (13/20)', 14, 3)).toEqual([
+        { system: 'xmltv_ns', value: '2.13/20.0/1' },
+        { system: 'onscreen', value: 'S03E14' },
+      ]);
+    });
+
+    describe('told not to fill in from the title', () => {
+      const rex = (numbered: true | NumberedOptions) =>
+        ProgrammeBuilder.of('c', start, 'Komisár Rex III (13)', { numbered });
+      const e13 = [
+        { system: 'xmltv_ns', value: '.12.0/1' },
+        { system: 'onscreen', value: 'E13' },
+      ];
+      const s03e13 = [
+        { system: 'xmltv_ns', value: '2.12.0/1' },
+        { system: 'onscreen', value: 'S03E13' },
+      ];
+
+      it("writes a call's numbers alone, for the builder", () => {
+        const built = rex({ fromTitle: false }).episode(13).build();
+
+        expect(built.title).toEqual([{ value: 'Komisár Rex' }]);
+        expect(built.episodeNum).toEqual(e13);
+      });
+
+      it("still writes the title's where no call gives any", () => {
+        expect(rex({ fromTitle: false }).build().episodeNum).toEqual(s03e13);
+      });
+
+      it('reads its patterns all the same', () => {
+        const built = ProgrammeBuilder.of('c', start, 'Herbárium 2. évad', {
+          numbered: { patterns: [/^(?<title>.+?)\s+(?<season>\d+)\.\s*évad$/u], fromTitle: false },
+        }).build();
+
+        expect(built.title).toEqual([{ value: 'Herbárium' }]);
+      });
+
+      it("writes a call's numbers alone, for that call", () => {
+        expect(rex(true).episode(13, null, { fromTitle: false }).build().episodeNum).toEqual(e13);
+      });
+
+      it('lets a call fill in where the builder says not to', () => {
+        expect(
+          rex({ fromTitle: false }).episode(13, null, { fromTitle: true }).build().episodeNum,
+        ).toEqual(s03e13);
+      });
+    });
+
+    it('fills in on every call', () => {
+      const built = ProgrammeBuilder.of('c', start, 'Komisár Rex III (13)', { numbered: true })
+        .episode(13)
+        .episode(null, 3)
+        .episode(14)
+        .build();
+
+      expect(built.episodeNum).toEqual([
+        { system: 'xmltv_ns', value: '2.12.0/1' },
+        { system: 'onscreen', value: 'S03E13' },
+        { system: 'xmltv_ns', value: '2.12.0/1' },
+        { system: 'onscreen', value: 'S03E13' },
+        { system: 'xmltv_ns', value: '2.13.0/1' },
+        { system: 'onscreen', value: 'S03E14' },
+      ]);
+    });
+
+    it("still writes the title's numbers after a call that gave none, told not to fill in", () => {
+      const built = ProgrammeBuilder.of('c', start, 'Komisár Rex III (13)', {
+        numbered: { fromTitle: false },
+      })
+        // As an API sends it: `"episode": null`.
+        .episode(null)
+        .build();
+
+      // Taken off the title, so written here or nowhere.
+      expect(built.title).toEqual([{ value: 'Komisár Rex' }]);
+      expect(built.episodeNum).toEqual([
+        { system: 'xmltv_ns', value: '2.12.0/1' },
+        { system: 'onscreen', value: 'S03E13' },
+      ]);
+    });
+
+    it("writes the title's sub-title over one of the site's that says nothing", () => {
+      const built = ProgrammeBuilder.of('c', start, 'Duel - S01E02 - Pilot', { numbered: true })
+        // As an API sends it: `"episodeTitle": ""`.
+        .subTitle('')
+        .build();
+
+      expect(built.subTitle).toEqual([{ value: 'Pilot' }]);
+    });
+
+    it('writes a part with no total as that part, of a number not known', () => {
+      const numbers = (title: string) =>
+        ProgrammeBuilder.of('c', start, title, { numbered: true }).build().episodeNum;
+
+      expect(numbers('Duel S01E02 P2')).toEqual([
+        { system: 'xmltv_ns', value: '0.1.1' },
+        { system: 'onscreen', value: 'S01E02' },
+      ]);
+      // How many parts, and not which.
+      expect(numbers('Duel S01E02 P0/2')).toEqual([
+        { system: 'xmltv_ns', value: '0.1./2' },
+        { system: 'onscreen', value: 'S01E02' },
+      ]);
+    });
+
+    it('hands each build a sub-title of its own', () => {
+      const builder = ProgrammeBuilder.of('c', start, 'Duel - S01E02 - Pilot', { numbered: true });
+
+      builder.build().subTitle![0]!.value = 'Changed';
+
+      expect(builder.build().subTitle).toEqual([{ value: 'Pilot' }]);
+    });
+
+    it("gives the source's own over the title's after a build too", () => {
+      const builder = ProgrammeBuilder.of('c', start, 'Duel - S01E02 - Pilot', { numbered: true });
+
+      expect(builder.build().subTitle).toEqual([{ value: 'Pilot' }]);
+
+      const built = builder.episode(3, 1).subTitle('The Pilot').build();
+
+      expect(built.subTitle).toEqual([{ value: 'The Pilot' }]);
+      expect(built.episodeNum).toEqual([
+        { system: 'xmltv_ns', value: '0.2.0/1' },
+        { system: 'onscreen', value: 'S01E03' },
+      ]);
+    });
+
+    it('leaves a title whose numbers say nothing to write as it is', () => {
+      const built = ProgrammeBuilder.of('c', start, 'Show (0/12)', { numbered: true }).build();
+
+      expect(built.title).toEqual([{ value: 'Show (0/12)' }]);
+      expect(built.episodeNum).toBeUndefined();
+    });
+
+    it('writes them once, however often it is built', () => {
+      const builder = ProgrammeBuilder.of('c', start, 'Duel - S01E02 - Pilot', { numbered: true });
+
+      builder.build();
+
+      expect(builder.build().episodeNum).toHaveLength(2);
+      expect(builder.build().subTitle).toHaveLength(1);
+    });
+
+    it('gives the sub-title no language where the title has none', () => {
+      const built = new ProgrammeBuilder({
+        channel: 'c',
+        start,
+        title: ['Duel - S01E02 - Pilot', { lang: '' }],
+        lang: 'sk',
+        numbered: true,
+      }).build();
+
+      expect(built.title).toEqual([{ value: 'Duel' }]);
+      expect(built.subTitle).toEqual([{ value: 'Pilot' }]);
+    });
+  });
+
   it('adds xmltv_ns episode/season totals and part counts via options', () => {
     const build = (opts: Parameters<ProgrammeBuilder['episode']>[2]) =>
       new ProgrammeBuilder({ channel: 'c', start: '20260717200000 +0000', title: 'T' })
@@ -212,6 +554,8 @@ describe('ProgrammeBuilder', () => {
     expect(xmltvNs({ parts: 2 })).toEqual({ system: 'xmltv_ns', value: '1.5.0/2' });
     // An explicit later part.
     expect(xmltvNs({ part: 2, parts: 2 })).toEqual({ system: 'xmltv_ns', value: '1.5.1/2' });
+    // A part with no total has none made up: "part 2 of 1" is no part.
+    expect(xmltvNs({ part: 2 })).toEqual({ system: 'xmltv_ns', value: '1.5.1' });
 
     // onscreen stays plain for a single part, and marks a 1-based part with `P`
     // when multi-part. `P` and not a parenthesised ratio: a `(n/m)` after an

@@ -86,4 +86,9 @@ export type * from './types.js';
  * these are the types `ParseContext` next door is written in terms of, and
  * having them anywhere else was the part that did not work.
  */
-export type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from '../xmltv/builder.js';
+export type {
+  ChannelBuilder,
+  NumberedOptions,
+  ProgrammeBuilder,
+  ProgrammeOptions,
+} from '../xmltv/builder.js';

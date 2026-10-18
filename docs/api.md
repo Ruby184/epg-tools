@@ -541,7 +541,7 @@ are not re-exported at all.
 | Days | `toDayString`, `dayToDate`, `addDays`, `diffDays`, `dayRange` |
 | Options parsing | `parseOptions`, `OptionError` |
 | XMLTV | `escapeXml`, `escapeXmlText`, `escapeXmlAttribute`, `serializeChannel`, `serializeProgramme`, `writeXmltvStream`, `writeXmltvToFile`, `parseXmltvStream`, `parseXmltvFile`, `validateXmltv`, every [date helper](./xmltv.md#dates) and the [zone helpers](./xmltv.md#named-zones) |
-| Episode numbers, genres | `parseXmltvNsEpisodeNum`, `formatXmltvNsEpisodeNum`, `parseOnscreenEpisodeNum`, `formatOnscreenEpisodeNum`, `parseDdProgidEpisodeNum`, `formatDdProgidEpisodeNum`, `DVB_GENRES`, `genreKey`, `genreOf` |
+| Episode numbers, genres | `parseXmltvNsEpisodeNum`, `formatXmltvNsEpisodeNum`, `parseOnscreenEpisodeNum`, `formatOnscreenEpisodeNum`, `parseDdProgidEpisodeNum`, `formatDdProgidEpisodeNum`, `parseTitleNumbering`, `stripTitleSeason`, `DVB_GENRES`, `genreKey`, `genreOf` |
 | Output profiles | `OUTPUT_PROFILE_NAMES`, `OUTPUT_PROFILES`, `resolveProfile` |
 | M3U | `parseM3uStream`, `parseM3uFile`, `parseM3uString`, `serializeM3uEntry`, `serializeM3uHeader`, `writeM3uStream`, `writeM3uToFile`, `M3uParseStream`, `M3uSerializeStream` |
 | Channels | `parseChannelsXml`, `serializeChannelsXml`, `serializeChannelsXmlEntry`, `matchChannels`, `timeshiftOf`, `timeshiftName` |
@@ -553,8 +553,8 @@ are not re-exported at all.
 
 Plus the types for all of the above (`EpgConfig`, `SiteConfig`,
 `GrabberChannel`, `XmltvProgramme`, `XmltvChannel`, `GuideServer`, …), and
-`ProgrammeBuilder`, `ChannelBuilder` and `ProgrammeOptions` as types — the
-builders themselves are values on `epg-tools/xmltv` only.
+`ProgrammeBuilder`, `ChannelBuilder`, `ProgrammeOptions` and `NumberedOptions`
+as types — the builders themselves are values on `epg-tools/xmltv` only.
 
 ### `epg-tools/xmltv`
 
@@ -568,6 +568,7 @@ class its serializer throws, whose module imports nothing. Full detail in
 - **Dates** — `parseXmltvDate`, `formatXmltvDate`, `xmltvDate`, `getXmltvOffset`, `setXmltvOffset`, `getXmltvPrecision`, `setXmltvPrecision`, `XMLTV_OFFSET`, `XMLTV_PRECISION`, `XmltvDateError`
 - **Zones** — `zonedXmltvDate`, `xmltvZone`, `setXmltvZone`, `xmltvZoneOffset` — see [named zones](./xmltv.md#named-zones)
 - **Episode numbers** — `parseXmltvNsEpisodeNum`, `formatXmltvNsEpisodeNum`, `parseOnscreenEpisodeNum`, `formatOnscreenEpisodeNum`, `parseDdProgidEpisodeNum`, `formatDdProgidEpisodeNum` — see [episode numbers](./xmltv.md#episode-numbers)
+- **Numbering in titles** — `parseTitleNumbering`, `stripTitleSeason` — see [numbering in titles](./xmltv.md#numbering-in-titles)
 - **Genres** — `DVB_GENRES`, `genreOf`, and `genreKey`, the folding `genreOf` matches by — see [genres](./xmltv.md#genres)
 - **Output profiles** — `OUTPUT_PROFILES`, `OUTPUT_PROFILE_NAMES`, `resolveProfile` — see [output profiles](./configuration.md#output-profiles)
 - **Validate** — `validateXmltv` — see [validating a guide](./configuration.md#validating-a-guide)
@@ -577,7 +578,8 @@ class its serializer throws, whose module imports nothing. Full detail in
 means the classes: since 0.7.0 `ProgrammeBuilder`, `ChannelBuilder` and
 `ProgrammeOptions` are re-exported *as types* from the root and from
 `epg-tools/grabber`, so a helper a site splits out of its `parseDay` can say
-what it takes.
+what it takes — and `NumberedOptions` with them, for a `numbered` shared
+between sites.
 
 ### `epg-tools/m3u`
 
@@ -877,7 +879,7 @@ again.
 `SiteStateHandle`, `StateKey`, `TrackedMap`, `channelsMaxAgeMs`,
 `DEFAULT_CHANNELS_MAX_AGE_DAYS`, `UnchangedError`, `isUnchanged`,
 `fellShort`, `resolveAllowance`, and `ProgrammeBuilder` / `ChannelBuilder` /
-`ProgrammeOptions` as types.
+`ProgrammeOptions` / `NumberedOptions` as types.
 
 `*` this subpath only — not re-exported from the root.
 

@@ -486,6 +486,33 @@ describe('grab', () => {
     expect(written[1]!.new).toBe(true);
   });
 
+  it('takes the numbering a title carries off it when asked', async () => {
+    const cache = new MemoryCache();
+
+    const config = makeConfig({
+      channels: [{ xmltvId: 'one.example', siteId: '1', lang: 'sk' }],
+      parseDay({ programme, day }) {
+        return [
+          programme(new Date(`${day}T06:00:00.000Z`), 'Komisár Rex III (13)', { numbered: true }),
+        ];
+      },
+    });
+
+    await grab([config], { cache, now: NOW });
+
+    const [written] = cache.get({
+      site: 'example.com',
+      channelId: 'one.example',
+      day: TODAY,
+    })!.programmes;
+
+    expect(written!.title).toEqual([{ value: 'Komisár Rex', lang: 'sk' }]);
+    expect(written!.episodeNum).toEqual([
+      { system: 'xmltv_ns', value: '2.12.0/1' },
+      { system: 'onscreen', value: 'S03E13' },
+    ]);
+  });
+
   it('takes builders and plain programmes in the same parse', async () => {
     const cache = new MemoryCache();
 

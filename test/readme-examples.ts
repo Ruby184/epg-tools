@@ -57,6 +57,8 @@ import {
   xmltvDate,
   ProgrammeBuilder,
   XmltvDocumentBuilder,
+  parseTitleNumbering,
+  stripTitleSeason,
 } from '../src/xmltv/main.js';
 import type {
   ParseContext,
@@ -192,6 +194,19 @@ export const built = defineSiteConfig({
         .episode(item.episode, item.season)
         .video({ quality: 'HDTV' })
         .rating(item.rating, { system: 'SK' }),
+    );
+  },
+});
+
+export const numberedSite = defineSiteConfig({
+  site: 'example.tv',
+  channels: [{ xmltvId: 'one.example.tv', siteId: '101' }],
+  async request({ http }) {
+    return http.get('epg').json<{ items: RawItem[] }>();
+  },
+  parseDay({ payload, programme }) {
+    return payload.items.map((item) =>
+      programme(new Date(item.start), item.title, { numbered: true }).episode(item.episode),
     );
   },
 });
@@ -875,6 +890,34 @@ export const tolerant = (xml: string): number =>
 // --- docs/xmltv.md: Serializing ---------------------------------------------
 export const pretty = writeXmltvStream({ meta: {}, channels: [], programmes: [] }, { indent: 2 });
 
+// --- docs/xmltv.md: Numbering in titles ------------------------------------
+export const numberings = [
+  parseTitleNumbering('Duel S01E99'),
+  parseTitleNumbering('Komisár Rex III (13)'),
+  parseTitleNumbering('Filter (6/12)'),
+  parseTitleNumbering('Big Coast - Season 12 - Duncanby Lodge'),
+  parseTitleNumbering('Spinal Tap II'),
+];
+
+const hungarian = [
+  /^(?<title>.+?)(?:\s+-)?\s+(?<season>\d+)\.\s*évad$/u,
+  /^(?<title>.+?)(?:\s+-)?\s+(?<season>\S+)\.\s*sorozat$/u,
+];
+
+export const sorozat = parseTitleNumbering('Magyar népmesék - I. sorozat', {
+  patterns: hungarian,
+});
+
+export const soap = parseTitleNumbering('Ulice (1999)', {
+  patterns: [/(?<title>.+?)\s*\((?<episode>\d+)\)/u],
+});
+
+export const stripped = [
+  stripTitleSeason('Zločin III', 3),
+  stripTitleSeason('Spinal Tap II', 1),
+  stripTitleSeason('Duel S01E05', 1),
+];
+
 // --- docs/xmltv.md: Builders ------------------------------------------------
 export const programme = new ProgrammeBuilder({
   channel: 'one.example.tv',
@@ -888,6 +931,24 @@ export const programme = new ProgrammeBuilder({
   .episode(3, 2)
   .actor('Jane Doe', { role: 'Presenter' })
   .build();
+
+export const numbered = ProgrammeBuilder.of(
+  'one.example.tv',
+  '20260717200000 +0200',
+  'Duel - S01E02 - Pilot',
+  { numbered: true },
+).build();
+
+export const notFromTitle = (item: { start: Date; title: string; episode: number }) => [
+  ProgrammeBuilder.of('one.example.tv', item.start, item.title, {
+    numbered: { fromTitle: false },
+  }).episode(item.episode),
+  ProgrammeBuilder.of('one.example.tv', item.start, item.title, { numbered: true }).episode(
+    item.episode,
+    null,
+    { fromTitle: false },
+  ),
+];
 
 export const document = new XmltvDocumentBuilder()
   .generatorInfo('epg-tools', 'https://github.com/Ruby184/epg-tools')
