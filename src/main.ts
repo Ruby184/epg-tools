@@ -101,6 +101,8 @@ export {
   parseDdProgidEpisodeNum,
   parseOnscreenEpisodeNum,
   parseXmltvNsEpisodeNum,
+  parseTitleNumbering,
+  stripTitleSeason,
   DVB_GENRES,
   genreKey,
   genreOf,
@@ -126,6 +128,8 @@ export type {
   OutputProfileName,
   ProfileRef,
   RepeatableRef,
+  TitleNumbering,
+  TitleNumberingOptions,
   FindingCode,
   FindingSeverity,
   ValidateOptions,
@@ -275,7 +279,12 @@ export type {
   SiteConnection,
 } from './grabber/main.js';
 export type * from './grabber/types.js';
-export type { ChannelBuilder, ProgrammeBuilder, ProgrammeOptions } from './xmltv/builder.js';
+export type {
+  ChannelBuilder,
+  NumberedOptions,
+  ProgrammeBuilder,
+  ProgrammeOptions,
+} from './xmltv/builder.js';
 
 export { createGuideHandler, grabEvery, serveGuide } from './serve/main.js';
 export type {

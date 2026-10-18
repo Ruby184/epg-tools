@@ -318,6 +318,119 @@ The three fields partition the id, and `rootId` deliberately excludes the
 prefix — the same digits appear as `SH01006886.0000` for the series, so
 `` `SH${rootId}0000` `` is how one is derived from the other.
 
+### Numbering in titles
+
+Many sources give no episode number of their own and write it into the title
+instead. `parseTitleNumbering` takes it off and leaves the series' title:
+
+```ts
+parseTitleNumbering('Duel S01E99');          // { title: 'Duel', season: 1, episode: 99 }
+parseTitleNumbering('Komisár Rex III (13)'); // { title: 'Komisár Rex', season: 3, episode: 13 }
+parseTitleNumbering('Filter (6/12)');        // { title: 'Filter', episode: 6, episodes: 12 }
+parseTitleNumbering('Big Coast - Season 12 - Duncanby Lodge');
+// { title: 'Big Coast', season: 12, subTitle: 'Duncanby Lodge' }
+parseTitleNumbering('Spinal Tap II');        // { title: 'Spinal Tap II' }
+```
+
+A title is read only where it says outright what its numbers are.
+
+- A numeral at the end is as often a sequel as a season, so "Spinal Tap II"
+  stays.
+- A year in brackets stays: "Hrdinové (2019)". So does a span of years, as a
+  sports season is written: "Extraliga (2023/24)".
+- An `E` and a digit with no `S` before it stays: "Poprask na silnici E4" is a
+  road.
+- A word made of a numeral's letters is not a numeral: "CIVIL (2)" is episode 2
+  of "CIVIL". Nor is a numeral in small letters, nor one letter other than `I`
+  or `V`: "Malcolm X (2)" and "Vitamin C (3)" are names.
+- A season or episode of nought is left out: "Duel S00E05" is episode 5, with
+  no season. A title that names no season or episode above nought stays:
+  "Duel S00E00", "Show (0/12)".
+
+What a title says cannot always be told from its form:
+
+- A king's name ends in a numeral as a season does, so "Louis XIV (3)" is read
+  as season 14.
+- A film can be an episode by name, so "Star Wars: Episode 1 - The Phantom
+  Menace" is read as episode 1 of "Star Wars", with a sub-title.
+- A number in brackets is read as an episode, so a source that puts an age
+  rating there, "(18)", has to take it off before.
+- A number in brackets from 1900 to 2099 is taken for a year, so a daily soap's
+  "(1999)" stays. A pattern of the source's own reads it, since those are
+  tried first — see below.
+
+The built-in forms are English or need no language:
+
+- `S01E02`, and the rest of the grammar
+  [`parseOnscreenEpisodeNum`](#episode-numbers) reads, with the season
+  required: `S01 Ep 5`, `S1/3E2/10`, `S01E02 P1/2`
+- `Season 4 Episode 5`, `Season 4, Episode 5` and `Episode 4`
+- a Roman season before `(13)`
+- `(6/12)`
+- `: Season 1` and ` - Season 1`
+
+The words are read in any case: `s01e02` and `season 1` too. The separator
+before the numbering may be a colon, a comma or a dash, `-`, `–` or `—`. Where a form
+can be followed by a sub-title after a dash, it is read too.
+
+A reading is `{ title, season?, seasons?, episode?, episodes?, part?, parts?,
+subTitle? }`, its numbers 1-based, as `.episode()` takes them.
+
+A source's own words go in as `patterns`. They are tried first, and the
+built-in forms after them. Each pattern is a regular expression with named
+groups:
+
+- `title`, which is required: a pattern without one throws the first time the
+  patterns are used, whichever reads the title, since it could never read
+  anything;
+- any of `season`, `seasons`, `episode`, `episodes`, `part`, `parts` and
+  `subTitle`.
+
+A pattern is matched against the whole title, as though it began with `^` and
+ended with `$`, so a match never leaves part of the title out. A text of more
+than 500 characters is no title, and is not read. A number may be
+digits or a Roman numeral, with space around it and an ordinal's dot after it:
+`3.` and `I.` are 3 and 1. If a group holds a word that is no number, that
+pattern passes the title on to the next one. A group that matched nothing is a
+number not given, and a match that gives no season or episode is no reading:
+the next pattern is tried, so a pattern whose numbers are optional cannot
+stand in for the built-in ones.
+
+```ts
+const soap = /(?<title>.+?)\s*\((?<episode>\d+)\)/u;
+
+parseTitleNumbering('Ulice (1999)', { patterns: [soap] }); // { title: 'Ulice', episode: 1999 }
+```
+
+```ts
+const hungarian = [
+  /^(?<title>.+?)(?:\s+-)?\s+(?<season>\d+)\.\s*évad$/u,
+  /^(?<title>.+?)(?:\s+-)?\s+(?<season>\S+)\.\s*sorozat$/u,
+];
+
+parseTitleNumbering('Magyar népmesék - I. sorozat', { patterns: hungarian });
+// { title: 'Magyar népmesék', season: 1 }
+```
+
+A [builder](#builders) reads its title this way as it is made, with `numbered`.
+
+Some sources give the season in its own field and repeat it at the end of the
+title. `stripTitleSeason(title, season, options?)` takes off just that season,
+and hands the title back trimmed. A title that is neither text nor a number —
+`null`, as an API sends one — comes back as it came, from either function,
+rather than as the text "null". Here a bare numeral is read too, because the
+season given says what it is:
+
+```ts
+stripTitleSeason('Zločin III', 3);    // 'Zločin'
+stripTitleSeason('Spinal Tap II', 1); // 'Spinal Tap II' — not that season
+stripTitleSeason('Duel S01E05', 1);   // 'Duel S01E05' — an episode as well
+```
+
+`numbered` does not do this, since it reads nothing a source gives apart. A
+site that has the season in a field strips the title itself:
+`programme(start, stripTitleSeason(item.title, item.season))`.
+
 ### Genres
 
 `DVB_GENRES` is the ETSI EN 300 468 vocabulary with the `content_nibble` that
@@ -503,6 +616,60 @@ number above zero — is left empty rather than guessed: `.episode(177)` is
 `onscreen` (it has no form for one), and neither writes nothing at all. A
 season made up as `1` would be a claim the source never made, and one a
 consumer shows; before 0.8.0 it was the default.
+
+`numbered: true` takes off the numbering a source wrote into the title:
+
+- the title is what [`parseTitleNumbering`](#numbering-in-titles) leaves;
+- the numbers are written as `.episode()` would write them;
+- a sub-title after the numbers is written as `.subTitle()` would, in the
+  title's language.
+
+The title is rewritten as the builder is made. A title nothing reads stays
+exactly as it was given.
+
+What the source's own fields say wins, and the title's numbers fill in:
+
+- `.episode()` takes the title's numbers for whatever it leaves out.
+  `.episode(item.episode)` on "Komisár Rex III (13)" is season 3, episode 13 —
+  the season the title no longer says. A number the call does give wins.
+- Each number fills in where the call agrees with what it belongs to. How many
+  seasons there are is the series', and fills in for any call. The season
+  fills in for a call that names none: `.episode(113)` on "Komisár Rex III
+  (13)", from a source numbering episodes across the series, is season 3,
+  episode 113. The episode and how many there are are the season's, so a call
+  naming another season gets neither: `.episode(null, 4)` is season 4 alone,
+  not season 4's episode 13. The part is the episode's, so a call naming
+  another episode gets none.
+- `fromTitle: false` turns that off, so a call's numbers stand alone in place
+  of the title's. Put it on `numbered` for the whole builder, or on one
+  `.episode()` call; the call's own says what that call does.
+- Where no `.episode()` wrote numbers, the title's are written as the
+  programme is built — after a call told not to fill in that had none to
+  give, too, since they were taken off the title and would otherwise be
+  nowhere. An `xmltv_ns` or `onscreen` entry the site wrote with
+  `.episodeNum()` stands in for them; one in another system, such as
+  `dd_progid`, says something else, and the title's are written beside it.
+- The title's sub-title is written where the site gives no `.subTitle()` with
+  any text: one written from a field the source left empty does not stand in
+  for it.
+
+`.build()` adds what the title says to the programme it returns, not to the
+builder, so a `.subTitle()` or `.episode()` after one build still wins at the
+next.
+
+```ts
+programme(start, item.title, { numbered: { fromTitle: false } }).episode(item.episode);
+programme(start, item.title, { numbered: true }).episode(item.episode, null, { fromTitle: false });
+```
+
+`numbered: { patterns }` reads a source's own forms first. Only the title
+passed to the constructor is read, never one added later with `.title()`.
+
+```ts
+ProgrammeBuilder.of('one.example.tv', '20260717200000 +0200', 'Duel - S01E02 - Pilot', {
+  numbered: true,
+}).build(); // title 'Duel', sub-title 'Pilot', episode-num S01E02
+```
 
 A time the builder cannot read is handled by what the field is. `start` is
 required, so a bad one always throws. The rest can be done without, so the

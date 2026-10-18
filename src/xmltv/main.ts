@@ -50,6 +50,8 @@ export {
   parseXmltvNsEpisodeNum,
 } from './episode-num.js';
 export type { DdProgid, DdProgidType, EpisodeField, EpisodeNumbers } from './episode-num.js';
+export { parseTitleNumbering, stripTitleSeason } from './title-numbering.js';
+export type { TitleNumbering, TitleNumberingOptions } from './title-numbering.js';
 export { DVB_GENRES, genreKey, genreOf } from './genres.js';
 export type { Genre } from './genres.js';
 export { OUTPUT_PROFILE_NAMES, OUTPUT_PROFILES, resolveProfile } from './profile.js';
@@ -83,6 +85,7 @@ export type {
   EpisodeOptions,
   IconOptions,
   ImageOptions,
+  NumberedOptions,
   PersonOptions,
   PreviouslyShownOptions,
   ProgrammeBuilderBase,

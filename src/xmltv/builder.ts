@@ -12,6 +12,11 @@ import {
   writeXmltvStream,
 } from './serialize.js';
 import type { SerializeOptions, XmltvStreamInput } from './serialize.js';
+import {
+  readTitleNumbering,
+  type TitleNumbering,
+  type TitleNumberingOptions,
+} from './title-numbering.js';
 import type {
   XmltvActor,
   XmltvAudio,
@@ -100,6 +105,19 @@ export interface ProgrammeBuilderBase {
   clumpidx?: string;
   /** The first `<title>`; the tuple form carries its own lang and attributes. */
   title: string | [string, TextOptions];
+  /**
+   * Take the episode numbering a source writes into `title` off it, into
+   * `<episode-num>` and, after " - ", a `<sub-title>`: "Duel S01E99" is "Duel",
+   * season 1, episode 99. `true` reads the built-in forms, `{ patterns }` a
+   * source's own before them — see `parseTitleNumbering`.
+   *
+   * The title is rewritten at once. What the source's own fields say wins, and
+   * the title's fills in: an `.episode()` call takes the title's numbers for
+   * whatever it leaves out — unless `fromTitle` says not to — and without one
+   * they are written as the programme is built. The title's sub-title is
+   * written where the site gives none.
+   */
+  numbered?: boolean | NumberedOptions;
   /** Default `lang` applied by every method below unless it's given its own. */
   lang?: string;
   /**
@@ -191,6 +209,25 @@ export interface EpisodeOptions {
   part?: number;
   /** Total parts in the episode (default `1`). */
   parts?: number;
+  /**
+   * Whether this call fills in what it leaves out from the numbers `numbered`
+   * read off the title. `false` writes this call's numbers alone, and the
+   * title's are not written beside them — unless the call writes none. The builder's
+   * {@link NumberedOptions.fromTitle} unless given, which is `true` unless given.
+   */
+  fromTitle?: boolean;
+}
+
+/** How a builder reads the numbering its title carries — {@link ProgrammeBuilderBase.numbered}. */
+export interface NumberedOptions extends TitleNumberingOptions {
+  /**
+   * Whether an `.episode()` call fills in what it leaves out from the title's
+   * numbers. `false` has a call's numbers stand alone, in place of the
+   * title's: `.episode(13)` on "Komisár Rex III (13)" is then episode 13 with
+   * no season. A call's own `fromTitle` says otherwise for that call. `true`
+   * unless given.
+   */
+  fromTitle?: boolean;
 }
 
 /**
@@ -351,6 +388,34 @@ abstract class XmltvElementBuilder extends ExtraAttributesBuilder {
   }
 }
 
+/** The numbers a title carries, apart from the title itself. */
+type TitleNumbers = Omit<TitleNumbering, 'title' | 'subTitle'>;
+
+/**
+ * No numbers: what a builder fills in from where `numbered` read none off the
+ * title, or `fromTitle` says not to.
+ */
+const NO_TITLE_NUMBERS: Readonly<TitleNumbers> = Object.freeze({});
+
+/** No options, for {@link ProgrammeBuilder.build}'s numbers, which have none of a call's. */
+const NO_EPISODE_OPTIONS: Readonly<EpisodeOptions> = Object.freeze({});
+
+/** What `numbered` read off a builder's title, and what the site has done since. */
+interface TitleRead {
+  /** The numbers, which an `episode()` call fills in from and `build()` writes where the site wrote none. */
+  readonly numbers: Readonly<TitleNumbers>;
+  /** The sub-title, written where the site gives none. */
+  readonly subTitle: XmltvTextValue | undefined;
+  /** Whether an `episode()` call fills in from the numbers — {@link NumberedOptions.fromTitle}. */
+  readonly fill: boolean;
+  /**
+   * Whether the site gave numbers of its own — an `episode()` call, or an
+   * `xmltv_ns` or `onscreen` entry — so `build()` writes none of the title's
+   * beside them.
+   */
+  given: boolean;
+}
+
 /**
  * Fluent helper for building a fully-typed {@link XmltvProgramme}: construct
  * with the required base fields, chain the optional/repeatable ones, and
@@ -367,6 +432,12 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
   readonly #programme: XmltvProgramme;
   /** See {@link ProgrammeBuilderBase.timeZone}. */
   readonly #timeZone: string | undefined;
+  /**
+   * What `numbered` read off the title — see {@link ProgrammeBuilderBase.numbered}.
+   * Nothing for a builder not asked to, which then does no more than it ever
+   * did.
+   */
+  #titleRead: TitleRead | undefined;
 
   /** Positional shorthand for `new ProgrammeBuilder({ channel, start, title, ...options })`. */
   static of(
@@ -385,7 +456,7 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     this.#programme = {
       channel: base.channel,
       start: this.#zoned(base.start, xmltvDate(base.start)),
-      title: [this.textValue(base.title)],
+      title: [this.#numberedTitle(this.textValue(base.title), base.numbered)],
     };
 
     if (base.stop !== undefined) this.stop(base.stop);
@@ -394,6 +465,43 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     if (base.showview) this.showview(base.showview);
     if (base.videoplus) this.videoplus(base.videoplus);
     if (base.clumpidx) this.clumpidx(base.clumpidx);
+  }
+
+  /**
+   * The title, without the numbering `numbered` reads off it — which is kept
+   * for {@link episode} and {@link build} to write. A title nothing reads stays
+   * as it was given, untrimmed, and one that is not a string, as a JS caller can
+   * hand over, is not made one.
+   */
+  #numberedTitle(
+    title: XmltvTextValue,
+    numbered: ProgrammeBuilderBase['numbered'],
+  ): XmltvTextValue {
+    if (!numbered || typeof title.value !== 'string') {
+      return title;
+    }
+
+    const numbering = readTitleNumbering(
+      title.value,
+      numbered === true ? undefined : numbered.patterns,
+    );
+
+    if (numbering === undefined) {
+      return title;
+    }
+
+    this.#titleRead = {
+      numbers: numbering,
+      // In the title's language, a title of none included.
+      subTitle:
+        numbering.subTitle === undefined
+          ? undefined
+          : this.text(numbering.subTitle, title.lang ?? ''),
+      fill: numbered === true || numbered.fromTitle !== false,
+      given: false,
+    };
+
+    return { ...title, value: numbering.title };
   }
 
   /**
@@ -557,6 +665,10 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
 
   /** Explicit escape hatch for an `episode-num` system not covered by {@link episode}. */
   episodeNum(system: string, value: string, extraAttributes?: ExtraAttributes): this {
+    if (this.#titleRead !== undefined && (system === 'xmltv_ns' || system === 'onscreen')) {
+      this.#titleRead.given = true;
+    }
+
     (this.#programme.episodeNum ??= []).push(
       this.extraAttrs<XmltvEpisodeNum>({ system, value }, extraAttributes),
     );
@@ -576,16 +688,31 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
    * alone is `74..` with no `onscreen`, and neither is nothing at all. A season
    * made up as `1` would be a claim the source never made, and one a consumer
    * shows.
+   *
+   * On a builder whose title `numbered` read, a call fills in what it leaves
+   * out from the title's numbers: `.episode(13)` on "Komisár Rex III (13)" is
+   * season 3, episode 13 — the season the title no longer says.
    */
   episode(
     episode?: number | string | null,
     season?: number | string | null,
     opts: EpisodeOptions = {},
   ): this {
-    const numbers = this.#episodeNumbers(episode, season, opts);
+    const numbers = this.#episodeNumbers(
+      episode,
+      season,
+      opts,
+      this.#titleRead !== undefined && (opts.fromTitle ?? this.#titleRead.fill)
+        ? this.#titleRead.numbers
+        : NO_TITLE_NUMBERS,
+    );
 
     if (numbers.length > 0) {
       (this.#programme.episodeNum ??= []).push(...numbers);
+
+      if (this.#titleRead !== undefined) {
+        this.#titleRead.given = true;
+      }
     }
 
     return this;
@@ -780,8 +907,43 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     return this;
   }
 
+  /**
+   * The programme. Where `numbered` read the title, what it read and the site
+   * gave nothing of its own for is added to a copy — the title's sub-title
+   * where there is none, its numbers where neither `.episode()` nor an
+   * `xmltv_ns` or `onscreen` entry gave any — so the builder itself holds only
+   * what the site wrote, and whatever it adds after a build still wins.
+   */
   build(): XmltvProgramme {
-    return this.#programme;
+    const programme = this.#programme;
+
+    // Nothing read off the title — every builder not asked to — and the
+    // programme is what the site wrote, as it always was.
+    if (this.#titleRead === undefined) {
+      return programme;
+    }
+
+    // The site's own, where one says anything: one it wrote from a field the
+    // source left empty is none, and does not stand in for the title's.
+    const subTitle = programme.subTitle?.some(({ value }) => value)
+      ? undefined
+      : this.#titleRead.subTitle;
+    const numbers = this.#titleRead.given
+      ? []
+      : this.#episodeNumbers(undefined, undefined, NO_EPISODE_OPTIONS, this.#titleRead.numbers);
+
+    if (subTitle === undefined && numbers.length === 0) {
+      return programme;
+    }
+
+    return {
+      ...programme,
+      // A copy each time, so one build's changed by its caller is not the next's.
+      ...(subTitle === undefined ? {} : { subTitle: [{ ...subTitle }] }),
+      ...(numbers.length === 0
+        ? {}
+        : { episodeNum: [...(programme.episodeNum ?? []), ...numbers] }),
+    };
   }
 
   // --- internal helpers ---
@@ -896,7 +1058,6 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     return this.extraAttrs(rating, extraAttributes);
   }
 
-  /** Builds both `xmltv_ns` (0-based) and `onscreen` entries from 1-based season/episode numbers. */
   /**
    * A 1-based number as the 0-based index both wire formats use — or nothing,
    * for one the source did not give: missing, `null`, not a whole number, or
@@ -912,13 +1073,45 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     return Number.isInteger(number) && number > 0 ? number - 1 : undefined;
   }
 
+  /**
+   * The `xmltv_ns` and `onscreen` entries for the 1-based numbers a call
+   * gives, filled in from `title`'s for what it leaves out — each where the
+   * call agrees with what that number belongs to:
+   *
+   * - how many seasons there are is the series', and fills in for any call;
+   * - the season fills in for a call that names none;
+   * - the episode, and how many there are, are the season's, and fill in only
+   *   for a call naming no other season — season 3's episode 13 is not
+   *   season 4's;
+   * - the part, and how many there are, are the episode's, and fill in only
+   *   for a call naming no other episode either.
+   */
   #episodeNumbers(
     episode: number | string | null | undefined,
     season: number | string | null | undefined,
-    opts: EpisodeOptions,
+    given: EpisodeOptions,
+    title: Readonly<TitleNumbers>,
   ): XmltvEpisodeNum[] {
-    const seasonIndex = this.#index(season);
-    const episodeIndex = this.#index(episode);
+    const givenSeason = this.#index(season);
+    const givenEpisode = this.#index(episode);
+    const seasonAgrees =
+      givenSeason === undefined || title.season === undefined || givenSeason === title.season - 1;
+    const episodeAgrees =
+      seasonAgrees &&
+      (givenEpisode === undefined ||
+        title.episode === undefined ||
+        givenEpisode === title.episode - 1);
+    const seasonIndex = givenSeason ?? this.#index(title.season);
+    const episodeIndex = givenEpisode ?? (seasonAgrees ? this.#index(title.episode) : undefined);
+    const seasons = given.seasons ?? title.seasons;
+    const episodes = given.episodes ?? (seasonAgrees ? title.episodes : undefined);
+    const parts = given.parts ?? (episodeAgrees ? title.parts : undefined);
+    // A call giving how many parts and not which is at part 1, as it always
+    // was. A title's that says how many and not which — "P0/2" — is not known.
+    const part =
+      given.part ??
+      (episodeAgrees ? title.part : undefined) ??
+      (given.parts === undefined ? undefined : 1);
 
     if (seasonIndex === undefined && episodeIndex === undefined) {
       return [];
@@ -927,18 +1120,26 @@ export class ProgrammeBuilder extends XmltvElementBuilder {
     // The 1-based numbers a caller gives, as the 0-based indices both wire
     // formats use — and an empty slot where it gave none, which is how
     // `xmltv_ns` says "not known". An unspecified part means "part 1 of 1"
-    // (`0/1`), of an episode: with no episode there is no part to number.
+    // (`0/1`), of an episode: with no episode there is no part to number. A
+    // part with no total has none made up: "part 2 of 1" is no part.
     const numbers: EpisodeNumbers = {
       season: {
         ...(seasonIndex === undefined ? {} : { index: seasonIndex }),
-        ...(opts.seasons === undefined ? {} : { total: opts.seasons }),
+        ...(seasons === undefined ? {} : { total: seasons }),
       },
       episode: {
         ...(episodeIndex === undefined ? {} : { index: episodeIndex }),
-        ...(opts.episodes === undefined ? {} : { total: opts.episodes }),
+        ...(episodes === undefined ? {} : { total: episodes }),
       },
       part:
-        episodeIndex === undefined ? {} : { index: (opts.part ?? 1) - 1, total: opts.parts ?? 1 },
+        episodeIndex === undefined
+          ? {}
+          : part === undefined && parts === undefined
+            ? { index: 0, total: 1 }
+            : {
+                ...(part === undefined ? {} : { index: part - 1 }),
+                ...(parts === undefined ? {} : { total: parts }),
+              },
     };
     // Undefined where there is no episode to name: `onscreen` has no form for a
     // season alone.
