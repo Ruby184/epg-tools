@@ -24,12 +24,16 @@
  * {@link CacheManager}'s judgement, made the same way for every driver there is.
  */
 
+import type { Dirent } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { writeFileAtomic } from '../core/atomic.js';
+import { inParallel } from '../core/parallel.js';
 import type { CacheCodec, CodecName } from './codec.js';
 import type {
   CacheDriver,
+  CachedKey,
+  CacheListOptions,
   ChannelDayKey,
   FoundEntry,
   FoundMeta,
@@ -39,8 +43,8 @@ import type {
   StoredStateMeta,
 } from './types.js';
 
-/** How much of a prune's directory walk is in flight at once. */
-const PRUNE_CONCURRENCY = 8;
+/** How much of a walk of the cache directory — a prune's, a listing's — is in flight at once. */
+const WALK_CONCURRENCY = 8;
 
 /**
  * How much of an entry is read at a time while looking for its meta. A
@@ -150,27 +154,6 @@ export abstract class FsCacheDriver implements CacheDriver {
   }
 
   /**
-   * Run `work` over `items`, `limit` of them at a time.
-   *
-   * A prune is thousands of small operations that only wait on the disk, so
-   * doing them one after another spends the whole time waiting — while doing
-   * them all at once is the file descriptor storm the rest of this package is
-   * careful to avoid. Node's own file operations run on a threadpool of four by
-   * default, so there is little to gain past a handful in flight.
-   */
-  async #inParallel<T>(items: T[], limit: number, work: (item: T) => Promise<void>): Promise<void> {
-    let next = 0;
-
-    const worker = async (): Promise<void> => {
-      while (next < items.length) {
-        await work(items[next++]!);
-      }
-    };
-
-    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  }
-
-  /**
    * An open file, a chunk at a time and none of it before it is asked for.
    *
    * Node has readier tools for this — a `ReadStream` iterates chunks too — but a
@@ -220,6 +203,34 @@ export abstract class FsCacheDriver implements CacheDriver {
     const encoded = encodeURIComponent(value);
 
     return /^\.+$/.test(encoded) ? encoded.replaceAll('.', '%2E') : encoded;
+  }
+
+  /**
+   * A path segment as the name it was made from, or nothing for one this
+   * driver could not have made: a name it would have made as another segment —
+   * a mount's `lost+found`, whose `+` it would have escaped, or a `%2f` it
+   * would have written `%2F` — or one whose `%` is not an escape at all.
+   * Somebody's own directory, which no key this driver writes is in.
+   */
+  #named(segment: string): string | undefined {
+    let name: string;
+
+    try {
+      name = decodeURIComponent(segment);
+    } catch {
+      return undefined;
+    }
+
+    return this.#segment(name) === segment ? name : undefined;
+  }
+
+  /**
+   * What this driver's own entry files are called, the day captured. Built when
+   * asked rather than in the constructor, where a subclass has yet to say what
+   * its extension is.
+   */
+  #entryFile(): RegExp {
+    return new RegExp(`^(\\d{4}-\\d{2}-\\d{2})\\.${this.extension}$`);
   }
 
   #channelDir(key: ChannelDayKey): string {
@@ -360,63 +371,216 @@ export abstract class FsCacheDriver implements CacheDriver {
 
   async prune(options: { before: string }): Promise<number> {
     let removed = 0;
-    let sites;
+    const entryFile = this.#entryFile();
+    // Walked as a listing walks it, so what is listed is what is pruned: a site
+    // moved to another disk and linked back included, and beside the sites a
+    // directory this process may not read — a mount's `.Trash-0` — or could
+    // not have named — its `lost+found` — passed over.
+    const sites = (await this.#children(this.dir, 'named')).filter(
+      (entry) => entry.directory && this.#named(entry.name) !== undefined,
+    );
 
-    try {
-      sites = await fs.readdir(this.dir, { withFileTypes: true });
-    } catch (error) {
-      if (this.#isNotFound(error)) {
-        return 0;
-      }
-
-      throw error;
-    }
-
-    // This driver's own entry files. Built here rather than in the constructor,
-    // where a subclass has yet to say what its extension is, and a prune is
-    // once a run either way.
-    const entryFile = new RegExp(`^(\\d{4}-\\d{2}-\\d{2})\\.${this.extension}$`);
-
-    for (const site of sites.filter((entry) => entry.isDirectory())) {
+    for (const site of sites) {
       // Between sites, and between channels below: `readdir` and `rm` take no
       // signal of their own, and a prune is a walk rather than one long
       // operation — so this is where it stops, having removed whole days.
       this.signal?.throwIfAborted();
 
       const sitePath = path.join(this.dir, site.name);
-      const channels = await fs.readdir(sitePath, { withFileTypes: true });
-
-      await this.#inParallel(
-        channels.filter((entry) => entry.isDirectory()),
-        PRUNE_CONCURRENCY,
-        async (channel) => {
-          this.signal?.throwIfAborted();
-
-          const channelPath = path.join(sitePath, channel.name);
-          // Counted after the await, not `+= await`: that reads the total
-          // before waiting and writes it back after, so two of these running
-          // together would each add to the same stale number.
-          const pruned = await this.#pruneChannelDir(channelPath, options.before, entryFile);
-
-          removed += pruned;
-
-          await this.#removeIfEmpty(channelPath);
-        },
+      const channels = (await this.#children(sitePath, 'found')).filter(
+        (entry) => entry.directory && this.#named(entry.name) !== undefined,
       );
 
-      await this.#removeIfEmpty(sitePath);
+      await inParallel(channels, WALK_CONCURRENCY, async (channel) => {
+        this.signal?.throwIfAborted();
+
+        const channelPath = path.join(sitePath, channel.name);
+        // Counted after the await, not `+= await`: that reads the total
+        // before waiting and writes it back after, so two of these running
+        // together would each add to the same stale number.
+        const pruned = await this.#pruneChannelDir(channelPath, options.before, entryFile);
+
+        removed += pruned;
+
+        // A link is left in place, emptied or not: `rmdir` does not follow
+        // one, and where it points was somebody's choice.
+        if (!channel.link) {
+          await this.#removeIfEmpty(channelPath);
+        }
+      });
+
+      if (!site.link) {
+        await this.#removeIfEmpty(sitePath);
+      }
     }
 
     return removed;
   }
 
+  /**
+   * A walk of the cache directory, a site at a time: each channel directory
+   * holds a site's entries, and each `<key>.json` beside them a group of its
+   * state. A file of anything else — one being written, one somebody put there
+   * — is passed over, as is a name this driver could not have made.
+   *
+   * Only a directory found beside the sites is passed over when it cannot be
+   * read — a mount's `.Trash-0` holds nothing this process wrote. Inside a site
+   * everything is this driver's, so a channel that cannot be read says so, as
+   * a run reading it would, rather than be listed as holding nothing.
+   */
+  async *list(options: CacheListOptions = {}): AsyncIterable<CachedKey> {
+    const entryFile = this.#entryFile();
+    const sites =
+      options.site === undefined
+        ? (await this.#children(this.dir, 'named'))
+            .filter((entry) => entry.directory)
+            .map((entry) => entry.name)
+        : [this.#segment(options.site)];
+
+    for (const segment of sites) {
+      // Between sites and between channels, as a prune is: `readdir` takes no
+      // signal of its own.
+      this.signal?.throwIfAborted();
+
+      const site = this.#named(segment);
+
+      if (site === undefined) {
+        continue;
+      }
+
+      const sitePath = path.join(this.dir, segment);
+
+      // One channel's directory, where its site was named too, and none of the
+      // rest of the site. In a walk of every site it is looked for among what
+      // each holds below: a site found unreadable has none to look in.
+      if (options.channelId !== undefined && options.site !== undefined) {
+        if (options.kind !== 'state') {
+          yield* this.#entriesIn(
+            path.join(sitePath, this.#segment(options.channelId)),
+            site,
+            options.channelId,
+            entryFile,
+          );
+        }
+
+        continue;
+      }
+
+      for (const child of await this.#children(
+        sitePath,
+        options.site === undefined ? 'found' : 'named',
+      )) {
+        if (child.file && child.name.endsWith('.json')) {
+          // A group is a site's, and no channel's.
+          const key =
+            options.kind === 'entry' || options.channelId !== undefined
+              ? undefined
+              : this.#named(child.name.slice(0, -'.json'.length));
+
+          if (key !== undefined) {
+            yield { kind: 'state', site, key };
+          }
+
+          continue;
+        }
+
+        // Only groups asked for, and the channel directories are not read.
+        const channelId =
+          child.directory && options.kind !== 'state' ? this.#named(child.name) : undefined;
+
+        if (
+          channelId !== undefined &&
+          (options.channelId === undefined || channelId === options.channelId)
+        ) {
+          yield* this.#entriesIn(path.join(sitePath, child.name), site, channelId, entryFile);
+        }
+      }
+    }
+  }
+
+  /** The entries one channel directory holds. */
+  async *#entriesIn(
+    channelPath: string,
+    site: string,
+    channelId: string,
+    entryFile: RegExp,
+  ): AsyncGenerator<CachedKey> {
+    this.signal?.throwIfAborted();
+
+    for (const file of await this.#children(channelPath, 'named')) {
+      const day = file.file ? entryFile.exec(file.name)?.[1] : undefined;
+
+      if (day !== undefined) {
+        yield { kind: 'entry', key: { site, channelId, day } };
+      }
+    }
+  }
+
+  /**
+   * What a directory holds, and what each is — a symbolic link as what it
+   * points at, since a read follows one: a site moved to another disk and
+   * linked back is listed as it is read.
+   *
+   * Nothing where there is no such directory. Nothing, too, where it cannot be
+   * read and was `found` beside the sites in walking the cache — a mount's
+   * `.Trash-0` holds nothing this process wrote. Any other that cannot be read
+   * says so: one asked for by name, and anything inside a site, all of it this
+   * driver's.
+   */
+  async #children(
+    dir: string,
+    how: 'named' | 'found',
+  ): Promise<Array<{ name: string; directory: boolean; file: boolean; link: boolean }>> {
+    let entries: Dirent[];
+
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      const code = this.#code(error);
+
+      if (
+        code === 'ENOENT' ||
+        code === 'ENOTDIR' ||
+        (how === 'found' && (code === 'EACCES' || code === 'EPERM'))
+      ) {
+        return [];
+      }
+
+      throw error;
+    }
+
+    const children = entries.map((entry) => ({
+      name: entry.name,
+      directory: entry.isDirectory(),
+      file: entry.isFile(),
+      link: false,
+    }));
+
+    // A link is the one thing the entry cannot say, and is asked — only the
+    // links, a few at a time: a link to nothing is neither.
+    const links = entries.flatMap((entry, index) => (entry.isSymbolicLink() ? [index] : []));
+
+    await inParallel(links, WALK_CONCURRENCY, async (index) => {
+      const { name } = entries[index]!;
+      const target = await fs.stat(path.join(dir, name)).catch(() => undefined);
+
+      children[index] = {
+        name,
+        directory: target?.isDirectory() === true,
+        file: target?.isFile() === true,
+        link: true,
+      };
+    });
+
+    return children;
+  }
+
   /** Remove all entries in one channel directory older than `before`. */
   async #pruneChannelDir(channelPath: string, before: string, entryFile: RegExp): Promise<number> {
-    const files = await fs.readdir(channelPath);
     const staleDays = new Set<string>();
 
-    for (const file of files) {
-      const day = entryFile.exec(file)?.[1];
+    for (const file of await this.#children(channelPath, 'named')) {
+      const day = file.file ? entryFile.exec(file.name)?.[1] : undefined;
 
       // String comparison works for YYYY-MM-DD day strings.
       if (day !== undefined && day < before) {
@@ -427,7 +591,7 @@ export abstract class FsCacheDriver implements CacheDriver {
     // A day's files together, and the days a few at a time: the entries of one
     // channel are the smallest pieces here, and waiting for each in turn is
     // most of what a prune used to spend its time on.
-    await this.#inParallel([...staleDays], PRUNE_CONCURRENCY, async (day) =>
+    await inParallel([...staleDays], WALK_CONCURRENCY, async (day) =>
       fs.rm(path.join(channelPath, `${day}.${this.extension}`), { force: true }),
     );
 

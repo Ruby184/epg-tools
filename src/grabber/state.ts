@@ -155,6 +155,46 @@ interface StateGroup {
 }
 
 /**
+ * The channel list a {@link StateKey.CHANNELS} group holds, or nothing where
+ * it holds none a run can use — what a run reads, and what `epg cache state`
+ * reports.
+ */
+export function channelListIn(data: unknown): GrabberChannel[] | undefined {
+  // One shape: the envelope, whose first key is the list itself.
+  const list =
+    data === null || typeof data !== 'object'
+      ? undefined
+      : (data as { channels?: unknown }).channels;
+
+  // All or nothing, unlike a bag's entries: half a channel list would mean
+  // grabbing half a site, which is worse than fetching the list again.
+  return Array.isArray(list) &&
+    list.every(
+      (channel: unknown) =>
+        typeof channel === 'object' &&
+        channel !== null &&
+        typeof (channel as GrabberChannel).xmltvId === 'string' &&
+        typeof (channel as GrabberChannel).siteId === 'string',
+    )
+    ? (list as GrabberChannel[])
+    : undefined;
+}
+
+/**
+ * The `[key, value]` pairs a bag holds that a run keeps — each with a key that
+ * is a string — and none of anything else: what a run reads, and what `epg
+ * cache state` reports.
+ */
+export function bagEntriesIn(data: unknown): Array<[string, unknown]> {
+  return Array.isArray(data)
+    ? data.filter(
+        (entry: unknown): entry is [string, unknown] =>
+          Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string',
+      )
+    : [];
+}
+
+/**
  * The channel list a site fetched, and how old it is allowed to get.
  *
  * A group of its own rather than a bag because it is one value with one question
@@ -188,32 +228,10 @@ export class ChannelsGroup implements StateGroup {
    */
   static from(found: StateEntry | undefined): ChannelsGroup {
     return new ChannelsGroup(
-      ChannelsGroup.#listIn(found?.data),
+      channelListIn(found?.data),
       found?.meta.writtenAt,
       ChannelsGroup.#metadataIn(found?.data),
     );
-  }
-
-  /** The list an entry holds, or nothing where what it holds is not one. */
-  static #listIn(data: unknown): GrabberChannel[] | undefined {
-    // One shape: the envelope, whose first key is the list itself.
-    const list =
-      data === null || typeof data !== 'object'
-        ? undefined
-        : (data as { channels?: unknown }).channels;
-
-    // All or nothing, unlike a bag's entries: half a channel list would mean
-    // grabbing half a site, which is worse than fetching the list again.
-    return Array.isArray(list) &&
-      list.every(
-        (channel: unknown) =>
-          typeof channel === 'object' &&
-          channel !== null &&
-          typeof (channel as GrabberChannel).xmltvId === 'string' &&
-          typeof (channel as GrabberChannel).siteId === 'string',
-      )
-      ? (list as GrabberChannel[])
-      : undefined;
   }
 
   /** What the site said about the list it stored, where it said anything. */
@@ -320,15 +338,7 @@ class BagGroup<V> implements StateGroup {
    * one unreadable value is better than forgetting the token beside it.
    */
   static from<V>(key: string, found: StateEntry | undefined): BagGroup<V> {
-    return new BagGroup<V>(
-      key,
-      Array.isArray(found?.data)
-        ? found.data.filter(
-            (entry: unknown): entry is [string, V] =>
-              Array.isArray(entry) && entry.length === 2 && typeof entry[0] === 'string',
-          )
-        : [],
-    );
+    return new BagGroup<V>(key, bagEntriesIn(found?.data) as Array<[string, V]>);
   }
 
   readonly key: string;

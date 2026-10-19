@@ -14,7 +14,7 @@
  */
 
 import type { CacheCodec, CodecName } from './codec.js';
-import type { CacheDriver, FoundEntry, FoundMeta, FoundState } from './types.js';
+import type { CacheDriver, CachedKey, FoundEntry, FoundMeta, FoundState } from './types.js';
 
 export class NoCacheDriver implements CacheDriver {
   /** Never asked to make or read anything, and named so it is a codec a thread has. */
@@ -48,4 +48,7 @@ export class NoCacheDriver implements CacheDriver {
   async writeState(): Promise<void> {}
 
   async deleteState(): Promise<void> {}
+
+  /** Holding nothing, it has nothing to list. */
+  async *list(): AsyncIterable<CachedKey> {}
 }

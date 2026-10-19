@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CACHE_SCHEMA,
   CacheManager,
@@ -17,6 +17,8 @@ import {
 import type {
   CacheDriver,
   CacheEntryMeta,
+  CachedKey,
+  CacheListOptions,
   ChannelDayKey,
   FoundEntry,
   FoundMeta,
@@ -27,7 +29,7 @@ import type {
   StoredProgramme,
   StoredStateMeta,
 } from '../src/cache/main.js';
-import { CODECS, type CacheCodec, type CodecName } from '../src/cache/codec.js';
+import { CODECS, CorruptEntryError, type CacheCodec, type CodecName } from '../src/cache/codec.js';
 import {
   getXmltvOffset,
   getXmltvPrecision,
@@ -892,6 +894,20 @@ describe('CacheManager', () => {
       this.groups.delete(`${site}|${key}`);
     }
 
+    async *list(): AsyncIterable<CachedKey> {
+      for (const id of this.entries.keys()) {
+        const [site = '', channelId = '', day = ''] = id.split('|');
+
+        yield { kind: 'entry', key: { site, channelId, day } };
+      }
+
+      for (const id of this.groups.keys()) {
+        const [site = '', key = ''] = id.split('|');
+
+        yield { kind: 'state', site, key };
+      }
+    }
+
     async close(): Promise<void> {
       this.closed++;
     }
@@ -1452,11 +1468,32 @@ describe.skipIf(sqlite === undefined)('SqliteCacheDriver', () => {
 
     await using store = cache(new SqliteCacheDriver({ dir }));
 
-    // The meta is still good, and it is what the manager judges an entry by — so
-    // the entry stays, and a count disagreeing with what came back is what makes
-    // the day worth grabbing again.
+    // The meta is still good, so a staleness check alone keeps the entry; a
+    // read finds what it holds is not the two programmes it says, and removes
+    // it, so the day reads as never grabbed and the next run grabs it again.
     expect(await store.getMeta(key)).toMatchObject({ programmeCount: 2 });
-    expect(await store.read(key)).toEqual([]);
+    expect(await store.read(key)).toBeUndefined();
+    expect(await store.getMeta(key)).toBeUndefined();
+  });
+
+  it('removes an entry whose programmes a codec cannot read at all, as a run reads it', async () => {
+    const lines = path.join(dir, 'lines');
+    const store = ndjson({ dir: lines });
+
+    await store.write(key, [programme(), programme()]);
+
+    const file = path.join(lines, key.site, key.channelId, `${key.day}.ndjson`);
+    const content = (await fs.readFile(file, 'utf8')).trimEnd().split('\n');
+
+    // The last programme cut short, which `JSON.parse` throws on — and which
+    // used to throw out of the merge with it.
+    await fs.writeFile(
+      file,
+      `${content.slice(0, -1).join('\n')}\n${content.at(-1)!.slice(0, 20)}\n`,
+    );
+
+    expect(await store.read(key)).toBeUndefined();
+    expect(await store.getMeta(key)).toBeUndefined();
   });
 
   it('answers a batch of metas in one statement, in the order asked', async () => {
@@ -1528,6 +1565,201 @@ describe.skipIf(sqlite === undefined)('SqliteCacheDriver', () => {
     expect(await store.getMeta(key)).toBeUndefined();
     await store.write(key, [programme()]);
     expect(await store.read(key)).toHaveLength(1);
+  });
+
+  it('changes nothing it only reads, of tables another version made', async () => {
+    const file = path.join(dir, 'cache.sqlite');
+    const first = new SqliteCacheDriver({ dir });
+
+    await cache(first).write(key, [programme()]);
+    await cache(first).setState(key.site, 'state', [['cursor', 1]]);
+    await first.close();
+
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(file);
+    db.exec('PRAGMA user_version = 99');
+    db.close();
+
+    const looked = new SqliteCacheDriver({ dir });
+    const listed: unknown[] = [];
+
+    for await (const held of looked.list()) {
+      listed.push(held);
+    }
+
+    expect(listed).toEqual([]);
+    expect(await looked.readMeta(key)).toBeUndefined();
+    expect(await looked.readMetas([key])).toEqual([undefined]);
+    expect(await looked.read(key)).toBeUndefined();
+    expect(await looked.readState(key.site, 'state')).toBeUndefined();
+    expect(await looked.prune({ before: '2099-01-01' })).toBe(0);
+    await looked.delete(key);
+    await looked.deleteState(key.site, 'state');
+    await looked.close();
+
+    // The tables, and what is in them, as another version left them.
+    const after = new DatabaseSync(file);
+
+    expect(after.prepare('PRAGMA user_version').get()).toEqual({ user_version: 99 });
+    expect(after.prepare('SELECT count(*) AS n FROM entries').get()).toEqual({ n: 1 });
+    expect(after.prepare('SELECT count(*) AS n FROM state').get()).toEqual({ n: 1 });
+    after.close();
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'refuses a place it could never make the database, before anything is asked',
+    async () => {
+      const locked = path.join(dir, 'locked');
+
+      await fs.mkdir(locked, { mode: 0o500 });
+
+      try {
+        expect(() => new SqliteCacheDriver({ dir: path.join(locked, 'cache') })).toThrow(
+          `The sqlite cache cannot be made at ${path.join(locked, 'cache', 'cache.sqlite')}: ${locked} is not writable`,
+        );
+      } finally {
+        await fs.chmod(locked, 0o700);
+      }
+    },
+  );
+
+  it('lists a page at a time, and a change made while listing is made at once', async () => {
+    const file = path.join(dir, 'cache.sqlite');
+    const driver = new SqliteCacheDriver({ dir });
+    const store = cache(driver);
+    const days = Array.from({ length: 2500 }, (_, i) =>
+      new Date(Date.UTC(2020, 0, 1) + i * 86_400_000).toISOString().slice(0, 10),
+    );
+
+    for (const day of days) {
+      await store.write({ ...key, day }, []);
+    }
+
+    const { DatabaseSync } = await import('node:sqlite');
+    const other = new DatabaseSync(file);
+    const seen: string[] = [];
+
+    for await (const held of driver.list()) {
+      seen.push((held as { key: ChannelDayKey }).key.day);
+
+      // Removed as it is handed out — and seen gone from another connection
+      // straight after, which a write left waiting on an open read would not be.
+      await store.delete((held as { key: ChannelDayKey }).key);
+
+      if (seen.length === 1500) {
+        expect(other.prepare('SELECT count(*) AS n FROM entries').get()).toEqual({ n: 1000 });
+      }
+    }
+
+    other.close();
+    await driver.close();
+
+    expect(seen).toEqual(days);
+  });
+
+  it('logs ahead for a prune too, which changes what is there', async () => {
+    const file = path.join(dir, 'cache.sqlite');
+    const first = new SqliteCacheDriver({ dir });
+
+    await cache(first).write(key, [programme()]);
+    await first.close();
+
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(file);
+    db.exec('PRAGMA journal_mode = DELETE');
+    db.close();
+
+    const driver = new SqliteCacheDriver({ dir });
+
+    expect(await driver.prune({ before: '2099-01-01' })).toBe(1);
+    await driver.close();
+
+    const after = new DatabaseSync(file);
+
+    expect(after.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' });
+    after.close();
+  });
+
+  it('opens nothing again once closed', async () => {
+    const driver = new SqliteCacheDriver({ dir });
+
+    await driver.close();
+
+    await expect(driver.readMeta(key)).rejects.toThrow('This sqlite cache is closed');
+    await expect(cache(driver).write(key, [])).rejects.toThrow('This sqlite cache is closed');
+  });
+
+  it('logs ahead from its first write, whatever it read before', async () => {
+    const file = path.join(dir, 'cache.sqlite');
+    const first = new SqliteCacheDriver({ dir });
+
+    await cache(first).write(key, [programme()]);
+    await first.close();
+
+    // A copy someone took out of WAL to move it.
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(file);
+    db.exec('PRAGMA journal_mode = DELETE');
+    db.close();
+
+    const driver = new SqliteCacheDriver({ dir });
+
+    await driver.readMeta(key);
+    await cache(driver).write(key, [programme()]);
+    await driver.close();
+
+    const after = new DatabaseSync(file);
+
+    expect(after.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' });
+    after.close();
+  });
+
+  it('steps two listings through at once, each to its end', async () => {
+    const driver = new SqliteCacheDriver({ dir });
+    const store = cache(driver);
+
+    for (const day of ['2026-07-17', '2026-07-18', '2026-07-19']) {
+      await store.write({ ...key, day }, []);
+    }
+
+    const first = driver.list()[Symbol.asyncIterator]();
+    const second = driver.list()[Symbol.asyncIterator]();
+    const days: string[][] = [[], []];
+
+    // Turn about, so neither is read whole before the other starts.
+    for (let turn = 0; turn < 3; turn++) {
+      for (const [index, listing] of [first, second].entries()) {
+        const { value } = await listing.next();
+
+        days[index]!.push((value as { key: ChannelDayKey }).key.day);
+      }
+    }
+
+    expect(days).toEqual([
+      ['2026-07-17', '2026-07-18', '2026-07-19'],
+      ['2026-07-17', '2026-07-18', '2026-07-19'],
+    ]);
+    expect((await first.next()).done).toBe(true);
+    await driver.close();
+  });
+
+  it('makes nothing where there is no database, until it writes', async () => {
+    const nowhere = path.join(dir, 'not', 'here');
+    const driver = new SqliteCacheDriver({ dir: nowhere });
+
+    expect(await driver.readMeta(key)).toBeUndefined();
+    expect(await driver.prune({ before: '2099-01-01' })).toBe(0);
+
+    for await (const held of driver.list()) {
+      expect.unreachable(String(held));
+    }
+
+    expect(await fs.stat(nowhere).catch(() => undefined)).toBeUndefined();
+
+    await cache(driver).write(key, [programme()]);
+
+    expect(await cache(driver).read(key)).toHaveLength(1);
+    await driver.close();
   });
 
   it("keeps a site's state in a row of its own, one per group", async () => {
@@ -1672,7 +1904,7 @@ describe('a channel-day a thread encoded for its store', () => {
     const brief: CacheCodec = {
       encode: (programmes) =>
         CODECS.json.encode(programmes.map(({ desc: _desc, ...kept }) => kept as XmltvProgramme)),
-      decode: (body) => CODECS.json.decode(body),
+      decode: (body, meta) => CODECS.json.decode(body, meta),
     };
 
     class Brief extends MemoryCacheDriver {
@@ -1740,4 +1972,803 @@ describe('a meta longer than one read', () => {
       }
     });
   }
+});
+
+describe('what a store lists', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'epg-cache-list-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  /** What a listing named, as sortable lines. */
+  async function listed(driver: CacheDriver, options?: CacheListOptions): Promise<string[]> {
+    const names: string[] = [];
+
+    for await (const held of driver.list(options)) {
+      names.push(
+        held.kind === 'entry'
+          ? `entry ${held.key.site} | ${held.key.channelId} | ${held.key.day}`
+          : `state ${held.site} | ${held.key}`,
+      );
+    }
+
+    return names.sort();
+  }
+
+  const meta = (): StoredStateMeta => ({
+    writtenAt: '2026-07-17T12:00:00.000Z',
+    schema: STATE_SCHEMA,
+    writtenBy: __PKG_VERSION__,
+  });
+
+  const drivers: Array<[string, () => CacheDriver]> = [
+    ['ndjson', () => new FsNdjsonCacheDriver({ dir })],
+    ['xmltv', () => new FsXmltvCacheDriver({ dir })],
+    ['memory', () => new MemoryCacheDriver()],
+    ...(sqlite === undefined
+      ? []
+      : ([['sqlite', () => new sqlite.SqliteCacheDriver({ dir })]] as Array<
+          [string, () => CacheDriver]
+        >)),
+  ];
+
+  for (const [name, make] of drivers) {
+    describe(`the ${name} driver`, () => {
+      it('lists every entry and every group, and a site of them when asked', async () => {
+        const driver = make();
+        const store = cache(driver);
+
+        try {
+          await store.write({ site: 'a.tv', channelId: 'one', day: '2026-07-17' }, [programme()]);
+          await store.write({ site: 'a.tv', channelId: 'one', day: '2026-07-18' }, []);
+          await store.write({ site: 'a.tv', channelId: 'two', day: '2026-07-17' }, [programme()]);
+          await store.write({ site: 'b.tv', channelId: 'one', day: '2026-07-17' }, [programme()]);
+          await driver.writeState('a.tv', 'channels', { channels: [] }, meta());
+          await driver.writeState('b.tv', 'state', [['cursor', 42]], meta());
+
+          expect(await listed(driver)).toEqual([
+            'entry a.tv | one | 2026-07-17',
+            'entry a.tv | one | 2026-07-18',
+            'entry a.tv | two | 2026-07-17',
+            'entry b.tv | one | 2026-07-17',
+            'state a.tv | channels',
+            'state b.tv | state',
+          ]);
+          expect(await listed(driver, { site: 'b.tv' })).toEqual([
+            'entry b.tv | one | 2026-07-17',
+            'state b.tv | state',
+          ]);
+          expect(await listed(driver, { site: 'c.tv' })).toEqual([]);
+        } finally {
+          await driver.close?.();
+        }
+      });
+
+      it('narrows to one kind, and to one channel', async () => {
+        const driver = make();
+        const store = cache(driver);
+
+        try {
+          await store.write({ site: 'a.tv', channelId: 'one', day: '2026-07-17' }, []);
+          await store.write({ site: 'a.tv', channelId: 'two', day: '2026-07-17' }, []);
+          await store.write({ site: 'b.tv', channelId: 'one', day: '2026-07-17' }, []);
+          await driver.writeState('a.tv', 'state', [], meta());
+          await driver.writeState('b.tv', 'state', [], meta());
+
+          expect(await listed(driver, { site: 'a.tv', kind: 'state' })).toEqual([
+            'state a.tv | state',
+          ]);
+          expect(await listed(driver, { kind: 'entry', site: 'b.tv' })).toEqual([
+            'entry b.tv | one | 2026-07-17',
+          ]);
+          // A channel's entries are all a channel has: state is a site's.
+          expect(await listed(driver, { site: 'a.tv', channelId: 'two' })).toEqual([
+            'entry a.tv | two | 2026-07-17',
+          ]);
+          expect(await listed(driver, { site: 'a.tv', channelId: 'two', kind: 'state' })).toEqual(
+            [],
+          );
+          // And in every site, where it is looked for.
+          expect(await listed(driver, { channelId: 'one' })).toEqual([
+            'entry a.tv | one | 2026-07-17',
+            'entry b.tv | one | 2026-07-17',
+          ]);
+        } finally {
+          await driver.close?.();
+        }
+      });
+
+      it('names a key as it was written, whatever it had to be made into to be kept', async () => {
+        const driver = make();
+        const store = cache(driver);
+
+        try {
+          await store.write({ site: 'example.com:8080', channelId: '..', day: '2026-07-17' }, []);
+          await store.write({ site: 'example.com:8080', channelId: 'a/b', day: '2026-07-17' }, []);
+          await driver.writeState('example.com:8080', 'x/y', null, meta());
+
+          expect(await listed(driver, { site: 'example.com:8080' })).toEqual([
+            'entry example.com:8080 | .. | 2026-07-17',
+            'entry example.com:8080 | a/b | 2026-07-17',
+            'state example.com:8080 | x/y',
+          ]);
+        } finally {
+          await driver.close?.();
+        }
+      });
+
+      it('lists nothing for a store that holds nothing', async () => {
+        const driver = make();
+
+        try {
+          expect(await listed(driver)).toEqual([]);
+        } finally {
+          await driver.close?.();
+        }
+      });
+
+      it('lists what is left after a prune, and nothing removed', async () => {
+        const driver = make();
+        const store = cache(driver);
+
+        try {
+          await store.write({ site: 'a.tv', channelId: 'one', day: '2026-07-16' }, []);
+          await store.write({ site: 'a.tv', channelId: 'one', day: '2026-07-17' }, []);
+          await store.prune({ before: '2026-07-17' });
+
+          expect(await listed(driver)).toEqual(['entry a.tv | one | 2026-07-17']);
+        } finally {
+          await driver.close?.();
+        }
+      });
+    });
+  }
+
+  it('passes over a file a cache directory holds that the driver did not write', async () => {
+    const driver = new FsNdjsonCacheDriver({ dir });
+
+    await cache(driver).write({ site: 'a.tv', channelId: 'one', day: '2026-07-17' }, []);
+    // An entry being written, a note, an entry of another driver, a file at the
+    // top, and a directory whose name no encoding made.
+    await fs.writeFile(path.join(dir, 'a.tv', 'one', '.2026-07-18.ndjson.tmp'), '');
+    await fs.writeFile(path.join(dir, 'a.tv', 'one', 'notes.txt'), '');
+    await fs.writeFile(path.join(dir, 'a.tv', 'one', '2026-07-19.xml'), '');
+    await fs.writeFile(path.join(dir, 'a.tv', 'README'), '');
+    await fs.writeFile(path.join(dir, 'README'), '');
+    // An entry in a site, and a channel, no encoding could have named.
+    await fs.mkdir(path.join(dir, '100%', 'one'), { recursive: true });
+    await fs.writeFile(path.join(dir, '100%', 'one', '2026-07-17.ndjson'), '');
+    await fs.mkdir(path.join(dir, 'a.tv', '50%'));
+    await fs.writeFile(path.join(dir, 'a.tv', '50%', '2026-07-17.ndjson'), '');
+    // Names it would have made otherwise: a mount's, and a lower-case escape.
+    await fs.mkdir(path.join(dir, 'lost+found'), { mode: 0o000 });
+    await fs.mkdir(path.join(dir, 'a.tv', 'a%2fb'));
+    await fs.writeFile(path.join(dir, 'a.tv', 'a%2fb', '2026-07-17.ndjson'), '');
+
+    expect(await listed(driver)).toEqual(['entry a.tv | one | 2026-07-17']);
+  });
+
+  it('lists through a link as a read follows one', async () => {
+    const driver = new FsNdjsonCacheDriver({ dir });
+    const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), 'epg-cache-elsewhere-'));
+
+    try {
+      const moved = new FsNdjsonCacheDriver({ dir: elsewhere });
+
+      await cache(moved).write({ site: 'big.tv', channelId: 'one', day: '2026-07-17' }, []);
+      await cache(moved).write({ site: 'big.tv', channelId: 'two', day: '2026-07-17' }, []);
+      await cache(driver).write({ site: 'a.tv', channelId: 'one', day: '2026-07-17' }, []);
+      // A site moved to another disk and linked back, a channel linked in, and
+      // one day's file linked in.
+      await fs.symlink(path.join(elsewhere, 'big.tv'), path.join(dir, 'big.tv'));
+      await fs.symlink(path.join(elsewhere, 'big.tv', 'two'), path.join(dir, 'a.tv', 'two'));
+      await fs.symlink(
+        path.join(elsewhere, 'big.tv', 'one', '2026-07-17.ndjson'),
+        path.join(dir, 'a.tv', 'one', '2026-07-18.ndjson'),
+      );
+
+      expect(await listed(driver)).toEqual([
+        'entry a.tv | one | 2026-07-17',
+        'entry a.tv | one | 2026-07-18',
+        'entry a.tv | two | 2026-07-17',
+        'entry big.tv | one | 2026-07-17',
+        'entry big.tv | two | 2026-07-17',
+      ]);
+    } finally {
+      await fs.rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'passes over a directory it cannot read, unless that is the one it was asked for',
+    async () => {
+      const driver = new FsNdjsonCacheDriver({ dir });
+
+      await cache(driver).write({ site: 'a.tv', channelId: 'one', day: '2026-07-17' }, []);
+      // A name a site could have, in a directory nobody here may read.
+      await fs.mkdir(path.join(dir, '.Trash-0'), { mode: 0o000 });
+
+      try {
+        expect(await listed(driver)).toEqual(['entry a.tv | one | 2026-07-17']);
+        // Looked for in every site, it is in one found by the walk.
+        expect(await listed(driver, { channelId: 'one' })).toEqual([
+          'entry a.tv | one | 2026-07-17',
+        ]);
+        await expect(listed(driver, { site: '.Trash-0' })).rejects.toThrow(/EACCES/);
+      } finally {
+        await fs.chmod(path.join(dir, '.Trash-0'), 0o700);
+      }
+    },
+  );
+
+  it.skipIf(process.getuid?.() === 0)(
+    'says so of a channel it cannot read, rather than list it as holding nothing',
+    async () => {
+      const driver = new FsNdjsonCacheDriver({ dir });
+
+      await cache(driver).write({ site: 'a.tv', channelId: 'one', day: '2026-07-17' }, []);
+      await cache(driver).write({ site: 'a.tv', channelId: 'locked', day: '2026-07-17' }, []);
+      // Written by a run as somebody else, who kept it to themselves.
+      await fs.chmod(path.join(dir, 'a.tv', 'locked'), 0o000);
+
+      try {
+        for (const options of [{}, { site: 'a.tv' }, { channelId: 'locked' }]) {
+          await expect(listed(driver, options)).rejects.toThrow(/EACCES/);
+        }
+
+        // Another channel, asked for alone, is not that one.
+        expect(await listed(driver, { site: 'a.tv', channelId: 'one' })).toEqual([
+          'entry a.tv | one | 2026-07-17',
+        ]);
+        expect(await listed(driver, { channelId: 'one' })).toEqual([
+          'entry a.tv | one | 2026-07-17',
+        ]);
+      } finally {
+        await fs.chmod(path.join(dir, 'a.tv', 'locked'), 0o700);
+      }
+    },
+  );
+
+  it('prunes through a link as it lists through one, and leaves the link', async () => {
+    const driver = new FsNdjsonCacheDriver({ dir });
+    const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), 'epg-cache-elsewhere-'));
+
+    try {
+      const moved = new FsNdjsonCacheDriver({ dir: elsewhere });
+
+      await cache(moved).write({ site: 'big.tv', channelId: 'one', day: '2026-07-10' }, []);
+      await cache(moved).write({ site: 'big.tv', channelId: 'one', day: '2026-07-17' }, []);
+      await cache(moved).write({ site: 'other.tv', channelId: 'two', day: '2026-07-10' }, []);
+      await cache(driver).write({ site: 'a.tv', channelId: 'one', day: '2026-07-17' }, []);
+      // A site moved to another disk and linked back, and a channel linked in.
+      await fs.symlink(path.join(elsewhere, 'big.tv'), path.join(dir, 'big.tv'));
+      await fs.symlink(path.join(elsewhere, 'other.tv', 'two'), path.join(dir, 'a.tv', 'two'));
+
+      expect(await driver.prune({ before: '2026-07-15' })).toBe(2);
+      expect(await listed(driver)).toEqual([
+        'entry a.tv | one | 2026-07-17',
+        'entry big.tv | one | 2026-07-17',
+      ]);
+      // The links stay, the channel's emptied: where one points was somebody's
+      // choice.
+      expect((await fs.lstat(path.join(dir, 'big.tv'))).isSymbolicLink()).toBe(true);
+      expect((await fs.lstat(path.join(dir, 'a.tv', 'two'))).isSymbolicLink()).toBe(true);
+      expect(await fs.readdir(path.join(elsewhere, 'other.tv', 'two'))).toEqual([]);
+    } finally {
+      await fs.rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'prunes past a directory it cannot read, or could not have named',
+    async () => {
+      const driver = new FsNdjsonCacheDriver({ dir });
+
+      await cache(driver).write({ site: 'a.tv', channelId: 'one', day: '2026-07-10' }, []);
+      await cache(driver).write({ site: 'a.tv', channelId: 'one', day: '2026-07-17' }, []);
+      // A mount's: one nobody here may read, and an empty one no site is called.
+      await fs.mkdir(path.join(dir, '.Trash-0', 'files'), { recursive: true });
+      await fs.chmod(path.join(dir, '.Trash-0'), 0o000);
+      await fs.mkdir(path.join(dir, 'lost+found'));
+
+      try {
+        expect(await driver.prune({ before: '2026-07-15' })).toBe(1);
+        expect((await fs.stat(path.join(dir, 'lost+found'))).isDirectory()).toBe(true);
+
+        // A channel of a site nobody here may read is this driver's, and says so.
+        await cache(driver).write({ site: 'a.tv', channelId: 'locked', day: '2026-07-10' }, []);
+        await fs.chmod(path.join(dir, 'a.tv', 'locked'), 0o000);
+
+        await expect(driver.prune({ before: '2026-07-15' })).rejects.toThrow(/EACCES/);
+      } finally {
+        await fs.chmod(path.join(dir, '.Trash-0'), 0o700);
+        await fs.chmod(path.join(dir, 'a.tv', 'locked'), 0o700).catch(() => undefined);
+      }
+    },
+  );
+
+  it('lists nothing from a cache directory not made yet', async () => {
+    const driver = new FsNdjsonCacheDriver({ dir: path.join(dir, 'not', 'yet') });
+
+    expect(await listed(driver)).toEqual([]);
+    expect(await listed(driver, { site: 'a.tv' })).toEqual([]);
+  });
+
+  it('lists nothing from a store that keeps nothing', async () => {
+    expect(await listed(new NoCacheDriver())).toEqual([]);
+  });
+});
+
+describe('a look inside the cache', () => {
+  const key = { site: 'a.tv', channelId: 'one', day: '2026-07-17' };
+  const other = { ...key, channelId: 'two' };
+  const missing = { ...key, channelId: 'three' };
+
+  /** A cache with one entry a run would use, and one it would remove. */
+  async function looked(
+    invalidate?: (meta: StoredEntryMeta, at: ChannelDayKey) => boolean,
+  ): Promise<{ driver: MemoryCacheDriver; store: CacheManager }> {
+    const driver = new MemoryCacheDriver();
+    const store = new CacheManager({ driver, ...(invalidate ? { invalidate } : {}) });
+
+    await store.write(key, [programme()], { grabbedAt: '2026-07-17T03:00:00.000Z' });
+    await store.write(other, [programme()], { grabbedAt: '2026-07-17T03:00:00.000Z' });
+
+    const found = (await driver.read(other))!;
+
+    await driver.write(other, found.body, { ...(found.meta as StoredEntryMeta), schema: 0 });
+
+    return { driver, store };
+  }
+
+  it('judges metas as a run does, and leaves the ones a run would remove', async () => {
+    const { driver, store } = await looked();
+
+    expect(await store.inspectMetas([key, other, missing])).toEqual([
+      {
+        status: 'readable',
+        meta: stamped({ grabbedAt: '2026-07-17T03:00:00.000Z', programmeCount: 1 }),
+      },
+      {
+        status: 'incompatible',
+        meta: {
+          ...stamped({ grabbedAt: '2026-07-17T03:00:00.000Z', programmeCount: 1 }),
+          schema: 0,
+        },
+      },
+      undefined,
+    ]);
+    expect(await driver.readMeta(other)).toBeDefined();
+
+    // Where a run, asking the same, removes it.
+    expect(await store.getMetas([other])).toEqual([undefined]);
+    expect(await driver.readMeta(other)).toBeUndefined();
+  });
+
+  it("says what the config's invalidate voids, and leaves that too", async () => {
+    const { driver, store } = await looked((_meta, at) => at.channelId === 'one');
+
+    const meta = stamped({ grabbedAt: '2026-07-17T03:00:00.000Z', programmeCount: 1 });
+
+    expect(await store.inspectMetas([key])).toEqual([{ status: 'invalidated', meta }]);
+    expect(await store.inspect(key)).toEqual({ status: 'invalidated', meta });
+    expect(await driver.readMeta(key)).toBeDefined();
+  });
+
+  it('reads an entry with its programmes, or says why it would not', async () => {
+    const { driver, store } = await looked();
+
+    expect(await store.inspect(key)).toEqual({
+      status: 'readable',
+      meta: stamped({ grabbedAt: '2026-07-17T03:00:00.000Z', programmeCount: 1 }),
+      programmes: [programme()],
+    });
+
+    const found = (await driver.read(key))!;
+
+    await driver.write(key, found.body, {
+      ...(found.meta as StoredEntryMeta),
+      grabbedAt: 7 as never,
+    });
+
+    // What it said, as the store had it.
+    expect(await store.inspect(key)).toEqual({
+      status: 'unreadable',
+      meta: { ...(found.meta as StoredEntryMeta), grabbedAt: 7 },
+    });
+
+    // Of another schema, whatever fields it has: an older entry need not have
+    // today's.
+    await driver.write(key, found.body, { schema: 0 } as StoredEntryMeta);
+
+    expect(await store.inspect(key)).toEqual({ status: 'incompatible', meta: { schema: 0 } });
+    expect(await store.inspect(missing)).toBeUndefined();
+    expect(await driver.read(key)).toBeDefined();
+  });
+
+  it("reads a group of a site's state, and leaves one a run would remove", async () => {
+    const { driver, store } = await looked();
+
+    await store.setState('a.tv', 'state', [['cursor', 42]], {
+      writtenAt: '2026-07-17T03:00:00.000Z',
+    });
+    await driver.writeState('a.tv', 'old', [], {
+      writtenAt: '2026-07-17T03:00:00.000Z',
+      schema: STATE_SCHEMA + 1,
+      writtenBy: '9.9.9',
+    });
+
+    await driver.writeState('a.tv', 'torn', [], {
+      schema: STATE_SCHEMA,
+      writtenBy: '9.9.9',
+    } as StoredStateMeta);
+
+    expect(await store.inspectState('a.tv', 'state')).toEqual({
+      status: 'readable',
+      data: [['cursor', 42]],
+      meta: {
+        writtenAt: '2026-07-17T03:00:00.000Z',
+        schema: STATE_SCHEMA,
+        writtenBy: __PKG_VERSION__,
+      },
+    });
+    expect(await store.inspectState('a.tv', 'old')).toEqual({
+      status: 'incompatible',
+      meta: { writtenAt: '2026-07-17T03:00:00.000Z', schema: STATE_SCHEMA + 1, writtenBy: '9.9.9' },
+    });
+    expect(await store.inspectState('a.tv', 'torn')).toEqual({
+      status: 'unreadable',
+      meta: { schema: STATE_SCHEMA, writtenBy: '9.9.9' },
+    });
+    expect(await store.inspectState('a.tv', 'none')).toBeUndefined();
+    expect(await driver.readState('a.tv', 'old')).toBeDefined();
+
+    // Where a run, asking the same, removes it.
+    expect(await store.getState('a.tv', 'old')).toBeUndefined();
+    expect(await driver.readState('a.tv', 'old')).toBeUndefined();
+  });
+
+  it('lists exactly what it was asked for, whatever its driver answers with', async () => {
+    const driver = new MemoryCacheDriver();
+    const store = new CacheManager({ driver });
+
+    await store.write(key, []);
+    await store.write({ ...key, site: 'b.tv' }, []);
+    await store.setState('a.tv', 'state', []);
+
+    // A driver that narrows by nothing at all, which it may.
+    const unnarrowed = Object.assign(Object.create(driver) as MemoryCacheDriver, {
+      list: () => driver.list(),
+    });
+    const keys: string[] = [];
+
+    for await (const held of new CacheManager({ driver: unnarrowed }).list({
+      site: 'a.tv',
+      kind: 'entry',
+    })) {
+      keys.push(held.kind === 'entry' ? `${held.key.site} ${held.key.channelId}` : held.key);
+    }
+
+    expect(keys).toEqual(['a.tv one']);
+  });
+
+  it('says an entry whose programmes cannot be read is corrupt, and why', async () => {
+    const { driver, store } = await looked();
+    const found = (await driver.read(key))!;
+
+    // Bytes that are not the json codec's records at all, and not an array.
+    await driver.write(key, new TextEncoder().encode('[{"title": '), found.meta as StoredEntryMeta);
+
+    expect(await store.inspect(key)).toEqual({
+      status: 'corrupt',
+      meta: found.meta,
+      error: expect.any(CorruptEntryError),
+    });
+
+    await driver.write(
+      key,
+      new TextEncoder().encode('{"title": 1}'),
+      found.meta as StoredEntryMeta,
+    );
+
+    expect(await store.inspect(key)).toEqual({
+      status: 'corrupt',
+      meta: found.meta,
+      error: new CorruptEntryError('An entry of the json codec holds no array of records'),
+    });
+  });
+
+  it('knows a corrupt entry by its name, as another copy of this package throws one', () => {
+    const copy = Object.assign(new Error('cut short'), { name: 'CorruptEntryError' });
+
+    class Truncated extends CorruptEntryError {}
+
+    expect(copy instanceof CorruptEntryError).toBe(true);
+    expect(new Truncated('cut short') instanceof CorruptEntryError).toBe(true);
+    expect(new Error('cut short') instanceof CorruptEntryError).toBe(false);
+    // Only an error is one, whatever else carries the name.
+    expect({ name: 'CorruptEntryError' } instanceof CorruptEntryError).toBe(false);
+    // A subclass is asked as any class is: another copy has none of it.
+    expect(new Truncated('cut short') instanceof Truncated).toBe(true);
+    expect(copy instanceof Truncated).toBe(false);
+    expect(new CorruptEntryError('cut short') instanceof Truncated).toBe(false);
+  });
+
+  it('has every codec it ships say what it cannot read is a corrupt entry, and why', () => {
+    const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
+    const thrown = (decode: () => unknown): unknown => {
+      try {
+        decode();
+      } catch (error) {
+        return error;
+      }
+    };
+
+    for (const [codec, body] of [
+      ['ndjson', '{"title": '],
+      ['json', '[{"title": '],
+      ['xmltv', '<html></html>'],
+      // Records that read, with a date in them that does not.
+      ['ndjson', '{"start": "the evening"}'],
+      ['json', '[{"start": "the evening"}]'],
+    ] as const) {
+      const error = thrown(() =>
+        CODECS[codec].decode(
+          bytes(body),
+          stamped({ grabbedAt: '2026-07-17T03:00:00.000Z', programmeCount: 1 }),
+        ),
+      );
+
+      expect(error).toBeInstanceOf(CorruptEntryError);
+      expect((error as Error).name).toBe('CorruptEntryError');
+      expect((error as Error).message).toMatch(
+        new RegExp(`^An entry of the ${codec} codec does not read: .+`),
+      );
+      // What the parser said, for whoever has to look into it.
+      expect((error as Error).cause).toBeInstanceOf(Error);
+    }
+  });
+
+  it("says so where a codec cannot read an entry's programmes at all", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'epg-cache-corrupt-'));
+
+    try {
+      const store = ndjson({ dir });
+
+      await store.write(key, [programme(), programme()]);
+
+      const file = path.join(dir, 'a.tv', 'one', '2026-07-17.ndjson');
+      const lines = (await fs.readFile(file, 'utf8')).trimEnd().split('\n');
+
+      // The last programme cut short.
+      await fs.writeFile(file, `${lines.slice(0, -1).join('\n')}\n${lines.at(-1)!.slice(0, 20)}\n`);
+
+      const inspected = await store.inspect(key);
+
+      expect(inspected).toEqual({
+        status: 'corrupt',
+        meta: expect.objectContaining({ programmeCount: 2 }),
+        error: expect.any(CorruptEntryError),
+      });
+      expect((inspected as { error: Error }).error.cause).toBeInstanceOf(SyntaxError);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('says so of a driver with no list, as one written before every driver had one', async () => {
+    const driver = new MemoryCacheDriver();
+
+    (driver as { list?: unknown }).list = undefined;
+
+    const listing = new CacheManager({ driver }).list()[Symbol.asyncIterator]();
+
+    await expect(listing.next()).rejects.toThrow("This cache's driver has no list()");
+  });
+
+  it('says an entry of a codec this package ships that holds fewer than it says is corrupt', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'epg-cache-short-'));
+
+    try {
+      const lines = ndjson({ dir: path.join(dir, 'lines') });
+      const documents = xmltv({ dir: path.join(dir, 'documents') });
+
+      await lines.write(key, [programme(), programme(), programme()]);
+      await documents.write(key, [programme(), programme(), programme()]);
+
+      // An ndjson entry cut between lines, and an xmltv document that ends
+      // early: each still reads, as fewer programmes than it says it holds.
+      const lineFile = path.join(dir, 'lines', 'a.tv', 'one', '2026-07-17.ndjson');
+      const kept = (await fs.readFile(lineFile, 'utf8')).split('\n').slice(0, 2).join('\n');
+
+      await fs.writeFile(lineFile, `${kept}\n`);
+
+      const documentFile = path.join(dir, 'documents', 'a.tv', 'one', '2026-07-17.xml');
+      const document = await fs.readFile(documentFile, 'utf8');
+
+      await fs.writeFile(documentFile, document.slice(0, document.lastIndexOf('<programme')));
+
+      for (const store of [lines, documents]) {
+        const inspected = await store.inspect(key);
+
+        expect(inspected).toMatchObject({
+          status: 'corrupt',
+          error: expect.any(CorruptEntryError),
+        });
+        expect((inspected as { error: Error }).error.message).toMatch(
+          /^An entry of the (ndjson|xmltv) codec reads as [0-2] programmes, of the 3 it says it holds$/,
+        );
+        expect(await store.read(key)).toBeUndefined();
+        expect(await store.getMeta(key)).toBeUndefined();
+      }
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  /** A memory store whose codec is its own: one that drops the first programme, and throws what `fails` says on what it will not read. */
+  function ownCodec(fails: (body: Uint8Array) => Error | undefined): {
+    driver: MemoryCacheDriver;
+    store: CacheManager;
+    warned: string[];
+    /** The meta each read handed the codec. */
+    handed: StoredEntryMeta[];
+  } {
+    const driver = new MemoryCacheDriver();
+    const warned: string[] = [];
+    const handed: StoredEntryMeta[] = [];
+
+    Object.defineProperty(driver, 'codec', {
+      value: {
+        encode: CODECS.json.encode,
+        decode: (body: Uint8Array, meta: StoredEntryMeta) => {
+          const error = fails(body);
+
+          if (error !== undefined) {
+            throw error;
+          }
+
+          handed.push(meta);
+
+          return CODECS.json.decode(body, meta).slice(1);
+        },
+      } satisfies CacheCodec,
+    });
+
+    return {
+      driver,
+      store: new CacheManager({ driver, warn: (message) => warned.push(message) }),
+      warned,
+      handed,
+    };
+  }
+
+  it('throws what is no fault of the bytes, rather than take the entry for a damaged one', async () => {
+    const store = cache(new MemoryCacheDriver());
+
+    await store.write(key, [programme()]);
+
+    // A fault of this code's own, as a release could ship one, where the
+    // parser it calls throws on input that is fine.
+    const parse = vi.spyOn(JSON, 'parse').mockImplementation(() => {
+      throw new TypeError('a fault of its own');
+    });
+
+    try {
+      const thrown = await store.read(key).catch((error: unknown) => error);
+
+      expect(thrown).toEqual(new TypeError('a fault of its own'));
+      expect(thrown).not.toBeInstanceOf(CorruptEntryError);
+    } finally {
+      parse.mockRestore();
+    }
+
+    // Kept, for a release without the fault to read.
+    expect(await store.read(key)).toHaveLength(1);
+  });
+
+  it('reads back a programme of no channel that the xmltv codec wrote', () => {
+    const written = [programme({ channel: '' })];
+
+    expect(
+      CODECS.xmltv.decode(
+        CODECS.xmltv.encode(written),
+        stamped({ grabbedAt: '2026-07-17T03:00:00.000Z', programmeCount: 1 }),
+      ),
+    ).toMatchObject([{ channel: '' }]);
+  });
+
+  it('has every codec it ships hold an entry to the count it was written with', () => {
+    for (const codec of ['ndjson', 'json', 'xmltv'] as const) {
+      const body = CODECS[codec].encode([programme(), programme()]);
+      const meta = (programmeCount: number): StoredEntryMeta => ({
+        schema: CACHE_SCHEMA,
+        writtenBy: '0.9.0',
+        grabbedAt: '2026-07-17T03:00:00.000Z',
+        programmeCount,
+      });
+
+      expect(CODECS[codec].decode(body, meta(2))).toHaveLength(2);
+      expect(() => CODECS[codec].decode(body, meta(3))).toThrow(
+        new CorruptEntryError(
+          `An entry of the ${codec} codec reads as 2 programmes, of the 3 it says it holds`,
+        ),
+      );
+    }
+  });
+
+  it("leaves what a driver's own codec gives back to it, however many", async () => {
+    const { store, handed } = ownCodec(() => undefined);
+
+    await store.write(key, [programme(), programme()]);
+
+    // Fewer than it says is the codec's own business — handed the meta, to
+    // hold the entry to it or not.
+    expect(await store.inspect(key)).toMatchObject({ status: 'readable' });
+    expect(await store.read(key)).toHaveLength(1);
+    expect(handed).toEqual([
+      expect.objectContaining({ programmeCount: 2 }),
+      expect.objectContaining({ programmeCount: 2 }),
+    ]);
+  });
+
+  it("throws what a driver's own codec throws, other than a corrupt entry, and keeps the entry", async () => {
+    const { driver, store, warned } = ownCodec((body) =>
+      body.length === 0 ? new Error('a bug in the codec') : undefined,
+    );
+
+    await store.write(key, [programme(), programme()]);
+
+    const found = (await driver.read(key))!;
+
+    await driver.write(key, new Uint8Array(), found.meta as StoredEntryMeta);
+
+    await expect(store.inspect(key)).rejects.toThrow('a bug in the codec');
+    await expect(store.read(key)).rejects.toThrow('a bug in the codec');
+    // Kept: a codec that throws on every entry must not empty the cache.
+    expect(await driver.readMeta(key)).toBeDefined();
+    expect(warned).toEqual([]);
+  });
+
+  it("removes what a driver's own codec says is a corrupt entry, as it does its own", async () => {
+    // Thrown by this package, and by a copy of it the driver's own package brought.
+    for (const error of [
+      new CorruptEntryError('cut short'),
+      Object.assign(new Error('cut short'), { name: 'CorruptEntryError' }),
+    ]) {
+      const { driver, store, warned } = ownCodec((body) => (body.length === 0 ? error : undefined));
+
+      await store.write(key, [programme(), programme()]);
+
+      const found = (await driver.read(key))!;
+
+      await driver.write(key, new Uint8Array(), found.meta as StoredEntryMeta);
+
+      expect(await store.inspect(key)).toEqual({ status: 'corrupt', meta: found.meta, error });
+      // Looking left it; a run removes it, and says so.
+      expect(await driver.readMeta(key)).toBeDefined();
+      expect(await store.read(key)).toBeUndefined();
+      expect(await driver.readMeta(key)).toBeUndefined();
+      expect(warned).toEqual([
+        'one 2026-07-17: removed from the cache, its programmes unreadable (cut short) — ' +
+          'the day is grabbed again by the next run',
+      ]);
+    }
+  });
+
+  it('lists what its driver lists', async () => {
+    const { store } = await looked();
+    const keys: string[] = [];
+
+    for await (const held of store.list({ site: 'a.tv' })) {
+      keys.push(held.kind === 'entry' ? held.key.channelId : held.key);
+    }
+
+    expect(keys.sort()).toEqual(['one', 'two']);
+  });
 });

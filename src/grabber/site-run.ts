@@ -22,6 +22,7 @@ import type { KyInstance } from 'ky';
 import PQueue from 'p-queue';
 import { isStale } from '../cache/main.js';
 import type { CacheStore } from '../cache/types.js';
+import { count } from '../core/count.js';
 import type { Emit, GrabCounts } from '../core/events.js';
 import { ProgrammeBuilder } from '../xmltv/builder.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
@@ -573,9 +574,29 @@ export class SiteRun {
     const { cache, emit, grabbedAt } = this.#run;
     const site = this.#site;
     const key = { site, channelId: channel.xmltvId, day };
-    const mine = parsed
-      .map((entry) => ({ ...built(entry), channel: channel.xmltvId }))
-      .sort((a, b) => a.start.getTime() - b.start.getTime());
+    const mine: XmltvProgramme[] = [];
+    let undated = 0;
+
+    for (const entry of parsed) {
+      const programme = { ...built(entry), channel: channel.xmltvId };
+
+      // A programme with no time it starts at is no listing, and no codec
+      // writes one it can read back: kept, it would make the entry one that
+      // never reads, removed and grabbed again by every run.
+      if (!(programme.start instanceof Date) || Number.isNaN(programme.start.getTime())) {
+        undated++;
+      } else {
+        mine.push(programme);
+      }
+    }
+
+    if (undated > 0) {
+      this.#says.warn(
+        `${channel.xmltvId} ${day}: ${count(undated, 'programme')} without a valid start left out`,
+      );
+    }
+
+    mine.sort((a, b) => a.start.getTime() - b.start.getTime());
 
     if (!this.#written.has(id)) {
       this.#written.add(id);

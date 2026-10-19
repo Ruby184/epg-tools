@@ -26,7 +26,14 @@ import type { MissingAllowance } from '../grabber/main.js';
 import { GrabberError } from '../core/error.js';
 import { OptionError, parseOptions } from '../core/options.js';
 import { dayIn, dayToDate, resolveTimeZone, toDayString } from '../core/days.js';
-import { reportingTo, silent, stamped, LEVELS, type EventLevel } from '../core/events.js';
+import {
+  reportingTo,
+  silent,
+  stamped,
+  LEVELS,
+  type Emit,
+  type EventLevel,
+} from '../core/events.js';
 import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
 import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
@@ -37,6 +44,8 @@ import { outputOptions } from '../xmltv/serialize.js';
 import { renderReport, validateFile } from './validate.js';
 import type { CompressionFormat } from '../core/output.js';
 import type { GrabSummary } from '../grabber/types.js';
+import type { CacheCommand } from './cache.js';
+import { count } from '../core/count.js';
 
 export const USAGE = `Usage: epg <command> [options]
 
@@ -49,7 +58,7 @@ Commands:
   channels      Report which wanted channels will get no guide, and why
   serve         Hold the merged guide behind HTTP for a consumer that polls
   try           Put one site, channel and day through, showing every step
-  prune         Remove cached days older than a given day
+  cache         Look inside the cache — show, stats, state — or prune it
   init-grabber  Write a tv_grab_* executable for the config, next to it
 
 Options:
@@ -75,8 +84,8 @@ Options:
                         extensions, comma-separated (e.g. lcn,uniqueID)
       --no-extensions   build/merge/serve/filter: leave every provider
                         extension out, for a guide that validates against the DTD
-      --indent <n|str>  build/merge/serve/filter: pretty-print with this
-                        indentation
+      --indent <n|str>  build/merge/serve/filter/cache show: pretty-print with
+                        this indentation
       --profile <name>  Shape the guide for one consumer: tvheadend or jellyfin.
                         build/merge/serve/filter. Changes the guide, never the
                         cache, so switching it refetches nothing
@@ -92,7 +101,6 @@ Options:
                         into --against, in place — a *.channels.xml, a playlist
                         or a guide. With -o, writes there and leaves the
                         original alone
-      --before <day>    prune only: remove days before YYYY-MM-DD (default: today)
       --log-level <l>   How much to report: error, warn, info (default) or debug
   -v, --verbose         Same as --log-level debug
   -q, --quiet           Same as --log-level error. Beats --verbose if both are given
@@ -118,6 +126,17 @@ serve options:
 validate options:
       --format <how>    text (default) or json
       --strict          Count warnings as failures too
+
+cache commands:
+  epg cache show <site> [channel] [day]   What is cached, as an XMLTV document,
+                        or a programme per line with --format json
+  epg cache stats [site]                  How much is cached, per site
+  epg cache state <site> [group]          What a site remembers between runs:
+                        its groups, or what one holds
+  epg cache prune                         Remove cached days older than today
+      --format <how>    show, stats, state: text (default) or json
+      --keys            state with a group: only the keys it holds
+      --before <day>    prune: remove days before YYYY-MM-DD (default: today)
 
 init-grabber options:
       --description <s> What --description prints (default: the country and name)
@@ -207,11 +226,6 @@ const CONFIG_CANDIDATES = ['epg.config.ts', 'epg.config.js', 'epg.config.mjs'];
 /** The commands `--channels` narrows. The rest are told so rather than ignoring it. */
 const SELECTABLE = ['build', 'grab', 'merge', 'serve'];
 
-/** `2 channels`, `1 channel` — a count is read, so it should read. */
-function plural(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? '' : 's'}`;
-}
-
 /** `--threads`: bare for one per core, or how many at most. */
 function poolSize(raw: string, flag: string): true | number {
   if (raw === 'true') {
@@ -247,7 +261,7 @@ const COMMANDS = [
   'validate',
   'channels',
   'filter',
-  'prune',
+  'cache',
   'init-grabber',
 ];
 
@@ -406,6 +420,132 @@ async function validateGuide(
   return report.ok ? 0 : EXIT_FAILED;
 }
 
+/**
+ * The flags each `epg cache` subcommand acts on, beyond {@link EVERY_CACHE_COMMAND}.
+ * `prune`'s default day is today, which the `--timezone` says.
+ */
+const CACHE_FLAGS: Record<CacheCommand, ReadonlySet<string>> = {
+  show: new Set(['format', 'indent']),
+  stats: new Set(['format']),
+  state: new Set(['format', 'keys']),
+  prune: new Set(['before', 'timezone']),
+};
+
+/** What every `epg cache` subcommand takes: where the config and cache are, and how much to say. */
+const EVERY_CACHE_COMMAND: ReadonlySet<string> = new Set([
+  'config',
+  'cache-dir',
+  'cache-driver',
+  'log-level',
+  'quiet',
+  'verbose',
+  'reporter',
+  'failures',
+]);
+
+/**
+ * `epg cache <show|stats|state|prune>`: looking inside the cache, and pruning
+ * it. The three that look are loaded only when asked for, and change nothing.
+ */
+async function cacheCommand(
+  config: ResolvedConfig,
+  [subcommand, ...args]: string[],
+  values: Record<string, unknown> & {
+    format?: ReportFormat;
+    keys?: boolean;
+    before?: string;
+    indent?: string | number;
+  },
+  emit: Emit,
+  stdout: Writable,
+  stderr: Writable,
+  signal: AbortSignal | undefined,
+): Promise<number> {
+  const { CACHE_COMMANDS, showCache, showState, writeCacheStats } = await import('./cache.js');
+
+  if (!CACHE_COMMANDS.includes(subcommand as CacheCommand)) {
+    throw new UsageError(
+      subcommand === undefined
+        ? `cache needs one of ${CACHE_COMMANDS.join(', ')}`
+        : `Unknown cache command: ${subcommand}`,
+    );
+  }
+
+  const command = subcommand as CacheCommand;
+  const takes = { show: 3, stats: 1, state: 2, prune: 0 }[command];
+  const [site, second, third] = args;
+
+  // Everything a command line can get wrong, before the cache is opened: a
+  // mistake is said with the usage, and a store is not opened for nothing.
+  if (args.length > takes) {
+    throw new UsageError(`cache ${command} takes at most ${count(takes, 'argument')}`);
+  }
+
+  if ((command === 'show' || command === 'state') && site === undefined) {
+    throw new UsageError(
+      command === 'show'
+        ? 'cache show needs a site, e.g. cache show example.tv one.example.tv'
+        : 'cache state needs a site, e.g. cache state example.tv',
+    );
+  }
+
+  if (values.keys && (command !== 'state' || second === undefined)) {
+    throw new UsageError(
+      '--keys is for cache state with a group, e.g. cache state example.tv state',
+    );
+  }
+
+  // A flag a subcommand would ignore is refused rather than ignored: `cache
+  // show --before …` would otherwise show every day with nothing said, and
+  // `cache stats --days 3` the whole cache.
+  for (const [flag, value] of Object.entries(values)) {
+    if (value !== undefined && !EVERY_CACHE_COMMAND.has(flag) && !CACHE_FLAGS[command].has(flag)) {
+      throw new UsageError(`--${flag} is not for cache ${command}`);
+    }
+  }
+
+  // XMLTV is what is indented; a record per line has nothing to indent.
+  if (values.indent !== undefined && values.format === 'json') {
+    throw new UsageError('--indent is for cache show as XMLTV, not --format json');
+  }
+
+  const day = command === 'show' && third !== undefined ? dayString(third, 'day') : undefined;
+
+  await using cache = await createCacheStore(config, signal);
+  const reading = {
+    // The manager the config makes, which carries its `invalidate`: an entry a
+    // run would void is reported as void.
+    cache,
+    ...(values.format ? { format: values.format } : {}),
+    stdout,
+    stderr,
+    ...(signal ? { signal } : {}),
+  };
+
+  // Awaited before returning, each: the cache is closed on the way out of this
+  // block, and a look handed back still running would read a closed one.
+  switch (command) {
+    case 'show':
+      return await showCache(reading, site!, second, day, values.indent);
+    case 'stats':
+      return await writeCacheStats(reading, site);
+    case 'state':
+      return await showState(reading, site!, second, values.keys === true);
+    case 'prune': {
+      // Today, or the day before it for a site keeping a calendar whose window
+      // starts there — which the guide still reads once it has been grabbed.
+      const before =
+        values.before ??
+        earliestDay(config.sites, dayIn(new Date(), config.timeZone), config.timeZone);
+      const removed = await cache.prune({ before });
+
+      emit({ type: 'prune:done', removed, before });
+
+      return 0;
+    }
+  }
+}
+
 /** `epg filter <file>` — write the guide again with only some of its channels. */
 async function filterCommand(
   file: string | undefined,
@@ -472,7 +612,7 @@ async function filterCommand(
           `${report.missing.length} of ${channels?.size ?? 0} channels are not in ${file}: ${report.missing.join(', ')}`,
         ]
       : []),
-    `${plural(report.kept, 'channel')}, ${plural(report.programmes, 'programme')}`,
+    `${count(report.kept, 'channel')}, ${count(report.programmes, 'programme')}`,
   );
 
   return 0;
@@ -586,6 +726,8 @@ async function execute(
       // not something a command line can do — the same limit as `extensions`.
       profile: { type: 'string', choices: OUTPUT_PROFILE_NAMES },
       before: { type: 'string', transform: dayString },
+      // `epg cache state` only: a group's keys rather than what it holds.
+      keys: { type: 'boolean' },
       quiet: { type: 'boolean', short: 'q' },
       verbose: { type: 'boolean', short: 'v' },
       'log-level': { type: 'string', choices: LEVELS },
@@ -611,6 +753,12 @@ async function execute(
   }
 
   const command = positionals[0] ?? 'build';
+
+  // Moved, and said where to, so a job that ran it learns more than that it
+  // is gone.
+  if (command === 'prune') {
+    throw new UsageError('Unknown command: prune — it is epg cache prune now');
+  }
 
   if (!COMMANDS.includes(command)) {
     throw new UsageError(`Unknown command: ${command}`);
@@ -918,20 +1066,8 @@ async function execute(
         ...(signal ? { signal } : {}),
       });
     }
-    case 'prune': {
-      // Today, or the day before it for a site keeping a calendar whose window
-      // starts there — which the guide still reads once it has been grabbed.
-      const before =
-        values.before ??
-        earliestDay(config.sites, dayIn(new Date(), config.timeZone), config.timeZone);
-
-      await using cache = await createCacheStore(config, signal);
-      const removed = await cache.prune({ before });
-
-      emit({ type: 'prune:done', removed, before });
-
-      return 0;
-    }
+    case 'cache':
+      return cacheCommand(config, positionals.slice(1), values, emit, stdout, stderr, signal);
     default: {
       // Unreachable: `COMMANDS` is checked above, so a command with no case
       // here fails to compile rather than silently pruning the cache — which

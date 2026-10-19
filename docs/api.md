@@ -614,10 +614,10 @@ M3U one above.
 `CacheManager`, the drivers `FsNdjsonCacheDriver`, `FsXmltvCacheDriver`,
 `MemoryCacheDriver`* and `NoCacheDriver`* with the abstract `FsCacheDriver` the
 file ones build on, the codecs a driver names in `CODECS` and the `toRecord` /
-`fromRecord` pair they build on, `CACHE_SCHEMA`*, `STATE_SCHEMA`*, `isStale`,
+`fromRecord` pair they build on, `CorruptEntryError`, `CACHE_SCHEMA`*, `STATE_SCHEMA`*, `isStale`,
 `DEFAULT_STALENESS`, `CACHE_DRIVER_NAMES`, and the `CacheStore` / `CacheDriver` /
 `CacheManagerOptions` / `FsCacheDriverOptions` / `CacheCodec` / `CodecName` /
-`ChannelDayKey` / `CacheEntryMeta` / `StoredEntryMeta` / `StoredProgramme` /
+`ChannelDayKey` / `CachedKey` / `CacheListOptions` / `Inspected` / `Unusable` / `CacheEntryMeta` / `StoredEntryMeta` / `StoredProgramme` /
 `FoundMeta` / `FoundEntry` / `StateEntry` / `StoredStateMeta` / `FoundState` /
 `StalenessPolicy` / `CacheDriverName` types.
 
@@ -629,22 +629,63 @@ files, a database, a bucket — and holds no policy of its own. The
 which is what `grab` and `generateGuide` take), and it owns everything that must
 be true of every driver alike: the meta an entry carries, stamped on the way in
 and judged on the way out, and what to do with an entry that cannot answer for
-itself — it goes, so the day reads as never grabbed and the next run fetches it.
+itself, or whose programmes do not read back as what it says it holds — it
+goes, so the day reads as never grabbed and the next run fetches it.
 
 ```ts
 const cache = new CacheManager({ driver: new FsNdjsonCacheDriver({ dir }) });
 ```
 
+It also answers what [`epg cache`](./configuration.md#looking-inside-the-cache)
+asks, and changes nothing doing so. `list(options?)` is the driver's own.
+`inspectMetas(keys)`, `inspect(key)` and `inspectState(site, key)` judge an
+entry or a group exactly as `getMetas`, `read` and `getState` do — the config's
+`invalidate` included — and one a run would remove stays where it is. What
+comes back says which by its `status`, and a key with nothing under it is
+`undefined`:
+
+| `status` | is | beside it |
+|---|---|---|
+| `'readable'` | what a run would use | what was read: `meta`, and `programmes` or `data` |
+| `'unreadable'` | something that says nothing about itself this version can read | `meta`, whatever was there, or `undefined` |
+| `'incompatible'` | written in a shape this version does not read, older or newer | `meta`, what it says about itself — its `schema` the shape it was written in |
+| `'invalidated'` | an entry `invalidate` voids | `meta`, what it says about itself |
+| `'corrupt'` | an entry whose meta reads and whose programmes do not: its codec throws `CorruptEntryError` on them — as those of `CODECS` do for more or fewer than the meta says it holds | `meta`, and `error`, what the codec threw |
+
+```ts
+const looked = await cache.inspect({ site: 'example.tv', channelId: 'one', day: '2026-07-17' });
+// { status: 'readable', meta, programmes }, or { status: 'incompatible', meta: { schema: 0, … } }, …
+```
+
+What the driver throws — a file this user may not read — is thrown, as it is to
+a run: there is no entry to judge. `epg cache` says so of that one and goes on
+to the rest.
+
+#### A driver of your own
+
 A driver is a small thing to write: `codec`, `readMeta`, `read`, `write`,
 `delete`, `prune`, the three that keep [a site's
 state](#what-a-site-remembers-between-runs) — `readState`, `writeState`,
-`deleteState` — and, if it has them to offer, `readMetas` and `close`. It keeps
+`deleteState` — `list`, and, if it has them to offer, `readMetas` and `close`. It keeps
 an entry as **bytes** beside its meta and never sees a programme: `codec` says
 what the bytes are, and the manager encodes on the way in and decodes on the
 way out, so no driver has to remember to. `read` and `readMeta` return
 `undefined` when there is no entry, and `{ meta }` — possibly an undefined meta —
 when there is one that says nothing readable; the manager tells those apart and
 only removes the second.
+
+`list(options?)` names everything the store holds, as an async iterable:
+`{ kind: 'entry', key }` for a channel-day and `{ kind: 'state', site, key }`
+for a group of a site's state. `{ site, channelId, kind }` narrow it — to one
+site, to one channel's entries, to entries or to groups — so a store kept by
+site and channel need not look at the rest; one that cannot narrow by something
+may answer with more, and `CacheManager.list` leaves out what was not asked
+for. Keys as they were written, not as the store had to escape them, and only keys:
+what is in them is what `read` and `readState` are for, so a store that keeps an
+entry's meta inside the entry need not open every one to answer. In whatever
+order suits the store. It is what [`epg cache`](./configuration.md#looking-inside-the-cache)
+looks inside a store with, and it is required — a store that holds nothing
+yields nothing, as `NoCacheDriver` does.
 
 `readMetas(keys)` is the optional one worth knowing about. A grab asks about
 every channel-day of its window before fetching anything, a channel's window at
@@ -719,9 +760,58 @@ and the main thread only stamps and saves them.
 
 A driver that keeps something none of these make — fewer fields, a format of
 its own — brings a **`CacheCodec`** instead, an object with `encode(programmes)`
-and `decode(body)`; `toRecord` and `fromRecord` are there to build one on. It
+and `decode(body, meta)`; `toRecord` and `fromRecord` are there to build one on. It
 runs on the main thread only, since a thread cannot be handed code: a site in a
 thread sends its programmes, and the manager encodes them there.
+
+A codec says an entry is damaged — bytes that are not what it wrote: a line
+cut short, an edit, a disk that filled — by throwing **`CorruptEntryError`**
+from `decode`. A run then removes the entry, says so (see `warn` below), and
+the next run grabs the day again. Anything else `decode` throws is taken for
+the codec's own failing — a bug, a format changed without a schema to say so —
+and thrown out of `read` as it is, the entry kept: a removal, for every entry at
+once, would empty the cache and write an empty guide over the last good one.
+
+`decode(body, meta)` is handed what the entry says about itself beside its
+bytes, which is how a codec tells a cut that still reads — an ndjson entry cut
+between lines, an xmltv document that ends early — from a whole one: by
+`meta.programmeCount`.
+
+```ts
+import { gunzipSync, gzipSync } from 'node:zlib';
+import { CODECS, CorruptEntryError, type CacheCodec } from 'epg-tools/cache';
+
+const gzipped: CacheCodec = {
+  encode: (programmes) => gzipSync(CODECS.json.encode(programmes)),
+  decode(body, meta) {
+    let json: Uint8Array;
+
+    try {
+      json = gunzipSync(body);
+    } catch (error) {
+      // Bytes that are not gzip are an entry damaged, not a codec.
+      throw new CorruptEntryError('An entry of the gzipped codec is not gzip', { cause: error });
+    }
+
+    // Which says so itself of records it cannot read, or fewer than `meta` says.
+    return CODECS.json.decode(json, meta);
+  },
+};
+```
+
+The codecs of `CODECS` throw it for what their parser cannot read — JSON that
+is not JSON, a date that is no date, a document that is not XMLTV — with the
+parser's error as its `cause`, and for a programme count other than the meta's:
+they give back exactly what they were given. Anything else they throw is a
+fault of this package's, and thrown as it is. Each takes the meta now, and
+throws where before the `json` one answered `[]` and the other two threw the
+parser's error itself. A codec of a driver's own may give back other than it
+was given — one that leaves out, or folds together — and holds an entry to its
+count or not, as it knows it should.
+
+`instanceof CorruptEntryError` knows one by its name as well, so a driver
+whose package brings a copy of `epg-tools` of its own throws one the manager
+knows.
 
 What `write` is handed may be a view into a larger buffer — a codec allocates
 for the worst case rather than measuring first — so a driver that holds on to
@@ -763,6 +853,14 @@ new CacheManager({
 It is asked about every entry a run looks at — thousands of times — so it should
 decide from the meta it is given and nothing further. An entry the shape check
 already refused never reaches it.
+
+`warn(message, key)` on `CacheManager` is where it says it removed an entry
+whose codec said it was damaged — a line cut short, an edit — so the day is
+missing from anything built from the cache until the next run grabs it again.
+Only that: an entry removed for a schema this version does not read, or by
+`invalidate`, is what an upgrade or a config asked for. A run passes it on as a
+`site:warning` of the site whose day it was, whether a grab came across it or a
+merge.
 
 ### Drivers that need no store
 
@@ -863,6 +961,16 @@ The programmes became bytes in 0.7.0, and a column's type is not something a
 row can be read past, so the first run of 0.7.0 empties a database an older
 version made — its listings and what its sites remember — and the run fills it
 again.
+
+Nothing is made or replaced until something is written. A database another
+version made reads as empty — as does one not there yet — and the first write
+replaces its tables, or makes the file and its directory. So a look — `epg
+cache show`, `stats`, `state` — changes nothing, pointed at a directory with no
+database in it or at a cache another version wrote. A place the file could
+never be made — a read-only mount, a directory without permission, a path
+through a file — is refused when the driver is made, though, for a look as for
+a run: a run would otherwise fetch everything before finding out, and the driver
+cannot tell which it is serving.
 
 ### `epg-tools/grabber`
 

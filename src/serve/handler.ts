@@ -980,7 +980,11 @@ export async function createGuideHandler(
   ].join(', ');
 
   const opened = options.cache === undefined;
-  const cache = options.cache ?? (await createCacheStore(config, options.signal));
+  const cache =
+    options.cache ??
+    (await createCacheStore(config, options.signal, {
+      warn: (message, key) => emit({ type: 'site:warning', site: key.site, message }),
+    }));
 
   /** Where a `derived` function says things, which is where a merge's do. */
   const mergeSays: Says = {

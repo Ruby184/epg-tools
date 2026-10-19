@@ -202,6 +202,56 @@ export interface FoundState {
 }
 
 /**
+ * One thing a store holds, by key, as {@link CacheDriver.list} names it: a
+ * channel-day's entry, or a group of a site's state.
+ */
+export type CachedKey =
+  | { kind: 'entry'; key: ChannelDayKey }
+  | { kind: 'state'; site: string; key: string };
+
+/**
+ * Why a run would not use something a look at a cache found — and so would
+ * remove it, for the next run to grab or fetch again:
+ *
+ * - `unreadable`: it says nothing about itself this version can read;
+ * - `incompatible`: it was written in a shape this version does not read,
+ *   older or newer, its `schema` the shape it was written in;
+ * - `invalidated`: the manager's `invalidate` voids it — an entry only;
+ * - `corrupt`: what it says about itself is readable and what it holds is not
+ *   — an entry whose codec throws `CorruptEntryError` on its programmes, as
+ *   those of `CODECS` do for a count other than the one it was written with;
+ *   `error`, what the codec threw.
+ *
+ * Each with `meta`, what it says about itself as the store had it — `M` being
+ * what it should say: an entry's meta, or a group's envelope. For one that is
+ * unreadable that is whatever was there, or nothing.
+ */
+export type Unusable<M = StoredEntryMeta> =
+  | { status: 'unreadable'; meta: Partial<M> | undefined }
+  | { status: 'incompatible'; meta: Partial<M> & { schema: number } }
+  | { status: 'invalidated'; meta: M }
+  | { status: 'corrupt'; meta: M; error: Error };
+
+/**
+ * What a look at a cache found — `CacheManager`'s `inspect` methods: what a run
+ * would use, with `status: 'readable'`, or why it would not. A run removes the
+ * second kind; a look leaves it where it is.
+ */
+export type Inspected<T extends object, M = StoredEntryMeta> =
+  | ({ status: 'readable' } & T)
+  | Unusable<M>;
+
+/** What {@link CacheDriver.list} is asked for: everything, or less of it. */
+export interface CacheListOptions {
+  /** One site's keys only. */
+  site?: string;
+  /** One channel's entries only — of {@link site}, where it is given. */
+  channelId?: string;
+  /** Only entries, or only groups of state. */
+  kind?: CachedKey['kind'];
+}
+
+/**
  * Where cached programmes actually live.
  *
  * A driver answers for one store — a directory of files, a database, a bucket —
@@ -284,6 +334,27 @@ export interface CacheDriver {
   readState(site: string, key: string): Promise<FoundState | undefined>;
   writeState(site: string, key: string, data: unknown, meta: StoredStateMeta): Promise<void>;
   deleteState(site: string, key: string): Promise<void>;
+  /**
+   * Everything the store holds — each channel-day's entry and each group of a
+   * site's state — by key, and not what is in it: one of them is what
+   * {@link read} and {@link readState} are for.
+   *
+   * What `epg cache` looks inside a store with, since nothing else here could
+   * find out what is in one without being told the keys first. Keys and not
+   * metas, so a store that keeps an entry's meta inside the entry — a file
+   * each — need not open every one of them to answer.
+   *
+   * Narrowed by whatever of {@link CacheListOptions} is given, which a store
+   * kept by site and channel can answer without looking at the rest. A driver
+   * that cannot narrow by one may answer with more than was asked — a caller
+   * checks what it is handed — but never with less. In whatever order suits
+   * the store, and one key at a time, so a store too big to hold its own index
+   * in memory need not: a caller that wants them sorted sorts them.
+   *
+   * Required, as the state trio is: holding nothing is a legitimate answer and
+   * it is one line — `NoCacheDriver`'s yields nothing.
+   */
+  list(options?: CacheListOptions): AsyncIterable<CachedKey>;
   /** Let go of whatever is held open — a database handle, a connection. */
   close?(): Promise<void>;
 }
@@ -370,4 +441,14 @@ export interface CacheManagerOptions {
    * and nothing further.
    */
   invalidate?: (meta: StoredEntryMeta, key: ChannelDayKey) => boolean;
+  /**
+   * Where the manager says it removed an entry whose programmes could not be
+   * read — a line cut short, an edit — so that day is grabbed again by the
+   * next run, and is missing from anything built from the cache until then.
+   *
+   * Only that: an entry removed for a schema this version does not read, or by
+   * {@link invalidate}, is what an upgrade or a config asked for, and comes by
+   * the thousand. One whose programmes are broken is something gone wrong.
+   */
+  warn?: (message: string, key: ChannelDayKey) => void;
 }

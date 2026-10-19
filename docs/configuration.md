@@ -190,7 +190,7 @@ that follows the lineup still moves the tag, because the lineup does.
 | field | type | default | what it is |
 |---|---|---|---|
 | `dir` | `string` | `.epg-cache` in the working directory | Cache root. **Make it absolute** if the config is also used by a [grabber](./tv-grab.md), which runs from wherever it is called. |
-| `driver` | `'ndjson' \| 'xmltv' \| 'sqlite' \| 'memory' \| CacheDriverFactory` | `'ndjson'` | Where and how cached days are kept. Both names are **one file** per channel-day under `dir`, its own meta included. `ndjson` writes `<day>.ndjson`: a meta line (`grabbedAt`, `programmeCount`, and the two versions [an entry records about itself](./api.md#what-an-entry-says-about-itself)), then one JSON programme per line, with dates in XMLTV form (`20260807203000 +0200`) so the offset the source wrote them in and how precise it was both survive. `xmltv` writes `<day>.xml`, one small indented document — its root element carrying `date` as XMLTV means it, and its meta in a [processing instruction](./xmltv.md#processing-instructions) rather than in an attribute no DTD defines. Whether an entry then validates is down to the listing in it: a cache keeps whatever the site produced, [provider extensions](#provider-extensions) included, and the merge reads them back — so leaving them out is a decision for the guide, not for the cache. Pick it when something other than this package reads the cache. A driver reads **its own** entries only, so switching means starting the cache again. `sqlite` keeps the whole cache in one `cache.sqlite` under `dir` instead of a file per channel-day — worth it at thousands of channels, where a directory tree is tens of thousands of inodes to walk and back up; it needs Node 24 (or 22.5 with `--experimental-sqlite`), and is [loaded only when named](./api.md#epg-toolscachesqlite). `memory` keeps entries only as long as the process, which is enough for a `build` — its grab and its merge share one cache — and nothing for two commands, since `epg grab` and then `epg merge` would find the second one empty. Or pass a function returning a [driver of your own](./api.md#epg-toolscache) — `({ dir, signal }) => driver`, or a [builder](./api.md#epg-toolscache) that takes your options and returns one — which is how a cache ends up in a database, a bucket, or nowhere at all. It may await, so opening a connection belongs there. |
+| `driver` | `'ndjson' \| 'xmltv' \| 'sqlite' \| 'memory' \| CacheDriverFactory` | `'ndjson'` | Where and how cached days are kept. Both names are **one file** per channel-day under `dir`, its own meta included. `ndjson` writes `<day>.ndjson`: a meta line (`grabbedAt`, `programmeCount`, and the two versions [an entry records about itself](./api.md#what-an-entry-says-about-itself)), then one JSON programme per line, with dates in XMLTV form (`20260807203000 +0200`) so the offset the source wrote them in and how precise it was both survive. `xmltv` writes `<day>.xml`, one small indented document — its root element carrying `date` as XMLTV means it, and its meta in a [processing instruction](./xmltv.md#processing-instructions) rather than in an attribute no DTD defines. Whether an entry then validates is down to the listing in it: a cache keeps whatever the site produced, [provider extensions](#provider-extensions) included, and the merge reads them back — so leaving them out is a decision for the guide, not for the cache. Pick it when something other than this package reads the cache. A driver reads **its own** entries only, so switching means starting the cache again. `sqlite` keeps the whole cache in one `cache.sqlite` under `dir` instead of a file per channel-day — worth it at thousands of channels, where a directory tree is tens of thousands of inodes to walk and back up; it needs Node 24 (or 22.5 with `--experimental-sqlite`), and is [loaded only when named](./api.md#epg-toolscachesqlite). `memory` keeps entries only as long as the process, which is enough for a `build` — its grab and its merge share one cache — and nothing for two commands, since `epg grab` and then `epg merge` would find the second one empty. Or pass a function returning a [driver of your own](./api.md#a-driver-of-your-own) — `({ dir, signal }) => driver`, or a [builder](./api.md#epg-toolscache) that takes your options and returns one — which is how a cache ends up in a database, a bucket, or nowhere at all. It may await, so opening a connection belongs there. |
 | `staleness` | `Partial<StalenessPolicy>` | `{ refetchAll: false, alwaysRefetchDays: 1, maxAgeDays: 7, emptyMaxAgeDays: 1 }` | When a cached day is refetched. `refetchAll` is what `--refresh` sets: every day in the window is fetched whatever the cache holds, and it reaches days behind today, which `alwaysRefetchDays` never does. `alwaysRefetchDays: 1` means today only, `2` today and tomorrow, `0` never force-refetch. `maxAgeDays` busts anything grabbed longer ago than that, and `emptyMaxAgeDays` does the same for an entry that came back with **no programmes** — a source that was briefly broken is asked again the next day instead of leaving a hole for a week, while a channel that genuinely has nothing on costs one request a day rather than one per run. `0` refetches an empty day on any later run; a value as large as `maxAgeDays` turns the distinction off. |
 | `prune` | `boolean` | `true` | Remove cached days older than today after a successful grab. |
 | `invalidate` | `(meta, key) => boolean` | — | One more reason a cached entry is void. The stored shape is [already checked](./api.md#what-an-entry-says-about-itself), so this is for what that cannot describe: a release whose *grabbing* changed rather than its storing, a site whose channel ids were renamed, a cache to be emptied gradually. Return `true` and the entry goes, so the day reads as never grabbed. |
@@ -206,7 +206,9 @@ epg try example.tv one.example.tv   # one channel-day, with the working shown
 epg validate         # read the guide and report what is wrong with it
 epg channels --against playlist.m3u  # which wanted channels will get no guide
 epg filter guide.xml --channels my-60.m3u -o small.xml  # subset a guide you have
-epg prune            # drop cached days older than today
+epg cache stats      # how much is cached, per site
+epg cache show example.tv   # what is cached for a site, as XMLTV
+epg cache prune      # drop cached days older than today
 epg init-grabber tv_grab_sk_example   # write an XMLTV grabber for this config
 epg build -d 14 -o public/epg.xml
 epg build --offset 1 # start the window tomorrow instead of today
@@ -238,15 +240,16 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--grab-every <d>` | `serve` only: also grab on this interval — `6h`, `30m`, `1d`. Off unless said — see [grabbing on a schedule](#grabbing-on-a-schedule) |
 | `--grab-at <t>` | `serve` only: a time of day to line `--grab-every` up with, as `04:00`, on the clock of [`timeZone`](#which-day-is-today). On its own it means once a day, at that time |
 | `--raw` | `try` only: print the whole payload, not the first 2000 characters |
-| `--format <how>` | `validate`, `channels` and `--dry-run`: `text` (default) or `json` |
+| `--format <how>` | `validate`, `channels`, `--dry-run` and `cache show`/`stats`/`state`: `text` (default) or `json` |
 | `--strict` | `validate` only: count warnings as failures too |
 | `--channels <what>` | `build`/`grab`/`merge`/`serve`/`filter`: keep only these channels and fetch nothing for the rest — ids, or a file naming them. Repeatable — see [subsetting a guide](#keeping-only-some-channels). `filter` needs it or one of `--profile`, `--extensions`, `--no-extensions` and `--indent` — see [subsetting a guide you already have](#subsetting-a-guide-you-already-have) |
-| `--indent <n\|str>` | `build`/`merge`/`serve`/`filter`: pretty-print with this indentation, mirroring `JSON.stringify` |
+| `--indent <n\|str>` | `build`/`merge`/`serve`/`filter`/`cache show`: pretty-print with this indentation, mirroring `JSON.stringify` |
 | `--profile <name>` | `build`/`merge`/`serve`/`filter`: shape the guide for one consumer — `tvheadend` or `jellyfin`. See [Output profiles](#output-profiles) |
 | `--against <file>` | `channels` only: what you want a guide for — an M3U playlist, a `*.channels.xml` or an XMLTV guide |
 | `--write` | `channels` only: write the ids the report suggested back into `--against`, in place — or to `-o` |
 | `--check` | `channels` only: exit 1 unless every wanted channel matched by id |
-| `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
+| `--before <day>` | `cache prune` only: remove days before `YYYY-MM-DD`, default today |
+| `--keys` | `cache state` with a group only: the keys it holds, not what it holds — see [looking inside the cache](#looking-inside-the-cache) |
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
 | `-v, --verbose` | same as `--log-level debug` — every channel-day |
 | `-q, --quiet` | same as `--log-level error` — failures only. Beats `--verbose` if both are given |
@@ -356,7 +359,7 @@ Node's own `fs` and stream APIs take one:
 | requests | in flight through the site's client, queued ones dropped |
 | the rate-limit hold after a `429` | the wait is abandoned, nothing is resent |
 | cache reads and writes | a write stops **before** its rename, so an entry is either there in full or not at all |
-| `epg prune` | between days — whole days removed, never half of one |
+| `epg cache prune` | between days — whole days removed, never half of one |
 | parsing a guide | between chunks, and the file descriptor closes with it |
 | writing a guide | between elements, and the part-written file is discarded |
 | a socket output | the connection is given up on, rather than waiting to be read from |
@@ -1527,6 +1530,51 @@ network is neither of the two things this bounds, and holding the slot through
 it let one site that fetches a detail per programme fill every slot in the run
 with parses waiting on its own pacing: every other site's parses, however
 cheap, then queued behind it.
+
+### Looking inside the cache
+
+An entry is kept as its codec's bytes, so a `cache.sqlite` row holds a blob and
+`sqlite3` shows nothing worth reading. `epg cache` reads a cache the way a run
+does, through its driver, whichever driver that is:
+
+```sh
+epg cache stats                       # how much is cached, per site
+epg cache show example.tv             # every programme cached for a site, as XMLTV
+epg cache show example.tv one.example.tv 2026-07-17 --format json  # one day, a programme per line
+epg cache state example.tv            # the groups a site remembers between runs
+epg cache state example.tv validators --keys   # only the keys one of them holds
+epg cache prune --before 2026-07-01   # drop the days before that one
+```
+
+Looking changes nothing — a sqlite cache another version wrote included, whose
+tables only a run replaces. An entry a run could not vouch for — written in a
+shape this version does not read, or with a meta nobody can read — is counted
+as unreadable by `stats`, and one the config's `invalidate` voids as voided;
+`show` leaves either out, with a line on stderr saying why, and one whose
+programmes do not read as well. It stays where it is. A run removes it — one
+with a bad meta when it first asks about the day, one with bad programmes when
+it reads them, saying so as a warning of the site's — and a run grabs the day
+again, as long as the site is still in the config.
+
+An entry the store could not open at all — a file this user may not read — is
+said on stderr, and counted as one that could not be read, by `stats`, or left
+out by `show`; the look goes on to the rest. A run fails on one, so it is worth
+the line. A channel's directory this user may not read is an error of the
+look's own, since what is in it cannot even be counted; only a directory beside
+the sites — a mount's `.Trash-0` — is passed over.
+
+`show` writes to stdout, as XMLTV indented by two unless `--indent` says
+otherwise, and takes no `-o`, `--profile` or `--extensions`: it shows what is
+cached, not a guide.
+
+`stats` reads only what each entry says about itself — when it was grabbed and
+how many programmes it holds — so for a cache of files it opens every entry but
+reads none of the listings. `show` and `state` exit 1 when there is nothing for
+what was asked, or nothing of it this version can read; `stats` reports an
+empty cache and exits 0.
+
+A [driver of your own](./api.md#a-driver-of-your-own) answers all of this through its
+`list()`.
 
 ### Sites in threads of their own
 

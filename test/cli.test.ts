@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
@@ -7,6 +7,12 @@ import { gunzipSync, gzipSync } from 'node:zlib';
 import { describe, expect, it, vi } from 'vitest';
 import { runCli } from '../src/cli/run.js';
 import { defaultDescription } from '../src/cli/scaffold.js';
+
+/** Whether this runtime has `node:sqlite`, which the sqlite driver needs. */
+const hasSqlite = await import('node:sqlite').then(
+  () => true,
+  () => false,
+);
 
 /** Collects everything written, so stdout and stderr can be asserted on. */
 class Sink extends Writable {
@@ -1985,14 +1991,19 @@ describe('epg', () => {
 
     await run(['build', '--config', config, '--quiet', '--offset', '-2']);
 
-    const pruned = await run(['prune', '--config', config, '--before', '2099-01-01']);
+    const pruned = await run(['cache', 'prune', '--config', config, '--before', '2099-01-01']);
     expect(pruned.code).toBe(0);
     expect(pruned.stdout).toMatch(/Pruned \d+ cached entr/);
 
     // A string cutoff that looks like a date would prune far too much.
-    const invalid = await run(['prune', '--config', config, '--before', '2026-99-99']);
+    const invalid = await run(['cache', 'prune', '--config', config, '--before', '2026-99-99']);
     expect(invalid.code).toBe(2);
     expect(invalid.stderr).toContain('Invalid --before value: 2026-99-99');
+
+    // Moved under `cache`, and not kept where it was.
+    const moved = await run(['prune', '--config', config]);
+    expect(moved.code).toBe(2);
+    expect(moved.stderr).toContain('Unknown command: prune — it is epg cache prune now');
   });
 
   it('merges from the cache without grabbing', async () => {
@@ -2199,5 +2210,328 @@ describe('flushing', () => {
     expect(code).toBe(1);
     expect(stdout.text).toContain('Guide written to');
     expect(stderr.text).toContain('FAILED [example.tv] one.example.tv');
+  });
+});
+
+describe('epg cache', () => {
+  /** A site that remembers something, so there is state to look at too. */
+  async function rememberingConfig(dir: string): Promise<string> {
+    return configFile(
+      dir,
+      `export default {
+      sites: [{
+        site: 'example.tv',
+        channels: [{ xmltvId: 'one.example.tv', siteId: '1', name: 'One' }],
+        async request({ day }) { return { day }; },
+        parseDay: ({ channel, day, state }) => {
+          state.set('cursor', 42);
+
+          return [{
+            channel: channel.xmltvId,
+            start: new Date(day + 'T06:00:00.000Z'),
+            title: [{ value: 'Show' }],
+          }];
+        },
+      }],
+      days: 2,
+      output: ${JSON.stringify(join(dir, 'guide.xml'))},
+      cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+    };`,
+    );
+  }
+
+  async function grabbed(): Promise<{ dir: string; config: string; days: string[] }> {
+    const dir = await tempDir();
+    const config = await rememberingConfig(dir);
+
+    expect((await run(['grab', '--config', config, '--quiet'])).code).toBe(0);
+
+    const stats = await run(['cache', 'stats', '--config', config, '--format', 'json']);
+    const { days } = (
+      JSON.parse(stats.stdout) as { sites: [{ days: { first: string; last: string } }] }
+    ).sites[0];
+
+    return { dir, config, days: [days.first, days.last] };
+  }
+
+  // A driver with a connection to close, which the look must not close under
+  // itself before it has finished reading.
+  it.skipIf(!hasSqlite)('reads a sqlite cache to the end before closing it', async () => {
+    const dir = await tempDir();
+    const config = await rememberingConfig(dir);
+    const driver = ['--cache-driver', 'sqlite'];
+
+    expect((await run(['grab', '--config', config, '--quiet', ...driver])).code).toBe(0);
+
+    const shown = await run(['cache', 'show', 'example.tv', '--config', config, ...driver]);
+    expect(shown.stderr).toBe('');
+    expect(shown.code).toBe(0);
+    expect(shown.stdout.match(/<programme /g)).toHaveLength(2);
+
+    const stats = await run(['cache', 'stats', '--config', config, '--format', 'json', ...driver]);
+    expect(stats.code).toBe(0);
+    expect(JSON.parse(stats.stdout)).toMatchObject({
+      totals: { entries: 2, failed: 0, programmes: 2 },
+    });
+
+    const state = await run(['cache', 'state', 'example.tv', '--config', config, ...driver]);
+    expect(state.code).toBe(0);
+    expect(state.stdout).toMatch(/^state {2}1 key, written /m);
+  });
+
+  it('shows what is cached as an XMLTV document, or a programme per line', async () => {
+    const { config, days } = await grabbed();
+
+    const xml = await run(['cache', 'show', 'example.tv', '--config', config]);
+    expect(xml.code).toBe(0);
+    expect(xml.stdout).toContain('<tv');
+    expect(xml.stdout.match(/<programme /g)).toHaveLength(2);
+    expect(xml.stdout).toContain('<title>Show</title>');
+    // Indented, for a person to read.
+    expect(xml.stdout).toContain('\n  <programme ');
+
+    const one = await run([
+      'cache',
+      'show',
+      'example.tv',
+      'one.example.tv',
+      days[1]!,
+      '--config',
+      config,
+    ]);
+    expect(one.stdout.match(/<programme /g)).toHaveLength(1);
+
+    const lines = await run([
+      'cache',
+      'show',
+      'example.tv',
+      '--config',
+      config,
+      '--format',
+      'json',
+    ]);
+    const records = lines.stdout
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { title: unknown });
+    expect(records).toHaveLength(2);
+    expect(records[0]!.title).toEqual([{ value: 'Show' }]);
+  });
+
+  it('says so, and exits 1, where nothing is cached for what was asked', async () => {
+    const { config } = await grabbed();
+
+    const site = await run(['cache', 'show', 'nowhere.tv', '--config', config]);
+    expect(site.code).toBe(1);
+    expect(site.stderr).toContain('Nothing cached for nowhere.tv.');
+
+    const day = await run([
+      'cache',
+      'show',
+      'example.tv',
+      'one.example.tv',
+      '2001-01-01',
+      '--config',
+      config,
+    ]);
+    expect(day.code).toBe(1);
+    expect(day.stderr).toContain('Nothing cached for example.tv one.example.tv 2001-01-01.');
+  });
+
+  it('counts what is cached per site', async () => {
+    const { config, days } = await grabbed();
+
+    const text = await run(['cache', 'stats', '--config', config]);
+    expect(text.code).toBe(0);
+    expect(text.stdout).toContain(
+      `example.tv — 1 channel, 2 channel-days from ${days[0]} to ${days[1]}, 2 programmes`,
+    );
+    expect(text.stdout).toContain('remembers: state');
+
+    const json = await run([
+      'cache',
+      'stats',
+      'example.tv',
+      '--config',
+      config,
+      '--format',
+      'json',
+    ]);
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      sites: [
+        {
+          site: 'example.tv',
+          channels: 1,
+          entries: 2,
+          unreadable: 0,
+          empty: 0,
+          programmes: 2,
+          state: ['state'],
+        },
+      ],
+      totals: { sites: 1, entries: 2, programmes: 2 },
+    });
+
+    const none = await run(['cache', 'stats', 'nowhere.tv', '--config', config]);
+    expect(none.code).toBe(0);
+    expect(none.stdout).toContain('Nothing cached for nowhere.tv.');
+  });
+
+  it('reports an entry it cannot vouch for, and leaves it where it is', async () => {
+    const { dir, config, days } = await grabbed();
+    const file = join(dir, 'cache', 'example.tv', 'one.example.tv', `${days[0]}.ndjson`);
+
+    await writeFile(file, 'not an entry\n');
+
+    const stats = await run(['cache', 'stats', '--config', config]);
+    expect(stats.stdout).toContain(' · 1 unreadable\n');
+
+    const shown = await run(['cache', 'show', 'example.tv', '--config', config]);
+    expect(shown.code).toBe(0);
+    expect(shown.stderr).toContain(`one.example.tv ${days[0]}: left out`);
+    expect(shown.stdout.match(/<programme /g)).toHaveLength(1);
+
+    // Looking changed nothing.
+    expect(await readFile(file, 'utf8')).toBe('not an entry\n');
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'goes on past an entry this user may not read, saying so',
+    async () => {
+      const { dir, config, days } = await grabbed();
+      const file = join(dir, 'cache', 'example.tv', 'one.example.tv', `${days[0]}.ndjson`);
+
+      await chmod(file, 0o000);
+
+      try {
+        const stats = await run(['cache', 'stats', '--config', config]);
+        expect(stats.code).toBe(0);
+        expect(stats.stdout).toContain(' · 1 could not be read\n');
+        expect(stats.stderr).toContain(
+          `example.tv one.example.tv ${days[0]}: could not be read: EACCES`,
+        );
+
+        const shown = await run(['cache', 'show', 'example.tv', '--config', config]);
+        expect(shown.code).toBe(0);
+        expect(shown.stderr).toContain(`one.example.tv ${days[0]}: left out — could not be read`);
+        expect(shown.stdout.match(/<programme /g)).toHaveLength(1);
+      } finally {
+        await chmod(file, 0o600);
+      }
+    },
+  );
+
+  it('shows what a site remembers: its groups, one of them, or its keys', async () => {
+    const { config } = await grabbed();
+
+    const groups = await run(['cache', 'state', 'example.tv', '--config', config]);
+    expect(groups.code).toBe(0);
+    expect(groups.stdout).toMatch(/^state +1 key, written \d{4}-\d{2}-\d{2} \d{2}:\d{2}Z by /m);
+
+    const data = await run(['cache', 'state', 'example.tv', 'state', '--config', config]);
+    expect(JSON.parse(data.stdout)).toEqual([['cursor', 42]]);
+
+    const withMeta = await run([
+      'cache',
+      'state',
+      'example.tv',
+      'state',
+      '--config',
+      config,
+      '--format',
+      'json',
+    ]);
+    expect(JSON.parse(withMeta.stdout)).toMatchObject({
+      meta: { schema: 1 },
+      data: [['cursor', 42]],
+    });
+
+    const keys = await run(['cache', 'state', 'example.tv', 'state', '--keys', '--config', config]);
+    expect(keys.stdout).toBe('cursor\n');
+
+    const missing = await run(['cache', 'state', 'example.tv', 'validators', '--config', config]);
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain('Nothing remembered for example.tv under validators.');
+
+    const nowhere = await run(['cache', 'state', 'nowhere.tv', '--config', config]);
+    expect(nowhere.code).toBe(1);
+    expect(nowhere.stderr).toContain('Nothing remembered for nowhere.tv.');
+  });
+
+  it('opens no store for a command line it refuses', async () => {
+    const dir = await tempDir();
+    const opened = join(dir, 'opened');
+    // A driver of the config's own, which says when it is made.
+    const config = await configFile(
+      dir,
+      `import { writeFileSync } from 'node:fs';
+
+      export default {
+        sites: [${siteSource()}],
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: {
+          driver: () => {
+            writeFileSync(${JSON.stringify(opened)}, '');
+
+            throw new Error('not for this test');
+          },
+        },
+      };`,
+    );
+
+    for (const argv of [
+      ['cache', 'show'],
+      ['cache', 'show', 'example.tv', 'one.example.tv', '2026-99-99'],
+      ['cache', 'state', 'example.tv', '--keys'],
+      ['cache', 'show', 'example.tv', '-o', 'day.xml'],
+    ]) {
+      expect((await run([...argv, '--config', config])).code).toBe(2);
+    }
+
+    expect(existsSync(opened)).toBe(false);
+  });
+
+  it('refuses what it cannot do, with the usage', async () => {
+    const { config } = await grabbed();
+    const refused = async (argv: string[], message: string): Promise<void> => {
+      const result = await run([...argv, '--config', config]);
+
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain(message);
+      expect(result.stderr).toContain('Usage: epg');
+    };
+
+    await refused(['cache'], 'cache needs one of show, stats, state, prune');
+    await refused(['cache', 'look'], 'Unknown cache command: look');
+    await refused(['cache', 'show'], 'cache show needs a site');
+    await refused(['cache', 'state'], 'cache state needs a site');
+    await refused(['cache', 'stats', 'a', 'b'], 'cache stats takes at most 1 argument');
+    await refused(
+      ['cache', 'state', 'example.tv', '--keys'],
+      '--keys is for cache state with a group',
+    );
+    await refused(
+      ['cache', 'show', 'example.tv', 'one.example.tv', 'tuesday'],
+      'Invalid day value: tuesday',
+    );
+
+    // A flag a subcommand would only ignore.
+    for (const [argv, message] of [
+      [['cache', 'show', 'example.tv', '--before', '2026-07-01'], '--before is not for cache show'],
+      [['cache', 'stats', '--indent', '2'], '--indent is not for cache stats'],
+      [['cache', 'prune', '--format', 'json'], '--format is not for cache prune'],
+      [['cache', 'stats', '--days', '3'], '--days is not for cache stats'],
+      [['cache', 'state', 'example.tv', '--refresh'], '--refresh is not for cache state'],
+      // What shapes a guide written somewhere, which no cache command writes.
+      [['cache', 'show', 'example.tv', '-o', 'day.xml'], '--output is not for cache show'],
+      [['cache', 'show', 'example.tv', '--profile', 'jellyfin'], '--profile is not for cache show'],
+      [['cache', 'show', 'example.tv', '--no-extensions'], '--extensions is not for cache show'],
+      [
+        ['cache', 'show', 'example.tv', '--format', 'json', '--indent', '4'],
+        '--indent is for cache show as XMLTV, not --format json',
+      ],
+    ] as const) {
+      await refused([...argv], message);
+    }
   });
 });

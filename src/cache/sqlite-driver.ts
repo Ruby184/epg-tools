@@ -19,13 +19,15 @@
  * filesystem driver is careful about cannot happen here at all.
  */
 
-import { mkdirSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { StatementSync } from 'node:sqlite';
 import type { CacheCodec, CodecName } from './codec.js';
 import type {
   CacheDriver,
+  CachedKey,
+  CacheListOptions,
   ChannelDayKey,
   FoundEntry,
   FoundMeta,
@@ -40,8 +42,9 @@ import type {
  * A different question from an entry's `schema`, which says what one row
  * *holds*: this says what the columns *are*, and a mismatch is not something
  * re-grabbing a day could fix, since the statements would not run at all. So the
- * table is dropped and made again — a cache is disposable, and that is the whole
- * of the migration story here as everywhere else in this module.
+ * table is dropped and made again, by the first write — until then a read
+ * finds nothing — since a cache is disposable, and that is the whole of the
+ * migration story here as everywhere else in this module.
  *
  * 1 — site, channel, day, the four meta fields, and the programmes as JSON.
  * 2 — a `state` table beside it: what each site remembers between runs.
@@ -49,6 +52,12 @@ import type {
  *     so a channel-day a site's thread encoded is kept as it came.
  */
 const TABLE_VERSION = 3;
+
+/** How many keys {@link SqliteCacheDriver.list} reads at a time. */
+const LIST_PAGE = 1000;
+
+/** What asks a database which version of the tables it holds. */
+const VERSION = 'PRAGMA user_version';
 
 /** What the database is called inside the cache directory. */
 const DEFAULT_FILE = 'cache.sqlite';
@@ -163,8 +172,16 @@ export class SqliteCacheDriver implements CacheDriver {
   /** The records' array, as JSON — kept in a row as the bytes the codec made. */
   readonly codec: CodecName | CacheCodec = 'json';
 
-  readonly #db: DatabaseSync;
+  readonly #file: string;
   readonly #signal: AbortSignal | undefined;
+  /** Opened when first asked for anything, and only then — see {@link #prepared}. */
+  #db: DatabaseSync | undefined;
+  /** Whether the tables are the ones this code makes, as far as it has found. */
+  #current = false;
+  /** Whether the file is ready to write: logging ahead, and the tables this code's. */
+  #writable = false;
+  /** Whether {@link close} was asked for — after which nothing is opened again. */
+  #closed = false;
   /**
    * Statements prepared once and reused, which is most of why this is quick: a
    * run asks the same handful of questions about every channel-day in the
@@ -172,60 +189,161 @@ export class SqliteCacheDriver implements CacheDriver {
    */
   readonly #statements = new Map<string, StatementSync>();
 
+  /**
+   * Nothing is opened or made here: a driver made only to be looked into —
+   * `epg cache` — must not make a database where there was none, or replace
+   * the tables of one another version wrote. See {@link #prepared}.
+   */
   constructor(options: SqliteCacheDriverOptions) {
     this.#signal = options.signal;
+    this.#file = options.file ?? path.join(options.dir, DEFAULT_FILE);
 
-    const file = options.file ?? path.join(options.dir, DEFAULT_FILE);
+    // Refused now rather than at the first write: a run asks the cache before
+    // it fetches anything, so a database that could never be made would be
+    // found out only after every request had been made for nothing.
+    if (this.#file !== ':memory:' && !existsSync(this.#file)) {
+      this.#canMake(this.#file);
+    }
+  }
 
-    // SQLite will not make the directory its file goes in, and on a first run
-    // that directory is as likely as not to be missing.
-    if (file !== ':memory:') {
-      mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
+  /**
+   * Whether the file could be made where it is to go, asked without making
+   * anything: the nearest directory there is, on its way, has to be writable.
+   */
+  #canMake(file: string): void {
+    let dir = path.dirname(path.resolve(file));
+
+    while (!existsSync(dir) && path.dirname(dir) !== dir) {
+      dir = path.dirname(dir);
     }
 
-    this.#db = new DatabaseSync(file);
-    // Write-ahead logging, so a merge reading the cache is not held up by a grab
-    // writing it; and the relaxed sync because this is a cache — a day lost to a
-    // power cut is a day grabbed again.
-    this.#db.exec('PRAGMA journal_mode = WAL');
-    this.#db.exec('PRAGMA synchronous = NORMAL');
+    if (!statSync(dir).isDirectory()) {
+      throw new Error(`The sqlite cache cannot be made at ${file}: ${dir} is not a directory`);
+    }
+
+    try {
+      accessSync(dir, constants.W_OK);
+    } catch (cause) {
+      throw new Error(`The sqlite cache cannot be made at ${file}: ${dir} is not writable`, {
+        cause,
+      });
+    }
+  }
+
+  #open(): void {
+    const db = new DatabaseSync(this.#file);
+
+    // The relaxed sync because this is a cache — a day lost to a power cut is a
+    // day grabbed again.
+    db.exec('PRAGMA synchronous = NORMAL');
     // Wait rather than fail when another process holds the write lock: grabbing
     // two sites into one cache from two commands is a reasonable thing to do.
-    this.#db.exec('PRAGMA busy_timeout = 5000');
-    this.#ensureTable();
+    db.exec('PRAGMA busy_timeout = 5000');
+    this.#db = db;
   }
 
-  /** The table as this code expects it — made, or made again. */
-  #ensureTable(): void {
-    const { user_version: version } = this.#db.prepare('PRAGMA user_version').get() as {
-      user_version: number;
-    };
-
-    if (version === TABLE_VERSION) {
-      return;
-    }
-
-    this.#db.exec('DROP TABLE IF EXISTS entries');
-    this.#db.exec('DROP TABLE IF EXISTS state');
-
-    for (const statement of CREATE_TABLE) {
-      this.#db.exec(statement);
-    }
-
-    // Interpolated because a pragma takes no parameter — and it is an integer
-    // constant of ours, not anything a caller can reach.
-    this.#db.exec(`PRAGMA user_version = ${TABLE_VERSION}`);
+  #version(): number {
+    return (this.#statement(VERSION).get() as { user_version: number }).user_version;
   }
 
-  #prepared(sql: string): StatementSync {
+  /**
+   * A statement on the open database, prepared the first time it is asked for
+   * and reused after. Only ever asked once {@link #prepared} has opened it.
+   */
+  #statement(sql: string): StatementSync {
     let statement = this.#statements.get(sql);
 
     if (statement === undefined) {
-      statement = this.#db.prepare(sql);
+      statement = this.#db!.prepare(sql);
       this.#statements.set(sql, statement);
     }
 
     return statement;
+  }
+
+  /** The table as this code expects it — made, or made again. */
+  #ensureTable(): void {
+    if (this.#version() === TABLE_VERSION) {
+      return;
+    }
+
+    const db = this.#db!;
+
+    db.exec('DROP TABLE IF EXISTS entries');
+    db.exec('DROP TABLE IF EXISTS state');
+
+    for (const statement of CREATE_TABLE) {
+      db.exec(statement);
+    }
+
+    // Interpolated because a pragma takes no parameter — and it is an integer
+    // constant of ours, not anything a caller can reach.
+    db.exec(`PRAGMA user_version = ${TABLE_VERSION}`);
+  }
+
+  /**
+   * A statement, prepared once and reused, on a database opened the first time
+   * anything is asked of it.
+   *
+   * For a write, the file and its directory are made first, and the tables —
+   * made again where another version made them. For a read there is no
+   * statement where there is nothing this code can read: no file yet, or
+   * tables of another version. That read answers as an empty store would, with
+   * nothing made and nothing replaced — so a look changes nothing, and a run
+   * finds nothing it can read and grabs again, as when the tables were replaced
+   * the moment it opened. Asked again by each read while the answer is no,
+   * which is one pragma: a run in another process may have made them since.
+   */
+  #prepared(mode: 'read' | 'change', sql: string): StatementSync | undefined;
+  #prepared(mode: 'write', sql: string): StatementSync;
+  #prepared(mode: 'read' | 'change' | 'write', sql: string): StatementSync | undefined {
+    // Closed is closed: a driver used after it would otherwise open a database
+    // again, which nothing would ever close.
+    if (this.#closed) {
+      throw new Error('This sqlite cache is closed');
+    }
+
+    // Nothing to read or to change where there is no file yet, or its tables
+    // are another version's: only a write makes or replaces them.
+    if (mode !== 'write' && !this.#current) {
+      if (this.#db === undefined) {
+        if (this.#file !== ':memory:' && !existsSync(this.#file)) {
+          return undefined;
+        }
+
+        this.#open();
+      }
+
+      this.#current = this.#version() === TABLE_VERSION;
+
+      if (!this.#current) {
+        return undefined;
+      }
+    }
+
+    // Ready to change the file: write-ahead logging, so a merge reading the
+    // cache is not held up by a grab writing it — and, for a write, the file
+    // and its tables made first. Said by the first change, whatever was read
+    // before it, since it is a setting the file keeps: a look leaves the file
+    // as it found it, and a run puts it back.
+    if (mode !== 'read' && !this.#writable) {
+      if (this.#db === undefined) {
+        // SQLite will not make the directory its file goes in, and on a first
+        // run that directory is as likely as not to be missing.
+        if (this.#file !== ':memory:') {
+          mkdirSync(path.dirname(path.resolve(this.#file)), { recursive: true });
+        }
+
+        this.#open();
+      }
+
+      this.#db!.exec('PRAGMA journal_mode = WAL');
+      this.#ensureTable();
+      this.#current = true;
+      this.#writable = true;
+    }
+
+    return this.#statement(sql);
   }
 
   #meta(row: MetaRow): StoredEntryMeta {
@@ -242,7 +360,7 @@ export class SqliteCacheDriver implements CacheDriver {
 
     // The payload column is left out of the query rather than read and dropped,
     // which is what lets `entries_meta` answer this on its own.
-    const row = this.#prepared(`SELECT ${META_COLUMNS} FROM entries ${BY_KEY}`).get(
+    const row = this.#prepared('read', `SELECT ${META_COLUMNS} FROM entries ${BY_KEY}`)?.get(
       key.site,
       key.channelId,
       key.day,
@@ -267,14 +385,20 @@ export class SqliteCacheDriver implements CacheDriver {
   async readMetas(keys: readonly ChannelDayKey[]): Promise<Array<FoundMeta | undefined>> {
     this.#signal?.throwIfAborted();
 
-    if (keys.length === 0) {
-      return [];
+    const statement =
+      keys.length === 0
+        ? undefined
+        : this.#prepared(
+            'read',
+            `SELECT site, channel, day, ${META_COLUMNS} FROM entries
+       WHERE (site, channel, day) IN (VALUES ${keys.map(() => '(?, ?, ?)').join(', ')})`,
+          );
+
+    if (statement === undefined) {
+      return keys.map(() => undefined);
     }
 
-    const rows = this.#prepared(
-      `SELECT site, channel, day, ${META_COLUMNS} FROM entries
-       WHERE (site, channel, day) IN (VALUES ${keys.map(() => '(?, ?, ?)').join(', ')})`,
-    ).all(
+    const rows = statement.all(
       ...keys.flatMap((key) => [key.site, key.channelId, key.day]),
     ) as unknown as KeyedMetaRow[];
 
@@ -298,11 +422,10 @@ export class SqliteCacheDriver implements CacheDriver {
   async read(key: ChannelDayKey): Promise<FoundEntry | undefined> {
     this.#signal?.throwIfAborted();
 
-    const row = this.#prepared(`SELECT ${META_COLUMNS}, programmes FROM entries ${BY_KEY}`).get(
-      key.site,
-      key.channelId,
-      key.day,
-    ) as EntryRow | undefined;
+    const row = this.#prepared(
+      'read',
+      `SELECT ${META_COLUMNS}, programmes FROM entries ${BY_KEY}`,
+    )?.get(key.site, key.channelId, key.day) as EntryRow | undefined;
 
     return row && { meta: this.#meta(row), body: row.programmes };
   }
@@ -314,6 +437,7 @@ export class SqliteCacheDriver implements CacheDriver {
     // there before it — the promise the filesystem driver keeps with an atomic
     // rename, kept here by the database.
     this.#prepared(
+      'write',
       `INSERT INTO entries (site, channel, day, ${META_COLUMNS}, programmes)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (site, channel, day) DO UPDATE SET
@@ -339,16 +463,21 @@ export class SqliteCacheDriver implements CacheDriver {
   async delete(key: ChannelDayKey): Promise<void> {
     this.#signal?.throwIfAborted();
 
-    this.#prepared(`DELETE FROM entries ${BY_KEY}`).run(key.site, key.channelId, key.day);
+    // On what is there: nothing is made to delete from.
+    this.#prepared('change', `DELETE FROM entries ${BY_KEY}`)?.run(
+      key.site,
+      key.channelId,
+      key.day,
+    );
   }
 
   async readState(site: string, key: string): Promise<FoundState | undefined> {
     this.#signal?.throwIfAborted();
 
-    const row = this.#prepared(`SELECT ${STATE_COLUMNS} FROM state WHERE site = ? AND key = ?`).get(
-      site,
-      key,
-    ) as StateRow | undefined;
+    const row = this.#prepared(
+      'read',
+      `SELECT ${STATE_COLUMNS} FROM state WHERE site = ? AND key = ?`,
+    )?.get(site, key) as StateRow | undefined;
 
     if (row === undefined) {
       return;
@@ -374,6 +503,7 @@ export class SqliteCacheDriver implements CacheDriver {
     this.#signal?.throwIfAborted();
 
     this.#prepared(
+      'write',
       `INSERT INTO state (site, key, ${STATE_COLUMNS})
        VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (site, key) DO UPDATE SET
@@ -397,7 +527,79 @@ export class SqliteCacheDriver implements CacheDriver {
   async deleteState(site: string, key: string): Promise<void> {
     this.#signal?.throwIfAborted();
 
-    this.#prepared('DELETE FROM state WHERE site = ? AND key = ?').run(site, key);
+    // On what is there: nothing is made to delete from.
+    this.#prepared('change', 'DELETE FROM state WHERE site = ? AND key = ?')?.run(site, key);
+  }
+
+  /**
+   * The entries, a page at a time in the order of `entries_key` — which
+   * answers each page without touching a payload — and then the groups.
+   *
+   * Pages rather than one statement stepped through as its keys are handed
+   * out: a statement still being stepped holds the connection's read open, and
+   * a caller that wrote as it went — deleting what it was handed, say — would
+   * have its writes left uncommitted, and the write lock held against every
+   * other process, until the listing ended. Each page is read whole before a
+   * key of it is handed out, so nothing is held across a yield, and a listing
+   * of 70,000 is never held at once either.
+   */
+  async *list(options: CacheListOptions = {}): AsyncIterable<CachedKey> {
+    this.#signal?.throwIfAborted();
+
+    const { site, channelId, kind } = options;
+    const narrowed = [
+      ...(site === undefined ? [] : [site]),
+      ...(channelId === undefined ? [] : [channelId]),
+    ];
+
+    if (kind !== 'state') {
+      let after: { site: string; channel: string; day: string } | undefined;
+
+      do {
+        const page = (this.#prepared(
+          'read',
+          `SELECT site, channel, day FROM entries${this.#where(site, channelId, after !== undefined)}
+           ORDER BY site, channel, day LIMIT ${LIST_PAGE}`,
+        )?.all(
+          ...narrowed,
+          ...(after === undefined ? [] : [after.site, after.channel, after.day]),
+        ) ?? []) as unknown as Array<{ site: string; channel: string; day: string }>;
+
+        for (const row of page) {
+          yield { kind: 'entry', key: { site: row.site, channelId: row.channel, day: row.day } };
+        }
+
+        this.#signal?.throwIfAborted();
+        after = page.length === LIST_PAGE ? page.at(-1) : undefined;
+      } while (after !== undefined);
+    }
+
+    // A channel's entries are all a channel has: state is a site's. A site's
+    // groups are a handful, and read at once.
+    if (kind !== 'entry' && channelId === undefined) {
+      const groups = (this.#prepared(
+        'read',
+        `SELECT site, key FROM state${this.#where(site)}`,
+      )?.all(...narrowed) ?? []) as unknown as Array<{ site: string; key: string }>;
+
+      for (const row of groups) {
+        yield { kind: 'state', site: row.site, key: row.key };
+      }
+    }
+  }
+
+  /**
+   * What narrows a listing, as SQL — its parameters given in the same order —
+   * and, for a page after the first, where the last one ended.
+   */
+  #where(site: string | undefined, channelId?: string, after = false): string {
+    const said = [
+      ...(site === undefined ? [] : ['site = ?']),
+      ...(channelId === undefined ? [] : ['channel = ?']),
+      ...(after ? ['(site, channel, day) > (?, ?, ?)'] : []),
+    ];
+
+    return said.length === 0 ? '' : ` WHERE ${said.join(' AND ')}`;
   }
 
   async prune(options: { before: string }): Promise<number> {
@@ -405,15 +607,19 @@ export class SqliteCacheDriver implements CacheDriver {
 
     // The whole prune in one statement the database plans itself: no directory
     // walk, nothing to do a few at a time, and nothing to stop half way — which
-    // is why this is the one method whose signal is only asked at the start.
-    const { changes } = this.#prepared('DELETE FROM entries WHERE day < ?').run(options.before);
-
-    return Number(changes);
+    // is why this is the one method whose signal is only asked at the start. On
+    // what is there, as a delete is.
+    return Number(
+      this.#prepared('change', 'DELETE FROM entries WHERE day < ?')?.run(options.before).changes ??
+        0,
+    );
   }
 
   async close(): Promise<void> {
+    this.#closed = true;
     this.#statements.clear();
-    this.#db.close();
+    this.#db?.close();
+    this.#db = undefined;
   }
 
   /** The same as {@link close}, for `await using`. */

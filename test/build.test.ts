@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, readdir, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -1766,5 +1766,64 @@ describe('an output profile', () => {
     expect(shaped).toContain('eit="0x10"');
     expect(other).not.toContain('eit=');
     expect(other).toContain('Movie / Drama');
+  });
+});
+
+describe('a cache that cannot be read or made', () => {
+  it('says, as the site, that a merge removed a day whose programmes would not read', async () => {
+    const dir = await tempDir();
+    const warnings: string[] = [];
+
+    await runGrab(config(dir), { now: NOW });
+
+    const file = join(dir, 'cache', 'example.com', 'one.example', `${TODAY}.ndjson`);
+    const lines = (await readFile(file, 'utf8')).trimEnd().split('\n');
+
+    // The programme line cut short, after a meta line that still reads.
+    await writeFile(file, `${lines[0]}\n${lines[1]!.slice(0, 10)}\n`);
+
+    await runMerge(config(dir), {
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'site:warning') {
+          warnings.push(`${event.site}: ${event.message}`);
+        }
+      },
+    });
+
+    expect(warnings).toEqual([
+      expect.stringMatching(
+        new RegExp(
+          `^example\\.com: one\\.example ${TODAY}: removed from the cache, its programmes unreadable \\(.+\\) — the day is grabbed again by the next run$`,
+        ),
+      ),
+    ]);
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("says a sqlite cache's place is wrong as a place, not as a runtime", async () => {
+    const dir = await tempDir();
+    const notADirectory = join(dir, 'notes.txt');
+
+    await writeFile(notADirectory, '');
+
+    const sqlite = await import('../src/cache/sqlite-driver.js').catch(() => undefined);
+
+    if (sqlite === undefined) {
+      return;
+    }
+
+    await expect(
+      createCacheStore(
+        config(dir, { cache: { dir: join(notADirectory, 'cache'), driver: 'sqlite' } }),
+      ),
+    ).rejects.toThrow(
+      `The sqlite cache cannot be made at ${join(notADirectory, 'cache', 'cache.sqlite')}: ${notADirectory} is not a directory`,
+    );
+    await expect(
+      createCacheStore(
+        config(dir, { cache: { dir: join(notADirectory, 'cache'), driver: 'sqlite' } }),
+      ),
+    ).rejects.not.toThrow('needs Node 24');
   });
 });
