@@ -160,7 +160,9 @@ epg try <site> <ch>  # one channel-day: the request, the payload, the programmes
 epg validate         # read the guide and report what is wrong with it
 epg filter guide.xml --channels my-60.m3u -o small.xml  # keep 60 of 900
 epg channels --against playlist.m3u   # which wanted channels will get no guide
-epg prune            # drop cached days older than today
+epg cache stats      # how much is cached, per site
+epg cache show <site>  # what is cached for a site, as XMLTV
+epg cache prune      # drop cached days older than today
 epg init-grabber tv_grab_sk_example   # write an XMLTV grabber for this config
 epg build -d 14 -o public/epg.xml
 epg build --offset 1 # start the window tomorrow instead of today
@@ -186,7 +188,8 @@ into place, so a reader never sees half a guide.
 | `--allow-missing <n>` | exit 0 with up to this much of the guide missing — a number of channel-days, or a share like `5%`; [a site that answered nothing is never forgiven](./docs/configuration.md#allowing-some-of-the-guide-to-be-missing) |
 | `--dry-run` | `grab`/`build` only: [say what a run would fetch](./docs/configuration.md#what-a-run-would-do), and stop — `--format json` for a machine-readable one |
 | `--threads[=n]` | `build`/`grab`/`serve`: run the sites in [worker threads](./docs/configuration.md#sites-in-threads-of-their-own), one per core or at most `n`; `--no-threads` overrides a config that asks for them |
-| `--before <day>` | `prune` only: remove days before `YYYY-MM-DD`, default today |
+| `--before <day>` | `cache prune` only: remove days before `YYYY-MM-DD`, default today |
+| `--keys` | `cache state` with a group only: the keys it holds, not what it holds |
 | `--log-level <l>` | how much to report: `error`, `warn`, `info` (default) or `debug` |
 | `-v, --verbose` | same as `--log-level debug`; `-q, --quiet` is `--log-level error` |
 | `--reporter <name>` | `progress` (default — a live line on a terminal, `text` anywhere else), `text`, or `json` for one object per line |

@@ -27,6 +27,7 @@ import {
 } from './events.js';
 import { errorChain, errorMessage, MAX_CAUSE_DEPTH } from './error.js';
 import { queueLine } from './streams.js';
+import { count } from './count.js';
 
 /** A reporter this package ships, by name — what a config can ask for. */
 export const REPORTER_NAMES = ['text', 'json', 'progress'] as const;
@@ -58,11 +59,6 @@ export interface ReporterRuntime {
 
 /** A reporter that wants those before it can be built. */
 export type ReporterFactory = (runtime: ReporterRuntime) => Reporter;
-
-/** `N thing` / `N things`, since almost every line here counts something. */
-function count(n: number, one: string, many = `${one}s`): string {
-  return `${n} ${n === 1 ? one : many}`;
-}
 
 /**
  * A duration, in the unit somebody reading a nightly run would use.
@@ -268,10 +264,10 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       return 'Stopped serving';
     case 'prune:done':
       // One wording where there were two: a prune after a grab used to say
-      // "Pruned N cached day(s) older than X" and `epg prune` "Pruned N cached
-      // entr(y|ies) before X", for the same act on the same store.
+      // "Pruned N cached day(s) older than X" and the prune command "Pruned N
+      // cached entr(y|ies) before X", for the same act on the same store.
       return (
-        `Pruned ${event.removed} cached entr${event.removed === 1 ? 'y' : 'ies'} ` +
+        `Pruned ${count(event.removed, 'cached entry', 'cached entries')} ` +
         `before ${event.before}`
       );
     default:

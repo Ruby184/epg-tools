@@ -14,8 +14,12 @@ import ky, { HTTPError } from 'ky';
 import { createSecureServer } from 'node:http2';
 import { createServer as createHttpsServer } from 'node:https';
 import Fastify from 'fastify';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import {
   build,
+  CacheManager,
+  CODECS,
+  CorruptEntryError,
   createGuideHandler,
   grabEvery,
   defineConfig,
@@ -32,8 +36,10 @@ import {
 } from '../src/main.js';
 import type {
   GrabberChannel,
+  CacheCodec,
   CacheDriver,
   CacheDriverFactory,
+  CachedKey,
   CacheStore,
   ChannelDayKey,
   OutputProfile,
@@ -712,15 +718,46 @@ export const namedAfterTheLineup = defineConfig({
   }),
 });
 
+// --- docs/api.md: epg-tools/cache ------------------------------------------
+export const looked = async (cache: CacheManager): Promise<string> => {
+  const found = await cache.inspect({ site: 'example.tv', channelId: 'one', day: '2026-07-17' });
+
+  return found === undefined
+    ? 'nothing cached'
+    : found.status === 'readable'
+      ? `${found.programmes.length} of ${found.meta.programmeCount}`
+      : found.status;
+};
+
 // --- docs/api.md: A driver of your own -------------------------------------
+
+export const gzipped: CacheCodec = {
+  encode: (programmes) => gzipSync(CODECS.json.encode(programmes)),
+  decode(body, meta) {
+    let json: Uint8Array;
+
+    try {
+      json = gunzipSync(body);
+    } catch (error) {
+      // Bytes that are not gzip are an entry damaged, not a codec.
+      throw new CorruptEntryError('An entry of the gzipped codec is not gzip', { cause: error });
+    }
+
+    // Which says so itself of records it cannot read, or fewer than `meta` says.
+    return CODECS.json.decode(json, meta);
+  },
+};
 
 /**
  * The store behind the example driver. A real one is a client — Redis,
  * Postgres, a bucket — and stands in here as a `Map`, since what the
  * documentation is promising is the shape of the driver rather than the client.
  */
-const rows = new Map<string, { meta: StoredEntryMeta; body: Uint8Array }>();
-const groups = new Map<string, { meta: StoredStateMeta; data: unknown }>();
+const rows = new Map<string, { key: ChannelDayKey; meta: StoredEntryMeta; body: Uint8Array }>();
+const groups = new Map<
+  string,
+  { site: string; key: string; meta: StoredStateMeta; data: unknown }
+>();
 
 class KeyValueCacheDriver implements CacheDriver {
   // What an entry's bytes are: the records' array, as JSON. A site in a thread
@@ -737,6 +774,11 @@ class KeyValueCacheDriver implements CacheDriver {
     return `${this.#prefix}:${key.site}:${key.channelId}:${key.day}`;
   }
 
+  /** Whether a row or a group is this cache's, and of the site asked about. */
+  #holds(id: string, site: string, only: string | undefined): boolean {
+    return id.startsWith(`${this.#prefix}:`) && (only === undefined || site === only);
+  }
+
   async readMeta(key: ChannelDayKey): Promise<FoundMeta | undefined> {
     const row = rows.get(this.#id(key));
 
@@ -749,7 +791,7 @@ class KeyValueCacheDriver implements CacheDriver {
 
   // A copy of the view: the bytes may sit in a buffer with room to spare.
   async write(key: ChannelDayKey, body: Uint8Array, meta: StoredEntryMeta): Promise<void> {
-    rows.set(this.#id(key), { meta, body: new Uint8Array(body) });
+    rows.set(this.#id(key), { key, meta, body: new Uint8Array(body) });
   }
 
   async delete(key: ChannelDayKey): Promise<void> {
@@ -759,8 +801,8 @@ class KeyValueCacheDriver implements CacheDriver {
   async prune(options: { before: string }): Promise<number> {
     let removed = 0;
 
-    for (const id of rows.keys()) {
-      if (id.slice(id.lastIndexOf(':') + 1) < options.before) {
+    for (const [id, row] of rows) {
+      if (this.#holds(id, row.key.site, undefined) && row.key.day < options.before) {
         rows.delete(id);
         removed++;
       }
@@ -776,11 +818,28 @@ class KeyValueCacheDriver implements CacheDriver {
   }
 
   async writeState(site: string, key: string, data: unknown, meta: StoredStateMeta): Promise<void> {
-    groups.set(`${this.#prefix}:${site}:${key}`, { meta, data });
+    groups.set(`${this.#prefix}:${site}:${key}`, { site, key, meta, data });
   }
 
   async deleteState(site: string, key: string): Promise<void> {
     groups.delete(`${this.#prefix}:${site}:${key}`);
+  }
+
+  // What `epg cache` looks inside a store with: every key it holds, from the
+  // key each row keeps beside it rather than picked back out of its id — a
+  // site called `example.com:8080` has a colon of its own.
+  async *list(options?: { site?: string }): AsyncIterable<CachedKey> {
+    for (const [id, row] of rows) {
+      if (this.#holds(id, row.key.site, options?.site)) {
+        yield { kind: 'entry', key: row.key };
+      }
+    }
+
+    for (const [id, group] of groups) {
+      if (this.#holds(id, group.site, options?.site)) {
+        yield { kind: 'state', site: group.site, key: group.key };
+      }
+    }
   }
 
   async close(): Promise<void> {}

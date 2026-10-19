@@ -372,7 +372,10 @@ programme(zonedXmltvDate(item.start, dayZone), item.title);
 ```
 
 A failed `request` fails every channel-day it covered; one channel-day's
-`parseDay` error only drops that channel-day.
+`parseDay` error only drops that channel-day. A programme handed back without a
+`start` that is a real time — `new Date('')`, a field the source left empty —
+is left out of its channel-day, with a warning saying how many: no guide can
+place it, and the cache could not keep it.
 
 ### Remembering something between runs
 

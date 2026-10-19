@@ -5,7 +5,7 @@ import {
   FsXmltvCacheDriver,
   MemoryCacheDriver,
 } from './cache/main.js';
-import type { CacheDriver, CacheStore } from './cache/main.js';
+import type { CacheDriver, CacheManagerOptions, CacheStore } from './cache/main.js';
 import { resolveSessions } from './grabber/channels.js';
 import { grabWith } from './grabber/grab.js';
 import { covered, coverageOf } from './grabber/main.js';
@@ -90,6 +90,7 @@ export interface RunOptions {
 export async function createCacheStore(
   config: EpgConfig,
   signal?: AbortSignal,
+  says?: Pick<CacheManagerOptions, 'warn'>,
 ): Promise<CacheManager> {
   const options = { dir: config.cache?.dir ?? path.join(process.cwd(), '.epg-cache'), signal };
   const driver = config.cache?.driver;
@@ -97,6 +98,7 @@ export async function createCacheStore(
   return new CacheManager({
     driver: await driverFor(options, driver),
     ...(config.cache?.invalidate ? { invalidate: config.cache.invalidate } : {}),
+    ...(says?.warn ? { warn: says.warn } : {}),
   });
 }
 
@@ -126,10 +128,10 @@ async function driverFor(
       // fails, on a Node that has never heard of it. Which is worth saying in
       // terms of the choice that led here rather than leaving Node to say "No
       // such built-in module" about something the config never mentioned.
-      try {
-        const { SqliteCacheDriver } = await import('./cache/sqlite-driver.js');
+      let sqlite: typeof import('./cache/sqlite-driver.js');
 
-        return new SqliteCacheDriver(options);
+      try {
+        sqlite = await import('./cache/sqlite-driver.js');
       } catch (error) {
         throw new GrabberError(
           `The sqlite cache driver needs Node 24 or newer (22.5 with --experimental-sqlite): ${
@@ -137,6 +139,10 @@ async function driverFor(
           }`,
         );
       }
+
+      // Outside the catch: a place the database could never be made is a
+      // mistake in the config, not in the runtime, and says so itself.
+      return new sqlite.SqliteCacheDriver(options);
     }
     default: {
       // Unreachable from TypeScript, which is what the `never` says: every name
@@ -168,7 +174,12 @@ async function cacheFor(
     return { cache: options.cache, release: async () => {} };
   }
 
-  const cache = await createCacheStore(config, options.signal);
+  // An entry removed for programmes that would not read is its site's to
+  // say, whether a grab came across it or a merge.
+  const emit = emitter(options);
+  const cache = await createCacheStore(config, options.signal, {
+    warn: (message, key) => emit({ type: 'site:warning', site: key.site, message }),
+  });
 
   return { cache, release: () => cache.close() };
 }

@@ -1,6 +1,6 @@
 export { isStale } from './staleness.js';
 export { CacheManager, CACHE_SCHEMA, STATE_SCHEMA } from './manager.js';
-export { CODECS, fromRecord, toRecord } from './codec.js';
+export { CODECS, CorruptEntryError, fromRecord, toRecord } from './codec.js';
 export type { CacheCodec, CodecName } from './codec.js';
 export { FsCacheDriver } from './fs-driver.js';
 export { MemoryCacheDriver } from './memory-driver.js';

@@ -215,6 +215,31 @@ function makeDaysConfig(overrides: Partial<DaysConfig> = {}): DaysConfig {
 }
 
 describe('grab', () => {
+  it('leaves out a programme without a valid start, saying so, so the entry reads back', async () => {
+    const cache = new CacheManager({ driver: new MemoryCacheDriver() });
+    const report = collect();
+    const config = makeConfig({
+      parseDay: ({ day }) => [
+        { start: new Date('not a time'), title: [{ value: 'Lost' }] } as never,
+        programme(`${day}T06:00:00.000Z`),
+      ],
+    });
+
+    await grab([config], { cache, now: NOW, reporter: report.reporter });
+
+    // Kept, the entry would read as broken and be grabbed again every run.
+    expect(
+      await cache.inspect({ site: 'example.com', channelId: 'one.example', day: TODAY }),
+    ).toMatchObject({ status: 'readable', meta: { programmeCount: 1 } });
+    expect(report.events).toContainEqual(
+      expect.objectContaining({
+        type: 'site:warning',
+        site: 'example.com',
+        message: `one.example ${TODAY}: 1 programme without a valid start left out`,
+      }),
+    );
+  });
+
   it('skips fresh cache entries and fetches stale ones', async () => {
     const cache = new MemoryCache();
     const fetchedDays: string[] = [];

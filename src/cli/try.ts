@@ -42,6 +42,7 @@ import type { AnySiteConfig, GrabberChannel, ParsedProgramme } from '../grabber/
 import { ProgrammeBuilder } from '../xmltv/builder.js';
 import { serializeProgramme } from '../xmltv/serialize.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
+import { count } from '../core/count.js';
 
 /** How much of a payload is shown when nothing says otherwise. */
 const PAYLOAD_PREVIEW = 2000;
@@ -477,9 +478,7 @@ export async function tryChannelDay(
     out.push('');
   }
 
-  out.push(
-    `  ${programmes.length} programme${programmes.length === 1 ? '' : 's'} in ${Date.now() - began}ms`,
-  );
+  out.push(`  ${count(programmes.length, 'programme')} in ${Date.now() - began}ms`);
 
   for (const programme of programmes) {
     // Deliberately unshaped: no `outputOptions`, no profile, whatever the

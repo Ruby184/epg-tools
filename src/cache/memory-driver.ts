@@ -30,6 +30,8 @@
 import type { CacheCodec, CodecName } from './codec.js';
 import type {
   CacheDriver,
+  CachedKey,
+  CacheListOptions,
   ChannelDayKey,
   FoundEntry,
   FoundMeta,
@@ -162,6 +164,41 @@ export class MemoryCacheDriver implements CacheDriver {
    */
   #copy(data: unknown): unknown {
     return data === undefined ? undefined : (JSON.parse(JSON.stringify(data)) as unknown);
+  }
+
+  async *list(options: CacheListOptions = {}): AsyncIterable<CachedKey> {
+    const { site: only, channelId: channel, kind } = options;
+
+    for (const [site, channels] of kind === 'state' ? [] : this.#narrowed(this.#sites, only)) {
+      for (const [channelId, days] of this.#narrowed(channels, channel)) {
+        for (const day of days.keys()) {
+          yield { kind: 'entry', key: { site, channelId, day } };
+        }
+      }
+    }
+
+    // A channel's entries are all a channel has: state is a site's.
+    for (const [site, groups] of kind === 'entry' || channel !== undefined
+      ? []
+      : this.#narrowed(this.#state, only)) {
+      for (const key of groups.keys()) {
+        yield { kind: 'state', site, key };
+      }
+    }
+  }
+
+  /**
+   * A map's one pair under `key`, asked for rather than walked to — or all of
+   * them, where no key is given.
+   */
+  #narrowed<V>(map: Map<string, V>, key: string | undefined): Iterable<[string, V]> {
+    if (key === undefined) {
+      return map;
+    }
+
+    const value = map.get(key);
+
+    return value === undefined ? [] : [[key, value]];
   }
 
   async prune(options: { before: string }): Promise<number> {

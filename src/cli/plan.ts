@@ -35,6 +35,7 @@ import { DEFAULT_DAYS, resolveSite } from '../grabber/site.js';
 import { SiteStateHandle } from '../grabber/state.js';
 import type { AnySiteConfig, GrabberChannel } from '../grabber/types.js';
 import type { ReportFormat } from './format.js';
+import { count } from '../core/count.js';
 
 /** Where a site's channel list came from, which is what it cost to know it. */
 export type ChannelsFrom = 'config' | 'cache' | 'fetched' | 'failed';
@@ -287,11 +288,6 @@ export async function planRun(
     },
     sites,
   };
-}
-
-/** `1 day`, `3 days` — because a report that says "1 channels" reads as a bug. */
-function count(n: number, one: string, many = `${one}s`): string {
-  return `${n} ${n === 1 ? one : many}`;
 }
 
 /** What each provenance costs, said once rather than per row. */

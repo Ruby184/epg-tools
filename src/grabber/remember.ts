@@ -41,6 +41,18 @@ type Outcome = { value: unknown } | { error: unknown; refused?: true };
  */
 export type Away = <T>(wait: () => Promise<T>) => Promise<T>;
 
+/**
+ * Whether a value kept in the `remembered` group is still remembered at `now`
+ * — what a run keeps of the group, and what `epg cache state` counts. A pair
+ * that is not one is forgotten with the rest: whatever wrote it, it is no
+ * answer to anything.
+ */
+export function isRemembered(entry: unknown, now: number): boolean {
+  const until = (entry as Partial<Kept> | null | undefined)?.until;
+
+  return typeof until === 'number' && until > now;
+}
+
 /** One site's remembered values for the length of a run. */
 export class Memory {
   readonly #handle: SiteStateHandle;
@@ -191,9 +203,7 @@ export class Memory {
     this.#kept ??= this.#handle.bag<Kept>(StateKey.REMEMBERED).then(
       (kept) => {
         for (const [key, entry] of kept) {
-          // A pair that is not one is forgotten with the rest: whatever wrote
-          // it, it is no answer to anything.
-          if (typeof entry?.until !== 'number' || !(entry.until > this.#now)) {
+          if (!isRemembered(entry, this.#now)) {
             kept.delete(key);
           }
         }

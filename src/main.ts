@@ -204,6 +204,7 @@ export {
   FsNdjsonCacheDriver,
   FsXmltvCacheDriver,
   CODECS,
+  CorruptEntryError,
   fromRecord,
   toRecord,
   isStale,

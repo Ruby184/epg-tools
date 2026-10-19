@@ -22,9 +22,11 @@
 
 import { parseXmltvString, serializeProgramme } from '../xmltv/main.js';
 import type { SerializeOptions } from '../xmltv/main.js';
-import { formatXmltvDate, getXmltvOffset, parseXmltvDate } from '../xmltv/date.js';
+import { formatXmltvDate, getXmltvOffset, parseXmltvDate, XmltvDateError } from '../xmltv/date.js';
+import { XmltvInputError } from '../xmltv/scan.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
-import type { StoredProgramme } from './types.js';
+import { errorMessage } from '../core/error.js';
+import type { StoredEntryMeta, StoredProgramme } from './types.js';
 
 /**
  * A channel-day's programmes as bytes, and back — what a driver of your own
@@ -33,8 +35,46 @@ import type { StoredProgramme } from './types.js';
 export interface CacheCodec {
   /** The programmes as the bytes a store keeps. */
   encode(programmes: XmltvProgramme[]): Uint8Array;
-  /** The programmes those bytes stand for — what a driver's `read` handed back. */
-  decode(body: Uint8Array): XmltvProgramme[];
+  /**
+   * The programmes those bytes stand for — what a driver's `read` handed back,
+   * with `meta`, what the entry says about itself. Throws
+   * {@link CorruptEntryError} for bytes that are not what it wrote: a codec
+   * that gives back exactly what it was given can tell a cut that still reads
+   * by `meta.programmeCount`.
+   */
+  decode(body: Uint8Array, meta: StoredEntryMeta): XmltvProgramme[];
+}
+
+/**
+ * Bytes a codec cannot read as the programmes it wrote — a line cut short, an
+ * edit, a disk that filled — thrown by its `decode` to say so.
+ *
+ * What it tells the {@link CacheManager} is that the entry is damaged, not the
+ * codec: a run removes it, says so as a warning of its site's, and the next run
+ * grabs the day again. Anything else a codec throws is taken for the codec's
+ * own failing — a bug, a format changed without a schema to say so — and thrown
+ * as it is, since for every entry at once a removal would empty the cache and
+ * write an empty guide over the last good one. The codecs of {@link CODECS}
+ * throw it for whatever they cannot read, the cause beside it, and for a count
+ * other than the one the entry was written with.
+ *
+ * `instanceof` knows one by its name as well, so a driver whose package brings
+ * a copy of this one of its own throws one the manager knows.
+ */
+export class CorruptEntryError extends Error {
+  override readonly name = 'CorruptEntryError';
+
+  /**
+   * An instance, or an error of the same name — another copy's. Asked of a
+   * subclass, only an instance of it is one: what a subclass adds, another
+   * copy's error does not have.
+   */
+  static [Symbol.hasInstance](value: unknown): value is CorruptEntryError {
+    return (
+      Function.prototype[Symbol.hasInstance].call(this, value) ||
+      (this === CorruptEntryError && value instanceof Error && value.name === 'CorruptEntryError')
+    );
+  }
 }
 
 /**
@@ -136,28 +176,30 @@ export const CODECS = {
   ndjson: {
     encode: (programmes) => utf8(programmes.map(toLine).join('\n')),
     // A blank line is what the end of a file looks like.
-    decode: (body) =>
-      text(body)
-        .split('\n')
-        .filter((line) => line.trim() !== '')
-        .map(fromLine),
+    decode: (body, meta) =>
+      readAs('ndjson', meta, () =>
+        text(body)
+          .split('\n')
+          .filter((line) => line.trim() !== '')
+          .map(fromLine),
+      ),
   },
   /** The records' array, as JSON: what sqlite and memory keep. */
   json: {
     encode: (programmes) => utf8(JSON.stringify(programmes.map(toRecord))),
-    decode: (body) => {
-      try {
+    decode: (body, meta) =>
+      readAs('json', meta, () => {
+        // Bytes that are not the records' array say nothing about their
+        // programmes, and are as damaged as a line cut short: the day is
+        // grabbed again rather than served as empty.
         const parsed = JSON.parse(text(body)) as unknown;
 
-        return Array.isArray(parsed) ? (parsed as StoredProgramme[]).map(fromRecord) : [];
-      } catch {
-        // Bytes that are not JSON say nothing about their programmes, and what
-        // that means for the entry is not a codec's to decide: the meta beside
-        // them is what the manager judges, and a count disagreeing with what
-        // came back is a day worth grabbing again.
-        return [];
-      }
-    },
+        if (!Array.isArray(parsed)) {
+          throw new CorruptEntryError('An entry of the json codec holds no array of records');
+        }
+
+        return (parsed as StoredProgramme[]).map(fromRecord);
+      }),
   },
   /**
    * `<programme>` elements, as XMLTV writes them: what the xmltv driver puts in
@@ -168,13 +210,17 @@ export const CODECS = {
   xmltv: {
     encode: (programmes) =>
       utf8(programmes.map((programme) => serializeProgramme(programme, XMLTV_ENTRY)).join('')),
-    decode: (body) => {
-      const document = text(body);
+    decode: (body, meta) =>
+      readAs('xmltv', meta, () => {
+        const document = text(body);
 
-      return parseXmltvString(
-        /^\s*(<programme[\s/>]|$)/.test(document) ? `<tv>${document}</tv>` : document,
-      ).programmes;
-    },
+        // A programme of no channel is one this codec wrote — an entry is a
+        // channel's whichever way — so it is read back rather than dropped.
+        return parseXmltvString(
+          /^\s*(<programme[\s/>]|$)/.test(document) ? `<tv>${document}</tv>` : document,
+          { tolerateMissingId: true },
+        ).programmes;
+      }),
   },
 } satisfies Record<string, CacheCodec>;
 
@@ -230,6 +276,58 @@ function utf8(source: string): Uint8Array {
 
 function text(body: Uint8Array): string {
   return DECODER.decode(body);
+}
+
+/**
+ * What a codec of {@link CODECS} reads — or, for bytes it cannot, a
+ * {@link CorruptEntryError}: what a parser throws for its input — JSON that is
+ * not JSON, a date that is no date, a document that is not XMLTV — is the
+ * entry's doing. Anything else is thrown as it is: a fault of this code taken
+ * for a damaged entry would remove every entry it read.
+ *
+ * And for fewer or more than `meta` says the entry holds, since these give back
+ * exactly what they were given and the count was taken from the very
+ * programmes encoded: a cut that still reads — an ndjson entry cut between
+ * lines, an xmltv document that ends early — reads as fewer.
+ */
+function readAs(
+  codec: string,
+  meta: StoredEntryMeta,
+  decode: () => XmltvProgramme[],
+): XmltvProgramme[] {
+  let programmes: XmltvProgramme[];
+
+  try {
+    programmes = decode();
+  } catch (error) {
+    // The json codec's own CorruptEntryError among them, said as it is.
+    if (!isInputError(error)) {
+      throw error;
+    }
+
+    throw new CorruptEntryError(
+      `An entry of the ${codec} codec does not read: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+
+  if (programmes.length !== meta.programmeCount) {
+    throw new CorruptEntryError(
+      `An entry of the ${codec} codec reads as ${programmes.length} programmes, ` +
+        `of the ${meta.programmeCount} it says it holds`,
+    );
+  }
+
+  return programmes;
+}
+
+/** What a parser throws for input it cannot read, rather than for a fault of its own. */
+function isInputError(error: unknown): boolean {
+  return (
+    error instanceof SyntaxError ||
+    error instanceof XmltvDateError ||
+    error instanceof XmltvInputError
+  );
 }
 
 /**

@@ -125,6 +125,14 @@ const CREDIT_ROLES: ReadonlySet<string> = new Set([
 ] satisfies CreditRole[]);
 
 /**
+ * Input that is no XMLTV document at all — no root found, or a root other than
+ * `<tv>` — as against a fault of this code. A `TypeError` as it always was, and
+ * named as one; a class of its own so a reader that must tell the two apart —
+ * the cache, deciding whether an entry is damaged — can.
+ */
+export class XmltvInputError extends TypeError {}
+
+/**
  * XMLTV scanner. Holds the scan state (`pos`, current tag scratch) as
  * instance fields; helpers write their "out" values there instead of
  * allocating result tuples. Methods must copy tag state to locals BEFORE
@@ -306,7 +314,7 @@ export class XmltvScanner {
    */
   #advance(buf: string, consumed: number, checkRootLimit = false): string {
     if (checkRootLimit && !this.#rootFound && buf.length - consumed > this.#rootScanLimit) {
-      throw new TypeError(
+      throw new XmltvInputError(
         `No root element found within the first ${this.#rootScanLimit} characters of input`,
       );
     }
@@ -2786,7 +2794,7 @@ export class XmltvScanner {
         // forward here (consumed === buf.length), so `checkRootLimit` on
         // #advance doesn't apply — check the whole scanned buffer directly.
         if (!this.#rootFound && buf.length > this.#rootScanLimit) {
-          throw new TypeError(
+          throw new XmltvInputError(
             `No root element found within the first ${this.#rootScanLimit} characters of input`,
           );
         }
@@ -2893,7 +2901,7 @@ export class XmltvScanner {
         }
 
         if (this.#tagName !== 'tv') {
-          throw new TypeError(
+          throw new XmltvInputError(
             `Invalid XMLTV document: expected root element <tv>, found <${this.#tagName}>`,
           );
         }
