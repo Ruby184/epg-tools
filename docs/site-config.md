@@ -41,6 +41,7 @@ it cannot leave a half-built site's output in the cache.
 | `cacheChannels` | `boolean \| { maxAgeDays? }` | off | Keep a **fetched** channel list in the cache, so the next command reads it instead of asking the source — see [keeping a fetched list](#keeping-a-fetched-list). `true` means a day. |
 | `conditionalGet` | `boolean` | off | Ask the source whether anything has changed, and keep what is cached when it says no — see [asking only when it is worth it](#asking-only-when-it-is-worth-it). No code changes in the site. |
 | `request` | `(ctx) => Promise<TRaw>` | **required**\* | Fetch one request's raw data. The context's shape comes from `batching`. |
+| `requestLabel` | `string` | `'request'`, or `'stream'` | What the site's own requests are counted as in `site:done`'s [`requestsBy`](./api.md#what-a-run-cost-and-what-the-merge-made-of-it): `request`'s, beside what a parse's [`paced`](#a-parse-that-needs-another-request) calls are labelled — `'listings'` beside `'detail'` — or, for a [stream](#a-pass-paces-its-own-requests), which has no planned requests, its `paced` calls that give no label. |
 | `parseDay` | `(ctx) => ParsedProgramme[] \| Promise<…>` | **required**\* | Turn part of a response into one channel-day's programmes. Called once per channel-day. May return builders, plain objects, or a mix. |
 | `stream` | `(ctx) => AsyncIterable<StreamedChannelDay>` | — | \*Instead of `request` and `parseDay`: answer the whole window in one pass, yielding each channel-day as it is complete — see [sites that answer in one pass](#sites-that-answer-in-one-pass). Such a site is written with `defineStreamSiteConfig` rather than `defineSiteConfig`. |
 | `channelInfo` | `(channel, element) => XmltvChannel \| ChannelBuilder` | `defaultChannelInfo` — id, display name and logo | Build the `<channel>` element for a channel. |
@@ -525,6 +526,38 @@ and writing take across every site — and takes it back when the answer comes,
 ahead of work that has not started. A site fetching a detail per programme
 would otherwise fill every slot with parses waiting on its own pacing, and
 leave every other site's parses queued behind them.
+
+Give it a label, and the run's summary counts it apart from the requests it
+came out of:
+
+```ts
+const detail = await paced(
+  ({ signal }) => http.get(`detail/${item.id}`, { signal }).json<Detail>(),
+  { label: 'detail' },
+);
+```
+
+`site:done`'s [`requestsBy`](./api.md#what-a-run-cost-and-what-the-merge-made-of-it)
+then says how many detail calls there were, how long they waited, and what
+failed them — a `404` the parse goes on to catch included — and the text line
+says it beside the rest:
+
+```
+5291 requests (request 49, detail 5242: 3242 × 404 and 3 × timeout) in 11m37s, 585s waiting
+```
+
+Without a label a parse's are `paced`; the planned requests are `request`, or
+what the site's `requestLabel` calls them. A label is a word with a letter in
+it, or words joined by `.`, `_`, `/` or `-`. One that is not throws where
+`paced` is called, so a `.catch` meant for a missing detail does not swallow it
+with every detail — and is said once as a warning of the site's, for a `try`
+around the `await` that would.
+
+A label names a kind of request — `detail`, `episodes` — not one request: each
+is a key of `requestsBy` and a name on the site's line, so a label made from a
+url or an id makes one of each. A site whose requests come under more than 64
+labels is told so once, as a warning of its own, and every one is still
+counted.
 
 A request straight through `http` works too and still aborts with the run — it
 is simply not queued, so nothing paces it. Requests a `request` makes itself
@@ -1530,7 +1563,12 @@ thread's own.
 
 Only the fetch belongs inside `paced`, not the work its answer feeds: a slot is
 one request to the source, and holding one for the length of a pass would be
-holding it for the length of the run.
+holding it for the length of the run. A pass's fetches are counted in
+`site:done`'s `requestsBy` under the label each `paced` call gives — as a
+parse's are — and the rest under the site's `requestLabel`, `stream` unless it
+gives one. A stream has no planned requests, so its fetches are what that
+names: `requestLabel: 'document'` on a [published guide](#a-published-guide-as-a-source)
+names the one fetch of its document.
 
 Everything else about a site is the same: `channels`, `cacheChannels`,
 `concurrency`, `rateLimit`, `backoff`, `ky`, `connection`, `staleness`,

@@ -2213,6 +2213,52 @@ describe('flushing', () => {
   });
 });
 
+describe('a reporter that throws', () => {
+  it('says what the run failed of, and what its reporter threw beside it', async () => {
+    const dir = await tempDir();
+    const config = await configFile(
+      dir,
+      `export default {
+      // What the program asked to be told, through a listener that throws.
+      events: {
+        emit(type) {
+          if (type === 'site:note') {
+            throw new Error('the listener fell over');
+          }
+
+          return true;
+        },
+      },
+      sites: [{
+        ...${siteSource()},
+        channels: async ({ log }) => {
+          log('listing');
+
+          return [{ xmltvId: 'one.example.tv', siteId: '1', name: 'One' }];
+        },
+      }],
+      // And the run failing of itself, after.
+      derived: () => {
+        throw new Error('the derived channels could not be worked out');
+      },
+      days: 1,
+      output: ${JSON.stringify(join(dir, 'guide.xml'))},
+      cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+    };`,
+    );
+
+    const { code, stderr } = await run(['build', '--config', config]);
+
+    expect(code).toBe(1);
+    // Each said as itself: the reporter's, then the run's own.
+    expect(stderr).toContain(
+      'The reporter threw 1 time: Error: the listener fell over (1 × at site:note)',
+    );
+    expect(stderr).toContain('the derived channels could not be worked out\n');
+    expect(stderr).not.toContain('and the reporter threw as well');
+  });
+});
+
 describe('epg cache', () => {
   /** A site that remembers something, so there is state to look at too. */
   async function rememberingConfig(dir: string): Promise<string> {

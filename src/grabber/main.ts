@@ -1,4 +1,6 @@
 export { grab } from './grab.js';
+export { ReporterError, RunFailedError } from '../core/events.js';
+export type { ReporterThrow } from '../core/events.js';
 export {
   channelElement,
   channelsFromChannelsXml,

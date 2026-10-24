@@ -514,7 +514,23 @@ export interface SiteBackoff {
  */
 export type PacedRequest = <T>(
   task: (options: { signal?: AbortSignal | undefined }) => Promise<T>,
+  options?: PacedOptions,
 ) => Promise<T>;
+
+/** What a {@link PacedRequest} is told about the request beside it. */
+export interface PacedOptions {
+  /**
+   * What the request is for, as `site:done`'s `requestsBy` counts it —
+   * `'detail'`, `'episodes'`. When not given, `'paced'` from a parse, and
+   * from a stream its site's `requestLabel` — `'stream'` without one. A name
+   * of the site's, not a URL's: one label per kind of request, not per
+   * channel — a word with a letter in it, or words joined by `.`, `_`, `/` or
+   * `-`, and never `channels`. One that is not throws where `paced` is
+   * called, rather than rejecting the request: a mistake in the site's code
+   * is not a `404` to be caught.
+   */
+  label?: string;
+}
 
 /**
  * What a parse is handed. `log` and `warn` come from {@link Says}, and a
@@ -623,8 +639,10 @@ export interface ParseContext<TRaw, TData = unknown> extends Says, SiteZones {
    * ```ts
    * async parseDay({ payload, programme, http, paced }) {
    *   return Promise.all(payload.items.map(async (item) => {
-   *     const detail = await paced(({ signal }) =>
-   *       http.get(`detail/${item.id}`, { signal }).json<Detail>());
+   *     const detail = await paced(
+   *       ({ signal }) => http.get(`detail/${item.id}`, { signal }).json<Detail>(),
+   *       { label: 'detail' },
+   *     );
    *
    *     return programme(new Date(item.start), item.title).desc(detail.synopsis);
    *   }));
@@ -674,6 +692,22 @@ export type ChannelElement = (displayName?: string) => ChannelBuilder;
 export interface BaseSiteConfig<TData = unknown> {
   /** Unique site identifier, e.g. `webtv.sk`. Used as cache namespace. */
   site: string;
+  /**
+   * What the site's own requests are counted as in `site:done`'s
+   * `requestsBy`: a `request`'s, `'request'` unless given — and a stream's,
+   * which has no planned requests and asks through `paced`, those `paced`
+   * calls that give no label of their own, `'stream'` unless given.
+   *
+   * A site that makes requests of more than one kind names each, so its
+   * summary says which kind cost what: `requestLabel: 'listings'` beside a
+   * parse's `paced(task, { label: 'detail' })`. A word with a letter in it,
+   * or words joined by `.`, `_`, `/` or `-`, and never `channels`: a site
+   * with one that is not is refused, and fetches nothing but its channel
+   * list, where the run settles every list first — a `build`, whose guide
+   * still writes what the site has cached, or a grab with a selection or a
+   * `cover` to apply.
+   */
+  requestLabel?: string;
   /**
    * The channels to grab. A function is called with the site's HTTP client, so
    * a list that has to be fetched costs no extra setup — and it is called only

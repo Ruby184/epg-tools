@@ -20,9 +20,11 @@ import type { Writable } from 'node:stream';
 import { inspect } from 'node:util';
 import {
   atLevel,
+  noCounts,
   type EpgEvent,
   type EventLevel,
   type GrabCounts,
+  type RequestCounts,
   type Reporter,
 } from './events.js';
 import { errorChain, errorMessage, MAX_CAUSE_DEPTH } from './error.js';
@@ -80,11 +82,53 @@ function took(ms: number): string {
 }
 
 /** What a site cost the run, which is not what it fetched. */
-function cost(event: { requests: number; ms: number; requestMs: number }): string {
+function cost(event: {
+  requests: number;
+  ms: number;
+  requestMs: number;
+  /** Not on a `site:done` an earlier version wrote, which a log may replay. */
+  requestsBy?: Record<string, RequestCounts>;
+}): string {
   // The two times are kept apart rather than averaged into one: a site waiting
   // on its own `rateLimit` and a site waiting on a slow source look identical
   // in a total, and are the opposite problems.
-  return `${count(event.requests, 'request')} in ${took(event.ms)}, ${took(event.requestMs)} waiting`;
+  return (
+    `${count(event.requests, 'request')}${byLabel(event.requestsBy ?? {})} ` +
+    `in ${took(event.ms)}, ${took(event.requestMs)} waiting`
+  );
+}
+
+/**
+ * A site's requests by what each was for, and what failed them —
+ * ` (request 49, detail 5242: 3242 × 404)`. Of one kind, only what failed:
+ * ` (3000 × 404)`, since the total already says how many there were.
+ */
+function byLabel(requestsBy: Record<string, RequestCounts>): string {
+  const labels = Object.entries(requestsBy);
+  // " and " between failures, so the commas are left to separate labels.
+  // `failed` read as `requestsBy` was, where an event from elsewhere may lack it.
+  const failures = (failed: Record<string, number> | undefined): string =>
+    Object.entries(failed ?? {})
+      .map(([failure, n]) => `${n} × ${failure}`)
+      .join(' and ');
+
+  if (labels.length === 1) {
+    const failed = failures(labels[0]![1].failed);
+
+    return failed === '' ? '' : ` (${failed})`;
+  }
+
+  if (labels.length === 0) {
+    return '';
+  }
+
+  const each = labels.map(([label, { requests, failed }]) => {
+    const said = failures(failed);
+
+    return `${label} ${requests}${said === '' ? '' : `: ${said}`}`;
+  });
+
+  return ` (${each.join(', ')})`;
 }
 
 /** What a run or a site came to, in the one form both say it. */
@@ -548,20 +592,27 @@ export function textReporter(options: TextReporterOptions): Reporter {
 
 /** An error as JSON keeps it, `cause` chain and all. */
 function errorJson(error: unknown, depth = 0): unknown {
-  if (!(error instanceof Error)) {
-    // Including the odd `throw 'nope'`: a log should not be where that becomes
-    // a crash, and `String` is the only honest thing left.
-    return { message: String(error) };
-  }
+  try {
+    if (!(error instanceof Error)) {
+      // Including the odd `throw 'nope'`: a log should not be where that becomes
+      // a crash, and `String` is the only honest thing left.
+      return { message: String(error) };
+    }
 
-  return {
-    name: error.name,
-    message: error.message,
-    ...(error.stack === undefined ? {} : { stack: error.stack }),
-    ...(error.cause === undefined || depth >= MAX_CAUSE_DEPTH
-      ? {}
-      : { cause: errorJson(error.cause, depth + 1) }),
-  };
+    return {
+      name: error.name,
+      message: error.message,
+      ...(error.stack === undefined ? {} : { stack: error.stack }),
+      ...(error.cause === undefined || depth >= MAX_CAUSE_DEPTH
+        ? {}
+        : { cause: errorJson(error.cause, depth + 1) }),
+    };
+  } catch {
+    // A site's error that cannot be read — a revoked proxy, a getter that
+    // throws — said as such: a reporter that threw at it would fail the run
+    // over what the site did.
+    return { message: errorMessage(error) };
+  }
 }
 
 export interface JsonReporterOptions {
@@ -669,14 +720,7 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
     return lines;
   }
 
-  const counts: GrabCounts = {
-    fetched: 0,
-    empty: 0,
-    fromCache: 0,
-    unchanged: 0,
-    failed: 0,
-    sitesFailed: 0,
-  };
+  const counts = noCounts();
   const sites = new Set<string>();
   let finishedSites = 0;
   let planned = 0;
@@ -747,6 +791,9 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
         planned += event.entries;
         break;
       case 'site:done':
+        // Added here as well: a site that could not be read is done without
+        // having started, and is one of the run's all the same.
+        sites.add(event.site);
         finishedSites++;
         break;
       case 'entry:fetched':

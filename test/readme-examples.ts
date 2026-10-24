@@ -570,6 +570,30 @@ export const askedOnce = defineSiteConfig<{
   },
 });
 
+// --- docs/site-config.md: A parse that needs another request ----------------
+export const labelled = defineSiteConfig<{ items: { id: string; start: string; title: string }[] }>(
+  {
+    site: 'example.tv',
+    channels: [],
+    requestLabel: 'listings',
+    async request({ channel, day, http }) {
+      return http.get(`epg/${channel.siteId}/${day}`).json();
+    },
+    async parseDay({ payload, http, paced, programme }) {
+      return Promise.all(
+        payload.items.map(async (item) => {
+          const detail = await paced(
+            ({ signal }) => http.get(`detail/${item.id}`, { signal }).json<Detail>(),
+            { label: 'detail' },
+          );
+
+          return programme(new Date(item.start), item.title).desc(detail.description);
+        }),
+      );
+    },
+  },
+);
+
 // The mode decides which caps are accepted, and the shape of the context.
 export const wrongCap = defineSiteConfig({
   site: 'example.tv',

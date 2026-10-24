@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/types.js';
 import type { EpgEventInput } from '../src/core/events.js';
-import { grab, StateKey, type AnySiteConfig } from '../src/grabber/main.js';
+import { grab, ReporterError, StateKey, type AnySiteConfig } from '../src/grabber/main.js';
+import { grabWith } from '../src/grabber/grab.js';
+import { openSession } from '../src/grabber/session.js';
 import { getXmltvOffset } from '../src/xmltv/main.js';
 import config from './fixtures/thread.config.js';
 
@@ -82,6 +84,131 @@ describe('sites in worker threads', () => {
     expect(getXmltvOffset(programme!.start)).toBe(120);
   });
 
+  it("counts each site's requests by kind over there, and sums them here", async () => {
+    const { events } = await grabbed(['offset.example', 'failing.example']);
+
+    const failing = events.find(
+      (event) => event.type === 'site:done' && event.site === 'failing.example',
+    ) as Extract<EpgEventInput, { type: 'site:done' }>;
+
+    expect(failing.requestsBy).toEqual({
+      request: { requests: 1, requestMs: expect.any(Number), failed: { network: 1 } },
+    });
+    // Read from what a thread said as each site finished.
+    expect(events.at(-1)).toMatchObject({ type: 'grab:done' });
+    expect((events.at(-1) as Extract<EpgEventInput, { type: 'grab:done' }>).requestsBy).toEqual({
+      request: { requests: 2, requestMs: expect.any(Number), failed: { network: 1 } },
+    });
+  });
+
+  it('says what a list settled on this thread cost, beside what the thread asked', async () => {
+    const cache = new CacheManager({ driver: new MemoryCacheDriver() });
+    const [found] = sites('channels.example');
+    // As `build` leaves a site it settled: the list fetched through a session
+    // of this thread, and the site handed on with the list it came to.
+    const session = openSession(found!, cache);
+
+    await session.send(
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+
+        return [{ xmltvId: 'own', siteId: 'own' }];
+      },
+      { label: 'channels' },
+    );
+
+    const events: EpgEventInput[] = [];
+
+    try {
+      await grabWith(
+        [{ ...found!, channels: [{ xmltvId: 'own', siteId: 'own' }] } as AnySiteConfig],
+        {
+          cache,
+          now: NOW,
+          startDay: DAY,
+          days: 1,
+          threads: 1,
+          configModule: CONFIG,
+          reporter: (event) => events.push(event),
+        },
+        new Map([['channels.example', session]]),
+      );
+    } finally {
+      session.pacing.dispose();
+    }
+
+    const counted = {
+      channels: { requests: 1, requestMs: expect.any(Number), failed: {} },
+      request: { requests: 1, requestMs: expect.any(Number), failed: {} },
+    };
+    const done = events.find((event) => event.type === 'site:done') as Extract<
+      EpgEventInput,
+      { type: 'site:done' }
+    >;
+
+    expect(done).toMatchObject({ requests: 2 });
+    // Its list's time its own too, as in a run on one thread.
+    expect(done.ms).toBeGreaterThanOrEqual(50);
+    expect(done.ms).toBeGreaterThanOrEqual(done.requestMs - 5);
+    expect(done.requestsBy).toEqual(counted);
+    expect(Object.keys(done.requestsBy)).toEqual(['channels', 'request']);
+    expect((events.at(-1) as Extract<EpgEventInput, { type: 'grab:done' }>).requestsBy).toEqual(
+      counted,
+    );
+  });
+
+  it('says what a site its thread never ran cost, as a site on this thread would', async () => {
+    class Zone {}
+
+    const cache = new CacheManager({ driver: new MemoryCacheDriver() });
+    // A list settled here, holding what no thread can be handed.
+    const refused = {
+      ...sites('offset.example')[0]!,
+      channels: [{ xmltvId: 'one', siteId: '1', data: { zone: new Zone() } }],
+    } as AnySiteConfig;
+    const session = openSession(refused, cache);
+
+    await session.send(async () => [], { label: 'channels' });
+
+    const events: EpgEventInput[] = [];
+
+    try {
+      await grabWith(
+        [refused],
+        {
+          cache,
+          now: NOW,
+          startDay: DAY,
+          days: 1,
+          threads: 1,
+          configModule: CONFIG,
+          reporter: (event) => events.push(event),
+        },
+        new Map([['offset.example', session]]),
+      );
+    } finally {
+      session.pacing.dispose();
+    }
+
+    const ofSite = events.filter(
+      (event) => event.type === 'site:failed' || event.type === 'site:done',
+    );
+
+    expect(ofSite.map((event) => event.type)).toEqual(['site:failed', 'site:done']);
+    // What refused it, as it is — as a site on this thread says it, unwrapped.
+    expect(ofSite[0]).toMatchObject({
+      error: expect.objectContaining({
+        name: 'TypeError',
+        message: expect.stringContaining('an instance of Zone'),
+      }),
+    });
+    expect(ofSite[1]).toMatchObject({
+      sitesFailed: 1,
+      requests: 1,
+      requestsBy: { channels: { requests: 1, failed: {} } },
+    });
+  });
+
   it('lets a cancelled site wind down before the run answers', async () => {
     // Cancelled once the quick site has written its day and the slow one is
     // waiting on a request. The slow one then saves its state on the way out,
@@ -130,6 +257,72 @@ describe('sites in worker threads', () => {
     expect(events.find((event) => event.type === 'site:failed')).toMatchObject({
       site: 'crashing.example',
       error: { message: 'stray timer' },
+    });
+  });
+
+  it('says a lost thread’s site, and rejects, though the reporter throws at it', async () => {
+    const fellOver = new Error('the reporter fell over');
+    const events: EpgEventInput[] = [];
+
+    // Said from the thread's listener as it goes, where a throw that got out
+    // would end the process rather than the run.
+    const rejected = await grab(sites('crashing.example', 'offset.example'), {
+      cache: new CacheManager({ driver: new MemoryCacheDriver() }),
+      now: NOW,
+      startDay: DAY,
+      days: 1,
+      threads: 2,
+      configModule: CONFIG,
+      reporter: (event) => {
+        events.push(event);
+
+        if (event.type === 'site:failed') {
+          throw fellOver;
+        }
+      },
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(rejected).toBeInstanceOf(ReporterError);
+    expect((rejected as ReporterError).thrown).toEqual([
+      { error: fellOver, times: 1, at: { 'site:failed': 1 } },
+    ]);
+    expect(
+      events
+        .filter((event) => event.type === 'site:failed' || event.type === 'site:done')
+        .map((event) => `${event.type} ${(event as { site: string }).site}`)
+        .sort(),
+    ).toEqual([
+      'site:done crashing.example',
+      'site:done offset.example',
+      'site:failed crashing.example',
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: 'grab:done', fetched: 1, sitesFailed: 1 });
+  });
+
+  it('fails a site whose thread threw what is no error, with an error', async () => {
+    const { events, summary } = await grabbed(['crashing-quietly.example', 'offset.example'], {
+      threads: 3,
+      siteConcurrency: 1,
+    });
+
+    // Its thread counted as gone, though nothing said why: the next site is
+    // run elsewhere, and this one fails with an error that says so.
+    expect(summary).toMatchObject({ fetched: 1, sitesFailed: 1 });
+    expect(events.find((event) => event.type === 'site:failed')).toMatchObject({
+      site: 'crashing-quietly.example',
+      error: { message: expect.stringContaining('threw undefined') },
+    });
+  });
+
+  it('says what a thread threw that is no error, an object’s fields and all', async () => {
+    const { events } = await grabbed(['crashing-plainly.example'], { threads: 1 });
+
+    expect(events.find((event) => event.type === 'site:failed')).toMatchObject({
+      site: 'crashing-plainly.example',
+      error: { message: "A site's thread threw { reason: 'out of cheese' }" },
     });
   });
 

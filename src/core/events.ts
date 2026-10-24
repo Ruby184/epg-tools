@@ -24,6 +24,7 @@
  */
 
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { errorMessage } from './error.js';
 
 /**
  * How much a reporter is being told, in the order a threshold reads them.
@@ -159,6 +160,53 @@ export interface GrabCounts {
   sitesFailed: number;
 }
 
+/** Every count at nought — a site's, a run's or a reporter's, before any is counted. */
+export function noCounts(): GrabCounts {
+  return { fetched: 0, empty: 0, fromCache: 0, unchanged: 0, failed: 0, sitesFailed: 0 };
+}
+
+/** A label's requests at nought, before any is counted — see {@link RequestCounts}. */
+export function noRequests(): RequestCounts {
+  return { requests: 0, requestMs: 0, failed: {} };
+}
+
+/**
+ * What one kind of request cost — a site's, or the run's, under one label of
+ * `requestsBy`.
+ *
+ * A label is what the request was for: a site's `requestLabel` for its planned
+ * requests, `'request'` without one; what a `ctx.paced` call names — without a
+ * name, `'paced'` from a parse, and from a stream its site's `requestLabel`, or
+ * `'stream'` without one; and `'channels'` for the channel list. Named by the
+ * site rather than read off a URL, whose ids would make a label of every
+ * channel.
+ *
+ * `requestsBy` lists them in the order each was first sent: a label has a
+ * letter in it, so none is put first as a number would be.
+ */
+export interface RequestCounts {
+  /**
+   * How many were sent — counted as each one's turn came, so one a cancel
+   * dropped before it was not, and one under way when the cancel came was.
+   */
+  requests: number;
+  /**
+   * How long they spent waiting on the source, pacing not included: the
+   * label's share of `site:done`'s `requestMs`, and nothing like its `ms`,
+   * which is the site's wall clock.
+   */
+  requestMs: number;
+  /**
+   * The ones that failed, by what failed them: the status the source answered
+   * with (`'404'`), `'timeout'`, `'network'` where nothing answered, or
+   * `'error'` for anything else the request threw — read where it was thrown,
+   * so a `404` a site goes on to catch is counted all the same. A request the
+   * cancel itself stopped is not counted as failed — what failed before it
+   * still is — and a `304` that said a channel-day is unchanged is an answer.
+   */
+  failed: Record<string, number>;
+}
+
 /**
  * What an emitter says: the type, and the fields that type carries.
  *
@@ -191,7 +239,12 @@ export type EpgEventInput =
    * chunks, and keeps this in the tens of milliseconds however busy it keeps
    * the thread.
    */
-  | ({ type: 'grab:done'; loopMaxMs: number } & GrabCounts)
+  | ({
+      type: 'grab:done';
+      loopMaxMs: number;
+      /** Every request of the run, by {@link RequestCounts} label. */
+      requestsBy: Record<string, RequestCounts>;
+    } & GrabCounts)
   /**
    * What this site is about to do, which the planner has just worked out.
    *
@@ -229,6 +282,10 @@ export type EpgEventInput =
    * long by; and `requestMs` is how long those requests spent waiting on the
    * source, which is less than `ms` where a site waits on its own pacing, and
    * more than it where a site runs several at once.
+   *
+   * `requestsBy` is `requests` and `requestMs` again, by what each request was
+   * for, with what failed them — see {@link RequestCounts}. "5291 requests"
+   * does not say that 3,242 of them were detail calls answered `404`.
    */
   | ({
       type: 'site:done';
@@ -236,6 +293,7 @@ export type EpgEventInput =
       requests: number;
       ms: number;
       requestMs: number;
+      requestsBy: Record<string, RequestCounts>;
     } & GrabCounts)
   /** The site could not be read or run at all, so none of it was grabbed. */
   | { type: 'site:failed'; site: string; error: unknown }
@@ -575,6 +633,254 @@ export function emitter(options: ReportedOptions): Emit {
   return options.reporter === undefined ? silent : stamped(options.reporter);
 }
 
+/** How many kinds of what a reporter threw are kept — see {@link keepingThrows}. */
+const KEPT_KINDS = 10;
+
+/** One kind of what a reporter threw — see {@link ReporterError}. */
+export interface ReporterThrow {
+  /** The first of its kind, as the reporter threw it. */
+  error: unknown;
+  /** How many times it was thrown. */
+  times: number;
+  /** At which events, and how many times at each. */
+  at: Partial<Record<EpgEventType, number>>;
+}
+
+/**
+ * What a run rejects with when its reporter threw — once the run is done, and
+ * has said everything it did.
+ *
+ * `errors` is what was thrown, each kind once — a name and a message make a
+ * kind — and `thrown` how often each was, and at which events: a broken
+ * reporter throws at every event, and a run says tens of thousands. No more
+ * than ten kinds are kept, and what is past them is counted in `untracked`.
+ */
+export class ReporterError extends AggregateError {
+  override readonly name = 'ReporterError';
+  /** Each kind thrown, in the order each was first. */
+  readonly thrown: readonly ReporterThrow[];
+  /** Throws of kinds past the ten kept, counted and no more. */
+  readonly untracked: number;
+
+  constructor(thrown: readonly ReporterThrow[], untracked = 0) {
+    const times = thrown.reduce((sum, kind) => sum + kind.times, untracked);
+    const kinds = thrown.map(
+      (kind) =>
+        `${kindOf(kind.error)} (${Object.entries(kind.at)
+          .map(([type, n]) => `${n} × at ${type}`)
+          .join(', ')})`,
+    );
+
+    super(
+      thrown.map((kind) => kind.error),
+      `The reporter threw ${times} ${times === 1 ? 'time' : 'times'}: ${kinds.join('; ')}` +
+        (untracked > 0 ? `; and ${untracked} more of other kinds` : ''),
+    );
+    this.thrown = thrown;
+    this.untracked = untracked;
+  }
+}
+
+/**
+ * What a run rejects with when it failed of itself, and its reporter threw as
+ * well: both, so neither is lost. An `AggregateError` of the two, in that
+ * order — `error`, what the run would have rejected with had its reporter not
+ * thrown, and `reporter`, what the reporter threw beside it.
+ */
+export class RunFailedError extends AggregateError {
+  override readonly name = 'RunFailedError';
+  /** The run's own failure. */
+  readonly error: unknown;
+  /** What its reporter threw, beside it. */
+  readonly reporter: ReporterError;
+
+  constructor(error: unknown, reporter: ReporterError) {
+    super([error, reporter], `${errorMessage(error)} — and the reporter threw as well`);
+    this.error = error;
+    this.reporter = reporter;
+  }
+}
+
+/** What makes two things a reporter threw one kind: a name, and a message. */
+function kindOf(error: unknown): string {
+  let name: string;
+
+  try {
+    name = error instanceof Error ? error.name : typeof error;
+  } catch {
+    // Something that cannot even be asked what it is — a revoked proxy.
+    name = 'something unreadable';
+  }
+
+  return `${name}: ${errorMessage(error)}`;
+}
+
+/** A reporter's throws, kept — see {@link keepingThrows}. */
+export interface KeptThrows<T> {
+  /** The options, reporting through the reporter that keeps them. */
+  options: T;
+  /** Throw what has been kept so far, as a {@link ReporterError} — if anything has. */
+  rethrow(): void;
+  /**
+   * `running`, once settled — and with it, what was kept: alone where it
+   * resolved, and beside its own error where it rejected, so neither is lost.
+   * Nothing is said after: what reported through these is done, and an event
+   * from work it left behind is told to nobody.
+   */
+  settle<R>(running: Promise<R>): Promise<R>;
+}
+
+/**
+ * `options` reporting through a reporter whose throws are kept rather than let
+ * loose, and thrown as a {@link ReporterError} once whatever reported through
+ * it is done. So a sink that cannot keep up neither ends what it is told about
+ * part way — a site half said, or the process, from a listener nothing
+ * catches — nor is swallowed. What a grab reports through, and a run around
+ * one.
+ */
+export function keepingThrows<T extends ReportedOptions>(options: T): KeptThrows<T> {
+  const { reporter } = options;
+
+  // Kept already, by a run around this one, which throws what it keeps once
+  // it is done itself: not kept twice.
+  if (reporter !== undefined && keeping.has(reporter)) {
+    return { options, rethrow() {}, settle: (running) => running };
+  }
+
+  const kinds = new Map<string, ReporterThrow>();
+  let untracked = 0;
+  let over = false;
+  /** What {@link rethrow} threw, last — see `settle`. */
+  let thrown: ReporterError | undefined;
+
+  /** What has been kept so far, as it stands now: what is counted after is not in it. */
+  const kept = (): ReporterError =>
+    new ReporterError(
+      [...kinds.values()].map((kind) => ({ ...kind, at: { ...kind.at } })),
+      untracked,
+    );
+  const rethrow = (): void => {
+    if (kinds.size > 0) {
+      thrown = kept();
+      throw thrown;
+    }
+  };
+  /** Keep `error`, thrown — or rejected with — at `event`. */
+  const keep = (error: unknown, event: EpgEvent): void => {
+    if (over) {
+      return;
+    }
+
+    const kind = kindOf(error);
+    let known = kinds.get(kind);
+
+    if (known === undefined) {
+      if (kinds.size === KEPT_KINDS) {
+        untracked++;
+
+        return;
+      }
+
+      known = { error, times: 0, at: {} };
+      kinds.set(kind, known);
+    }
+
+    known.times++;
+    known.at[event.type] = (known.at[event.type] ?? 0) + 1;
+  };
+
+  if (reporter === undefined) {
+    return { options, rethrow, settle: (running) => running };
+  }
+
+  const keepingReporter: Reporter = (event) => {
+    if (over) {
+      return;
+    }
+
+    try {
+      const returned: unknown = reporter(event);
+
+      // Synchronous, as a reporter is — but one written `async` is not
+      // refused by its type, and what it rejects with is kept as a throw is,
+      // rather than left to end the process. Kept while what reported through
+      // this is going: nothing waits on a reporter, so one that rejects after
+      // the run has answered is let go of.
+      if (isThenable(returned)) {
+        returned.then(undefined, (error: unknown) => {
+          keep(error, event);
+        });
+      }
+    } catch (error) {
+      keep(error, event);
+    }
+  };
+
+  keeping.add(keepingReporter);
+
+  return {
+    options: { ...options, reporter: keepingReporter },
+    rethrow,
+    async settle(running) {
+      let done: Awaited<typeof running>;
+
+      try {
+        done = await running;
+      } catch (error) {
+        over = true;
+
+        if (kinds.size === 0) {
+          throw error;
+        }
+
+        // Thrown already, on the way out — as it stands now, then, with
+        // what was kept since.
+        if (error === thrown) {
+          throw kept();
+        }
+
+        throw new RunFailedError(error, kept());
+      }
+
+      over = true;
+      rethrow();
+
+      return done;
+    },
+  };
+}
+
+/**
+ * Throw what reporters joined together threw: one as it is, several together.
+ * What each threw, and nothing of the event: the same reporters failing the
+ * same way at every event are one failure, and failing another way another —
+ * which is how {@link keepingThrows} keeps them.
+ */
+function throwAll(threw: unknown[]): void {
+  if (threw.length === 1) {
+    throw threw[0];
+  }
+
+  if (threw.length > 1) {
+    throw new AggregateError(
+      threw,
+      `${threw.length} reporters threw: ${threw.map(kindOf).join('; ')}`,
+    );
+  }
+}
+
+/** Every reporter {@link keepingThrows} made: one handed it again is kept already. */
+const keeping = new WeakSet<Reporter>();
+
+/** Whether `value` is a promise, or anything awaited as one. */
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    (typeof value === 'object' || typeof value === 'function') &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
+}
+
 /**
  * The options a run reports through, with the config's own emitter added.
  *
@@ -641,9 +947,12 @@ export function emitterReporter(events: EpgEventSink): Reporter {
  * reporter: combineReporters(options.reporter, loggerReporter({ logger })),
  * ```
  *
- * A reporter that throws is not caught here, as it is not caught anywhere
- * else: a sink that cannot keep up with a run is a bug in the sink, and
- * swallowing it would leave a run reporting into silence with nothing said.
+ * A reporter that throws is not swallowed here: a sink that cannot keep up with
+ * a run is a bug in the sink, and swallowing it would leave a run reporting
+ * into silence with nothing said. The others are told all the same — one
+ * sink's bug is not another's silence — and what was thrown is thrown once
+ * they have been: one as it is, several together. A grab keeps the first, says
+ * the rest of the run, and rejects with it once it is done.
  */
 export function combineReporters(...reporters: (Reporter | undefined)[]): Reporter {
   const listening = reporters.filter((reporter) => reporter !== undefined);
@@ -654,11 +963,46 @@ export function combineReporters(...reporters: (Reporter | undefined)[]): Report
     return listening[0]!;
   }
 
-  return (event) => {
+  const combined = (event: EpgEvent): Promise<unknown> | undefined => {
+    let threw: unknown[] | undefined;
+    let pending: Array<PromiseLike<unknown>> | undefined;
+
     for (const reporter of listening) {
-      reporter(event);
+      try {
+        const returned: unknown = reporter(event);
+
+        if (isThenable(returned)) {
+          (pending ??= []).push(returned);
+        }
+      } catch (error) {
+        (threw ??= []).push(error);
+      }
     }
+
+    // What was thrown, thrown now, as a reporter's throw is: never held back
+    // behind what one written `async` is still doing. What those reject with
+    // at this event is then let go of — the throw is what is said of it.
+    if (threw !== undefined) {
+      for (const one of pending ?? []) {
+        one.then(undefined, () => {});
+      }
+
+      throwAll(threw);
+    }
+
+    // Otherwise handed on — one as it is, several waited for together — for
+    // whoever keeps what reporters throw to keep what they reject with, all of
+    // it. One, as most are: nothing made for it at every event.
+    if (pending === undefined || pending.length === 1) {
+      return pending?.[0] as Promise<unknown> | undefined;
+    }
+
+    return Promise.allSettled(pending).then((settled) => {
+      throwAll(settled.flatMap((one) => (one.status === 'rejected' ? [one.reason] : [])));
+    });
   };
+
+  return combined;
 }
 
 /**

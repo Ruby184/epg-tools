@@ -11,7 +11,15 @@ export type {
 export { createConfigContext, defaultsReader, envReader } from './core/answers.js';
 export type { ConfigContext, ConfigReader, StageDefaults } from './core/answers.js';
 export { errorChain, errorMessage, GrabberError } from './core/error.js';
-export { atLevel, emitter, EVENT_KINDS, LEVELS, PHASES } from './core/events.js';
+export {
+  atLevel,
+  emitter,
+  EVENT_KINDS,
+  LEVELS,
+  PHASES,
+  ReporterError,
+  RunFailedError,
+} from './core/events.js';
 export type {
   Emit,
   EpgEvent,
@@ -22,7 +30,9 @@ export type {
   EventLevel,
   GrabCounts,
   ReportedOptions,
+  RequestCounts,
   Reporter,
+  ReporterThrow,
   RunPhase,
   SaidFields,
   Says,

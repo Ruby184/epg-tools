@@ -23,7 +23,8 @@ import PQueue from 'p-queue';
 import { isStale } from '../cache/main.js';
 import type { CacheStore } from '../cache/types.js';
 import { count } from '../core/count.js';
-import type { Emit, GrabCounts } from '../core/events.js';
+import { errorMessage } from '../core/error.js';
+import { noCounts, type Emit, type GrabCounts } from '../core/events.js';
 import { ProgrammeBuilder } from '../xmltv/builder.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import { resolveChannels } from './channels.js';
@@ -39,8 +40,9 @@ import {
   type Revalidation,
   type Validator,
 } from './revalidate.js';
-import { openSession, type SiteSession } from './session.js';
-import { resolveSite, type ResolvedSite } from './site.js';
+import { LABELS } from './labels.js';
+import { openSession, siteDone, type RequestSink, type SiteSession } from './session.js';
+import { pacedLabels, resolveSite, type ResolvedSite } from './site.js';
 import { StateKey, TrackedMap, type SiteStateHandle } from './state.js';
 import type {
   AnySiteConfig,
@@ -85,8 +87,17 @@ export interface Run {
   /** The run-wide queue for work that never leaves the machine. */
   localWork: PQueue;
   enqueue: Enqueue;
-  /** What the run has counted so far — a site adds to it as it goes. */
+  /**
+   * What the run has counted so far — a site adds to it as it goes, and one in
+   * a thread of its own as its turn ends, from the memory it counted in.
+   */
   tally: GrabCounts;
+  /**
+   * Told of each request as it is done, for `grab:done`'s `requestsBy` — as
+   * {@link tally} is told of each count, so a site that never says `site:done`
+   * has still said what it asked.
+   */
+  requested: RequestSink;
 }
 
 /** A parse may hand back either form; the cache only knows the object. */
@@ -119,6 +130,8 @@ export class SiteRun {
    * fortnight was building fourteen thousand of these to hand out.
    */
   readonly #says: Pick<BaseRequestContext, 'log' | 'warn'>;
+  /** What each `paced` call is counted as — see {@link pacedLabels}. */
+  readonly #pacedLabel: ReturnType<typeof pacedLabels>;
 
   /**
    * The site's queue, client and state for this run — handed over by a run that
@@ -176,15 +189,13 @@ export class SiteRun {
    */
   /** When this site's turn began, for the wall clock the session's two are not. */
   #began = 0;
+  /**
+   * How long its list took to settle, where a session the run settled it
+   * through was handed on: its turn too, though before this one began.
+   */
+  readonly #settledMs: number;
 
-  readonly #counts: GrabCounts = {
-    fetched: 0,
-    empty: 0,
-    fromCache: 0,
-    unchanged: 0,
-    failed: 0,
-    sitesFailed: 0,
-  };
+  readonly #counts = noCounts();
 
   /** Filled in by {@link run}, since each of them has to be waited for. */
   #siteState: SiteState = new Map();
@@ -209,6 +220,7 @@ export class SiteRun {
       warn: (message, data) =>
         run.emit({ type: 'site:warning', site: resolved.site, message, ...(data ? { data } : {}) }),
     };
+    this.#pacedLabel = pacedLabels(this.#site, this.#says.warn);
 
     // The queue and the client together: the signal rides on the instance, so
     // every call a site makes through it is abortable without the site having to
@@ -218,11 +230,13 @@ export class SiteRun {
     // the work its response is for. That is what its `concurrency`, `rateLimit`
     // and backoff are about, and keeping it to that is what lets a `parseDay` ask
     // for a request of its own.
+    this.#settledMs = session?.spanMs ?? 0;
     this.#session =
       session ??
       openSession(config, run.cache, {
         ...(run.signal ? { signal: run.signal } : {}),
         emit: run.emit,
+        counted: run.requested,
       });
     this.#http = this.#session.pacing.http;
     this.#state = this.#session.state;
@@ -267,7 +281,7 @@ export class SiteRun {
    */
   #sending<T>(
     task: (options: { signal?: AbortSignal | undefined }) => Promise<T>,
-    options?: { priority?: number },
+    options: { label: string; priority?: number },
   ): Promise<T> {
     return this.#session.send(task, options);
   }
@@ -290,41 +304,62 @@ export class SiteRun {
    */
   async run(): Promise<void> {
     this.#began = Date.now();
+    let failed = false;
 
     try {
       await this.#work();
     } catch (error) {
-      // Counted and said here rather than left to the run, and that ordering is
-      // load-bearing: p-queue rejects a cancelled task's promise while the task
-      // itself carries on, so the summary can be read the moment the cancel
-      // lands. Anything recorded after the awaits below would be recorded into a
-      // total nobody is going to read.
+      // Counted and said here, the moment it fails, rather than left to the
+      // run: what the site says of itself is the one account of it, and the
+      // run waits for every site's turn — cancelled or not — before it adds
+      // them up.
       // The site's own count, not one of its channel-days: what failed here is
       // the site — its channel list, or its whole turn — and none of the grid
       // it would have covered was ever asked for.
+      failed = true;
       this.#count('sitesFailed');
       this.#run.emit({ type: 'site:failed', site: this.#site, error });
     } finally {
       this.#session.pacing.dispose();
+
       // Beside `dispose`, and for the same reason: a site that threw, or was
       // cancelled part way, has as much to hand back as one that finished — the
       // channel list it fetched, and whatever its own code remembered. Only the
       // groups that changed are written. What the site remembered is pruned
       // first, so a site that no longer asks stops keeping what it kept.
-      await this.#memory.prune();
-      await this.#state.save();
-      // For a failed site too, where every count is nought — which is the truth,
-      // and reads correctly beside the `site:failed` that says why.
-      this.#run.emit({
-        type: 'site:done',
-        site: this.#site,
-        requests: this.#session.sent,
-        // Wall clock, which is the one a nightly run is long by — and nothing
-        // like the sum below once a site runs several requests at once.
-        ms: Date.now() - this.#began,
-        requestMs: this.#session.spent,
-        ...this.#counts,
-      });
+      //
+      // Said here rather than thrown, should it fail: the run then counts the
+      // site once, and hears its `site:done` either way. A site that had not
+      // failed has now; one that had is told so beside why.
+      try {
+        await this.#memory.prune();
+        await this.#state.save();
+      } catch (error) {
+        if (failed) {
+          this.#run.emit({
+            type: 'site:warning',
+            site: this.#site,
+            message: `what it remembered could not be saved either: ${errorMessage(error)}`,
+          });
+        } else {
+          this.#count('sitesFailed');
+          this.#run.emit({ type: 'site:failed', site: this.#site, error });
+        }
+      }
+
+      // For a failed site too, with what it did count — nought, where it
+      // failed before it began — and beside the `site:failed` that says why.
+      this.#run.emit(
+        siteDone(
+          this.#site,
+          // Wall clock, which is the one a nightly run is long by — and
+          // nothing like its `requestMs` once a site runs several requests at
+          // once.
+          Date.now() - this.#began + this.#settledMs,
+          this.#session.requestsBy,
+          this.#counts,
+        ),
+      );
     }
   }
 
@@ -360,7 +395,7 @@ export class SiteRun {
       refresh: this.#resolved.staleness.refetchAll,
       now: this.#run.now,
       timeZone: this.#run.timeZone,
-      paced: (fetch) => this.#sending(fetch),
+      paced: (fetch) => this.#sending(fetch, { label: LABELS.channels }),
     });
 
     const stale = await this.#collectStale();
@@ -403,6 +438,9 @@ export class SiteRun {
     // Everything this site does happens inside one of those pipelines — the
     // fetch, the parse, the write, and any request a parse made of its own —
     // and none of them is ever abandoned, so this is the site being done.
+    // A request a parse asked for and did not wait on is not waited on here
+    // either: one that never settles would hold the run for ever. It is counted
+    // when it is done — after this site's `site:done`, if it is still going.
     await this.#pipelines.onIdle();
   }
 
@@ -670,7 +708,12 @@ export class SiteRun {
           // A request of the parse's own goes through the site's queue, like
           // the request being parsed did — ahead of the planned ones, so a
           // channel-day in hand is finished rather than joined by another.
-          paced: (task) => slot.away(() => this.#sending(task, { priority: 1 })),
+          paced: (task, options) => {
+            // Asked before the slot is, so a label that is none throws here.
+            const label = this.#pacedLabel(options, LABELS.paced);
+
+            return slot.away(() => this.#sending(task, { priority: 1, label }));
+          },
           away: (wait) => slot.away(wait),
         }),
       );
@@ -815,31 +858,36 @@ export class SiteRun {
       // work for the first request of a site and silently for none of the rest.
       // Around the site's call and nothing else, which is also what keeps a
       // request made later from inside `parseDay` out of it.
-      payload = await this.#sending(({ signal: taskSignal }) => {
-        // Timed from inside the task, so what is reported is the request rather
-        // than the wait for a slot — a site paced to one request a second would
-        // otherwise report every request as having taken a second.
-        this.#run.emit({ type: 'request:started', site: this.#site, ...span });
+      payload = await this.#sending(
+        ({ signal: taskSignal }) => {
+          // Timed from inside the task, so what is reported is the request rather
+          // than the wait for a slot — a site paced to one request a second would
+          // otherwise report every request as having taken a second.
+          this.#run.emit({ type: 'request:started', site: this.#site, ...span });
 
-        const began = Date.now();
+          const began = Date.now();
 
-        // No ambient store for a site that never asks: the hooks are not even
-        // installed, and an `AsyncLocalStorage` context per request is a real
-        // cost for a `none`-batched site with one request per channel-day.
-        const fetch = (): Promise<unknown> =>
-          config.request(requestContext(request, this.#resolved.batching, this.#deps(taskSignal)));
+          // No ambient store for a site that never asks: the hooks are not even
+          // installed, and an `AsyncLocalStorage` context per request is a real
+          // cost for a `none`-batched site with one request per channel-day.
+          const fetch = (): Promise<unknown> =>
+            config.request(
+              requestContext(request, this.#resolved.batching, this.#deps(taskSignal)),
+            );
 
-        return (this.#revalidates ? revalidation.run(asking, fetch) : fetch()).then((raw) => {
-          this.#run.emit({
-            type: 'request:done',
-            site: this.#site,
-            ...span,
-            ms: Date.now() - began,
+          return (this.#revalidates ? revalidation.run(asking, fetch) : fetch()).then((raw) => {
+            this.#run.emit({
+              type: 'request:done',
+              site: this.#site,
+              ...span,
+              ms: Date.now() - began,
+            });
+
+            return raw;
           });
-
-          return raw;
-        });
-      });
+        },
+        { label: this.#resolved.requestLabel },
+      );
       // The run's own, and a different question: was this cancelled while it was
       // in flight? p-queue's task signal governs the slot, not the work in it, so
       // stopping is ours to do — and what it stops here is a response already paid
@@ -932,7 +980,11 @@ export class SiteRun {
             ...this.#deps(signal),
             // As a parse's is, and ahead of the planned ones for the same
             // reason: a pass already under way is finished rather than joined.
-            paced: (task) => this.#sending(task, { priority: 1 }),
+            paced: (task, options) =>
+              this.#sending(task, {
+                priority: 1,
+                label: this.#pacedLabel(options, this.#resolved.requestLabel),
+              }),
             // A pass holds no slot while it runs, so it waits as it is.
             away: (wait) => wait(),
           }),

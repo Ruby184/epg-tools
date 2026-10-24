@@ -1,4 +1,4 @@
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -9,7 +9,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { build, createCacheStore, guideStream, runGrab, runMerge } from '../src/build.js';
 import { planRun } from '../src/cli/plan.js';
 import { CacheManager, FsNdjsonCacheDriver, NoCacheDriver } from '../src/cache/main.js';
-import type { EpgEventMap } from '../src/core/events.js';
+import {
+  ReporterError,
+  RunFailedError,
+  type EpgEvent,
+  type EpgEventMap,
+} from '../src/core/events.js';
 import type { ChannelDayKey, StoredEntryMeta } from '../src/cache/main.js';
 import { defineConfig, type EpgConfig } from '../src/config.js';
 import { parseXmltvString } from '../src/xmltv/main.js';
@@ -81,6 +86,105 @@ async function collect(chunks: AsyncGenerator<string>): Promise<string> {
 describe('a channel list fetched before the grab', () => {
   // A build settles every list before any site is asked for a day, and the
   // fetch is still the first request of the site's turn: one queue, one state.
+
+  it('keeps what a reporter throws while the lists are settled, and rejects once the grab is', async () => {
+    const dir = await tempDir();
+    const fellOver = new Error('the reporter fell over');
+    const events: EpgEvent[] = [];
+    const listing: SiteConfig<unknown> = {
+      ...site([]),
+      channels: async ({ log }) => {
+        // Said as the list is settled, before the grab begins.
+        log('listing');
+
+        return [{ xmltvId: 'one.example', siteId: '1', name: 'One' }];
+      },
+    };
+
+    const rejected = await build(config(dir, { sites: [listing] }), {
+      now: NOW,
+      reporter: (event) => {
+        events.push(event);
+
+        if (event.type === 'site:note') {
+          throw fellOver;
+        }
+      },
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(rejected).toBeInstanceOf(ReporterError);
+    expect((rejected as ReporterError).thrown).toEqual([
+      { error: fellOver, times: 1, at: { 'site:note': 1 } },
+    ]);
+    // Not taken for the site's list failing: the grab went on with it.
+    expect(events.filter((event) => event.type === 'site:failed')).toEqual([]);
+    expect(events.find((event) => event.type === 'grab:done')).toMatchObject({ fetched: 1 });
+    // And no guide written by a run that is rejecting.
+    expect(existsSync(join(dir, 'guide.xml'))).toBe(false);
+  });
+
+  it('counts no nameless site’s list as another’s', async () => {
+    const dir = await tempDir();
+    const report: EpgEvent[] = [];
+    let asked = 0;
+    const nameless = (siteId: string, name: unknown): SiteConfig<unknown> => ({
+      ...site([]),
+      site: name as never,
+      channels: async () => {
+        asked++;
+
+        return [{ xmltvId: `${siteId}.example`, siteId, name: siteId }];
+      },
+    });
+
+    // No name, and an empty one, which is refused as none.
+    await build(
+      config(dir, {
+        sites: [nameless('one', undefined), nameless('two', ''), nameless('three', '')],
+      }),
+      {
+        now: NOW,
+        reporter: (event) => report.push(event),
+      },
+    ).catch(() => undefined);
+
+    // Each refused, and each said apart: no list of one counted as the other's.
+    const done = report.filter((event) => event.type === 'site:done');
+
+    // Nor any of their sources asked for a list kept under no name.
+    expect(asked).toBe(0);
+    expect(done).toHaveLength(3);
+    expect(done.map((event) => (event as { requestsBy: object }).requestsBy)).toEqual([{}, {}, {}]);
+  });
+
+  it('lets go of the sessions its lists were fetched through, should settling them fail', async () => {
+    const dir = await tempDir();
+    const run = new AbortController();
+    const listed: SiteConfig<unknown> = {
+      ...site([]),
+      channels: async () => [{ xmltvId: 'one.example', siteId: '1', name: 'One' }],
+    };
+
+    await expect(
+      build(
+        config(dir, {
+          sites: [listed],
+          // Asked about the lists once they are settled — and failing.
+          derived: () => {
+            throw new Error('the derived channels could not be worked out');
+          },
+        }),
+        { now: NOW, signal: run.signal },
+      ),
+    ).rejects.toThrow('the derived channels could not be worked out');
+
+    // Nothing of the session left listening to the run, with the site's
+    // config in hand.
+    expect(getEventListeners(run.signal, 'abort')).toHaveLength(0);
+  });
 
   it('is paced with the requests after it', async () => {
     const dir = await tempDir();
@@ -251,6 +355,127 @@ describe('a site whose channel list fails', () => {
 
     expect(guide.channels.map((channel) => channel.id)).toEqual(['one.example']);
     expect(guide.programmes).toHaveLength(1);
+  });
+
+  it('says what the list it failed on cost, though it was asked before the grab', async () => {
+    const dir = await tempDir();
+    const events: EpgEvent[] = [];
+    const refused: SiteConfig<unknown> = {
+      ...site([]),
+      site: 'broken.example',
+      channels: async () => {
+        throw Object.assign(new Error('Not Found'), {
+          name: 'HTTPError',
+          response: { status: 404 },
+        });
+      },
+    };
+
+    await build(config(dir, { sites: [site([]), refused] }), {
+      now: NOW,
+      reporter: (event) => events.push(event),
+    });
+
+    const done = events.find(
+      (event) => event.type === 'site:done' && event.site === 'broken.example',
+    ) as Extract<EpgEvent, { type: 'site:done' }>;
+    const counted = {
+      channels: { requests: 1, requestMs: expect.any(Number), failed: { 404: 1 } },
+    };
+
+    expect(done.requests).toBe(1);
+    // Its list was all it did: its time is the list's, pacing and all.
+    expect(done.ms).toBeGreaterThanOrEqual(done.requestMs);
+    expect(done.requestsBy).toEqual(counted);
+    expect(
+      (
+        events.find((event) => event.type === 'grab:done') as Extract<
+          EpgEvent,
+          { type: 'grab:done' }
+        >
+      ).requestsBy,
+    ).toMatchObject(counted);
+  });
+
+  it("counts a settled list's time in its site's, as its requests are", async () => {
+    const dir = await tempDir();
+    const events: EpgEvent[] = [];
+    const slow: SiteConfig<unknown> = {
+      ...site([]),
+      site: 'slow.example',
+      channels: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+
+        return [{ xmltvId: 'slow.one', siteId: '1' }];
+      },
+    };
+
+    await build(config(dir, { sites: [slow] }), {
+      now: NOW,
+      reporter: (event) => events.push(event),
+    });
+
+    const done = events.find(
+      (event) => event.type === 'site:done' && event.site === 'slow.example',
+    ) as Extract<EpgEvent, { type: 'site:done' }>;
+
+    // Settled before the grab began, and the site's time all the same.
+    expect(done.requestsBy.channels!.requestMs).toBeGreaterThanOrEqual(50);
+    expect(done.ms).toBeGreaterThanOrEqual(done.requestMs);
+  });
+
+  it('writes what a site it could not run has cached, and says what its list cost', async () => {
+    const dir = await tempDir();
+    let asked = 0;
+    const unread = (requestLabel?: string): SiteConfig<unknown> => ({
+      ...site([]),
+      site: 'unread.example',
+      ...(requestLabel === undefined ? {} : { requestLabel }),
+      channels: async () => {
+        asked++;
+
+        return [{ xmltvId: 'unread.one', siteId: '1' }];
+      },
+      parseDay: ({ day }) => [
+        {
+          channel: 'unread.one',
+          start: new Date(`${day}T06:00:00.000Z`),
+          title: [{ value: 'Kept' }],
+        },
+      ],
+    });
+
+    // A run that grabs it, and one after a mistake in its config.
+    await build(config(dir, { sites: [unread()] }), { now: NOW });
+
+    const events: EpgEvent[] = [];
+    const summary = await build(config(dir, { sites: [unread('detail calls')] }), {
+      now: NOW,
+      reporter: (event) => events.push(event),
+    });
+
+    expect(summary.sitesFailed).toBe(1);
+    // Its list asked for again — for the merge, which writes what it has
+    // cached rather than dropping the site from the guide.
+    expect(asked).toBe(2);
+
+    const guide = parseXmltvString(await readFile(join(dir, 'guide.xml'), 'utf8'));
+
+    expect(guide.programmes.map((programme) => programme.title[0]!.value)).toEqual(['Kept']);
+
+    const ofSite = events.filter(
+      (event) =>
+        (event.type === 'site:failed' || event.type === 'site:done') &&
+        event.site === 'unread.example',
+    );
+
+    // And what that list cost, in the site's own line.
+    expect(ofSite.map((event) => event.type)).toEqual(['site:failed', 'site:done']);
+    expect(ofSite[1]).toMatchObject({
+      requests: 1,
+      sitesFailed: 1,
+      requestsBy: { channels: { requests: 1, failed: {} } },
+    });
   });
 
   it('costs a grab that resolves the lists early for `cover` only that site', async () => {
@@ -1799,6 +2024,125 @@ describe('a cache that cannot be read or made', () => {
       ),
     ]);
     expect(existsSync(file)).toBe(false);
+  });
+
+  it('writes a merge’s guide though its reporter throws, and rejects once it is written', async () => {
+    const dir = await tempDir();
+    const fellOver = new Error('the reporter fell over');
+
+    await runGrab(config(dir), { now: NOW });
+
+    const rejected = await runMerge(config(dir), {
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:channel') {
+          throw fellOver;
+        }
+      },
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect((rejected as ReporterError).thrown).toEqual([
+      { error: fellOver, times: 1, at: { 'merge:channel': 1 } },
+    ]);
+    // All of it, rather than what there was before the first throw.
+    expect(await readFile(join(dir, 'guide.xml'), 'utf8')).toContain('</tv>');
+  });
+
+  it('throws what a reporter threw at a guide stream, though letting go of the cache failed', async () => {
+    const dir = await tempDir();
+    const fellOver = new Error('the reporter fell over');
+
+    await runGrab(config(dir), { now: NOW });
+
+    class Closing extends FsNdjsonCacheDriver {
+      async close(): Promise<void> {
+        throw new Error('the store would not close');
+      }
+    }
+
+    const reading = async (): Promise<void> => {
+      for await (const _chunk of guideStream(
+        config(dir, { cache: { driver: () => new Closing({ dir: join(dir, 'cache') }) } }),
+        {
+          now: NOW,
+          reporter: (event) => {
+            if (event.type === 'merge:channel') {
+              throw fellOver;
+            }
+          },
+        },
+      )) {
+        // Read to the end.
+      }
+    };
+
+    // Both, rather than the second failure in place of the first.
+    const thrown = await reading().catch((error: unknown) => error);
+
+    expect(thrown).toBeInstanceOf(RunFailedError);
+    expect(thrown).toMatchObject({
+      error: { message: 'the store would not close' },
+      reporter: { thrown: [{ error: fellOver }] },
+    });
+  });
+
+  it('throws what a reporter threw at a guide stream, to a reader that stopped early too', async () => {
+    const dir = await tempDir();
+    const fellOver = new Error('the reporter fell over');
+
+    await runGrab(config(dir), { now: NOW });
+
+    const reading = async (): Promise<void> => {
+      for await (const _chunk of guideStream(config(dir), {
+        now: NOW,
+        reporter: (event) => {
+          if (event.type === 'merge:channel') {
+            throw fellOver;
+          }
+        },
+      })) {
+        // Walked away from after a chunk, as a client that hung up.
+        break;
+      }
+    };
+
+    await expect(reading()).rejects.toBeInstanceOf(ReporterError);
+  });
+
+  it('keeps what a reporter throws at what the cache says, and rejects once the guide is written', async () => {
+    const dir = await tempDir();
+    const fellOver = new Error('the reporter fell over');
+
+    await runGrab(config(dir, { days: 2 }), { now: NOW });
+
+    // Tomorrow's, which is still fresh — today's is asked for again anyway.
+    const file = join(dir, 'cache', 'example.com', 'one.example', `${TOMORROW}.ndjson`);
+    const lines = (await readFile(file, 'utf8')).trimEnd().split('\n');
+
+    await writeFile(file, `${lines[0]}\n${lines[1]!.slice(0, 10)}\n`);
+
+    // Not grabbed again, and said of by the cache as the merge reads it, where
+    // a throw would have broken the read.
+    const rejected = await build(config(dir, { days: 2 }), {
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'site:warning') {
+          throw fellOver;
+        }
+      },
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(rejected).toBeInstanceOf(ReporterError);
+    expect((rejected as ReporterError).thrown).toEqual([
+      { error: fellOver, times: 1, at: { 'site:warning': 1 } },
+    ]);
+    expect(existsSync(join(dir, 'guide.xml'))).toBe(true);
   });
 
   it("says a sqlite cache's place is wrong as a place, not as a runtime", async () => {

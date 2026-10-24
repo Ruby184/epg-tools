@@ -35,10 +35,16 @@ import { writeFlushed } from '../core/streams.js';
 import { kyWith, resolveChannels, siteHttp } from '../grabber/channels.js';
 import { parseContext, requestContext, streamContext } from '../grabber/context.js';
 import { planRequests } from '../grabber/planner.js';
-import { resolveSite } from '../grabber/site.js';
+import { LABELS } from '../grabber/labels.js';
+import { pacedLabels, resolveSite } from '../grabber/site.js';
 import { Memory } from '../grabber/remember.js';
 import { SiteStateHandle } from '../grabber/state.js';
-import type { AnySiteConfig, GrabberChannel, ParsedProgramme } from '../grabber/types.js';
+import type {
+  AnySiteConfig,
+  GrabberChannel,
+  PacedOptions,
+  ParsedProgramme,
+} from '../grabber/types.js';
 import { ProgrammeBuilder } from '../xmltv/builder.js';
 import { serializeProgramme } from '../xmltv/serialize.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
@@ -396,15 +402,24 @@ export async function tryChannelDay(
     throw new GrabberError(`Nothing to ask for ${channel.xmltvId} on ${day}`);
   }
 
+  const pacedLabel = pacedLabels(site.site, says.warn);
   const deps = {
     http,
     state: await state.bag(),
     says,
     ...(options.signal ? { signal: options.signal } : {}),
     // A request a pass or a parse makes of its own simply runs: there is no
-    // queue to pace it against, since this is the only thing happening.
-    paced: <T>(task: (o: { signal?: AbortSignal | undefined }) => Promise<T>): Promise<T> =>
-      task({ ...(options.signal ? { signal: options.signal } : {}) }),
+    // queue to pace it against, since this is the only thing happening. Its
+    // label is checked as a run checks it, so what works here works there,
+    // though nothing here counts by it.
+    paced: <T>(
+      task: (slot: { signal?: AbortSignal | undefined }) => Promise<T>,
+      labelled?: PacedOptions,
+    ): Promise<T> => {
+      pacedLabel(labelled, LABELS.paced);
+
+      return task({ ...(options.signal ? { signal: options.signal } : {}) });
+    },
     timeZone: config.timeZone,
     dayZone: resolved.dayZone,
     // Over a store that keeps nothing, as `state` is: remembered for as long

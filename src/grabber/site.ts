@@ -11,11 +11,14 @@ import { DEFAULT_STALENESS } from '../cache/main.js';
 import type { StalenessPolicy } from '../cache/types.js';
 import { sameClock } from '../xmltv/zone.js';
 import { dayIn, dayRange, daysCovering, resolveTimeZone } from '../core/days.js';
+import { errorMessage } from '../core/error.js';
 import { resolveBatching, type ResolvedBatching } from './planner.js';
+import { LABELS } from './labels.js';
 import type {
   AnySiteConfig,
   BatchingOption,
   GrabOptions,
+  PacedOptions,
   SiteConfig,
   StreamSiteConfig,
 } from './types.js';
@@ -54,6 +57,11 @@ interface ResolvedSiteBase {
   batching: ResolvedBatching;
   /** When a cached day counts as stale: run policy under site override. */
   staleness: StalenessPolicy;
+  /**
+   * What its own requests are counted as: its `requestLabel`, or `request` —
+   * `stream`, for a stream's `paced` calls that give no label.
+   */
+  requestLabel: string;
 }
 
 /** A site that fetches a request at a time and parses each channel-day out of it. */
@@ -87,6 +95,11 @@ function received(value: unknown): string {
     return 'null';
   }
 
+  // The one string a check for a non-empty one refuses, said as itself.
+  if (value === '') {
+    return 'an empty string';
+  }
+
   if (Array.isArray(value)) {
     return 'an array';
   }
@@ -94,6 +107,168 @@ function received(value: unknown): string {
   const kind = typeof value;
 
   return kind === 'undefined' ? 'undefined' : `${kind === 'object' ? 'an' : 'a'} ${kind}`;
+}
+
+/**
+ * What reads as one name on the text line — `(request 49, detail 5242: 3242
+ * × 404)` — and so what a label may be: a word, or words joined by `.`, `_`,
+ * `/` or `-`, in any script — a letter's combining marks with it, as a vowel
+ * sign or a decomposed accent is. A space, a comma or a colon would read as the
+ * line's own.
+ */
+const LABEL = /^[\p{L}\p{N}][\p{L}\p{M}\p{N}]*(?:[._/-][\p{L}\p{N}][\p{L}\p{M}\p{N}]*)*$/u;
+
+/**
+ * A letter, which a label must have one of: `404` beside a status would read
+ * as one, and a key of digits alone is put first in any object, whatever
+ * order it was sent in.
+ */
+const LETTER = /\p{L}/u;
+
+/**
+ * A label a site gave its requests, where it is one — `what` says where it was
+ * given. A name on the text line and a key in `requestsBy`: an empty one would
+ * read as a gap there, a number would be one key here and another there and
+ * read as a status, and `channels` would count the site's requests as the
+ * run's list fetch.
+ *
+ * Answered composed (NFC): a word written with an accent of its own and one
+ * written with a combining mark print alike, and are one label.
+ */
+export function labelOf(site: string, label: unknown, what: string): string {
+  if (typeof label !== 'string' || !LABEL.test(label) || !LETTER.test(label)) {
+    throw new RefusedLabel(
+      `Site "${site}": ${what} names what requests are for, as a word — letters and digits, ` +
+        `a letter among them, joined by . _ / or - (got ${
+          typeof label === 'string' && label !== '' ? JSON.stringify(label) : received(label)
+        })`,
+      typeof label === 'string' ? 'a string that is no word' : received(label),
+    );
+  }
+
+  const composed = label.normalize('NFC');
+
+  if (composed === LABELS.channels) {
+    throw new RefusedLabel(
+      `Site "${site}": ${what} cannot be "${LABELS.channels}", which is what a run counts a ` +
+        `fetched channel list as`,
+      `"${LABELS.channels}"`,
+    );
+  }
+
+  return composed;
+}
+
+/**
+ * A label {@link labelOf} refused, and which mistake it was — not which value:
+ * a site making its labels from what each request is for makes the same
+ * mistake with a new one every time, and is told of it once.
+ */
+class RefusedLabel extends TypeError {
+  readonly mistake: string;
+
+  constructor(message: string, mistake: string) {
+    super(message);
+    this.mistake = mistake;
+  }
+}
+
+/** How many labels a site's `paced` calls are checked once each, rather than at every call. */
+const CHECKED_LABELS = 256;
+
+/**
+ * What a `ctx.paced` call is counted as: the label its options give, checked,
+ * or `fallback` where they give none. One for the site, so a label is checked
+ * once for the whole of its run, and every context's `paced` asks it — a
+ * closure of the context's own, and nothing more, per channel-day.
+ *
+ * A label that is no label is a mistake in the site's code rather than a
+ * request that failed, so `paced` is to ask before it returns: it throws where
+ * `paced` is called — not as the call's rejection, which a `.catch` meant for
+ * a `404` would swallow — and is said once, through `warn`, beside: a `try`
+ * around the `await` catches what is thrown, and with it every request the
+ * site meant to send.
+ */
+export function pacedLabels(
+  site: string,
+  warn: (message: string) => void,
+): (options: PacedOptions | undefined, fallback: string) => string {
+  // A site sends thousands under a handful of labels: each is checked once,
+  // and kept as it is counted.
+  const checked = new Map<string, string>();
+  const said = new Set<string>();
+
+  /**
+   * Throw `error`, said once for the `kind` of mistake it is — not for each
+   * value: a label made from what each request is for, a url or an object
+   * built for the call, is a new one every time, and would be said for every
+   * request the site meant to send.
+   */
+  function refuse(kind: string, error: unknown): never {
+    if (!said.has(kind)) {
+      said.add(kind);
+      warn(`${errorMessage(error)} — no request is sent with it`);
+    }
+
+    throw error;
+  }
+
+  return (options, fallback) => {
+    // A label handed as it is, where its options go — `paced(task, 'detail')`
+    // — would otherwise be no label at all, and counted as the fallback.
+    if (
+      options !== undefined &&
+      (typeof options !== 'object' || options === null || Array.isArray(options))
+    ) {
+      refuse(
+        `options that are ${received(options)}`,
+        new TypeError(
+          `Site "${site}": a paced request's options are an object, such as ` +
+            `{ label: 'detail' } (got ${received(options)})`,
+        ),
+      );
+    }
+
+    const label = options?.label;
+
+    if (label === undefined) {
+      return fallback;
+    }
+
+    let counted = checked.get(label);
+
+    if (counted === undefined) {
+      try {
+        counted = labelOf(site, label, "a paced request's label");
+      } catch (error) {
+        refuse(`a label that is ${(error as RefusedLabel).mistake}`, error);
+      }
+
+      // Kept for the next time, while there are few: a site naming its
+      // requests one by one would otherwise keep every name it made.
+      if (checked.size < CHECKED_LABELS) {
+        checked.set(label, counted);
+      }
+    }
+
+    return counted;
+  };
+}
+
+/**
+ * A site's name — its cache namespace, and what every event says it as — or a
+ * throw saying it has none: a site refused for it, as one that cannot be told
+ * from another.
+ */
+export function siteName(config: { site?: unknown }): string {
+  if (typeof config.site !== 'string' || config.site === '') {
+    throw new TypeError(
+      `A site must define site: a non-empty string, unique to it, naming its cache namespace ` +
+        `(got ${received(config.site)})`,
+    );
+  }
+
+  return config.site;
 }
 
 /**
@@ -125,12 +300,7 @@ export function resolveSite(
   /** The run's "now", which decides a leading day the site is not asked for — see {@link siteWindow}. */
   now?: Date,
 ): ResolvedSite {
-  if (typeof config.site !== 'string' || config.site === '') {
-    throw new TypeError(
-      `A site must define site: a non-empty string, unique to it, naming its cache namespace ` +
-        `(got ${received(config.site)})`,
-    );
-  }
+  siteName(config);
 
   if (typeof config.channels !== 'function' && !Array.isArray(config.channels)) {
     throw new TypeError(
@@ -150,6 +320,11 @@ export function resolveSite(
   ) {
     resolveTimeZone(config.dayZone, `Site "${config.site}" dayZone`);
   }
+
+  const requestLabel =
+    config.requestLabel === undefined
+      ? undefined
+      : labelOf(config.site, config.requestLabel, 'requestLabel');
 
   const common = {
     site: config.site,
@@ -190,6 +365,7 @@ export function resolveSite(
       // channel-day. So the planner needs no idea that this site is different.
       batching: resolveBatching({ mode: 'both' }),
       isStreaming: true,
+      requestLabel: requestLabel ?? LABELS.stream,
       config,
     };
   }
@@ -215,6 +391,7 @@ export function resolveSite(
     ...common,
     batching: resolveBatching(config.batching),
     isStreaming: false,
+    requestLabel: requestLabel ?? LABELS.request,
     config,
   };
 }
