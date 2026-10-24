@@ -28,6 +28,8 @@ import { OptionError, parseOptions } from '../core/options.js';
 import { dayIn, dayToDate, resolveTimeZone, toDayString } from '../core/days.js';
 import {
   reportingTo,
+  ReporterError,
+  RunFailedError,
   silent,
   stamped,
   LEVELS,
@@ -628,10 +630,25 @@ export async function runCli(argv: string[], options: CliOptions = {}): Promise<
 
   try {
     return await execute(argv, stdout, stderr, options);
-  } catch (error) {
+  } catch (thrown) {
+    // A run that failed, whose reporter threw as well: its own failure is what
+    // it exits on, and the reporter's is said before it — cancelled or not.
+    const [error, reporting] =
+      thrown instanceof RunFailedError ? [thrown.error, thrown.reporter] : [thrown, undefined];
+
+    if (reporting !== undefined) {
+      await writeLines(stderr, reporting.message);
+    }
+
     // Whatever the interruption surfaced as — a merge's own abort, a request
     // dropped mid-flight — a cancelled run is not a failure to describe.
     if (options.signal?.aborted) {
+      // Though what a reporter threw at the run, before it was cancelled, is
+      // still said.
+      if (error instanceof ReporterError) {
+        await writeLines(stderr, error.message);
+      }
+
       await writeLines(stderr, 'Cancelled.');
       return EXIT_CANCELLED;
     }

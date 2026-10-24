@@ -344,6 +344,26 @@ describe('epg try', () => {
     expect(out).toContain('a stream site');
   });
 
+  it('refuses a paced label a run would refuse, rather than working only here', async () => {
+    const config = configWith(
+      defineSiteConfig({
+        site: 'example.tv',
+        channels: [{ xmltvId: 'one', siteId: '1' }],
+        request: async () => ({}),
+        parseDay: async ({ paced }) => {
+          await paced(async () => 'detail', { label: '' });
+
+          return [];
+        },
+      }),
+    );
+
+    await expect(run(config, 'example.tv', 'one')).rejects.toThrow(
+      "a paced request's label names what requests are for, as a word — letters and digits, " +
+        'a letter among them, joined by . _ / or - (got an empty string)',
+    );
+  });
+
   it('refuses a site a run would refuse, in the same words', async () => {
     const config = configWith({
       site: 'example.tv',

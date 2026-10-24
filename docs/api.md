@@ -118,8 +118,8 @@ the whole answer to "what does the default verbosity show?".
 
 | group | types |
 |---|---|
-| the run | `run:cancelled`, `grab:done` |
-| a site | `site:started` (with `dayZone` for a site on [another calendar](./configuration.md#which-day-is-today), whose days `days` then counts), `site:done` (its counts plus what it cost: `requests`, `ms`, `requestMs`), `site:failed`, `site:note`, `site:warning` (the last two carrying whatever [fields the site attached](./site-config.md#saying-something)) |
+| the run | `run:cancelled`, `grab:done` (with every request of the run, by label — which a request a parse did not wait for can take past what its sites' `site:done` add up to) |
+| a site | `site:started` (with `dayZone` for a site on [another calendar](./configuration.md#which-day-is-today), whose days `days` then counts), `site:done` (its counts plus what it cost: `requests`, `ms`, `requestMs`, `requestsBy`), `site:failed`, `site:note`, `site:warning` (the last two carrying whatever [fields the site attached](./site-config.md#saying-something)) |
 | one channel-day | `entry:cached`, `entry:fetched`, `entry:appended`, `entry:unchanged`, `entry:failed` |
 | one request | `request:started`, `request:done` (with `ms`), `request:failed` |
 | a whole-document source | `stream:gaps`, `stream:ignored` |
@@ -160,6 +160,75 @@ waiting on something of its own: its `rateLimit`, or the parsing and writing
 that follow each response, which share [`localConcurrency`](./configuration.md#how-caching-works)
 with every other site. That is the measurement to take before tuning either.
 
+`requestsBy` says the same by what each request was for, with what failed them
+— so "5291 requests" says that 3,242 of them were detail calls answered `404`:
+
+```json
+"requestsBy": {
+  "request": { "requests": 49, "requestMs": 12034, "failed": {} },
+  "detail": { "requests": 5242, "requestMs": 573118, "failed": { "404": 3242, "timeout": 3 } }
+}
+```
+
+`requestMs` is the label's share of the site's `requestMs`, the time spent
+waiting on the source — not of `ms`, which is the site's wall clock.
+
+A label is the site's to name: [`requestLabel`](./site-config.md#reference)
+for its own requests — a request site's planned ones, or, since a stream has
+none, the fetches of a pass that give no label — and
+[`paced(task, { label })`](./site-config.md#a-parse-that-needs-another-request)
+for the rest. A label is a word with a letter in it, in any script, or words
+joined by `.`, `_`, `/` or `-` — `detail`, `v2/episodes` — so it reads as one
+name on the text line, not as a status, and is never `channels`. A site with a
+`requestLabel` that is not one is refused, and asks its source for nothing but
+its channel list, where the run settles every list before it grabs: a `build`,
+whose guide still writes what the site has cached, or a grab with a selection
+or a `cover` to apply. A `paced` call with one throws where it is called, past any `.catch`
+meant for the request, and is said once as a warning of the site's, past a
+`try` around the `await` too. A label names a kind of request, not one request:
+a site whose requests come under more than 64 labels is warned once, and every
+one is still counted.
+
+Without one, a request site's planned requests are `request`, a parse's `paced`
+calls are `paced`, and a stream's fetches are `stream`. A channel list that was
+fetched is `channels`, the calls of Schedules Direct's lineup among it, and
+Schedules Direct names the rest of its own: `md5`, `schedules` and `programs`.
+They come in the order each was first sent.
+
+A request is counted as its turn comes, so one a cancel dropped before it is
+not, and one already under way when the cancel came is. A failure is counted
+where the request threw it, so a `404` the site goes on to catch is counted all
+the same: by its status, `timeout`, `network` where nothing answered, or
+`error` for anything else the request threw — a Schedules Direct refusal
+answered at `200` among them. A request the cancel itself stopped is not
+counted as failed — one that threw the cancel's reason, or an `AbortError`,
+read down the error's `cause` chain — though what a source answered before or
+as the cancel came still is; and a `304` that said a channel-day is unchanged
+is an answer. A request a parse sent and did not wait for counts in its site's
+`site:done` as far as it had got by then, and in `grab:done` as far as it has
+by the end of the run.
+
+`grab:done` carries every request a site's queue sent, a list settled before
+the grab included — save the list of a site whose settings no queue can be made
+from, which is fetched without one, counted nowhere, and the site then refused.
+A site in a thread counts its requests in memory its thread shares with the
+run's, read once the run is done with every site, as a site on the run's own
+thread is counted until then. One whose thread dies has lost none of what it
+counted, and its `site:failed` comes with a `site:done` saying what it had
+done — once, and only once everything the thread sent has been heard: a site
+that had said it failed is told its thread went too as a warning, and one
+that had said its `site:done` is said no more. Heard, that is, when its port
+says it has closed, which it does at once however a thread goes; should one
+never say so, the site is said five seconds after from what its memory holds,
+less any label its thread had not named.
+
+The text reporter lists them on a site's line where it had more than one kind
+— and, for a site of one kind, only what failed it: `10647 requests (12 × 503)`:
+
+```
+[skylink.sk] 144 fetched, 0 from cache, 0 failed — 5291 requests (request 49, detail 5242: 3242 × 404 and 3 × timeout) in 11m37s, 585s waiting
+```
+
 `merge:summary` says what the sources made of each other, once the last
 programme is out:
 
@@ -188,6 +257,27 @@ shows it decides how, and a single-site grabber leaves it out.
 **Filtering is a reporter's job and happens nowhere else.** A sink of your own
 is told everything, which is what makes one worth writing; the ones below take a
 `level` and drop what is under it.
+
+**A reporter that throws fails the grab, once it is done.** What it threw does
+not stop a site part way through saying what it did, nor the run: every site is
+counted and said, `grab:done` or `run:cancelled` included, and then the grab —
+and the `build` around it, before its merge — rejects with a `ReporterError`.
+That is an `AggregateError` whose `errors` are what was thrown, each kind once
+— a name and a message make a kind — and whose `thrown` says how often each
+was, and at which events: a broken reporter throws at every event, and a run
+says tens of thousands. Ten kinds are kept, and any past them counted in
+`untracked`. A merge goes the same way — `runMerge`, or a `build` whose
+reporter throws only at its merge, writes the whole guide, then rejects, and
+`guideStream` hands over the whole of it, then throws — and a run that fails
+on its own as well rejects with a `RunFailedError`, so neither is lost: an
+`AggregateError` of both, with the run's own failure as its `error` and the
+`ReporterError` as its `reporter`. A reporter written `async`, though a reporter is synchronous, has what it
+rejects with kept as a throw is, while the run lasts: nothing waits on a
+reporter, so one that rejects after the run has answered is let go of. Nothing is said once the run has
+answered, though a request a parse did not wait for may still be going.
+Reporters joined by `combineReporters` are each told every event, whatever
+another throws. A sink that cannot keep up is a bug in the sink, and is said
+rather than swallowed.
 
 ### The ones this package ships
 
@@ -532,7 +622,7 @@ are not re-exported at all.
 |---|---|
 | Config | `defineConfig`, `resolveConfigSource` |
 | Answers | `createConfigContext`, `defaultsReader`, `envReader` |
-| Errors | `GrabberError`, `errorMessage`, `errorChain` |
+| Errors | `GrabberError`, `ReporterError`, `RunFailedError`, `errorMessage`, `errorChain` |
 | Events | `LEVELS`, `PHASES`, `EVENT_KINDS`, `atLevel`, `emitter` |
 | Reporters | `textReporter`, `jsonReporter`, `progressReporter`, `loggerReporter`, `emitterReporter`, `combineReporters`, `render`, `renderFailure`, `isFailure`, `reporterFor`, `REPORTER_NAMES`, `FAILURE_MODES`, `DEFAULT_FAILURE_CAP` |
 | Runners | `build`, `runGrab`, `runMerge`, `guideStream`, `createCacheStore` |
@@ -986,8 +1076,9 @@ cannot tell which it is serving.
 `kyWith`, `sitePacing`, `retryAfterMs`, `channelElement`, `defaultChannelInfo`,
 `SiteStateHandle`, `StateKey`, `TrackedMap`, `channelsMaxAgeMs`,
 `DEFAULT_CHANNELS_MAX_AGE_DAYS`, `UnchangedError`, `isUnchanged`,
-`fellShort`, `resolveAllowance`, and `ProgrammeBuilder` / `ChannelBuilder` /
-`ProgrammeOptions` / `NumberedOptions` as types.
+`ReporterError`, `RunFailedError`, `fellShort`, `resolveAllowance`, and
+`ProgrammeBuilder` / `ChannelBuilder` / `ProgrammeOptions` / `NumberedOptions`
+/ `ReporterThrow` as types.
 
 `*` this subpath only — not re-exported from the root.
 

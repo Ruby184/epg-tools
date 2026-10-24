@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { Writable } from 'node:stream';
 import { HTTPError, NetworkError } from 'ky';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type {
@@ -15,14 +16,19 @@ import type { XmltvProgramme } from '../src/xmltv/types.js';
 import {
   fellShort,
   grab,
+  ReporterError,
   resolveAllowance,
   resolveChannels,
   resolveSites,
   SiteStateHandle,
+  StateKey,
   UnchangedError,
 } from '../src/grabber/main.js';
 import { errorMessage } from '../src/core/error.js';
 import type { EpgEvent } from '../src/core/events.js';
+import { MANY_LABELS, openSession } from '../src/grabber/session.js';
+import { SiteRun } from '../src/grabber/site-run.js';
+import { combineReporters, jsonReporter } from '../src/core/reporters.js';
 import { collect } from './reporting.js';
 import type {
   ChannelsBatching,
@@ -4328,10 +4334,9 @@ describe('what a run reports', () => {
     //
     // A hold is identified by its duration, which is the one thing no other
     // timer here shares: `ky`'s own default timeout is ten seconds, this is
-    // thirty. So: was one set, and was it cleared.
+    // thirty. So: was one set, and does it hold the process.
     const HOLD_MS = 30_000;
     const set = vi.spyOn(globalThis, 'setTimeout');
-    const cleared = vi.spyOn(globalThis, 'clearTimeout');
 
     try {
       const report = collect();
@@ -4362,9 +4367,10 @@ describe('what a run reports', () => {
         .filter((call) => call.ms === HOLD_MS);
 
       // One was set — without this the test would pass by holding nothing —
-      // and it was cleared rather than left counting down.
+      // and it holds the process no longer: still counting down, so it lets go
+      // of whatever waits behind it, but kept alive by nothing.
       expect(holds).toHaveLength(1);
-      expect(cleared.mock.calls.map(([handle]) => handle)).toContain(holds[0]!.handle);
+      expect((holds[0]!.handle as NodeJS.Timeout).hasRef()).toBe(false);
       expect(summary).toMatchObject({ failed: 0, sitesFailed: 1 });
       expect(report.of('site:failed')).toHaveLength(1);
       expect(report.of('site:done')).toEqual([
@@ -4372,7 +4378,6 @@ describe('what a run reports', () => {
       ]);
     } finally {
       set.mockRestore();
-      cleared.mockRestore();
       server.close();
     }
   });
@@ -4430,6 +4435,1091 @@ describe('what a run reports', () => {
     expect(events.filter((event) => event.type === 'site:warning')).toEqual([
       expect.objectContaining({ message: 'the source renamed a channel', level: 'warn' }),
     ]);
+  });
+});
+
+describe('what a run says its requests were for', () => {
+  /** An error as ky throws one for a status, shaped rather than made. */
+  const status = (code: number): Error =>
+    Object.assign(new Error(`Request failed with status code ${code}`), {
+      name: 'HTTPError',
+      response: { status: code },
+    });
+
+  const doneOf = (events: EpgEvent[]) =>
+    events.find((event) => event.type === 'site:done') as Extract<EpgEvent, { type: 'site:done' }>;
+
+  it('counts each kind of request apart, with what failed them', async () => {
+    const report = collect();
+    const config = makeConfig({
+      requestLabel: 'listings',
+      async parseDay({ day, paced }) {
+        // Three details, one the source has none of — which the parse goes on
+        // to catch, and is counted all the same.
+        await Promise.all(
+          ['a', 'b', 'gone'].map((id) =>
+            paced(
+              async () => {
+                if (id === 'gone') {
+                  throw status(404);
+                }
+
+                return id;
+              },
+              { label: 'detail' },
+            ).catch(() => undefined),
+          ),
+        );
+        await paced(
+          async () => {
+            throw Object.assign(new Error('took too long'), { name: 'TimeoutError' });
+          },
+          { label: 'detail' },
+        ).catch(() => undefined);
+        await paced(async () => 'unnamed');
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    const done = doneOf(report.events);
+
+    expect(done.requests).toBe(6);
+    expect(done.requestsBy).toEqual({
+      listings: { requests: 1, requestMs: expect.any(Number), failed: {} },
+      detail: { requests: 4, requestMs: expect.any(Number), failed: { 404: 1, timeout: 1 } },
+      paced: { requests: 1, requestMs: expect.any(Number), failed: {} },
+    });
+    // In the order each was first asked for.
+    expect(Object.keys(done.requestsBy)).toEqual(['listings', 'detail', 'paced']);
+    expect(Object.values(done.requestsBy).every(({ requestMs }) => requestMs >= 0)).toBe(true);
+    expect(
+      Object.values(done.requestsBy).reduce((total, { requestMs }) => total + requestMs, 0),
+    ).toBe(done.requestMs);
+  });
+
+  it('names a fetched channel list, planned requests and a stream by default', async () => {
+    const report = collect();
+    const listed = makeConfig({
+      site: 'listed.example',
+      channels: async () => [channel('one.example')],
+    });
+    const streamed: StreamSiteConfig = {
+      site: 'stream.example',
+      channels: [channel('a')],
+      days: 1,
+      async *stream({ channels, days, paced }) {
+        await paced(async () => 'page');
+        yield { channel: channels[0]!, day: days[0]!, programmes: [] };
+      },
+    };
+
+    await grab([listed, streamed], {
+      cache: new MemoryCache(),
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    const by = (site: string) =>
+      (
+        report.events.find((event) => event.type === 'site:done' && event.site === site) as Extract<
+          EpgEvent,
+          { type: 'site:done' }
+        >
+      ).requestsBy;
+
+    expect(Object.keys(by('listed.example'))).toEqual(['channels', 'request']);
+    expect(by('stream.example')).toEqual({
+      stream: { requests: 1, requestMs: expect.any(Number), failed: {} },
+    });
+  });
+
+  it('does not wait on a request a parse let go of, which may never settle', async () => {
+    const report = collect();
+    const config = makeConfig({
+      parseDay({ day, paced }) {
+        // Asked for, not waited on — and never answered.
+        void paced(() => new Promise(() => {}), { label: 'prefetch' });
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    // Done, rather than held by it for ever.
+    const summary = await grab([config], {
+      cache: new MemoryCache(),
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    expect(summary.fetched).toBe(1);
+    expect(report.events.filter((event) => event.type === 'site:done')).toHaveLength(1);
+  });
+
+  it('says a site failed whose state could not be saved, with what it did', async () => {
+    const report = collect();
+    const cache = new MemoryCache();
+
+    cache.setState = async () => {
+      throw new Error('the disk is full');
+    };
+
+    const config = makeConfig({
+      parseDay({ day, state }) {
+        state.set('cursor', day);
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW, reporter: report.reporter });
+
+    // Failed once, and said so — and done, with what it fetched and asked.
+    expect(summary).toMatchObject({ fetched: 1, sitesFailed: 1 });
+    expect(report.events.filter((event) => event.type === 'site:failed')).toEqual([
+      expect.objectContaining({ error: expect.objectContaining({ message: 'the disk is full' }) }),
+    ]);
+    expect(report.events.filter((event) => event.type === 'site:done')).toEqual([
+      expect.objectContaining({ fetched: 1, sitesFailed: 1, requests: 1 }),
+    ]);
+  });
+
+  it('counts a site that failed, and could not save its state either, once', async () => {
+    const report = collect();
+    const cache = new MemoryCache();
+
+    cache.setState = async () => {
+      throw new Error('the disk is full');
+    };
+
+    const config = makeConfig({
+      // Its list fetched, remembered — and then refused.
+      channels: async ({ state }) => {
+        state.set('token', 'abc');
+
+        throw new Error('the list is gone');
+      },
+    });
+
+    const summary = await grab([config], { cache, now: NOW, reporter: report.reporter });
+
+    expect(summary.sitesFailed).toBe(1);
+    expect(report.events.filter((event) => event.type === 'site:failed')).toEqual([
+      expect.objectContaining({ error: expect.objectContaining({ message: 'the list is gone' }) }),
+    ]);
+    expect(report.events).toContainEqual(
+      expect.objectContaining({
+        type: 'site:warning',
+        message: 'what it remembered could not be saved either: the disk is full',
+      }),
+    );
+    expect(report.events.filter((event) => event.type === 'site:done')).toHaveLength(1);
+  });
+
+  it("names a stream's fetches after its requestLabel, where a fetch names none", async () => {
+    const report = collect();
+    const streamed: StreamSiteConfig = {
+      site: 'stream.example',
+      channels: [channel('a')],
+      days: 1,
+      requestLabel: 'pages',
+      async *stream({ channels, days, paced }) {
+        await paced(async () => 'page 1');
+        await paced(async () => 'page 2');
+        await paced(async () => 'an episode', { label: 'episodes' });
+        yield { channel: channels[0]!, day: days[0]!, programmes: [] };
+      },
+    };
+
+    await grab([streamed], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    expect(doneOf(report.events).requestsBy).toEqual({
+      pages: { requests: 2, requestMs: expect.any(Number), failed: {} },
+      episodes: { requests: 1, requestMs: expect.any(Number), failed: {} },
+    });
+  });
+
+  it("sums every site's for the run", async () => {
+    const report = collect();
+    const sites = ['a.example', 'b.example', 'c.example'].map((site) =>
+      makeConfig({
+        site,
+        async request() {
+          if (site !== 'a.example') {
+            throw status(503);
+          }
+
+          return {};
+        },
+      }),
+    );
+
+    await grab(sites, { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    expect(report.events.at(-1)).toMatchObject({ type: 'grab:done' });
+    expect((report.events.at(-1) as Extract<EpgEvent, { type: 'grab:done' }>).requestsBy).toEqual({
+      request: { requests: 3, requestMs: expect.any(Number), failed: { 503: 2 } },
+    });
+  });
+
+  it('fails the grab, rather than saying it of the site, should a site’s turn throw', async () => {
+    const report = collect();
+    const fault = new Error('a fault in the package');
+    const run = SiteRun.prototype.run;
+    const slow = makeConfig({
+      site: 'slow.example',
+      async request() {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+
+        return {};
+      },
+    });
+    // The first site's turn throws; the other is still going.
+    const running = vi.spyOn(SiteRun.prototype, 'run').mockImplementation(function (this: SiteRun) {
+      return running.mock.calls.length === 1 ? Promise.reject(fault) : run.call(this);
+    });
+
+    try {
+      await expect(
+        grab([makeConfig(), slow], {
+          cache: new MemoryCache(),
+          now: NOW,
+          reporter: report.reporter,
+        }),
+      ).rejects.toBe(fault);
+      // Nothing made up for the site: what it did is not knowable. And the run
+      // went on to its end, the other site with it.
+      expect(report.events.filter((event) => event.type === 'site:failed')).toEqual([]);
+      expect(report.events.filter((event) => event.type === 'site:done')).toEqual([
+        expect.objectContaining({ site: 'slow.example', fetched: 1 }),
+      ]);
+      // Nor said to have finished as it should: it rejects instead.
+      expect(report.events.filter((event) => event.type === 'grab:done')).toEqual([]);
+    } finally {
+      running.mockRestore();
+    }
+  });
+
+  it('fails the grab with a fault in a site’s turn, though the run was cancelled', async () => {
+    const stop = new AbortController();
+    const fault = new Error('a fault in the package');
+    const running = vi.spyOn(SiteRun.prototype, 'run').mockImplementation(async () => {
+      stop.abort(new Error('run cancelled'));
+
+      throw fault;
+    });
+
+    try {
+      await expect(
+        grab([makeConfig()], { cache: new MemoryCache(), now: NOW, signal: stop.signal }),
+      ).rejects.toBe(fault);
+    } finally {
+      running.mockRestore();
+    }
+  });
+
+  it('lets a cancelled site on this thread wind down before the run answers', async () => {
+    const stop = new AbortController();
+    const report = collect();
+    const slow = new MemoryCache();
+    const save = slow.setState.bind(slow);
+
+    // A save that takes a while, as a store across a network does.
+    slow.setState = async (...args) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      return save(...args);
+    };
+
+    await grab(
+      [
+        makeConfig({
+          parseDay({ day, state }) {
+            state.set('last', day);
+            stop.abort(new Error('run cancelled'));
+
+            return [programme(`${day}T06:00:00.000Z`)];
+          },
+        }),
+      ],
+      { cache: slow, now: NOW, signal: stop.signal, reporter: report.reporter },
+    );
+
+    // Its turn said to the end, and what it remembered saved, before the run
+    // said it was cancelled.
+    expect(
+      report.events
+        .filter((event) => event.type === 'site:done' || event.type === 'run:cancelled')
+        .map((event) => event.type),
+    ).toEqual(['site:done', 'run:cancelled']);
+    expect(await slow.getState('example.com', StateKey.SITE)).toBeDefined();
+  });
+
+  it('counts no request a cancel dropped before its turn', async () => {
+    const stop = new AbortController();
+    const report = collect();
+    const config = makeConfig({
+      async parseDay({ day, paced }) {
+        // Three at once, at a concurrency of one: the first cancels the run,
+        // and the other two never get their turn.
+        await Promise.allSettled(
+          [1, 2, 3].map((n) =>
+            paced(
+              async () => {
+                if (n === 1) {
+                  stop.abort(new Error('run cancelled'));
+                }
+
+                return n;
+              },
+              { label: 'detail' },
+            ),
+          ),
+        );
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    await grab([config], {
+      cache: new MemoryCache(),
+      now: NOW,
+      signal: stop.signal,
+      reporter: report.reporter,
+    });
+
+    expect(doneOf(report.events).requestsBy.detail).toEqual({
+      requests: 1,
+      requestMs: expect.any(Number),
+      failed: {},
+    });
+  });
+
+  it('counts a request under way when the cancel came, though it ends after the site does', async () => {
+    const stop = new AbortController();
+    const report = collect();
+    const config = makeConfig({
+      // Sent, and still going when the run is cancelled — and when the site
+      // says it is done.
+      async request() {
+        stop.abort(new Error('run cancelled'));
+        await new Promise((resolve) => setTimeout(resolve, 30));
+
+        return {};
+      },
+    });
+
+    await grab([config], {
+      cache: new MemoryCache(),
+      now: NOW,
+      signal: stop.signal,
+      reporter: report.reporter,
+    });
+
+    expect(doneOf(report.events)).toMatchObject({
+      requests: 1,
+      requestsBy: { request: { requests: 1 } },
+    });
+  });
+
+  it('lists the labels in the order each was first sent, whichever answered first', async () => {
+    const report = collect();
+    const config = makeConfig({
+      concurrency: 2,
+      async parseDay({ day, paced }) {
+        await Promise.all([
+          paced(() => new Promise((resolve) => setTimeout(resolve, 30)), { label: 'md5' }),
+          paced(async () => 'at once', { label: 'programs' }),
+        ]);
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    expect(Object.keys(doneOf(report.events).requestsBy)).toEqual(['request', 'md5', 'programs']);
+    expect(
+      Object.keys((report.events.at(-1) as Extract<EpgEvent, { type: 'grab:done' }>).requestsBy),
+    ).toEqual(['request', 'md5', 'programs']);
+  });
+
+  it('refuses a label that is no name', async () => {
+    const report = collect();
+    const unnamed = makeConfig({ site: 'unnamed.example', requestLabel: '' });
+    const numbered = makeConfig({
+      site: 'numbered.example',
+      async parseDay({ day, paced }) {
+        await paced(async () => 'detail', { label: 7 as never });
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    const summary = await grab([unnamed, numbered], {
+      cache: new MemoryCache(),
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    // The site's setting fails the site, as any of its settings would; a call's
+    // fails what it was called for.
+    expect(report.events).toContainEqual(
+      expect.objectContaining({
+        type: 'site:failed',
+        site: 'unnamed.example',
+        error: expect.objectContaining({
+          message:
+            'Site "unnamed.example": requestLabel names what requests are for, as a word — ' +
+            'letters and digits, a letter among them, joined by . _ / or - (got an empty string)',
+        }),
+      }),
+    );
+    // As a site that never ran: its `site:done` too, with nothing done.
+    expect(report.events).toContainEqual({
+      type: 'site:done',
+      level: 'info',
+      phase: 'grab',
+      site: 'unnamed.example',
+      requests: 0,
+      ms: 0,
+      requestMs: 0,
+      requestsBy: {},
+      fetched: 0,
+      empty: 0,
+      fromCache: 0,
+      unchanged: 0,
+      failed: 0,
+      sitesFailed: 1,
+    });
+    expect(report.events).toContainEqual(
+      expect.objectContaining({
+        type: 'entry:failed',
+        site: 'numbered.example',
+        error: expect.objectContaining({
+          message: expect.stringMatching(/a paced request's label names .*\(got a number\)$/),
+        }),
+      }),
+    );
+    expect(summary).toMatchObject({ sitesFailed: 1, failed: 1 });
+  });
+
+  it('says the whole run though a reporter throws, and rejects with what it threw once done', async () => {
+    const fellOver = new Error('the reporter fell over');
+    /** A run whose reporter throws at every event of `type`, after keeping it. */
+    const throwingAt = async (
+      type: EpgEvent['type'],
+      config: SiteConfig<unknown>,
+      cache: CacheStore = new MemoryCache(),
+    ) => {
+      const events: EpgEvent[] = [];
+      const rejected = await grab([config], {
+        cache,
+        now: NOW,
+        reporter: (event) => {
+          events.push(event);
+
+          if (event.type === type) {
+            throw fellOver;
+          }
+        },
+      }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      const done = events.at(-1) as Extract<EpgEvent, { type: 'grab:done' }>;
+
+      return {
+        rejected,
+        done,
+        said: events
+          .filter((event) => event.type === 'site:failed' || event.type === 'site:done')
+          .map((event) => event.type),
+      };
+    };
+
+    // At the failure it said: counted, and said, once — its `site:done` after.
+    const failing = await throwingAt(
+      'site:failed',
+      makeConfig({
+        channels: () => {
+          throw new Error('no lineup');
+        },
+      }),
+    );
+
+    // What it threw, once, with how often and at what.
+    expect(failing.rejected).toBeInstanceOf(ReporterError);
+    expect((failing.rejected as ReporterError).errors).toEqual([fellOver]);
+    expect((failing.rejected as ReporterError).thrown).toEqual([
+      { error: fellOver, times: 1, at: { 'site:failed': 1 } },
+    ]);
+    expect(failing.said).toEqual(['site:failed', 'site:done']);
+    expect(failing.done).toMatchObject({ type: 'grab:done', sitesFailed: 1 });
+
+    // At every `site:done`, of a site that did not fail: not made one.
+    const finished = await throwingAt('site:done', makeConfig());
+
+    expect((finished.rejected as ReporterError).thrown).toEqual([
+      { error: fellOver, times: 1, at: { 'site:done': 1 } },
+    ]);
+    expect(finished.said).toEqual(['site:done']);
+    expect(finished.done).toMatchObject({ type: 'grab:done', fetched: 1, sitesFailed: 0 });
+
+    // At a failure said as it let go — what it remembered could not be saved —
+    // which still has its `site:done` said after it.
+    const unsaving = new MemoryCache();
+
+    unsaving.setState = async () => {
+      throw new Error('the disk is full');
+    };
+
+    const unsaved = await throwingAt(
+      'site:failed',
+      makeConfig({
+        parseDay({ day, state }) {
+          state.set('last', day);
+
+          return [programme(`${day}T06:00:00.000Z`)];
+        },
+      }),
+      unsaving,
+    );
+
+    expect((unsaved.rejected as ReporterError).errors).toEqual([fellOver]);
+    expect(unsaved.said).toEqual(['site:failed', 'site:done']);
+    expect(unsaved.done).toMatchObject({ fetched: 1, sitesFailed: 1 });
+
+    // At a warning said inside a request's turn: the request sent, and counted.
+    const warned = await throwingAt(
+      'site:warning',
+      makeConfig({
+        async parseDay({ day, paced }) {
+          for (let id = 0; id <= MANY_LABELS; id++) {
+            await paced(async () => id, { label: `item-${id}` });
+          }
+
+          return [programme(`${day}T06:00:00.000Z`)];
+        },
+      }),
+    );
+
+    expect((warned.rejected as ReporterError).thrown).toEqual([
+      { error: fellOver, times: 1, at: { 'site:warning': 1 } },
+    ]);
+    expect(warned.done).toMatchObject({ fetched: 1, failed: 0 });
+    expect(Object.keys(warned.done.requestsBy)).toHaveLength(MANY_LABELS + 2);
+  });
+
+  it('rejects with what a reporter threw at grab:done, though one joined to it is async', async () => {
+    const sinkBroke = new Error('sink broke');
+
+    await expect(
+      grab([makeConfig()], {
+        cache: new MemoryCache(),
+        now: NOW,
+        reporter: combineReporters(
+          async () => {},
+          (event) => {
+            if (event.type === 'grab:done') {
+              throw sinkBroke;
+            }
+          },
+        ),
+      }),
+    ).rejects.toMatchObject({ thrown: [{ error: sinkBroke, at: { 'grab:done': 1 } }] });
+  });
+
+  it('says a site whose error cannot be read, rather than failing the run for it', async () => {
+    const { proxy, revoke } = Proxy.revocable(new Error('gone'), {});
+
+    revoke();
+
+    const lines: string[] = [];
+    // The JSON reporter, which reads an error's fields.
+    const summary = await grab(
+      [
+        makeConfig({
+          channels: () => {
+            throw proxy;
+          },
+        }),
+      ],
+      {
+        cache: new MemoryCache(),
+        now: NOW,
+        reporter: jsonReporter({
+          stream: new Writable({
+            write(chunk, _encoding, done) {
+              lines.push(String(chunk));
+              done();
+            },
+          }),
+        }),
+      },
+    );
+
+    expect(summary.sitesFailed).toBe(1);
+    expect(lines.join('')).toContain('[something that cannot be read]');
+  });
+
+  it('names each site its config named nothing, so no reporter is handed none — and two, two', async () => {
+    const report = collect();
+    const nameless = (): SiteConfig<unknown> => ({ ...makeConfig(), site: undefined as never });
+
+    // An empty name is none either, as it is refused as none.
+    const summary = await grab([nameless(), { ...makeConfig(), site: '' }], {
+      cache: new MemoryCache(),
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    expect(
+      report.events
+        .filter((event) => event.type === 'site:failed' || event.type === 'site:done')
+        .map((event) => `${event.type} ${(event as { site: string }).site}`),
+    ).toEqual([
+      'site:failed a site with no name (1)',
+      'site:done a site with no name (1)',
+      'site:failed a site with no name (2)',
+      'site:done a site with no name (2)',
+    ]);
+    expect(summary.sitesFailed).toBe(2);
+  });
+
+  it('refuses a list handed where its options go, as it does a label', async () => {
+    const report = collect();
+    const config = makeConfig({
+      async parseDay({ day, paced }) {
+        await paced(async () => 'detail', ['detail'] as never);
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    expect(report.events).toContainEqual(
+      expect.objectContaining({
+        type: 'site:warning',
+        message: expect.stringContaining(
+          "options are an object, such as { label: 'detail' } (got an array)",
+        ),
+      }),
+    );
+    expect(doneOf(report.events).requestsBy.paced).toBeUndefined();
+  });
+
+  it('refuses a label handed where its options go, rather than counting it as none', async () => {
+    const report = collect();
+    const config = makeConfig({
+      channels: [channel('one.example'), channel('two.example')],
+      async parseDay({ channel: { siteId }, day, paced }) {
+        // A different one each time, as a label made from the request would be.
+        await paced(async () => 'detail', `detail-${siteId}` as never);
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    const summary = await grab([config], {
+      cache: new MemoryCache(),
+      now: NOW,
+      reporter: report.reporter,
+    });
+    const message =
+      'Site "example.com": a paced request\'s options are an object, such as ' +
+      "{ label: 'detail' } (got a string)";
+
+    expect(report.events).toContainEqual(
+      expect.objectContaining({
+        type: 'entry:failed',
+        error: expect.objectContaining({ message }),
+      }),
+    );
+    // Said once for the site, though each was another string.
+    expect(report.events.filter((event) => event.type === 'site:warning')).toEqual([
+      expect.objectContaining({ message: `${message} — no request is sent with it` }),
+    ]);
+    expect(summary.failed).toBe(2);
+  });
+
+  it('names a label after what is on every object, and counts it as any other', async () => {
+    const report = collect();
+    const config = makeConfig({
+      requestLabel: 'constructor',
+      async parseDay({ day, paced }) {
+        await paced(
+          async () => {
+            throw status(404);
+          },
+          { label: 'toString' },
+        ).catch(() => undefined);
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    expect(doneOf(report.events).requestsBy).toEqual({
+      constructor: { requests: 1, requestMs: expect.any(Number), failed: {} },
+      toString: { requests: 1, requestMs: expect.any(Number), failed: { 404: 1 } },
+    });
+    expect((report.events.at(-1) as Extract<EpgEvent, { type: 'grab:done' }>).requestsBy).toEqual(
+      doneOf(report.events).requestsBy,
+    );
+    // Nothing every object has was written to.
+    expect(({} as { requests?: unknown }).requests).toBeUndefined();
+  });
+
+  it('counts a word written composed and with a combining mark as one label', async () => {
+    const report = collect();
+    const config = makeConfig({
+      requestLabel: 'rela\u0301cie',
+      async parseDay({ day, paced }) {
+        await paced(async () => 'detail', { label: 'relácie' });
+        await paced(async () => 'detail', { label: 'rela\u0301cie' });
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    expect(doneOf(report.events).requestsBy).toEqual({
+      relácie: { requests: 3, requestMs: expect.any(Number), failed: {} },
+    });
+  });
+
+  it('refuses a label that would not read as one name, or would be the list fetch', async () => {
+    for (const [label, said] of [
+      [' ', '(got " ")'],
+      ['detail: 404', '(got "detail: 404")'],
+      ['detail calls', '(got "detail calls")'],
+      ['channels', 'cannot be "channels"'],
+      // Read as a status beside the ones it is printed with, and put first.
+      ['404', '(got "404")'],
+      ['2024', '(got "2024")'],
+    ] as const) {
+      const report = collect();
+
+      await grab([makeConfig({ requestLabel: label })], {
+        cache: new MemoryCache(),
+        now: NOW,
+        reporter: report.reporter,
+      });
+
+      expect(report.events).toContainEqual(
+        expect.objectContaining({
+          type: 'site:failed',
+          error: expect.objectContaining({ message: expect.stringContaining(said) }),
+        }),
+      );
+    }
+
+    // What one name may be: words joined, in any script — a letter's marks
+    // with it, as a vowel sign or a decomposed accent is.
+    for (const label of [
+      'detail',
+      'detail-page',
+      'v2/episodes',
+      'podrobnosti_relácie',
+      'podrobnosti_rela\u0301cie',
+      'विवरण',
+      'รายละเอียด',
+      'api.1',
+    ]) {
+      const report = collect();
+
+      await grab([makeConfig({ requestLabel: label })], {
+        cache: new MemoryCache(),
+        now: NOW,
+        reporter: report.reporter,
+      });
+
+      // Counted composed, however it was written.
+      expect(Object.keys(doneOf(report.events).requestsBy)).toEqual([label.normalize('NFC')]);
+    }
+  });
+
+  it('throws a paced label that is no name where it is called, past a catch meant for a 404', async () => {
+    const report = collect();
+    const config = makeConfig({
+      async parseDay({ day, paced }) {
+        // As a parse does for details: a missing one is no reason to fail.
+        await paced(async () => 'detail', { label: '' }).catch(() => undefined);
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    const summary = await grab([config], {
+      cache: new MemoryCache(),
+      now: NOW,
+      reporter: report.reporter,
+    });
+
+    // Said, rather than every detail quietly missing.
+    expect(summary.failed).toBe(1);
+    expect(report.events).toContainEqual(
+      expect.objectContaining({
+        type: 'entry:failed',
+        error: expect.objectContaining({
+          message: expect.stringContaining("a paced request's label names what requests are for"),
+        }),
+      }),
+    );
+  });
+
+  it('says a paced label that is no name once for the site, past a try around the await', async () => {
+    const report = collect();
+    const config = makeConfig({
+      channels: [channel('one.example'), channel('two.example')],
+      async parseDay({ day, paced }) {
+        let detail: string | undefined;
+
+        // As a parse may write it — which catches what is thrown as well.
+        try {
+          detail = await paced(async () => 'detail', { label: 'detail calls' });
+        } catch {
+          detail = undefined;
+        }
+
+        return [
+          { ...programme(`${day}T06:00:00.000Z`), title: [{ value: detail ?? 'no detail' }] },
+        ];
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    // Two channel-days that swallowed it, and one warning of the site's.
+    expect(
+      report.events.filter(
+        (event) => event.type === 'site:warning' && event.message.includes('detail calls'),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        site: 'example.com',
+        message: expect.stringContaining('— no request is sent with it'),
+      }),
+    ]);
+  });
+
+  it('says a label that is no name once for each kind of mistake, not for each value', async () => {
+    const report = collect();
+    let calls = 0;
+    const config = makeConfig({
+      channels: [channel('one.example'), channel('two.example')],
+      async parseDay({ day, paced }) {
+        calls++;
+        // Built afresh for each channel-day, as a parse building its label from
+        // what each request is for would: an object, and a url.
+        try {
+          await paced(async () => 'detail', { label: ['detail'] as never });
+        } catch {
+          // Thrown where it is called, as a label that is none is.
+        }
+
+        await paced(async () => 'detail', { label: `https://example.tv/detail/${calls}` });
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    // Two channel-days that failed for it, and one warning for each kind.
+    expect(report.events.filter((event) => event.type === 'entry:failed')).toHaveLength(2);
+    expect(
+      report.events
+        .filter((event) => event.type === 'site:warning')
+        .map((event) => (event as { message: string }).message.match(/\(got (.*)\)/)?.[1]),
+    ).toEqual(['an array', '"https://example.tv/detail/1"']);
+  });
+
+  it('counts what a site threw that cannot be read as an error, and hands it back as it was', async () => {
+    const report = collect();
+    // What a site may throw: a value whose every property throws.
+    const hostile = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('no reading this');
+        },
+      },
+    );
+    let caught: unknown;
+    const config = makeConfig({
+      async parseDay({ day, paced }) {
+        try {
+          await paced(
+            async () => {
+              throw hostile;
+            },
+            { label: 'detail' },
+          );
+        } catch (error) {
+          caught = error;
+        }
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    expect(caught).toBe(hostile);
+    expect(doneOf(report.events).requestsBy.detail).toEqual({
+      requests: 1,
+      requestMs: expect.any(Number),
+      failed: { error: 1 },
+    });
+  });
+
+  it('says what a session settled before the run says as the run it joins says it', async () => {
+    const before: EpgEvent['type'][] = [];
+    const after: EpgEvent['type'][] = [];
+    // Paced, so its queue says when it is held as well.
+    const session = openSession(
+      makeConfig({ rateLimit: { requests: MANY_LABELS, perMs: 20 } }),
+      new MemoryCache(),
+      { emit: (event) => before.push(event.type) },
+    );
+
+    try {
+      session.joinRun({ requested: () => {}, emit: (event) => after.push(event.type) });
+
+      for (let id = 0; id <= MANY_LABELS; id++) {
+        await session.send(async () => id, { label: `item-${id}` });
+      }
+    } finally {
+      session.pacing.dispose();
+    }
+
+    expect(before).toEqual([]);
+    expect(after).toContain('site:warning');
+    expect(after).toContain('pacing:rateLimit');
+  });
+
+  it('counts no failure for a cancelled run, nor for a source saying nothing changed', async () => {
+    const stop = new AbortController();
+    const cancelled = collect();
+    const waiting = makeConfig({
+      request: ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          stop.abort(new Error('run cancelled'));
+        }),
+    });
+
+    await grab([waiting], {
+      cache: new MemoryCache(),
+      now: NOW,
+      signal: stop.signal,
+      reporter: cancelled.reporter,
+    });
+
+    expect(doneOf(cancelled.events).requestsBy).toEqual({
+      request: { requests: 1, requestMs: expect.any(Number), failed: {} },
+    });
+
+    const unchanged = collect();
+
+    await grab(
+      [
+        makeConfig({
+          async request() {
+            throw new UnchangedError('https://example.com/epg');
+          },
+        }),
+      ],
+      { cache: new MemoryCache(), now: NOW, reporter: unchanged.reporter },
+    );
+
+    expect(doneOf(unchanged.events).requestsBy).toEqual({
+      request: { requests: 1, requestMs: expect.any(Number), failed: {} },
+    });
+  });
+
+  it('warns a site once whose requests come under many labels, and counts every one', async () => {
+    /** A run whose parse sends `n` detail calls, each labelled as one request rather than a kind. */
+    const labelled = async (n: number) => {
+      const report = collect();
+
+      await grab(
+        [
+          makeConfig({
+            async parseDay({ day, paced }) {
+              for (let id = 0; id < n; id++) {
+                await paced(async () => id, { label: `item-${id}` });
+              }
+
+              return [programme(`${day}T06:00:00.000Z`)];
+            },
+          }),
+        ],
+        { cache: new MemoryCache(), now: NOW, reporter: report.reporter },
+      );
+
+      return {
+        warned: report.events.filter((event) => event.type === 'site:warning'),
+        labels: Object.keys(doneOf(report.events).requestsBy),
+      };
+    };
+
+    // With the planned request's own: as many as a site may have, then one over.
+    expect((await labelled(MANY_LABELS - 1)).warned).toEqual([]);
+    expect((await labelled(MANY_LABELS)).warned).toEqual([
+      expect.objectContaining({
+        site: 'example.com',
+        message:
+          'its requests have come under more than 64 labels — a label names a kind of request, ' +
+          'such as detail, not one request: each is counted apart, in site:done and on its line',
+      }),
+    ]);
+
+    // Once, however many more — and none of them left out.
+    const many = await labelled(MANY_LABELS + 20);
+
+    expect(many.warned).toHaveLength(1);
+    expect(many.labels).toHaveLength(MANY_LABELS + 21);
+  });
+
+  it('counts what a source answered as the cancel came, and not the cancel however it is wrapped', async () => {
+    /** What one request failed with, thrown once the run is cancelled. */
+    const failedWith = async (
+      thrown: (reason: unknown) => unknown,
+    ): Promise<Record<string, number> | undefined> => {
+      const stop = new AbortController();
+      const report = collect();
+
+      await grab(
+        [
+          makeConfig({
+            async request() {
+              stop.abort(new Error('run cancelled'));
+
+              throw thrown(stop.signal.reason);
+            },
+          }),
+        ],
+        { cache: new MemoryCache(), now: NOW, signal: stop.signal, reporter: report.reporter },
+      );
+
+      return doneOf(report.events).requestsBy.request?.failed;
+    };
+    const aborted = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' });
+
+    // The source's answer, which the cancel happened to come with.
+    expect(await failedWith(() => status(503))).toEqual({ 503: 1 });
+    // The cancel, as it is — and beneath what a site made of it.
+    expect(await failedWith((reason) => reason)).toEqual({});
+    expect(await failedWith((reason) => new Error('gave up', { cause: reason }))).toEqual({});
+    expect(await failedWith(() => new Error('gave up', { cause: aborted }))).toEqual({});
   });
 });
 

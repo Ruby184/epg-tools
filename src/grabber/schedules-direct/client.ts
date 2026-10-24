@@ -443,50 +443,71 @@ export function createSchedulesDirectClient(
     },
   });
 
-  /** One call: a path, a body if it takes one, and an answer of the shape asked for. */
-  const request = <T>(path: string, body?: unknown): Promise<T> =>
-    paced(({ signal }) =>
-      clientWithAuth(path, {
-        method: body === undefined ? 'get' : 'post',
-        ...(body === undefined ? {} : { json: body }),
-        ...(signal ? { signal } : {}),
-      }).json<T>(),
-    );
+  /**
+   * A path, a body if it takes one, and an answer of the shape asked for — in
+   * whatever turn of the queue it was given. A `get`, or a `post` with a body,
+   * unless the call says which it is.
+   */
+  const call = <T>(
+    path: string,
+    signal: AbortSignal | undefined,
+    sent: { body?: unknown; method?: 'put' | 'delete' } = {},
+  ): Promise<T> =>
+    clientWithAuth(path, {
+      method: sent.method ?? (sent.body === undefined ? 'get' : 'post'),
+      ...(sent.body === undefined ? {} : { json: sent.body }),
+      ...(signal ? { signal } : {}),
+    }).json<T>();
 
-  /** A call that changes something, which is neither a `get` nor a `post`. */
-  const change = <T>(path: string, method: 'put' | 'delete'): Promise<T> =>
-    paced(({ signal }) =>
-      clientWithAuth(path, { method, ...(signal ? { signal } : {}) }).json<T>(),
-    );
+  /**
+   * One call, in a turn of the queue of its own — a `put` or a `delete` where
+   * it says so, for one that changes something.
+   *
+   * `label` is what `requestsBy` counts it as — the kind of call, not its
+   * path, which carries a lineup's id.
+   */
+  const request = <T>(
+    label: string,
+    path: string,
+    sent: { body?: unknown; method?: 'put' | 'delete' } = {},
+  ): Promise<T> => paced(({ signal }) => call<T>(path, signal, sent), { label });
 
   /**
    * A call whose answer is a list.
    *
    * The service answers a whole-request failure with an *object* even where
    * success is an array — at HTTP 200, so nothing threw and nothing but the
-   * shape says anything is wrong.
+   * shape says anything is wrong. Said inside the call's own turn, so the
+   * queue counts it as the failure it is.
    */
-  const requestList = async <T>(path: string, body: unknown): Promise<T[]> => {
-    const answer = await request<T[] | Record<string, unknown>>(path, body);
+  const requestList = <T>(label: string, path: string, body: unknown): Promise<T[]> =>
+    paced(
+      async ({ signal }) => {
+        const answer = await call<T[] | Record<string, unknown>>(path, signal, { body });
 
-    if (Array.isArray(answer)) {
-      return answer;
-    }
+        if (Array.isArray(answer)) {
+          return answer;
+        }
 
-    throw new GrabberError(`${site}: Schedules Direct refused ${path} — ${wireMessage(answer)}`);
-  };
+        throw new GrabberError(
+          `${site}: Schedules Direct refused ${path} — ${wireMessage(answer)}`,
+        );
+      },
+      { label },
+    );
 
   return {
-    status: () => request<WireStatus>('status'),
+    status: () => request<WireStatus>('status', 'status'),
     headends: (where) =>
       // Its own spelling: the service takes `postalcode`, all lower case.
       requestList<WireHeadend>(
+        'headends',
         `headends?${new URLSearchParams({ country: where.country, postalcode: where.postalCode }).toString()}`,
         undefined,
       ),
     lineups: async () => {
       try {
-        return await request<WireLineups>('lineups');
+        return await request<WireLineups>('lineups', 'lineups');
       } catch (error) {
         // An account with no lineups is not a failed request — the service's
         // own client does the same, and everything above here is already
@@ -494,16 +515,21 @@ export function createSchedulesDirectClient(
         return refusalCode(error) === SD_NO_LINEUPS ? {} : Promise.reject(error);
       }
     },
-    lineup: (id) => request<WireLineup>(`lineups/${encodeURIComponent(id)}`),
-    addLineup: (id) => change<WireLineupChange>(`lineups/${encodeURIComponent(id)}`, 'put'),
-    removeLineup: (id) => change<WireLineupChange>(`lineups/${encodeURIComponent(id)}`, 'delete'),
-    schedulesMd5: (stations) => request<WireMd5Response>('schedules/md5', stations),
-    schedules: (stations) => requestList<WireSchedule>('schedules', stations),
-    programs: (ids) => requestList<WireProgram>('programs', ids),
+    lineup: (id) => request<WireLineup>('lineups', `lineups/${encodeURIComponent(id)}`),
+    addLineup: (id) =>
+      request<WireLineupChange>('lineups', `lineups/${encodeURIComponent(id)}`, { method: 'put' }),
+    removeLineup: (id) =>
+      request<WireLineupChange>('lineups', `lineups/${encodeURIComponent(id)}`, {
+        method: 'delete',
+      }),
+    schedulesMd5: (stations) =>
+      request<WireMd5Response>('md5', 'schedules/md5', { body: stations }),
+    schedules: (stations) => requestList<WireSchedule>('schedules', 'schedules', stations),
+    programs: (ids) => requestList<WireProgram>('programs', 'programs', ids),
     // The trailing slash is not decoration. Without it the service answers
     // `1008 INCORRECT_REQUEST` to every body — its own documented example
     // included, and with or without a token — and with it the same body is
     // accepted. Verified against the live service on 2026-09-17.
-    artwork: (ids) => requestList<WireArtwork>('metadata/programs/', ids),
+    artwork: (ids) => requestList<WireArtwork>('metadata', 'metadata/programs/', ids),
   };
 }

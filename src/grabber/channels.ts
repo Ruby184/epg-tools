@@ -10,6 +10,7 @@ import { localTimeZone } from '../core/days.js';
 import { errorMessage, unanswered } from '../core/error.js';
 import { unplain } from '../core/plain.js';
 import type { Emit, Says } from '../core/events.js';
+import { LABELS } from './labels.js';
 import type { SiteSession } from './session.js';
 import type {
   AnyIterable,
@@ -598,7 +599,10 @@ export async function resolveSessions(
         try {
           const channels = await resolveChannels(site, {
             ...(session
-              ? { http: session.pacing.http, paced: (fetch) => session.send(fetch) }
+              ? {
+                  http: session.pacing.http,
+                  paced: (fetch) => session.send(fetch, { label: LABELS.channels }),
+                }
               : {}),
             ...(options.signal ? { signal: options.signal } : {}),
             ...(state ? { state } : {}),

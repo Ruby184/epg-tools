@@ -25,7 +25,14 @@ import type {
   Reporter,
 } from '../src/main.js';
 import { silent, stamped, PHASES } from '../src/core/events.js';
-import { emitter } from '../src/core/events.js';
+import {
+  emitter,
+  keepingThrows,
+  ReporterError,
+  RunFailedError,
+  type ReportedOptions,
+} from '../src/core/events.js';
+import { errorMessage } from '../src/core/error.js';
 
 /** Collects lines, so what a reporter wrote can be read back. */
 class Sink extends Writable {
@@ -202,6 +209,7 @@ describe('render', () => {
         requests: 96,
         ms: 42_000,
         requestMs: 28_500,
+        requestsBy: {},
         fetched: 412,
         empty: 0,
         fromCache: 8,
@@ -214,10 +222,90 @@ describe('render', () => {
     [
       {
         type: 'site:done',
+        site: 'sky.sk',
+        requests: 5291,
+        ms: 697_000,
+        requestMs: 585_000,
+        requestsBy: {
+          request: { requests: 49, requestMs: 12_000, failed: {} },
+          detail: { requests: 5242, requestMs: 573_000, failed: { 404: 3242, timeout: 3 } },
+        },
+        fetched: 144,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 0,
+        sitesFailed: 0,
+      },
+      // By kind where there was more than one, and what failed them — " and "
+      // between failures, so the commas stay between kinds.
+      '[sky.sk] 144 fetched, 0 from cache, 0 failed — 5291 requests ' +
+        '(request 49, detail 5242: 3242 × 404 and 3 × timeout) in 11m37s, 585s waiting',
+    ],
+    [
+      {
+        type: 'site:done',
+        site: 'one.tv',
+        requests: 3,
+        ms: 3000,
+        requestMs: 2000,
+        requestsBy: { listings: { requests: 3, requestMs: 2000, failed: { 500: 1 } } },
+        fetched: 2,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 1,
+        sitesFailed: 0,
+      },
+      // Of one kind, what failed and nothing more: the total says how many.
+      '[one.tv] 2 fetched, 0 from cache, 1 failed — 3 requests (1 × 500) in 3000ms, 2000ms waiting',
+    ],
+    [
+      // An entry from elsewhere that says nothing failed by leaving it out.
+      {
+        type: 'site:done',
+        site: 'other.tv',
+        requests: 3,
+        ms: 3000,
+        requestMs: 2000,
+        requestsBy: {
+          request: { requests: 1, requestMs: 500 },
+          detail: { requests: 2, requestMs: 1500 },
+        },
+        fetched: 1,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 0,
+        sitesFailed: 0,
+      } as unknown as EpgEventInput,
+      '[other.tv] 1 fetched, 0 from cache, 0 failed — 3 requests (request 1, detail 2) in 3000ms, 2000ms waiting',
+    ],
+    [
+      // As an earlier version wrote one, which a log may replay.
+      {
+        type: 'site:done',
+        site: 'old.tv',
+        requests: 3,
+        ms: 3000,
+        requestMs: 2000,
+        fetched: 3,
+        empty: 0,
+        fromCache: 0,
+        unchanged: 0,
+        failed: 0,
+        sitesFailed: 0,
+      } as unknown as EpgEventInput,
+      '[old.tv] 3 fetched, 0 from cache, 0 failed — 3 requests in 3000ms, 2000ms waiting',
+    ],
+    [
+      {
+        type: 'site:done',
         site: 'b.tv',
         requests: 1,
         ms: 2543,
         requestMs: 2100,
+        requestsBy: {},
         fetched: 0,
         empty: 0,
         fromCache: 0,
@@ -257,6 +345,7 @@ describe('render', () => {
       {
         type: 'grab:done',
         loopMaxMs: 0,
+        requestsBy: {},
         fetched: 1,
         empty: 0,
         fromCache: 0,
@@ -270,6 +359,7 @@ describe('render', () => {
       {
         type: 'grab:done',
         loopMaxMs: 0,
+        requestsBy: {},
         fetched: 1,
         empty: 1,
         fromCache: 0,
@@ -421,6 +511,7 @@ describe('textReporter', () => {
       {
         type: 'grab:done',
         loopMaxMs: 0,
+        requestsBy: {},
         fetched: 0,
         empty: 0,
         fromCache: 0,
@@ -444,6 +535,7 @@ describe('textReporter', () => {
       {
         type: 'grab:done',
         loopMaxMs: 0,
+        requestsBy: {},
         fetched: 0,
         empty: 0,
         fromCache: 0,
@@ -487,6 +579,7 @@ describe('textReporter', () => {
       {
         type: 'grab:done',
         loopMaxMs: 0,
+        requestsBy: {},
         fetched: 0,
         empty: 0,
         fromCache: 0,
@@ -511,6 +604,7 @@ describe('textReporter', () => {
       {
         type: 'grab:done',
         loopMaxMs: 0,
+        requestsBy: {},
         fetched: 0,
         empty: 0,
         fromCache: 0,
@@ -606,6 +700,7 @@ describe('progressReporter', () => {
       {
         type: 'grab:done',
         loopMaxMs: 0,
+        requestsBy: {},
         fetched: 6,
         empty: 0,
         fromCache: 0,
@@ -617,6 +712,32 @@ describe('progressReporter', () => {
 
     expect(out.lines.at(-1)).toBe('Grab done: 6 fetched, 0 from cache, 0 failed');
     expect(out.raw.endsWith('Grab done: 6 fetched, 0 from cache, 0 failed\n')).toBe(true);
+  });
+
+  it('counts a site that could not be read among the sites, though it never started', () => {
+    const out = new Tty();
+    const done = {
+      requests: 0,
+      ms: 0,
+      requestMs: 0,
+      requestsBy: {},
+      fetched: 0,
+      empty: 0,
+      fromCache: 0,
+      unchanged: 0,
+      failed: 0,
+    };
+
+    run(progressReporter({ stream: out }), [
+      // As a run says a site it could not read: failed, and done.
+      { type: 'site:failed', site: 'unread.tv', error: new Error('no request') },
+      { type: 'site:done', site: 'unread.tv', ...done, sitesFailed: 1 },
+      { type: 'site:started', site: 'a.tv', channels: 1, days: 1, entries: 1, requests: 1 },
+      { type: 'site:started', site: 'b.tv', channels: 1, days: 1, entries: 1, requests: 1 },
+    ]);
+
+    // One of three done — not one of the two that started.
+    expect(out.raw.endsWith('1/3 sites · 0/2 channel-days · 1 site answered nothing')).toBe(true);
   });
 
   it('writes nothing when the line would say what it already says', () => {
@@ -640,6 +761,7 @@ describe('progressReporter', () => {
       {
         type: 'grab:done',
         loopMaxMs: 0,
+        requestsBy: {},
         fetched: 6,
         empty: 0,
         fromCache: 0,
@@ -823,6 +945,440 @@ describe('emitterReporter and combineReporters', () => {
     expect(combineReporters(only, undefined)).toBe(only);
     // Nothing to call, and nothing that throws for being called.
     expect(() => combineReporters()(event({ type: 'serve:reloaded' }))).not.toThrow();
+  });
+
+  it('tells every reporter though one throws, and throws what was thrown once all are told', () => {
+    const told: string[] = [];
+    const first = new Error('the first fell over');
+    const second = new Error('the second did too');
+    const throwing =
+      (name: string, error?: Error): Reporter =>
+      () => {
+        told.push(name);
+
+        if (error !== undefined) {
+          throw error;
+        }
+      };
+
+    // One, as it is.
+    expect(() =>
+      combineReporters(throwing('a', first), throwing('b'))(event({ type: 'serve:reloaded' })),
+    ).toThrow(first);
+    expect(told).toEqual(['a', 'b']);
+
+    // Several, together.
+    let thrown: unknown;
+
+    try {
+      combineReporters(
+        throwing('c', first),
+        throwing('d', second),
+      )(event({ type: 'serve:reloaded' }));
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).errors).toEqual([first, second]);
+    expect(told).toEqual(['a', 'b', 'c', 'd']);
+  });
+});
+
+describe('keepingThrows and ReporterError', () => {
+  const at = (type: 'site:done' | 'site:failed' | 'serve:reloaded') =>
+    event(
+      type === 'serve:reloaded'
+        ? { type }
+        : type === 'site:failed'
+          ? { type, site: 'a.tv', error: new Error('no lineup') }
+          : {
+              type,
+              site: 'a.tv',
+              requests: 0,
+              ms: 0,
+              requestMs: 0,
+              requestsBy: {},
+              fetched: 0,
+              empty: 0,
+              fromCache: 0,
+              unchanged: 0,
+              failed: 0,
+              sitesFailed: 0,
+            },
+    );
+
+  it('keeps what a reporter throws, and throws it once done, with how often and at what', () => {
+    const broken = new TypeError('cannot read properties of undefined');
+    const kept = keepingThrows<ReportedOptions>({
+      reporter: () => {
+        throw broken;
+      },
+    });
+
+    // Told everything, throwing nothing yet.
+    expect(() => {
+      kept.options.reporter!(at('site:done'));
+      kept.options.reporter!(at('site:done'));
+      kept.options.reporter!(at('site:failed'));
+    }).not.toThrow();
+
+    let thrown: unknown;
+
+    try {
+      kept.rethrow();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(ReporterError);
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect(thrown).toMatchObject({
+      name: 'ReporterError',
+      // The same one at every event, kept once.
+      errors: [broken],
+      thrown: [{ error: broken, times: 3, at: { 'site:done': 2, 'site:failed': 1 } }],
+      untracked: 0,
+      message:
+        'The reporter threw 3 times: TypeError: cannot read properties of undefined ' +
+        '(2 × at site:done, 1 × at site:failed)',
+    });
+  });
+
+  it('keeps each kind once, ten at most, and counts the rest', () => {
+    let n = 0;
+    const kept = keepingThrows<ReportedOptions>({
+      reporter: () => {
+        // A different message every time: a reporter that puts what it was
+        // told into what it throws.
+        throw new Error(`no room for event ${n++}`);
+      },
+    });
+
+    for (let i = 0; i < 25; i++) {
+      kept.options.reporter!(at('serve:reloaded'));
+    }
+
+    let thrown: ReporterError | undefined;
+
+    try {
+      kept.rethrow();
+    } catch (error) {
+      thrown = error as ReporterError;
+    }
+
+    expect(thrown?.errors).toHaveLength(10);
+    expect(thrown?.thrown.map((kind) => kind.times)).toEqual(Array(10).fill(1));
+    expect(thrown?.untracked).toBe(15);
+    expect(thrown?.message).toMatch(/^The reporter threw 25 times: /);
+    expect(thrown?.message).toMatch(/; and 15 more of other kinds$/);
+  });
+
+  it('throws nothing for a reporter that threw nothing, nor for no reporter', () => {
+    const kept = keepingThrows<ReportedOptions>({ reporter: () => {} });
+
+    kept.options.reporter!(at('serve:reloaded'));
+
+    expect(() => kept.rethrow()).not.toThrow();
+    expect(() => keepingThrows<ReportedOptions>({}).rethrow()).not.toThrow();
+    expect(keepingThrows<ReportedOptions>({}).options.reporter).toBeUndefined();
+  });
+
+  it('throws what it kept once what reported through it is settled, and says nothing after', async () => {
+    const broken = new Error('the reporter fell over');
+    const told: string[] = [];
+    const failing = keepingThrows<ReportedOptions>({
+      reporter: (given) => {
+        told.push(given.type);
+
+        throw broken;
+      },
+    });
+
+    failing.options.reporter!(at('site:done'));
+
+    // Resolved: what was kept, alone.
+    await expect(failing.settle(Promise.resolve('done'))).rejects.toBeInstanceOf(ReporterError);
+
+    // And nothing told after: the run is done.
+    failing.options.reporter!(at('site:failed'));
+    expect(told).toEqual(['site:done']);
+
+    // Rejected, with something kept: both, neither lost.
+    const both = keepingThrows<ReportedOptions>({
+      reporter: () => {
+        throw broken;
+      },
+    });
+    const ownError = new Error('the store fell over');
+
+    both.options.reporter!(at('site:done'));
+
+    const thrown = await both.settle(Promise.reject(ownError)).catch((error: unknown) => error);
+
+    expect(thrown).toBeInstanceOf(RunFailedError);
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect(thrown).toMatchObject({
+      name: 'RunFailedError',
+      message: 'the store fell over — and the reporter threw as well',
+      error: ownError,
+      reporter: expect.any(ReporterError),
+      errors: [ownError, expect.any(ReporterError)],
+    });
+
+    // Rejected, with nothing kept — or with what was kept, thrown already: as it is.
+    const quiet = keepingThrows<ReportedOptions>({ reporter: () => {} });
+
+    await expect(quiet.settle(Promise.reject(ownError))).rejects.toBe(ownError);
+    await expect(quiet.settle(Promise.resolve(7))).resolves.toBe(7);
+  });
+
+  it('throws what was kept as it stood then, though more is counted after', () => {
+    const kept = keepingThrows<ReportedOptions>({
+      reporter: () => {
+        throw new Error('the reporter fell over');
+      },
+    });
+
+    kept.options.reporter!(at('site:done'));
+
+    let thrown: ReporterError | undefined;
+
+    try {
+      kept.rethrow();
+    } catch (error) {
+      thrown = error as ReporterError;
+    }
+
+    kept.options.reporter!(at('site:done'));
+    kept.options.reporter!(at('site:failed'));
+
+    // As its message says.
+    expect(thrown?.thrown).toEqual([
+      { error: expect.any(Error), times: 1, at: { 'site:done': 1 } },
+    ]);
+    expect(thrown?.message).toMatch(/^The reporter threw 1 time:/);
+  });
+
+  it('keeps what a reporter written async rejects with, as a throw', async () => {
+    const rejected = new Error('the sink fell over');
+    const kept = keepingThrows<ReportedOptions>({
+      // What a reporter is not, though its type lets it be written so.
+      reporter: async () => {
+        throw rejected;
+      },
+    });
+
+    kept.options.reporter!(at('site:done'));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const thrown = await kept.settle(Promise.resolve()).catch((error: unknown) => error);
+
+    expect((thrown as ReporterError).thrown).toEqual([
+      { error: rejected, times: 1, at: { 'site:done': 1 } },
+    ]);
+  });
+
+  it('keeps what reporters joined together reject with, as one of theirs', async () => {
+    const rejected = new Error('the sink fell over');
+    const kept = keepingThrows<ReportedOptions>({
+      reporter: combineReporters(
+        () => {},
+        async () => {
+          throw rejected;
+        },
+      ),
+    });
+
+    kept.options.reporter!(at('site:failed'));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await expect(kept.settle(Promise.resolve())).rejects.toMatchObject({
+      thrown: [{ error: rejected, times: 1, at: { 'site:failed': 1 } }],
+    });
+  });
+
+  it('throws what a joined reporter threw at once, though another is written async', async () => {
+    const unhandled: unknown[] = [];
+    const listen = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+
+    process.on('unhandledRejection', listen);
+
+    try {
+      const report = combineReporters(
+        async () => {
+          throw new Error('db down');
+        },
+        () => {
+          throw new Error('bad line');
+        },
+        async () => {},
+      );
+
+      // Thrown now, as a reporter's throw is — not held back behind the
+      // others, past where anything is still listening for it.
+      expect(() => report(at('site:done'))).toThrow('bad line');
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // And what the one written async rejected with, let go of: handled.
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', listen);
+    }
+  });
+
+  it('hands back the promise of the one reporter written async as it is', async () => {
+    const promised = Promise.resolve();
+    const report = combineReporters(
+      () => promised as never,
+      () => {},
+    );
+
+    expect((report as (event: unknown) => unknown)(at('site:done'))).toBe(promised);
+  });
+
+  it('hands back what reporters written async reject with, all of it, where none threw', async () => {
+    const report = combineReporters(
+      async () => {
+        throw new Error('db down');
+      },
+      async () => {
+        throw new Error('queue full');
+      },
+      () => {},
+    );
+
+    const returned = (report as (event: unknown) => unknown)(at('site:done')) as Promise<unknown>;
+    const thrown = await returned.catch((error: unknown) => error);
+
+    expect((thrown as AggregateError).errors.map(errorMessage)).toEqual(['db down', 'queue full']);
+  });
+
+  it('keeps a reporter kept already as it is, for what kept it to throw', () => {
+    const outer = keepingThrows<ReportedOptions>({
+      reporter: () => {
+        throw new Error('the reporter fell over');
+      },
+    });
+    const inner = keepingThrows(outer.options);
+
+    expect(inner.options).toBe(outer.options);
+
+    inner.options.reporter!(at('site:done'));
+
+    // Nothing to throw for the inner; the outer kept it, once.
+    expect(() => inner.rethrow()).not.toThrow();
+    expect(() => outer.rethrow()).toThrow(ReporterError);
+  });
+
+  it('throws, as it settles, what was kept since it was thrown on the way out', async () => {
+    const kept = keepingThrows<ReportedOptions>({
+      reporter: () => {
+        throw new Error('the reporter fell over');
+      },
+    });
+
+    kept.options.reporter!(at('site:done'));
+
+    let early: unknown;
+
+    try {
+      kept.rethrow();
+    } catch (error) {
+      early = error;
+    }
+
+    // Said, and thrown at, after — before what it was thrown out of let go.
+    kept.options.reporter!(at('site:failed'));
+
+    const thrown = await kept.settle(Promise.reject(early)).catch((error: unknown) => error);
+
+    expect((thrown as ReporterError).thrown).toEqual([
+      { error: expect.any(Error), times: 2, at: { 'site:done': 1, 'site:failed': 1 } },
+    ]);
+  });
+
+  it('keeps reporters joined together, failing at every event, as one kind', () => {
+    const kept = keepingThrows<ReportedOptions>({
+      reporter: combineReporters(
+        () => {
+          throw new Error('one fell over');
+        },
+        () => {
+          throw new Error('two fell over');
+        },
+      ),
+    });
+
+    kept.options.reporter!(at('site:done'));
+    kept.options.reporter!(at('site:failed'));
+    kept.options.reporter!(at('serve:reloaded'));
+
+    let thrown: ReporterError | undefined;
+
+    try {
+      kept.rethrow();
+    } catch (error) {
+      thrown = error as ReporterError;
+    }
+
+    expect(thrown?.thrown).toEqual([
+      {
+        error: expect.any(AggregateError),
+        times: 3,
+        at: { 'site:done': 1, 'site:failed': 1, 'serve:reloaded': 1 },
+      },
+    ]);
+  });
+
+  it('keeps reporters joined together failing another way as another kind', () => {
+    let message = 'disk full';
+    const kept = keepingThrows<ReportedOptions>({
+      reporter: combineReporters(
+        () => {
+          throw new Error(message);
+        },
+        () => {
+          throw new Error('socket closed');
+        },
+      ),
+    });
+
+    kept.options.reporter!(at('site:done'));
+    kept.options.reporter!(at('site:done'));
+    message = 'quota exceeded';
+    kept.options.reporter!(at('site:failed'));
+
+    let thrown: ReporterError | undefined;
+
+    try {
+      kept.rethrow();
+    } catch (error) {
+      thrown = error as ReporterError;
+    }
+
+    expect(thrown?.thrown.map((kind) => [(kind.error as Error).message, kind.times])).toEqual([
+      ['2 reporters threw: Error: disk full; Error: socket closed', 2],
+      ['2 reporters threw: Error: quota exceeded; Error: socket closed', 1],
+    ]);
+  });
+
+  it('keeps what cannot even be read, as a kind of its own', () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+
+    revoke();
+
+    const kept = keepingThrows<ReportedOptions>({
+      reporter: () => {
+        throw proxy;
+      },
+    });
+
+    kept.options.reporter!(at('serve:reloaded'));
+
+    expect(() => kept.rethrow()).toThrow(ReporterError);
   });
 });
 

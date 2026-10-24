@@ -36,11 +36,43 @@ export class GrabberError extends Error {
  * place a stray `throw 'nope'` becomes a crash.
  */
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  try {
+    return error instanceof Error ? error.message : String(error);
+  } catch {
+    // Something that cannot even be read — a revoked proxy, an object whose
+    // `toString` throws — said as such, rather than thrown from where it was
+    // being said.
+    return '[something that cannot be read]';
+  }
 }
 
 /** How deep a `cause` chain is followed before it is called a cycle. */
 export const MAX_CAUSE_DEPTH = 8;
+
+/**
+ * `error`, then what caused it, and what caused that — down `cause` wherever
+ * there is one, error or not, since a site may hand on anything, and no
+ * further than {@link MAX_CAUSE_DEPTH}, where a cycle would go for ever.
+ */
+export function* causes(error: unknown): Generator<unknown> {
+  let current = error;
+
+  for (let depth = 0; depth <= MAX_CAUSE_DEPTH && current !== undefined; depth++) {
+    yield current;
+
+    if (typeof current !== 'object' || current === null) {
+      return;
+    }
+
+    try {
+      current = (current as { cause?: unknown }).cause;
+    } catch {
+      // A `cause` that cannot be read — a revoked proxy, a getter that throws
+      // — is where the chain ends, rather than a throw from reading it.
+      return;
+    }
+  }
+}
 
 /**
  * Statuses that say "not now" rather than "no": asked too often or too early,
@@ -53,7 +85,6 @@ const NOT_NOW = new Set([408, 425, 429]);
 const NETWORK_CODES = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
-  'ETIMEDOUT',
   'ENOTFOUND',
   'EAI_AGAIN',
   'EHOSTUNREACH',
@@ -62,21 +93,45 @@ const NETWORK_CODES = new Set([
 ]);
 
 /**
- * Whether an error means the source did not answer — the network failed, the
- * request timed out, or the source said "not now" (408, 425, 429, a 5xx) —
- * rather than that it answered and what it said was wrong.
+ * What a connection that took too long is called, by Node and by undici —
+ * whose `fetch` says `fetch failed` and leaves the timeout to its `cause`.
+ */
+const TIMEOUT_CODES = new Set([
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+]);
+
+/**
+ * What a failed request came to: the status the source answered with,
+ * `'timeout'` or `'network'` where it did not answer, and `'error'` for
+ * anything else — an answer `.json()` could not read, a site's own throw. What
+ * `requestsBy` counts a failure under, and what {@link unanswered} decides by.
  *
  * Read down the `cause` chain, so a site that wraps a failed request in an
  * error of its own is still read for what happened underneath. And by name and
  * shape rather than `instanceof`: a site may bring a ky of its own, whose error
  * classes are not the ones this package imports.
  */
-export function unanswered(error: unknown): boolean {
-  let current = error;
+export function failureOf(error: unknown): `${number}` | 'timeout' | 'network' | 'error' {
+  try {
+    return readFailure(error);
+  } catch {
+    // Whatever was thrown cannot be read — a revoked proxy, a getter that
+    // throws — so all that is known is that something was.
+    return 'error';
+  }
+}
 
-  for (let depth = 0; depth <= MAX_CAUSE_DEPTH; depth++) {
+/** {@link failureOf}, reading what may throw for being read. */
+function readFailure(error: unknown): `${number}` | 'timeout' | 'network' | 'error' {
+  /** Said where nothing answered, unless what is beneath says it timed out. */
+  let unanswering: 'network' | undefined;
+
+  for (const current of causes(error)) {
     if (typeof current !== 'object' || current === null) {
-      return false;
+      break;
     }
 
     const candidate = current as {
@@ -84,30 +139,70 @@ export function unanswered(error: unknown): boolean {
       message?: unknown;
       code?: unknown;
       response?: { status?: unknown };
-      cause?: unknown;
+      statusCode?: unknown;
     };
+    // ky's, on the response it answered with — or undici's own, whose errors
+    // for a status carry it beside their code. One that is not a success, as
+    // ky throws for: a site's own error about a `200` it could not use is the
+    // site's.
+    const answered =
+      typeof candidate.response?.status === 'number'
+        ? candidate.response.status
+        : typeof candidate.statusCode === 'number'
+          ? candidate.statusCode
+          : undefined;
+    const status = answered !== undefined && answered >= 300 ? answered : undefined;
 
-    if (candidate.name === 'NetworkError' || candidate.name === 'TimeoutError') {
-      return true;
+    if (candidate.name === 'TimeoutError') {
+      return 'timeout';
     }
 
-    // An answer, whatever else is below it: its status says which kind.
-    if (typeof candidate.response?.status === 'number') {
-      return NOT_NOW.has(candidate.response.status) || candidate.response.status >= 500;
-    }
-
+    // Nothing answered — and how, its cause may say: undici's timeouts arrive
+    // as a `fetch failed`, and ky wraps that in a `NetworkError`. Read before
+    // a status on the same error, as it is before one beneath it.
     if (
-      (candidate.name === 'TypeError' && candidate.message === 'fetch failed') ||
-      (typeof candidate.code === 'string' &&
-        (NETWORK_CODES.has(candidate.code) || candidate.code.startsWith('UND_ERR_')))
+      candidate.name === 'NetworkError' ||
+      (candidate.name === 'TypeError' && candidate.message === 'fetch failed')
     ) {
-      return true;
+      unanswering = 'network';
     }
 
-    current = candidate.cause;
+    // An answer, whatever else is below it — unless what is above it, or the
+    // error itself, says nothing answered, which a status cannot undo.
+    if (unanswering === undefined && status !== undefined) {
+      return `${status}`;
+    }
+
+    if (typeof candidate.code === 'string') {
+      if (TIMEOUT_CODES.has(candidate.code)) {
+        return 'timeout';
+      }
+
+      if (NETWORK_CODES.has(candidate.code) || candidate.code.startsWith('UND_ERR_')) {
+        return 'network';
+      }
+    }
   }
 
-  return false;
+  return unanswering ?? 'error';
+}
+
+/**
+ * Whether an error means the source did not answer — the network failed, the
+ * request timed out, or the source said "not now" (408, 425, 429, a 5xx) —
+ * rather than that it answered and what it said was wrong. Read as
+ * {@link failureOf} reads it.
+ */
+export function unanswered(error: unknown): boolean {
+  const failure = failureOf(error);
+
+  if (failure === 'timeout' || failure === 'network') {
+    return true;
+  }
+
+  const status = Number(failure);
+
+  return NOT_NOW.has(status) || status >= 500;
 }
 
 /**
@@ -120,11 +215,16 @@ export function unanswered(error: unknown): boolean {
  * none of the evidence. Kept out of the default line because a chain per
  * failure is noise until you are looking for one.
  */
-export function errorChain(error: unknown, depth = 0): string {
-  const message = errorMessage(error);
-  const cause = error instanceof Error ? error.cause : undefined;
-
-  return cause === undefined || depth >= MAX_CAUSE_DEPTH
-    ? message
-    : `${message}: ${errorChain(cause, depth + 1)}`;
+export function errorChain(
+  error: unknown,
+  /** How far down a chain `error` is already, of the {@link MAX_CAUSE_DEPTH} followed. */
+  depth = 0,
+): string {
+  // Something, however little: `undefined` thrown is said as itself.
+  return error === undefined
+    ? errorMessage(error)
+    : [...causes(error)]
+        .slice(0, Math.max(1, MAX_CAUSE_DEPTH - depth + 1))
+        .map(errorMessage)
+        .join(': ');
 }

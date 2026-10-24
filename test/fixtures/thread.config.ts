@@ -81,6 +81,54 @@ const sites: SiteConfig<unknown>[] = [
     parseDay: () => [],
   },
   {
+    // The same, with nothing to say why: what it throws is no error at all.
+    site: 'crashing-quietly.example',
+    channels: one,
+    request: () => {
+      setTimeout(() => {
+        throw undefined;
+      }, 0);
+
+      return new Promise(() => {});
+    },
+    parseDay: () => [],
+  },
+  {
+    // A list that fails with what cannot be read: a cause whose getter throws.
+    site: 'unreadable.example',
+    channels: () => {
+      throw Object.defineProperty(new Error('no lineup'), 'cause', {
+        get() {
+          throw new Error('no reading this');
+        },
+      });
+    },
+    request: async () => ({}),
+    parseDay: () => [],
+  },
+  {
+    // A failure whose cause no thread can be handed: a function in it.
+    site: 'odd-cause.example',
+    channels: one,
+    async request() {
+      throw new Error('the source said no', { cause: { status: 'busy', retry() {} } });
+    },
+    parseDay: () => [],
+  },
+  {
+    // The same with an object of its own, which says why only in its fields.
+    site: 'crashing-plainly.example',
+    channels: one,
+    request: () => {
+      setTimeout(() => {
+        throw { reason: 'out of cheese' };
+      }, 0);
+
+      return new Promise(() => {});
+    },
+    parseDay: () => [],
+  },
+  {
     // A note whose fields no thread can be handed, nor JSON written: a cycle,
     // and a function inside it.
     site: 'circular.example',

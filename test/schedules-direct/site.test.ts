@@ -127,6 +127,41 @@ describe('defineSchedulesDirectSite', () => {
     expect(xml).toContain('<category lang="en">Drama</category>');
   });
 
+  it('says what each of its calls was for', async () => {
+    const source = await service();
+    const report = collect();
+
+    await grab([site(source)], { cache: store(), now: NOW, reporter: report.reporter });
+
+    const done = report.events.find((event) => event.type === 'site:done') as Extract<
+      (typeof report.events)[number],
+      { type: 'site:done' }
+    >;
+
+    // The kind of call, not its path. The token is earned inside another
+    // call's turn, and is no request of the queue's; the lineup's calls are
+    // made inside the channel list's, as one request of the run's.
+    const { requestsBy } = done;
+
+    expect(Object.keys(requestsBy)).toEqual(['channels', 'md5', 'schedules', 'programs']);
+    expect(requestsBy.channels).toEqual({ requests: 1, requestMs: expect.any(Number), failed: {} });
+
+    for (const [label, path] of [
+      ['md5', 'schedules/md5'],
+      ['schedules', 'schedules'],
+      ['programs', 'programs'],
+    ] as const) {
+      expect(requestsBy[label]).toEqual({
+        requests: source.countOf(path),
+        requestMs: expect.any(Number),
+        failed: {},
+      });
+    }
+    expect(Object.values(requestsBy).reduce((total, { requests }) => total + requests, 0)).toBe(
+      done.requests,
+    );
+  });
+
   it('asks for md5s once for the whole site, then only for what moved', async () => {
     const source = await service();
     const cache = store();

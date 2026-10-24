@@ -312,6 +312,36 @@ describe('the Schedules Direct client', () => {
     expect(source.countOf('token')).toBe(1);
   });
 
+  it('names each call by what it is for, not by its path', async () => {
+    const source = await sdServer({ status: { account: { messages: [] }, lineups: [] } });
+    const named: Array<string | undefined> = [];
+    const sd = client(source, {
+      paced: async (task, options) => {
+        named.push(options?.label);
+
+        return task({});
+      },
+    });
+    const calls: Array<[string, () => Promise<unknown>]> = [
+      ['status', () => sd.status()],
+      ['headends', () => sd.headends({ country: 'GBR', postalCode: 'SW1A' })],
+      ['lineups', () => sd.lineups()],
+      ['lineups', () => sd.lineup('GBR-1000014-DEFAULT')],
+      ['lineups', () => sd.addLineup('GBR-1000014-DEFAULT')],
+      ['lineups', () => sd.removeLineup('GBR-1000014-DEFAULT')],
+      ['md5', () => sd.schedulesMd5([{ stationID: '101' }])],
+      ['schedules', () => sd.schedules([{ stationID: '101', date: ['2026-09-12'] }])],
+      ['programs', () => sd.programs(['EP0001'])],
+      ['metadata', () => sd.artwork(['EP0001'])],
+    ];
+
+    for (const [, call] of calls) {
+      await call().catch(() => undefined);
+    }
+
+    expect(named).toEqual(calls.map(([label]) => label));
+  });
+
   it('says what the service refused a whole request with, where success is a list', async () => {
     const source = await sdServer();
 
@@ -319,8 +349,18 @@ describe('the Schedules Direct client', () => {
     // whose success is an array — at HTTP 200, so only the shape says so.
     source.answer({ schedules: { code: 7020, message: 'no such station' } as never });
 
-    await expect(client(source).schedules([{ stationID: 'nope' }])).rejects.toThrow(
-      /no such station/,
-    );
+    // Thrown inside the call's own turn, where the queue counts it as failed.
+    const failedInTurn: unknown[] = [];
+    const sd = client(source, {
+      paced: (task) =>
+        task({}).catch((error: unknown) => {
+          failedInTurn.push(error);
+
+          throw error;
+        }),
+    });
+
+    await expect(sd.schedules([{ stationID: 'nope' }])).rejects.toThrow(/no such station/);
+    expect(failedInTurn).toHaveLength(1);
   });
 });

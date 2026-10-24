@@ -77,11 +77,16 @@ import type { WireAccountLineup, WireLineupChange } from './wire.js';
  */
 const MAPPING_VERSION = 1;
 
+/**
+ * A site of Schedules Direct's — without `requestLabel`, since every call it
+ * makes names itself (`md5`, `schedules`, `programs`), and so a label for
+ * those that do not would name none.
+ */
 export interface SchedulesDirectSiteOptions
   extends
     Omit<
       StreamSiteConfig<SchedulesDirectStation>,
-      'stream' | 'channels' | 'conditionalGet' | 'dayZone'
+      'stream' | 'channels' | 'conditionalGet' | 'dayZone' | 'requestLabel'
     >,
     SchedulesDirectMapOptions {
   username: string;

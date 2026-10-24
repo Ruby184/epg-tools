@@ -163,6 +163,27 @@ describe('defineXmltvSite', () => {
     expect(await entries(cache, 'b', TOMORROW)).toHaveLength(1);
   });
 
+  it('counts its document fetch under the requestLabel it is given', async () => {
+    const source = await serveGzip();
+    const report = collect();
+
+    await grab(
+      [defineXmltvSite({ site: 'published.example', url: source.url, requestLabel: 'document' })],
+      { cache: store(), now: NOW, days: 2, reporter: report.reporter },
+    );
+
+    const done = report.events.find((event) => event.type === 'site:done') as {
+      requestsBy: Record<string, { requests: number }>;
+    };
+
+    // The channel list out of the head of the document, then the document.
+    expect(done.requestsBy).toMatchObject({
+      channels: { requests: 1 },
+      document: { requests: 1 },
+    });
+    expect(Object.keys(done.requestsBy)).toEqual(['channels', 'document']);
+  });
+
   // A pass takes no queue slot of its own, so its fetch has to ask for one — or
   // the site's `rateLimit` would apply to the channel list and to nothing else.
   it('sends its document fetch through the site`s queue', async () => {

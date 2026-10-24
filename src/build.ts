@@ -9,7 +9,7 @@ import type { CacheDriver, CacheManagerOptions, CacheStore } from './cache/main.
 import { resolveSessions } from './grabber/channels.js';
 import { grabWith } from './grabber/grab.js';
 import { covered, coverageOf } from './grabber/main.js';
-import { earliestDay } from './grabber/site.js';
+import { earliestDay, siteName } from './grabber/site.js';
 import { openSession, type SiteSession } from './grabber/session.js';
 import { threadCount } from './grabber/thread.js';
 import type { AnySiteConfig, GrabberChannel, GrabSummary } from './grabber/types.js';
@@ -20,7 +20,7 @@ import { outputOptions } from './xmltv/serialize.js';
 import { addDays, dayIn, localTimeZone, resolveTimeZone } from './core/days.js';
 import { GrabberError } from './core/error.js';
 import type { Emit, Reporter, Says } from './core/events.js';
-import { emitter, reportingTo } from './core/events.js';
+import { emitter, keepingThrows, reportingTo } from './core/events.js';
 import {
   resolveConfigSource,
   type ConfigSource,
@@ -269,13 +269,52 @@ async function settled(
   now: Date,
   emit: Emit,
 ): Promise<Settled> {
-  const failures: Settled['failures'] = [];
   const sessions = new Map<string, SiteSession>();
+
+  try {
+    return await settling(config, cache, options, now, emit, sessions);
+  } catch (error) {
+    // Handed to no grab, which is what lets go of them otherwise: a hold's
+    // timer is not unref'd, and each listens to the run's signal.
+    for (const session of sessions.values()) {
+      session.pacing.dispose();
+    }
+
+    throw error;
+  }
+}
+
+/** {@link settled}, opening the sessions its lists are fetched through into `sessions`. */
+async function settling(
+  config: EpgConfig,
+  cache: CacheStore,
+  options: RunOptions,
+  now: Date,
+  emit: Emit,
+  sessions: Map<string, SiteSession>,
+): Promise<Settled> {
+  const failures: Settled['failures'] = [];
   const timeZone = zoneOf(config, options);
+  // A site its config named nothing is refused for it here, before anything
+  // is asked of its source: what it fetched would be kept under no name, for
+  // no grab or merge to read. Said by the grab, as a site whose list failed.
+  const named = config.sites.filter((site) => {
+    try {
+      siteName(site);
+
+      return true;
+    } catch (error) {
+      failures.push({ site: site.site, error });
+
+      return false;
+    }
+  });
 
   // For a site whose list is fetched, and only those: the fetch goes through the
-  // queue its requests will, and the grab carries on with the same one.
-  for (const site of config.sites) {
+  // queue its requests will, and the grab carries on with the same one. A site
+  // the grab will refuse is settled too: the merge writes what it has cached,
+  // which takes its list.
+  for (const site of named) {
     if (typeof site.channels !== 'function') {
       continue;
     }
@@ -292,7 +331,7 @@ async function settled(
   }
 
   const sites = await resolveSessions(
-    config.sites,
+    named,
     {
       ...(config.siteConcurrency !== undefined ? { concurrency: config.siteConcurrency } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
@@ -485,7 +524,10 @@ async function grabInto(
 /** Grab all sites into the cache (only stale/missing channel-days are fetched). */
 export async function runGrab(source: ConfigSource, given: RunOptions = {}): Promise<GrabSummary> {
   const config = await resolveConfigSource(source);
-  const options = reportingTo(given, config.events);
+  // From the first thing said — the cache's own warnings included — what a
+  // reporter throws is kept, and thrown once the run is done: see `grab`.
+  const kept = keepingThrows(reportingTo(given, config.events));
+  const options = kept.options;
 
   // Before a channel list is fetched: a run that cannot start its threads, or
   // was given a zone that is not one, says so first, rather than after every
@@ -494,42 +536,49 @@ export async function runGrab(source: ConfigSource, given: RunOptions = {}): Pro
   zoneOf(config, options);
   const now = options.now ?? new Date();
 
-  return withCache(config, options, async (cache) => {
-    // Settled here only when there is something to narrow — a selection, or a
-    // `cover` that takes channels away. Every site resolves its own list anyway,
-    // so this is the same work done early enough to act on, and a
-    // `cacheChannels` site answers from the cache both times.
-    if (config.channels === undefined && !narrowed(config)) {
+  return kept.settle(
+    withCache(config, options, async (cache) => {
+      // Settled here only when there is something to narrow — a selection, or
+      // a `cover` that takes channels away. Every site resolves its own list
+      // anyway, so this is the same work done early enough to act on, and a
+      // `cacheChannels` site answers from the cache both times.
+      if (config.channels === undefined && !narrowed(config)) {
+        return grabInto(
+          config,
+          { sites: config.sites, failures: [], sessions: new Map() },
+          cache,
+          options,
+          now,
+        );
+      }
+
       return grabInto(
         config,
-        { sites: config.sites, failures: [], sessions: new Map() },
+        await settled(config, cache, options, now, emitter(options)),
         cache,
         options,
         now,
       );
-    }
-
-    return grabInto(
-      config,
-      await settled(config, cache, options, now, emitter(options)),
-      cache,
-      options,
-      now,
-    );
-  });
+    }),
+  );
 }
 
 /** Generate the merged XMLTV guide from the cache, without grabbing. */
 export async function runMerge(source: ConfigSource, given: RunOptions = {}): Promise<void> {
   const config = await resolveConfigSource(source);
-  const options = reportingTo(given, config.events);
+  // As `runGrab` keeps them: what a reporter throws at the merge is thrown once
+  // the guide is written, rather than leaving it half made.
+  const kept = keepingThrows(reportingTo(given, config.events));
+  const options = kept.options;
 
-  await withCache(config, options, async (cache) =>
-    writeGuide({
-      ...guideOptions(config, options, options.now ?? new Date(), cache),
-      output: config.output,
-      ...(config.compress !== undefined ? { compress: config.compress } : {}),
-    }),
+  await kept.settle(
+    withCache(config, options, async (cache) =>
+      writeGuide({
+        ...guideOptions(config, options, options.now ?? new Date(), cache),
+        output: config.output,
+        ...(config.compress !== undefined ? { compress: config.compress } : {}),
+      }),
+    ),
   );
 }
 
@@ -542,16 +591,30 @@ export async function* guideStream(
   given: RunOptions = {},
 ): AsyncGenerator<string> {
   const config = await resolveConfigSource(source);
-  const options = reportingTo(given, config.events);
+  // As `runMerge` keeps them: what a reporter throws is thrown once the whole
+  // guide has been handed over.
+  const kept = keepingThrows(reportingTo(given, config.events));
+  const options = kept.options;
   const { cache, release } = await cacheFor(config, options);
+  let failed: { error: unknown } | undefined;
 
   try {
     yield* generateGuide(guideOptions(config, options, options.now ?? new Date(), cache));
+  } catch (error) {
+    failed = { error };
   } finally {
     // Whether the caller read the guide to its end or walked away half way
     // through it: a generator's `finally` runs either way, and a driver holding
-    // a handle open is waiting for exactly this.
-    await release();
+    // a handle open is waiting for exactly this — as is what a reporter threw,
+    // which is thrown to whoever stopped reading as well, whatever letting go
+    // of the cache came to.
+    try {
+      await release();
+    } catch (error) {
+      failed ??= { error };
+    }
+
+    await kept.settle(failed === undefined ? Promise.resolve() : Promise.reject(failed.error));
   }
 }
 
@@ -567,7 +630,10 @@ export async function build(source: ConfigSource, given: RunOptions = {}): Promi
   // Resolved once and passed on: a factory may read the environment or fetch,
   // and the grab and the merge that follows it must agree on one answer.
   const config = await resolveConfigSource(source);
-  const options = reportingTo(given, config.events);
+  // As `runGrab` keeps them, for the merge as well: what a reporter throws at
+  // it is thrown once the guide is written.
+  const kept = keepingThrows(reportingTo(given, config.events));
+  const options = kept.options;
   const now = options.now ?? new Date();
 
   // As `runGrab` does, and for the same reason: before the lists below.
@@ -581,25 +647,31 @@ export async function build(source: ConfigSource, given: RunOptions = {}): Promi
   // Opened before the channel lists are resolved, rather than after, because
   // that is where a site's cached list lives — a `cacheChannels` site then makes
   // no request for a list this cache already has.
-  return withCache(config, options, async (cache) => {
-    // Settled once for both halves, which have to agree about what exists.
-    const settling = await settled(config, cache, options, now, emitter(options));
-    // Without the selection, which the lists already went through, and without
-    // `events`, which `options` already reports to: a half handed either would
-    // act on it a second time — the same warning about the same missing
-    // channels, every event twice.
-    const { channels: _applied, events: _reported, ...rest } = config;
-    const resolved: EpgConfig = {
-      ...rest,
-      ...(settling.derived ? { derived: settling.derived } : {}),
-      sites: settling.sites,
-    };
-    const summary = await grabInto(resolved, settling, cache, options, now);
+  return kept.settle(
+    withCache(config, options, async (cache) => {
+      // Settled once for both halves, which have to agree about what exists.
+      const settling = await settled(config, cache, options, now, emitter(options));
+      // Without the selection, which the lists already went through, and
+      // without `events`, which `options` already reports to: a half handed
+      // either would act on it a second time — the same warning about the same
+      // missing channels, every event twice.
+      const { channels: _applied, events: _reported, ...rest } = config;
+      const resolved: EpgConfig = {
+        ...rest,
+        ...(settling.derived ? { derived: settling.derived } : {}),
+        sites: settling.sites,
+      };
+      const summary = await grabInto(resolved, settling, cache, options, now);
 
-    if (options.signal?.aborted !== true) {
-      await runMerge(resolved, { ...options, now, cache });
-    }
+      // Before the merge, should a reporter have thrown at the grab: a guide
+      // is not written by a run that is going to reject.
+      kept.rethrow();
 
-    return summary;
-  });
+      if (options.signal?.aborted !== true) {
+        await runMerge(resolved, { ...options, now, cache });
+      }
+
+      return summary;
+    }),
+  );
 }

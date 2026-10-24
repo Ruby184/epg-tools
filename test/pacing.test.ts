@@ -1,7 +1,8 @@
+import { getEventListeners } from 'node:events';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { KyInstance } from 'ky';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { retryAfterMs, sitePacing } from '../src/grabber/pacing.js';
 import type { AnySiteConfig } from '../src/grabber/types.js';
 import { emitter } from '../src/core/events.js';
@@ -69,6 +70,77 @@ async function hit(http: KyInstance, url: string): Promise<Response> {
 
   return response;
 }
+
+describe('sitePacing, let go of', () => {
+  it('stops listening to the run’s signal, which may outlive the site', () => {
+    const run = new AbortController();
+    const pacing = sitePacing(
+      { site: 'a.tv', channels: [], request: async () => ({}), parseDay: () => [] } as never,
+      { signal: run.signal },
+    );
+
+    expect(getEventListeners(run.signal, 'abort')).toHaveLength(1);
+
+    pacing.dispose();
+
+    // What listened kept the site's config with it, its channels among it.
+    expect(getEventListeners(run.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('still ends a hold under way, for what waits behind it, holding the process for it no longer', async () => {
+    const server = await scripted([{ status: 429 }]);
+
+    try {
+      const { http, queue, dispose } = sitePacing(site({ backoff: { fallbackMs: 40, maxMs: 40 } }));
+
+      await hit(http, server.url);
+      expect(queue.isPaused).toBe(true);
+
+      // Let go of mid-hold, with a request a parse did not wait for behind it.
+      dispose();
+
+      const behind = queue.add(async () => 'answered');
+
+      await expect(behind).resolves.toBe('answered');
+      expect(queue.isPaused).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  it('holds the process for nothing a request after it asks to wait for', async () => {
+    const server = await scripted([{ status: 429, headers: { 'retry-after': '600' } }]);
+    // The hold's own timer, known by its length: process-wide counts of timers
+    // take in whatever else is about.
+    const HOLD_MS = 60_000;
+    const set = vi.spyOn(globalThis, 'setTimeout');
+
+    try {
+      const { http, queue, dispose } = sitePacing(
+        site({ backoff: { fallbackMs: HOLD_MS, maxMs: HOLD_MS } }),
+      );
+
+      dispose();
+
+      // A request its parse did not wait for, answered after the site was
+      // done: held, but on a timer that keeps nobody waiting.
+      await hit(http, server.url);
+
+      const holds = set.mock.calls
+        .map((call, index) => ({ ms: call[1], handle: set.mock.results[index]?.value }))
+        .filter((call) => call.ms === HOLD_MS);
+
+      expect(queue.isPaused).toBe(true);
+      expect(holds).toHaveLength(1);
+      expect((holds[0]!.handle as NodeJS.Timeout).hasRef()).toBe(false);
+      clearTimeout(holds[0]!.handle as NodeJS.Timeout);
+      queue.clear();
+    } finally {
+      set.mockRestore();
+      server.close();
+    }
+  });
+});
 
 describe('retryAfterMs', () => {
   it('reads delta-seconds', () => {

@@ -69,8 +69,10 @@ export interface SitePacing {
   /** Its HTTP client, which reports a slow-down to the queue. */
   http: KyInstance;
   /**
-   * Drop a hold that is still pending. A run that has finished must not be kept
-   * alive by a timer counting down a minute for requests that will never come.
+   * Let go of the site: a hold still pending keeps the process alive no longer
+   * — a run that has finished must not be kept alive by a timer counting down
+   * a minute — though it still ends, and lets go of a request a parse did not
+   * wait for; and the run's signal is listened to no more.
    */
   dispose(): void;
 }
@@ -110,6 +112,8 @@ export function sitePacing(
   const ceiling = queue.concurrency;
 
   let timer: NodeJS.Timeout | undefined;
+  /** Whether the site is done with this — see `dispose`. */
+  let disposed = false;
   let holdingUntil = 0;
   let clean = 0;
 
@@ -141,8 +145,15 @@ export function sitePacing(
     queue.pause();
     emit({ type: 'pacing:held', site: config.site, status, ms: Math.round(ms) });
     // Deliberately not unref'd: a run in the middle of a hold has to stay
-    // alive, or the process would exit with the guide half grabbed.
+    // alive, or the process would exit with the guide half grabbed. Save once
+    // the site is let go of: a hold then is a request its parse did not wait
+    // for, which nothing waits on either — and which a cancel, no longer
+    // listened for, would not end.
     timer = setTimeout(release, ms);
+
+    if (disposed) {
+      timer.unref();
+    }
   };
 
   const client = siteHttp(config, options.signal);
@@ -227,19 +238,27 @@ export function sitePacing(
   // hand out tasks that are about to be removed. The hold is dropped and the
   // queue left paused; each task takes itself out of it, and an emptied queue
   // reaches idle whether it is paused or not.
-  options.signal?.addEventListener(
-    'abort',
-    () => {
-      clearTimeout(timer);
-      timer = undefined;
-      holdingUntil = 0;
-    },
-    { once: true },
-  );
+  const cancelled = (): void => {
+    clearTimeout(timer);
+    timer = undefined;
+    holdingUntil = 0;
+  };
+
+  options.signal?.addEventListener('abort', cancelled, { once: true });
 
   return {
     queue,
     http,
-    dispose: () => clearTimeout(timer),
+    // And let go of the run's signal, which may outlive the site by a while:
+    // what listens to it keeps all of this — the site's config, its channels
+    // among it — for as long as it does.
+    dispose: () => {
+      disposed = true;
+      // A hold under way still ends, and lets go of what it holds back — a
+      // request a parse did not wait for, which would otherwise wait for ever —
+      // but keeps nothing alive for it.
+      timer?.unref();
+      options.signal?.removeEventListener('abort', cancelled);
+    },
   };
 }
