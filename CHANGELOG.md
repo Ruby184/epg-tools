@@ -11,6 +11,35 @@ Conventional Commit messages on `main` — see
 hand-written, because that release was published before release-please took
 over; it describes what `0.1.0` actually shipped, not the surface since.
 
+## [0.10.0](https://github.com/Ruby184/epg-tools/compare/v0.9.0...v0.10.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* `ResolvedMatch.matches(a, b)` is replaced by `apart(a, b)`, which answers why two programmes are not one broadcast, or `undefined` where they are. `site:done.msBy` and `RequestCounts.waitedMs` are required. `Emit` carries a required `hears` set: make one with `emitter({ reporter })`, as `sitePacing` now insists. A run no longer makes its frequent events for kinds an `emitterReporter`'s emitter has no listener for, so an emitter whose own `emit` passes every event on needs `{ wants: () => true }`.
+* **grabber:** `requestsBy` is required on the `site:done` and `grab:done` event types. A reporter that throws makes `grab`, `runGrab`, `build`, `runMerge` and `guideStream` reject with a `ReporterError` (or a `RunFailedError`) once they are done, where its throw used to fail a site or the run part way; a build whose reporter throws only at its merge writes the guide, then rejects. An undici error carrying a 4xx `statusCode` is the source's answer: a channel list it fails no longer falls back to the stored one.
+* **cache:** `CacheDriver.list()` is required, so a driver of your own must list what it holds. `CacheCodec.decode` is handed the entry's meta, and the codecs of `CODECS` throw `CorruptEntryError` for what they cannot read — the json one answered `[]` before. `epg prune` is `epg cache prune`.
+* **merge:** a guide built from several sources writes one of two texts that say the same thing rather than both, so it changes on upgrade: fewer titles, categories and descriptions, none of them rewritten. Set `merge.union: 'exact'` to write every text as the sources gave them, as before.
+
+### Features
+
+* --explain reads back what a run said ([e8ca24a](https://github.com/Ruby184/epg-tools/commit/e8ca24a5fed72c054dbf087f5387e39eaa283819))
+* **cache:** epg cache says what a cache holds ([d47de60](https://github.com/Ruby184/epg-tools/commit/d47de60d6336d38012c4743d539aa0af9eea1849))
+* **grabber:** a run says what its requests were for ([e918a4e](https://github.com/Ruby184/epg-tools/commit/e918a4efa3d5dbbde190d7db1aa5bdf8baa1950c))
+* **grabber:** a site remembers a programme's details between runs ([83438e7](https://github.com/Ruby184/epg-tools/commit/83438e7842afb5e04faa3a62c3a5e40aa0b7d897))
+* **grabber:** a site remembers a programme's details between runs ([d2e0dca](https://github.com/Ruby184/epg-tools/commit/d2e0dca7a4594954633d69c3e537a57f03d498f5))
+* **merge:** texts two sources spell differently are written once ([a1ebee5](https://github.com/Ruby184/epg-tools/commit/a1ebee5b16f675bee958b6cf8734db86dadd342a))
+* **xmltv:** a title's episode numbering is read off it ([c7e2655](https://github.com/Ruby184/epg-tools/commit/c7e265567c7e9edcdbeba1ef6c22013d19056a88))
+* **xmltv:** a title's episode numbering is read off it ([75eec6f](https://github.com/Ruby184/epg-tools/commit/75eec6f84403486c6b3d8633faff4ee18ef68bbd))
+
+
+### Bug Fixes
+
+* **grabber:** a zone on the run's clock under another name is the run's calendar ([add3748](https://github.com/Ruby184/epg-tools/commit/add374893eb91c44d706f6e636adce1456278bb9))
+* **merge:** a day on another clock keeps what it runs on into past its midnight ([6f13fe1](https://github.com/Ruby184/epg-tools/commit/6f13fe1bb98233338a7d93863ac3d57e5f65af9f))
+* three time-zone fixes: the hour the clocks change, the run's clock under another name, and days that run past midnight ([c6c1b57](https://github.com/Ruby184/epg-tools/commit/c6c1b5730b1c16a4bb0fcc646364f99b30fb959f))
+* **xmltv:** a time on the hour the clocks change is read on the right side ([b932ab9](https://github.com/Ruby184/epg-tools/commit/b932ab96f07174cf85206494527364f4e2da2f0f))
+
 ## [0.9.0](https://github.com/Ruby184/epg-tools/compare/v0.8.0...v0.9.0) (2026-10-16)
 
 
