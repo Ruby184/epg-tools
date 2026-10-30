@@ -11,6 +11,7 @@ import type { KyInstance } from 'ky';
 import PQueue from 'p-queue';
 import { silent, type Emit } from '../core/events.js';
 import { siteHttp } from './channels.js';
+import type { SiteClock } from './clock.js';
 import type { AnySiteConfig, SiteBackoff } from './types.js';
 
 const DEFAULT_BACKOFF: Required<SiteBackoff> = {
@@ -21,6 +22,11 @@ const DEFAULT_BACKOFF: Required<SiteBackoff> = {
   maxMs: 60_000,
   adapt: true,
 };
+
+/** The statuses a site's `backoff` holds it for — none, where it is off. */
+export function heldFor(backoff: false | SiteBackoff | undefined): readonly number[] {
+  return backoff === false ? [] : (backoff?.statuses ?? DEFAULT_BACKOFF.statuses);
+}
 
 /**
  * Clean responses in a row before the concurrency lost to a slow-down is given
@@ -104,8 +110,20 @@ export function sitePacing(
     signal?: AbortSignal;
     /** Say what the queue did — see `core/events.ts`. */
     emit?: Emit;
+    /** Told when the site is held, or waits on its `rateLimit` — see `msBy`. */
+    clock?: SiteClock;
   } = {},
 ): SitePacing {
+  // Said here rather than by the queue's own listener mid-grab, where a throw
+  // ends the process: an `emit` from a JavaScript caller, or a cast, may be a
+  // plain function, which says nothing of what is wanted. Asked by `in`, so a
+  // run's set is not taken before the run asks for it.
+  if (options.emit !== undefined && !('hears' in options.emit)) {
+    throw new TypeError(
+      `sitePacing for ${config.site} was given an emit with no hears: make it with emitter({ reporter })`,
+    );
+  }
+
   const emit = options.emit ?? silent;
   const queue = requestQueue(config);
   const backoff = config.backoff === false ? undefined : { ...DEFAULT_BACKOFF, ...config.backoff };
@@ -120,6 +138,7 @@ export function sitePacing(
   const release = (): void => {
     timer = undefined;
     holdingUntil = 0;
+    options.clock?.held(false);
     queue.start();
   };
 
@@ -131,8 +150,9 @@ export function sitePacing(
    * alone — it is a response, not a mistake — and nothing is dropped: the
    * queue keeps its tasks and hands them out again on release.
    */
-  const hold = (ms: number, status: number): void => {
-    const until = Date.now() + ms;
+  const hold = (ms: number, status: number, asked: number | undefined): void => {
+    const now = Date.now();
+    const until = now + ms;
 
     // A longer hold already covers this one; two 429s in flight together must
     // not shorten the wait to the second one's.
@@ -140,10 +160,21 @@ export function sitePacing(
       return;
     }
 
+    // Said, so that one hold made longer is not read as two.
+    const lengthened = now < holdingUntil;
+
     holdingUntil = until;
     clearTimeout(timer);
     queue.pause();
-    emit({ type: 'pacing:held', site: config.site, status, ms: Math.round(ms) });
+    options.clock?.held(true);
+    emit({
+      type: 'pacing:held',
+      site: config.site,
+      status,
+      ms: Math.round(ms),
+      ...(asked === undefined ? {} : { retryAfterMs: Math.round(asked) }),
+      ...(lengthened ? { lengthened: true } : {}),
+    });
     // Deliberately not unref'd: a run in the middle of a hold has to stay
     // alive, or the process would exit with the guide half grabbed. Save once
     // the site is let go of: a hold then is a request its parse did not wait
@@ -190,12 +221,13 @@ export function sitePacing(
                     });
                   }
 
+                  // What the source asked for, said beside what it is given.
+                  const asked = retryAfterMs(response.headers.get('retry-after'));
+
                   hold(
-                    Math.min(
-                      retryAfterMs(response.headers.get('retry-after')) ?? backoff.fallbackMs,
-                      backoff.maxMs,
-                    ),
+                    Math.min(asked ?? backoff.fallbackMs, backoff.maxMs),
                     response.status,
+                    asked,
                   );
 
                   return;
@@ -223,12 +255,21 @@ export function sitePacing(
   // Only ever fires for a site that is paced, and it is the one thing a
   // `rateLimit` gives no other sign of. `addEventListener` rather than `on`:
   // p-queue 10 is an `EventTarget`.
-  queue.addEventListener('rateLimit', () =>
-    emit({ type: 'pacing:rateLimit', site: config.site, waiting: true }),
-  );
-  queue.addEventListener('rateLimitCleared', () =>
-    emit({ type: 'pacing:rateLimit', site: config.site, waiting: false }),
-  );
+  queue.addEventListener('rateLimit', () => {
+    options.clock?.rateLimited(true);
+
+    // Twice a window, for a site paced tight.
+    if (emit.hears.has('pacing:rateLimit')) {
+      emit({ type: 'pacing:rateLimit', site: config.site, waiting: true });
+    }
+  });
+  queue.addEventListener('rateLimitCleared', () => {
+    options.clock?.rateLimited(false);
+
+    if (emit.hears.has('pacing:rateLimit')) {
+      emit({ type: 'pacing:rateLimit', site: config.site, waiting: false });
+    }
+  });
 
   // A cancelled run must not sit out the rest of a hold — the timer is not
   // unref'd, so it would hold the process open — and must not resume either.
@@ -242,9 +283,16 @@ export function sitePacing(
     clearTimeout(timer);
     timer = undefined;
     holdingUntil = 0;
+    options.clock?.cancelled();
   };
 
   options.signal?.addEventListener('abort', cancelled, { once: true });
+
+  // Cancelled before the site was even set up — a thread told so as it read
+  // its config — which no listener added now will hear.
+  if (options.signal?.aborted) {
+    cancelled();
+  }
 
   return {
     queue,

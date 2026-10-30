@@ -10,7 +10,7 @@ export {
 } from './programme.js';
 export { normalizeTitle } from './text.js';
 export { DEFAULT_UNION, ResolvedUnion, resolveUnion } from './union.js';
-export type { BackfillOptions, ResolvedMatch } from './programme.js';
+export type { BackfillOptions, NearMissWhy, ResolvedMatch } from './programme.js';
 export { mergeChannels } from './channel.js';
 export { generateGuide, writeGuide, defaultChannelInfo } from './guide.js';
 export { channelSelection, unmatched } from './select.js';

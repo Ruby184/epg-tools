@@ -229,6 +229,7 @@ epg build -o /home/hts/.hts/tvheadend/epggrab/xmltv.sock  # write into a socket
 | `--refresh` | refetch every day in the window, ignoring what is cached — the days still land in the cache for the run after |
 | `--threads[=n]` | `build`/`grab`/`serve`: run the sites in [worker threads](#sites-in-threads-of-their-own), one per core or at most `n`; `--no-threads` runs them all in one, whatever the config says |
 | `--dry-run` | `grab`/`build` only: say what a run would fetch, and stop — see [what a run would do](#what-a-run-would-do) |
+| `--explain <what>` | list on stderr, once the run is done, what it said of one thing, and what that most likely means — `unmatched` for `build`/`merge`, the programmes that nearly merged; `empty`, `requests` or `held` for `build`/`grab`. Repeatable — see [what a run said, explained](#what-a-run-said-explained) |
 | `--allow-missing <n>` | exit 0 with up to this much of the guide missing: a number of channel-days, or a share like `5%` |
 | `--extensions <names>` | `build`/`merge`/`serve`/`filter`: keep only these [provider extensions](#provider-extensions), comma-separated — `--extensions lcn,uniqueID` |
 | `--no-extensions` | `build`/`merge`/`serve`/`filter`: leave every one out, for a guide that validates against the DTD |
@@ -1413,6 +1414,108 @@ counts for one config. What the report does not apply is `cover`: a channel
 a config would make more requests than someone expected. `build --dry-run`
 reports the same and writes no guide.
 
+### What a run said, explained
+
+A run counts what it has no room to list: `(5 empty)`, `5291 requests`, a
+merge's `36 nearly`. `--explain` lists one of them in full, on stderr, once the
+run is done, and says what the list most likely means — and what to change for
+it. It can be repeated, and each is written once, in the order asked for:
+
+```sh
+epg build --explain empty --explain requests --explain held
+```
+
+| Explains | For | What it lists, and reads |
+| --- | --- | --- |
+| `unmatched` | `build`, `merge` | every programme that nearly merged with another source's and did not, grouped by channel and source; a tolerance that would bring a group within reach, or a title rule that would join it |
+| `empty` | `build`, `grab` | the channel-days a source answered with no programmes; why, from what the rest of the run answered |
+| `requests` | `build`, `grab` | each site's requests by what they were for; where its time went, and what its failures mean |
+| `held` | `build`, `grab` | the sites a source told to slow down; what each status means, how each hold ended, and the pace that earned them |
+
+**`unmatched`** groups the near misses by channel, by the two sources and by
+what kept them apart, then lists each one. Where most of a group agree on a
+shift, it says by how much one source runs behind, and the `startToleranceMs`
+that would reach them all — beside the config's own, where it uses the shipped
+match — which joins those of them that each last longer than they are apart, a
+shorter pair being two programmes in a row as far as the merge can tell; or
+the `windowMs` that would let a matcher of the config's own be asked about
+them. Where one source's titles go on past the other's after the same
+separator, or begin with more before it, it says a `normalizeTitle` that cuts
+there would join them. See [what counts as the same broadcast](#what-counts-as-the-same-broadcast):
+
+```
+5 programmes nearly merged, on 1 channel:
+  ct1.cz, b.tv against a.tv:
+    3 × starts too far apart: b.tv starts 7 minutes later on all 3 — a startToleranceMs of 420000 would bring them within reach (it is 300000), and join those whose shorter lasts longer than they are apart
+    2 × titles differ: b.tv's titles go on past a.tv's after ": " on both, e.g. "DVTV: Jakub Kříž" / "DVTV" — a normalizeTitle that cuts them there would join them
+
+Each of them:
+  ct1.cz: 420s apart, starts too far apart — "Události" (b.tv, 06:07) / "Události" (a.tv, 06:00)
+  …
+```
+
+**`empty`** reads each empty channel-day against the rest of the run: a source
+empty on every channel-day it was asked about, whose `parseDay` may no longer
+read what it sends; one with nothing after a day on any channel, which has not
+published that far; a channel-day another source has programmes for, which
+this one may know by another id; one every source asked about it is empty on;
+and one this source alone is empty on, a gap in its listings. It claims nothing a
+channel-day served from the cache, said unchanged by the source, or failed
+could make untrue, since none of those says what it holds:
+
+```
+10 channel-days came back empty:
+  skylink.sk: nothing after 2026-10-29 on any channel — it has not published that far yet: 2026-10-30..2026-10-31 (2 days), on 3 channels
+  dvojka.sk (magio.tv): 2026-10-26 — nothing else says otherwise: off air, or a gap in magio.tv's listings
+  joj.sk (magio.tv): 2026-10-25..2026-10-27 (3 days) — skylink.sk has programmes then: magio.tv may know it by another id, or have stopped carrying it
+```
+
+**`requests`** tables each site's requests — how long they were out to the
+source, `waiting`, and how long they sat in its queue first, `in queue` — then
+says where each site's time went, from `site:done`'s
+[`msBy`](./api.md#what-a-run-cost-and-what-the-merge-made-of-it), and, where
+one part is most of a second or more, what would change it:
+
+```
+Requests, by site and what each was for:
+  site        label    requests  waiting  in queue  failed
+  magio.tv    request         2    939ms       0ms
+  skylink.sk  request        49   7310ms    2100ms
+  skylink.sk  detail       5242     577s       44s  3242 × 404
+
+Where each site's time went:
+  magio.tv took 170s: 168s waiting for a local slot, 1204ms parsing and writing, 939ms on the source, 169ms on other things.
+    Mostly waiting for one of the run's 16 local slots, which other sites' work held: a higher localConcurrency, or --threads, lets it in sooner.
+  skylink.sk took 11m37s: 560s on the source, 90s held by the source, 22s under its own rateLimit, 15s parsing and writing, 10s on other things.
+    Mostly waiting on the source, one request at a time: a concurrency above 1 would overlap them, where the source allows it.
+    3242 of its 5242 detail requests were answered 404: the source has nothing at those addresses — ids it no longer knows, or details of programmes it has dropped.
+```
+
+**`held`** is what makes a [rate limit](./site-config.md#rate-limits-and-backoff)
+visible. It says how each hold ended — as long as the source asked, cut short
+by `backoff.maxMs`, which makes another one likely, or the fallback where the
+source said nothing — and the pace the site kept while it had requests out and
+was not held, which is what earned the holds, beside the `rateLimit` it sets,
+or that it sets none:
+
+```
+1 site told to slow down:
+  skylink.sk: held twice, for up to 60s at a time; concurrency down to 2, back up to 3
+    2 × 429: too many requests — the source's rate limit
+    As long as the source asked, once.
+    Cut short by backoff.maxMs once, where the source asked for up to 120s: let go sooner than it wanted, the site is likely to be held again.
+    It sent 5291 requests, 9.4 a second over the 560s it had any out unheld, with no rateLimit: a rateLimit below that pace would keep it from being held, at the cost of the time that takes.
+```
+
+Each is made of events the run says anyway — `merge:unmatched`,
+`entry:fetched`, `site:done` and `pacing:held` among them — and keeps what it
+is about whatever `--log-level` shows. What it reads into them it says as
+likely, never as found: it has the run's events and the config, not the source.
+It is for reading, so `--format json` is refused beside it; a program has the
+same events as JSON through `--reporter json --log-level debug`. A cancelled
+run explains nothing. Asking for all four costs a run about 2µs a channel-day,
+measured on 7,000.
+
 ### `--offset`
 
 `--offset` shifts the window only; "now" is unchanged, so staleness and the
@@ -1745,6 +1848,15 @@ the tolerance is.
 
 Inside one source's own list none of this applies: two entries in a schedule are
 two broadcasts, and only entries naming the identical instant are pooled.
+
+**To see which of these to change**, `epg merge --explain unmatched` lists
+every programme that nearly merged and did not — both titles, both sites, how
+far apart — and says what kept them apart: the titles, which `normalizeTitle`
+answers; the starts, which `startToleranceMs` does; or the durations, which
+say they are two programmes in a row, or one within the other, and are better
+left so. Where a group of
+them agree, it says the tolerance that would bring them within reach, or the
+title rule that would join them.
 
 **A title rule is the cheap fix.** Where two sources describe the same
 broadcast but one prefixes or suffixes its titles, `normalizeTitle` says so in

@@ -30,6 +30,8 @@ async function grabbed(
     abortOn?: (event: EpgEventInput) => boolean;
     /** How long a site's state takes to save, as it does in a store across a network. */
     savingMs?: number;
+    /** The kinds the run's reporter wants — every kind, where left out. */
+    wants?: (type: EpgEventInput['type']) => boolean;
   } = {},
 ) {
   const cache = new CacheManager({ driver: new MemoryCacheDriver() });
@@ -61,13 +63,16 @@ async function grabbed(
     configModule: CONFIG,
     ...(options.siteConcurrency === undefined ? {} : { siteConcurrency: options.siteConcurrency }),
     signal: stop.signal,
-    reporter: (event) => {
-      events.push(event);
+    reporter: Object.assign(
+      (event: EpgEventInput) => {
+        events.push(event);
 
-      if (options.abortOn?.(event)) {
-        stop.abort(new Error('run cancelled'));
-      }
-    },
+        if (options.abortOn?.(event)) {
+          stop.abort(new Error('run cancelled'));
+        }
+      },
+      options.wants === undefined ? {} : { wants: options.wants },
+    ),
   });
 
   return { cache, events, summary };
@@ -84,6 +89,24 @@ describe('sites in worker threads', () => {
     expect(getXmltvOffset(programme!.start)).toBe(120);
   });
 
+  it('neither makes nor sends what the run’s reporter does not want', async () => {
+    const unwanted = new Set(['site:note', 'request:started', 'request:done', 'entry:fetched']);
+    const kinds = async (wants?: (type: string) => boolean): Promise<string[]> =>
+      (await grabbed(['offset.example'], wants === undefined ? {} : { wants })).events.map(
+        (event) => event.type,
+      );
+
+    // Each of them made, where it is wanted — the site logs as it parses.
+    const all = new Set(await kinds());
+
+    expect([...unwanted].filter((type) => !all.has(type))).toEqual([]);
+
+    const some = await kinds((type) => !unwanted.has(type));
+
+    expect(some.filter((type) => unwanted.has(type))).toEqual([]);
+    expect(some).toContain('site:done');
+  });
+
   it("counts each site's requests by kind over there, and sums them here", async () => {
     const { events } = await grabbed(['offset.example', 'failing.example']);
 
@@ -92,12 +115,22 @@ describe('sites in worker threads', () => {
     ) as Extract<EpgEventInput, { type: 'site:done' }>;
 
     expect(failing.requestsBy).toEqual({
-      request: { requests: 1, requestMs: expect.any(Number), failed: { network: 1 } },
+      request: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: { network: 1 },
+      },
     });
     // Read from what a thread said as each site finished.
     expect(events.at(-1)).toMatchObject({ type: 'grab:done' });
     expect((events.at(-1) as Extract<EpgEventInput, { type: 'grab:done' }>).requestsBy).toEqual({
-      request: { requests: 2, requestMs: expect.any(Number), failed: { network: 1 } },
+      request: {
+        requests: 2,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: { network: 1 },
+      },
     });
   });
 
@@ -138,8 +171,18 @@ describe('sites in worker threads', () => {
     }
 
     const counted = {
-      channels: { requests: 1, requestMs: expect.any(Number), failed: {} },
-      request: { requests: 1, requestMs: expect.any(Number), failed: {} },
+      channels: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: {},
+      },
+      request: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: {},
+      },
     };
     const done = events.find((event) => event.type === 'site:done') as Extract<
       EpgEventInput,
@@ -147,9 +190,12 @@ describe('sites in worker threads', () => {
     >;
 
     expect(done).toMatchObject({ requests: 2 });
-    // Its list's time its own too, as in a run on one thread.
+    // Its list's time its own too, as in a run on one thread — and where it
+    // went: the list out to the source here, beside what the thread measured.
     expect(done.ms).toBeGreaterThanOrEqual(50);
     expect(done.ms).toBeGreaterThanOrEqual(done.requestMs - 5);
+    expect(done.msBy.source).toBeGreaterThanOrEqual(50);
+    expect(Object.values(done.msBy).reduce((sum, ms) => sum + ms, 0)).toBe(done.ms);
     expect(done.requestsBy).toEqual(counted);
     expect(Object.keys(done.requestsBy)).toEqual(['channels', 'request']);
     expect((events.at(-1) as Extract<EpgEventInput, { type: 'grab:done' }>).requestsBy).toEqual(

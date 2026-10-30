@@ -116,15 +116,37 @@ Every event carries a `type`, the fields that type is about, a `level`
 than being chosen at the call site — `EVENT_KINDS` is the whole table, and it is
 the whole answer to "what does the default verbosity show?".
 
+A reporter may also say which kinds it does anything with, as a `wants`
+property, so a run need not make an event nobody will read. What it makes that
+often is made only where a reporter wants it: the `entry:*` of each channel-day
+but a failure, `request:started` and `request:done`, a site's `site:note`,
+`pacing:rateLimit`, and `merge:unmatched`, one per near miss and thousands of
+them where two sources run on two grids. Measured at `info`, for a site asking
+once per channel-day: 7% of a grab's time, and 4% in a thread. A reporter
+without `wants` wants every kind, as the one above does. The ones this package
+ships want what their level shows — plus their failures, and what the live line
+counts — `emitterReporter` what its emitter has listeners for, and
+`combineReporters` what any of its reporters wants. It is asked of each kind
+once, the first time a run asks — after the run's first wait, so what listens
+from as the run is started is asked about — and the run holds to that set — a site in a thread
+included, which neither makes nor sends what the set leaves out. It is never
+trusted to filter: a reporter is still handed whatever is made.
+
+```ts
+const reporter = Object.assign((event: EpgEvent) => metrics.increment(event.type), {
+  wants: (type: EpgEvent['type']) => type !== 'merge:unmatched',
+});
+```
+
 | group | types |
 |---|---|
 | the run | `run:cancelled`, `grab:done` (with every request of the run, by label — which a request a parse did not wait for can take past what its sites' `site:done` add up to) |
-| a site | `site:started` (with `dayZone` for a site on [another calendar](./configuration.md#which-day-is-today), whose days `days` then counts), `site:done` (its counts plus what it cost: `requests`, `ms`, `requestMs`, `requestsBy`), `site:failed`, `site:note`, `site:warning` (the last two carrying whatever [fields the site attached](./site-config.md#saying-something)) |
+| a site | `site:started` (with `dayZone` for a site on [another calendar](./configuration.md#which-day-is-today), whose days `days` then counts), `site:done` (its counts plus what it cost: `requests`, `ms`, `requestMs`, `requestsBy`, and `msBy`, where its `ms` went), `site:failed`, `site:note`, `site:warning` (the last two carrying whatever [fields the site attached](./site-config.md#saying-something)) |
 | one channel-day | `entry:cached`, `entry:fetched`, `entry:appended`, `entry:unchanged`, `entry:failed` |
 | one request | `request:started`, `request:done` (with `ms`), `request:failed` |
 | a whole-document source | `stream:gaps`, `stream:ignored` |
-| pacing | `pacing:held`, `pacing:slowed`, `pacing:recovered`, `pacing:rateLimit` |
-| merging, tidying | `merge:channel`, `merge:summary` (what the sources made of each other), `merge:done`, `merge:note`, `merge:warning`, `prune:done` |
+| pacing | `pacing:held` (with `retryAfterMs`, where the source said how long, and `lengthened`, where it made a running hold longer), `pacing:slowed`, `pacing:recovered`, `pacing:rateLimit` |
+| merging, tidying | `merge:channel`, `merge:unmatched` (each programme that nearly merged, at `debug`), `merge:summary` (what the sources made of each other), `merge:done`, `merge:note`, `merge:warning`, `prune:done` |
 | [serving](./configuration.md#serving-the-guide) | `serve:started` (with the `url`), `serve:response` (`method`, `path`, `status`, `ms`), `serve:reloaded`, `serve:disconnected`, `serve:failed`, `serve:grabFailed` (a scheduled grab that threw outright, rather than one of its sites failing), `serve:stopped` |
 
 ### What a run cost, and what the merge made of it
@@ -160,18 +182,57 @@ waiting on something of its own: its `rateLimit`, or the parsing and writing
 that follow each response, which share [`localConcurrency`](./configuration.md#how-caching-works)
 with every other site. That is the measurement to take before tuning either.
 
+`msBy` takes it. It is `ms` again, by what the site was doing — at each moment
+the first of these that held, so the parts never overlap and add up to `ms`:
+
+```json
+"msBy": { "source": 939, "held": 0, "rateLimit": 0, "working": 1204, "queued": 168100, "other": 169 }
+```
+
+`held` is the time the source had the site's requests held after a `429` or
+`503`, with any of them outstanding — waiting its turn, or out: under a hold,
+that is one ky retries once the source's `Retry-After` is up, or one sent
+before it that the hold holds up as much — so a site asking one request at a
+time is seen to be held, not waiting on the source. `source` is the time at
+least one of its requests was out to the source otherwise — once however many
+were, so it is `requestMs` only for a site that sends one at a time — and a
+streaming site's pass reading its document, its body arriving and split as it
+does, where nothing else of the site's holds.
+`rateLimit` is the time its own `rateLimit` held the next one back. `working` is its own work on this machine under way — a `parseDay`,
+a write to the cache, a check of what is cached — and `queued`, that work
+waiting for a `localConcurrency` slot with none of it under way, which other
+sites' work holds. `other` is the rest: its own code between them, reading what
+it remembered, its turn's beginning and end. The site above took 170 seconds
+over two requests answered in under one, and spent 168 of them waiting for a
+slot. A site in a thread measures its own in memory the run's thread reads, so
+one whose thread dies has said where its time went until then — its waits for a
+slot on the run's thread, writing its cache, among `queued`. A cancel drops
+what was waiting, so a cancelled site's last moments are `other`.
+
+It is measured in every run, for a few microseconds a channel-day: measured on
+7,000, a few percent of a grab whose requests and parses take no time at all,
+and nothing worth the name beside a source that takes any.
+
 `requestsBy` says the same by what each request was for, with what failed them
 — so "5291 requests" says that 3,242 of them were detail calls answered `404`:
 
 ```json
 "requestsBy": {
-  "request": { "requests": 49, "requestMs": 12034, "failed": {} },
-  "detail": { "requests": 5242, "requestMs": 573118, "failed": { "404": 3242, "timeout": 3 } }
+  "request": { "requests": 49, "requestMs": 12034, "waitedMs": 2100, "failed": {} },
+  "detail": { "requests": 5242, "requestMs": 573118, "waitedMs": 44021, "failed": { "404": 3242, "timeout": 3 } }
 }
 ```
 
 `requestMs` is the label's share of the site's `requestMs`, the time spent
 waiting on the source — not of `ms`, which is the site's wall clock.
+`waitedMs` is how long its requests sat in the site's queue before each was
+sent: for the source to stop holding them, for the site's `rateLimit`, or for
+one of its `concurrency` slots. Both are each request's own time added up, so
+four in flight together for a second each are four seconds. A parse's `paced`
+calls go ahead of the planned requests, so where both wait it is the planned
+ones whose `waitedMs` grows — and a planned request is asked for only once the
+response before it has been parsed and written, so that wait is in `msBy`,
+not here.
 
 A label is the site's to name: [`requestLabel`](./site-config.md#reference)
 for its own requests — a request site's planned ones, or, since a stream has
@@ -237,8 +298,10 @@ Merge: 4821 programmes combined, 37 nearly, 112 containers dropped
   sport.sk: 7m apart — "Správy" / "Správy TV"
 ```
 
-`combined` is programmes a later source joined to one already there. `nearMiss`
-is programmes that joined nothing with something close by — the quiet failure
+`combined` is programmes one source joined to another's already there — not to
+its own, held over from the day before and said again. `nearMiss` is
+programmes that joined nothing while another source's, within half an hour, was
+left unjoined too — the quiet failure
 that matters, because a source published on a different grid merges with
 nothing and the guide then carries every programme twice. A gap larger than
 `merge.match.startToleranceMs` means they failed on time; smaller means they
@@ -246,6 +309,27 @@ failed on titles. Counted in full, with the first few reported whole, since on
 a guide of thousands the count is the alarm and the examples only have to say
 whether it is one channel or all of them. `containers` and `clipped` are what
 `dropContainers` and `clipOverlaps` took away.
+
+Each of those near misses is a `merge:unmatched` of its own, at `debug`: the
+programme that joined nothing, the unmatched one of another source's nearest
+it — from a source before it in the merge, or one held over from the day before
+whatever its place — each as `{ site, title, start }` — the start as the guide writes it, to find
+them there by — `shiftMs`, how much later the one starts than the other, below
+nought where it starts earlier, and `why`. `title` means they started
+near enough and their titles differ, which `merge.match.normalizeTitle` decides;
+`start`, that the titles agree and the starts are too far apart, which
+`startToleranceMs` decides; `both`, both; `runs`, that the titles agree and the
+starts are near enough but further apart than the shorter of the two lasts —
+two programmes in a row, or one within the other, as a segment is within its
+show — which no tolerance changes. Under a `match` of the
+config's own, `matcher` is any pair it said no to, its reasons its own — none
+of the shipped rules is asked on its behalf — and `start`, for one with a
+`windowMs`, a pair that starts beyond it, which it is never asked about. Only another source's programme is a near
+miss — never a source's own, held from the day before. `epg merge --explain
+unmatched` and `epg build --explain unmatched` list them all on stderr once the
+guide is written, grouped, with what would join them — see
+[what a run said, explained](./configuration.md#what-a-run-said-explained);
+for each as JSON, `--reporter json --log-level debug` has them as events.
 
 Two things about the shape are deliberate, and both are the difference between a
 structured sink and a string one. **A failed request is one event, not one per
@@ -320,7 +404,15 @@ events.on('site:done', (event) => metrics.timing(event.site, event.ms));
 ```
 
 Each concern subscribes to the one it is about, instead of a `switch` in a
-reporter growing a case per concern. That is also where a supervisor's
+reporter growing a case per concern — and a run makes no event for a kind
+nothing has subscribed to, where making it costs anything, since an emitter
+says through its `listenerCount` which kinds have listeners — once a run first
+asks, so a listener added as `grab(…)` is called is heard, and one added part
+way through a run hears from the next. An emitter that
+hears more than its listeners do — an `emit` of its own that passes every event
+on, or a listener for any kind — says what it hears instead:
+`emitterReporter(bridge, { wants: () => true })` — which a config takes as its
+`events` as well. That is also where a supervisor's
 readiness ping belongs: this package sends none, because a library writing to
 an IPC channel nobody asked it to is a surprise rather than a feature.
 
@@ -342,6 +434,18 @@ Both run, and `events` is honoured by every entry point that reads a config —
 
 ```ts
 export default defineConfig({ sites, output, events });   // the emitter itself
+```
+
+`events` may be a reporter of your own as well, which is how a config gives an
+emitter that hears more than its listeners do — an `emit` of its own that
+passes every event on — and so says so:
+
+```ts
+export default defineConfig({
+  sites,
+  output,
+  events: emitterReporter(bridge, { wants: () => true }),
+});
 ```
 
 ### Naming one in a config
@@ -397,9 +501,11 @@ said so. `errorChain(error)` is the same walk, exported for a caller doing its
 own rendering.
 
 `emitter(options)` is the other end: it turns the `reporter` a caller passed
-into the `Emit` the internals take, and answers a silent one when nobody is
-listening. Only needed to drive `grab` or `generateGuide` directly and have
-their events reach the same reporter `build` would have given them.
+into the `Emit` the internals take — the function, and `hears`, the set of kinds
+its `wants` said yes to, asked once, the first time the run asks — and answers a silent one
+when nobody is listening. Only needed to drive `grab` or `generateGuide`
+directly and have their events reach the same reporter `build` would have given
+them, or to hand `sitePacing` an `emit`.
 
 ## Streaming a guide
 
@@ -1229,6 +1335,12 @@ them. A loaded config carries its `merge.union` already settled, as a
 `ResolvedUnion` — whose own fields are the union it was settled from, so a
 copy of it is that union — which `resolveUnion` takes as it is for the same
 match and settles again for another.
+`resolveMatch(match)` settles a match into what a merge asks of it:
+`windowMs`, how far apart two programmes can be and still be one broadcast;
+`normalizeTitle`; and `apart(a, b)`, what keeps two programmes from being one —
+a `NearMissWhy`, the `why` of `merge:unmatched` — or nothing, where they are
+one. One answer to both questions, so the two cannot disagree; it was
+`matches(a, b)`, a yes or no, before near misses said why.
 `mergeInto(target, incoming, resolveMatch(match))` is the piece underneath
 `mergeProgrammeLists`:
 one source's list folded into a sorted accumulator, which is also how the guide

@@ -20,12 +20,15 @@ import type { Writable } from 'node:stream';
 import { inspect } from 'node:util';
 import {
   atLevel,
+  EVENT_KINDS,
   noCounts,
   type EpgEvent,
   type EventLevel,
   type GrabCounts,
+  type NearMissWhy,
   type RequestCounts,
   type Reporter,
+  type UnmatchedProgramme,
 } from './events.js';
 import { errorChain, errorMessage, MAX_CAUSE_DEPTH } from './error.js';
 import { queueLine } from './streams.js';
@@ -69,7 +72,7 @@ export type ReporterFactory = (runtime: ReporterRuntime) => Reporter;
  * seconds and minutes above it, because `2543871ms` is a number nobody
  * subtracts in their head.
  */
-function took(ms: number): string {
+export function took(ms: number): string {
   if (ms < 10_000) {
     return `${String(ms)}ms`;
   }
@@ -105,12 +108,6 @@ function cost(event: {
  */
 function byLabel(requestsBy: Record<string, RequestCounts>): string {
   const labels = Object.entries(requestsBy);
-  // " and " between failures, so the commas are left to separate labels.
-  // `failed` read as `requestsBy` was, where an event from elsewhere may lack it.
-  const failures = (failed: Record<string, number> | undefined): string =>
-    Object.entries(failed ?? {})
-      .map(([failure, n]) => `${n} × ${failure}`)
-      .join(' and ');
 
   if (labels.length === 1) {
     const failed = failures(labels[0]![1].failed);
@@ -129,6 +126,17 @@ function byLabel(requestsBy: Record<string, RequestCounts>): string {
   });
 
   return ` (${each.join(', ')})`;
+}
+
+/**
+ * A label's failed requests by what failed them — `3242 × 404 and 3 × timeout`,
+ * or nothing. " and " between them, so commas are left to separate labels;
+ * `failed` read as `requestsBy` is, where an event from elsewhere may lack it.
+ */
+export function failures(failed: Record<string, number> | undefined): string {
+  return Object.entries(failed ?? {})
+    .map(([failure, n]) => `${n} × ${failure}`)
+    .join(' and ');
 }
 
 /** What a run or a site came to, in the one form both say it. */
@@ -159,11 +167,14 @@ function counts({ fetched, empty, fromCache, unchanged, failed, sitesFailed }: G
 function describeSpan(channels: string[], days: string[]): string {
   const channelPart = channels.length === 1 ? channels[0]! : count(channels.length, 'channel');
   const dayPart =
-    days.length === 1
-      ? days[0]!
-      : `${days[0]}..${days[days.length - 1]} (${count(days.length, 'day')})`;
+    days.length === 1 ? days[0]! : daySpan(days[0]!, days[days.length - 1]!, days.length);
 
   return `${channelPart} ${dayPart}`;
+}
+
+/** A run of days as every line that names one says it: `2026-10-24..2026-10-26 (3 days)`. */
+export function daySpan(first: string, last: string, days: number): string {
+  return `${first}..${last} (${count(days, 'day')})`;
 }
 
 /** `[site] ` unless a reporter was told not to. */
@@ -247,7 +258,9 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
         `answered in ${event.ms}ms`
       );
     case 'pacing:held':
-      return `${at(event.site, prefix)}HTTP ${event.status}: holding requests for ${event.ms}ms`;
+      return event.lengthened
+        ? `${at(event.site, prefix)}HTTP ${event.status}: holding requests longer, for ${event.ms}ms from now`
+        : `${at(event.site, prefix)}HTTP ${event.status}: holding requests for ${event.ms}ms`;
     case 'pacing:slowed':
       return `${at(event.site, prefix)}concurrency down to ${event.concurrency}`;
     case 'pacing:recovered':
@@ -263,6 +276,13 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
       // No site on either, so no prefix: a merge transform is the config's own
       // code, and there is nobody to attribute it to.
       return `${event.message}${said(event.data)}`;
+    case 'merge:unmatched':
+      // Which two, how far apart, and what kept them so — with whose each is,
+      // and when it starts by its own clock, to find them by in the guide.
+      return (
+        `${event.channelId}: ${took(Math.abs(event.shiftMs))} apart, ${UNMATCHED_WHY[event.why]} — ` +
+        `${side(event.programme)} / ${side(event.nearby)}`
+      );
     case 'merge:summary': {
       // Only what there is: a guide whose sources all line up says one number,
       // and a run that dropped nothing does not report two noughts every night.
@@ -320,6 +340,43 @@ export function render(event: EpgEvent, prefix = true): string | undefined {
   }
 }
 
+/** What kept two programmes apart, in words — see `merge:unmatched`, and `--explain unmatched`. */
+export const UNMATCHED_WHY = {
+  title: 'titles differ',
+  start: 'starts too far apart',
+  both: 'titles and starts differ',
+  runs: 'they start further apart than the shorter lasts',
+  matcher: "the config's match said no",
+} as const satisfies Record<NearMissWhy, string>;
+
+/** One side of a near miss: its title, its site, and when it starts by its own clock. */
+function side(programme: UnmatchedProgramme): string {
+  return `"${programme.title}" (${programme.site}, ${clockOf(programme.start)})`;
+}
+
+/**
+ * When a start written as the guide writes it is, by its own clock: `20:05`
+ * of `20261024200500 +0200` — or as much of it as the source said, which may
+ * be the hour (`20:00`), the day (`2026-10-24`), the month (`2026-10`) or the
+ * year alone (`2026`).
+ */
+function clockOf(start: string): string {
+  const [digits = ''] = start.split(' ');
+
+  if (digits.length >= 10) {
+    return `${digits.slice(8, 10)}:${digits.length >= 12 ? digits.slice(10, 12) : '00'}`;
+  }
+
+  if (digits.length >= 8) {
+    return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`;
+  }
+
+  return digits.length >= 6 ? `${digits.slice(0, 4)}-${digits.slice(4, 6)}` : digits.slice(0, 4);
+}
+
+/** The kinds of event that are a failure — see {@link isFailure}. */
+const FAILURES = new Set<EpgEvent['type']>(['entry:failed', 'request:failed', 'site:failed']);
+
 /** The three events that are a failure, and what one reads as. */
 export type FailureEvent = Extract<
   EpgEvent,
@@ -328,9 +385,7 @@ export type FailureEvent = Extract<
 
 /** Whether this is one of those, so a reporter can hold it back. */
 export function isFailure(event: EpgEvent): event is FailureEvent {
-  return (
-    event.type === 'entry:failed' || event.type === 'request:failed' || event.type === 'site:failed'
-  );
+  return FAILURES.has(event.type);
 }
 
 /**
@@ -442,14 +497,21 @@ export function loggerReporter(options: LoggerReporterOptions): Reporter {
   const { logger, level = 'info', prefix = true } = options;
   const cause = atLevel('debug', level);
 
-  return (event) => {
-    if (isFailure(event)) {
-      logger.error(renderFailure(event, prefix, cause));
+  // Its failures whatever the level, and the rest by it.
+  const shows = (type: EpgEvent['type'], at: EventLevel): boolean =>
+    FAILURES.has(type) || atLevel(at, level);
 
+  const reporter: Reporter = (event) => {
+    // Nothing it says it does not want, whether or not it was asked first —
+    // by the event's own level, so one of a kind this version does not know,
+    // read back from a later one's log, is told by it as it always was.
+    if (!shows(event.type, event.level)) {
       return;
     }
 
-    if (!atLevel(event.level, level)) {
+    if (isFailure(event)) {
+      logger.error(renderFailure(event, prefix, cause));
+
       return;
     }
 
@@ -477,10 +539,14 @@ export function loggerReporter(options: LoggerReporterOptions): Reporter {
       }
     }
   };
+
+  reporter.wants = (type) => shows(type, EVENT_KINDS[type].level);
+
+  return reporter;
 }
 
 export { combineReporters, emitterReporter } from './events.js';
-export type { EpgEventSink } from './events.js';
+export type { EmitterReporterOptions, EpgEventSink } from './events.js';
 
 export interface TextReporterOptions {
   /** Where progress goes. */
@@ -507,6 +573,16 @@ export interface TextReporterOptions {
 
 /** How many failures a block shows before counting the rest. */
 export const DEFAULT_FAILURE_CAP = 20;
+
+/**
+ * What a text reporter at `level` writes or keeps of an event of `type` at
+ * `at`: its failures whatever the level, what ends a run — the block flushed,
+ * or dropped — and the rest by it.
+ */
+function textShows(level: EventLevel): (type: EpgEvent['type'], at: EventLevel) => boolean {
+  return (type, at) =>
+    FAILURES.has(type) || type === 'run:cancelled' || type === 'grab:done' || atLevel(at, level);
+}
 
 /**
  * Lines of text, which is what a person reads and what a CI log keeps.
@@ -547,7 +623,15 @@ export function textReporter(options: TextReporterOptions): Reporter {
     dropped = 0;
   };
 
-  return (event) => {
+  const shows = textShows(level);
+
+  const reporter: Reporter = (event) => {
+    // Nothing it says it does not want, whether or not it was asked first —
+    // by the event's own level: see `loggerReporter`.
+    if (!shows(event.type, event.level)) {
+      return;
+    }
+
     if (isFailure(event)) {
       const line = renderFailure(event, prefix, cause);
 
@@ -588,6 +672,10 @@ export function textReporter(options: TextReporterOptions): Reporter {
       flush();
     }
   };
+
+  reporter.wants = (type) => shows(type, EVENT_KINDS[type].level);
+
+  return reporter;
 }
 
 /** An error as JSON keeps it, `cause` chain and all. */
@@ -635,7 +723,9 @@ export interface JsonReporterOptions {
 export function jsonReporter(options: JsonReporterOptions): Reporter {
   const { stream, level = 'debug', pretty = false } = options;
 
-  return (event) => {
+  const reporter: Reporter = (event) => {
+    // Nothing it says it does not want, whether or not it was asked first —
+    // by the event's own level: see `loggerReporter`.
     if (!atLevel(event.level, level)) {
       return;
     }
@@ -654,6 +744,10 @@ export function jsonReporter(options: JsonReporterOptions): Reporter {
 
     queueLine(stream, line);
   };
+
+  reporter.wants = (type) => atLevel(EVENT_KINDS[type].level, level);
+
+  return reporter;
 }
 
 /**
@@ -665,16 +759,30 @@ export function jsonReporter(options: JsonReporterOptions): Reporter {
  */
 const ENDS = new Set<EpgEvent['type']>(['grab:done', 'run:cancelled', 'merge:done', 'prune:done']);
 
+/** What the live line counts — see {@link progressReporter}. */
+const COUNTED = new Set<EpgEvent['type']>([
+  'site:started',
+  'site:done',
+  'entry:fetched',
+  'entry:cached',
+  'entry:unchanged',
+  'entry:failed',
+  'site:failed',
+  'request:failed',
+  'merge:channel',
+]);
+
+/**
+ * What the live line draws again rather than lets the lines write. Only kinds
+ * it wants, shown at `info` or counted: nothing else reaches it — a `debug`
+ * kind it neither shows nor counts is turned away first, redrawn for nothing.
+ */
 const SUMMARIZED = new Set<EpgEvent['type']>([
   'site:started',
   'site:done',
   'entry:cached',
   'entry:fetched',
-  'entry:appended',
   'entry:unchanged',
-  'request:started',
-  'request:done',
-  'stream:ignored',
   'merge:channel',
 ]);
 
@@ -784,7 +892,19 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
     shown = next;
   };
 
-  return (event) => {
+  // What the lines underneath show, what the live line counts, and what ends
+  // a half of the run: the rest it would only draw again, as it was.
+  const linesShow = textShows(level);
+  const shows = (type: EpgEvent['type'], at: EventLevel): boolean =>
+    linesShow(type, at) || COUNTED.has(type) || ENDS.has(type);
+
+  const reporter: Reporter = (event) => {
+    // Nothing it says it does not want, whether or not it was asked first —
+    // by the event's own level: see `loggerReporter`.
+    if (!shows(event.type, event.level)) {
+      return;
+    }
+
     switch (event.type) {
       case 'site:started':
         sites.add(event.site);
@@ -847,6 +967,10 @@ export function progressReporter(options: ProgressReporterOptions): Reporter {
     lines(event);
     paint();
   };
+
+  reporter.wants = (type) => shows(type, EVENT_KINDS[type].level);
+
+  return reporter;
 }
 
 /**

@@ -36,6 +36,8 @@ export type {
   RunPhase,
   SaidFields,
   Says,
+  TimeSpent,
+  UnmatchedProgramme,
 } from './core/events.js';
 export {
   DEFAULT_FAILURE_CAP,
@@ -53,6 +55,7 @@ export {
   textReporter,
 } from './core/reporters.js';
 export type {
+  EmitterReporterOptions,
   FailureEvent,
   EpgEventSink,
   FailureMode,
@@ -335,5 +338,11 @@ export {
   writeGuide,
   defaultChannelInfo,
 } from './merge/main.js';
-export type { BackfillOptions, ChannelSelection, ResolvedMatch, Selectable } from './merge/main.js';
+export type {
+  BackfillOptions,
+  ChannelSelection,
+  NearMissWhy,
+  ResolvedMatch,
+  Selectable,
+} from './merge/main.js';
 export type * from './merge/types.js';

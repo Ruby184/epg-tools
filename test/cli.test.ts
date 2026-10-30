@@ -2213,6 +2213,229 @@ describe('flushing', () => {
   });
 });
 
+describe('--explain', () => {
+  /** Two sites for one channel, whose one programme each starts seven minutes apart. */
+  async function driftingConfig(dir: string): Promise<string> {
+    const site = (name: string, start: string): string => `{
+      site: '${name}',
+      channels: [{ xmltvId: 'one.example.tv', siteId: '1', name: 'One' }],
+      async request({ day }) { return { day }; },
+      parseDay: ({ channel, day }) => [{
+        channel: channel.xmltvId,
+        start: new Date(day + 'T${start}:00.000Z'),
+        title: [{ value: 'Show' }],
+      }],
+    }`;
+
+    return configFile(
+      dir,
+      `export default {
+      sites: [${site('a.example.tv', '06:00')}, ${site('b.example.tv', '06:07')}],
+      days: 1,
+      output: ${JSON.stringify(join(dir, 'guide.xml'))},
+      cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+    };`,
+    );
+  }
+
+  it('lists what nearly merged, on stderr once the guide is written', async () => {
+    const dir = await tempDir();
+    const config = await driftingConfig(dir);
+    const { code, stdout, stderr } = await run([
+      'build',
+      '--config',
+      config,
+      '--explain',
+      'unmatched',
+    ]);
+
+    expect(code).toBe(0);
+    expect(stdout).toContain('Guide written to');
+    expect(stderr).toContain(
+      '1 programme nearly merged, on 1 channel:\n' +
+        '  one.example.tv, b.example.tv against a.example.tv:\n' +
+        '    1 × starts too far apart: b.example.tv starts 7 minutes later — ' +
+        'a startToleranceMs of 420000 would bring it within reach (it is 300000)' +
+        ', and join it if the shorter of the two lasts longer than they are apart\n' +
+        '\n' +
+        'Each of them:\n' +
+        '  one.example.tv: 420s apart, starts too far apart — ' +
+        '"Show" (b.example.tv, 06:07) / "Show" (a.example.tv, 06:00)\n',
+    );
+  });
+
+  it('lists them for a merge as for a build', async () => {
+    const dir = await tempDir();
+    const config = await driftingConfig(dir);
+
+    await run(['grab', '--config', config]);
+
+    const { code, stderr } = await run(['merge', '--config', config, '--explain', 'unmatched']);
+
+    expect(code).toBe(0);
+    expect(stderr).toContain('1 programme nearly merged, on 1 channel:');
+    expect(stderr).toContain('starts too far apart');
+  });
+
+  it('says a merge that matches nothing across sources has none to look for', async () => {
+    const dir = await tempDir();
+    const config = await driftingConfig(dir);
+
+    await run(['grab', '--config', config]);
+
+    // The same config, its programmes put side by side rather than matched.
+    const backfilling = config.replace('.mjs', '.backfill.mjs');
+
+    await writeFile(
+      backfilling,
+      `import base from ${JSON.stringify(config)};\n` +
+        `export default { ...base, merge: { programmeStrategy: 'backfill' } };\n`,
+    );
+
+    const { code, stderr } = await run([
+      'merge',
+      '--config',
+      backfilling,
+      '--explain',
+      'unmatched',
+    ]);
+
+    expect(code).toBe(0);
+    // Backfill matches across sources, to leave out what another already has —
+    // but keeps nothing of what it nearly matched.
+    expect(stderr).toContain(
+      "Near misses are looked for only under channelStrategy 'merge-programmes' and " +
+        "programmeStrategy 'merge', and this merge is under programmeStrategy: 'backfill'.",
+    );
+  });
+
+  it('is refused as JSON, and points to the events that are', async () => {
+    const dir = await tempDir();
+    const { code, stderr } = await run([
+      'build',
+      '--config',
+      await driftingConfig(dir),
+      '--explain',
+      'unmatched',
+      '--format',
+      'json',
+    ]);
+
+    expect(code).toBe(2);
+    expect(stderr).toContain('--reporter json --log-level debug');
+  });
+
+  it('says there were none, where none did', async () => {
+    const dir = await tempDir();
+    const { code, stderr } = await run([
+      'build',
+      '--config',
+      await plainConfig(dir),
+      '--explain',
+      'unmatched',
+    ]);
+
+    expect(code).toBe(0);
+    expect(stderr).toContain('No programmes nearly merged.');
+  });
+
+  it('is refused on a command whose run it is not about, before any of them returns', async () => {
+    const dir = await tempDir();
+    const config = await plainConfig(dir);
+    const grab = await run(['grab', '--config', config, '--explain', 'unmatched']);
+    const merge = await run(['merge', '--config', config, '--explain', 'held']);
+    // Answered before a config is looked for, and refused before that.
+    const validate = await run(['validate', join(dir, 'guide.xml'), '--explain', 'unmatched']);
+    const dry = await run(['build', '--config', config, '--dry-run', '--explain', 'empty']);
+
+    expect([grab.code, merge.code, validate.code, dry.code]).toEqual([2, 2, 2, 2]);
+    expect(grab.stderr).toContain('--explain unmatched is for build, merge, not grab');
+    expect(merge.stderr).toContain('--explain held is for build, grab, not merge');
+    expect(validate.stderr).toContain('--explain unmatched is for build, merge, not validate');
+    expect(dry.stderr).toContain('--explain is for a run, not --dry-run');
+  });
+
+  it('lists nothing for a run that was cancelled', async () => {
+    const dir = await tempDir();
+    const controller = new AbortController();
+    const config = await configFile(
+      dir,
+      `export default {
+        sites: [{
+          site: 'example.tv',
+          channels: [{ xmltvId: 'one.example.tv', siteId: '1' }],
+          async request() {
+            globalThis.cancelTheRun();
+            return {};
+          },
+          parseDay: () => [],
+        }],
+        days: 1,
+        output: ${JSON.stringify(join(dir, 'guide.xml'))},
+        cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+      };`,
+    );
+
+    Object.assign(globalThis, { cancelTheRun: () => controller.abort(new Error('SIGINT')) });
+
+    const { code, stderr } = await run(
+      ['grab', '--config', config, '--quiet', '--explain', 'held'],
+      controller.signal,
+    );
+
+    expect(code).toBe(130);
+    expect(stderr).not.toContain('slow down');
+  });
+
+  it('lists what a grab said of each thing asked for, once it is done', async () => {
+    const dir = await tempDir();
+    // Two channels, the second of which the source has nothing on.
+    const config = await configFile(
+      dir,
+      `export default {
+      sites: [{
+        site: 'example.tv',
+        channels: [
+          { xmltvId: 'one.example.tv', siteId: '1', name: 'One' },
+          { xmltvId: 'two.example.tv', siteId: '2', name: 'Two' },
+        ],
+        async request({ day }) { return { day }; },
+        parseDay: ({ channel, day }) => channel.siteId === '2' ? [] : [{
+          channel: channel.xmltvId,
+          start: new Date(day + 'T06:00:00.000Z'),
+          title: [{ value: 'Show' }],
+        }],
+      }],
+      days: 2,
+      output: ${JSON.stringify(join(dir, 'guide.xml'))},
+      cache: { dir: ${JSON.stringify(join(dir, 'cache'))} },
+    };`,
+    );
+    const { code, stderr } = await run([
+      'grab',
+      '--config',
+      config,
+      '--explain',
+      'empty',
+      '--explain',
+      'requests',
+      '--explain',
+      'held',
+      '--quiet',
+    ]);
+
+    expect(code).toBe(0);
+    // Its other channel has programmes those days: a gap in its listings.
+    expect(stderr).toMatch(
+      /^2 channel-days came back empty:\n {2}two\.example\.tv \(example\.tv\): \d{4}-\d\d-\d\d\.\.\d{4}-\d\d-\d\d \(2 days\) — example\.tv has programmes on other channels then: a gap in its listings, or off air\n\n/,
+    );
+    // Its four requests, how long they took, and where its time went.
+    expect(stderr).toMatch(/\n {2}example\.tv {2}request +4 +\d+ms +\d+ms\n/);
+    expect(stderr).toMatch(/\nWhere each site's time went:\n {2}example\.tv took \d+ms: /);
+    expect(stderr).toMatch(/\n\nNo site was told to slow down\.\n$/);
+  });
+});
+
 describe('a reporter that throws', () => {
   it('says what the run failed of, and what its reporter threw beside it', async () => {
     const dir = await tempDir();

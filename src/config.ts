@@ -21,6 +21,7 @@ import type { EpgServeConfig } from './serve/config.js';
 import type { AnySiteConfig } from './grabber/types.js';
 import type { DerivedChannels, GuideMeta, MergeOptions } from './merge/types.js';
 import type { SerializeOptions } from './xmltv/serialize.js';
+import type { Reporter } from './core/events.js';
 import type { EpgEventSink, ReporterFactory, ReporterName } from './core/reporters.js';
 
 /**
@@ -266,12 +267,24 @@ export interface EpgConfig {
    * export default defineConfig({ sites, output, events });
    * ```
    *
+   * Or a reporter of your own, told as a run's is — what an emitter that
+   * hears more than its listeners do is given as, since nothing else here can
+   * say so of it:
+   *
+   * ```ts
+   * export default defineConfig({
+   *   sites,
+   *   output,
+   *   events: emitterReporter(bridge, { wants: () => true }),
+   * });
+   * ```
+   *
    * Honoured wherever a run is started from this config — `epg serve` and
    * `epg grab`, and `build`, `runGrab`, `runMerge` and `createGuideHandler`
    * just the same. A library caller's own `reporter` is kept beside it rather
    * than replaced.
    */
-  events?: EpgEventSink;
+  events?: EpgEventSink | Reporter;
 }
 
 /** Builds the config from whatever answered the questions. */

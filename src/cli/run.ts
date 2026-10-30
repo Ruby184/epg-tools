@@ -36,10 +36,11 @@ import {
   type Emit,
   type EventLevel,
 } from '../core/events.js';
-import { FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
+import { combineReporters, FAILURE_MODES, reporterFor, REPORTER_NAMES } from '../core/reporters.js';
 import { drain, writeFlushed, writeLines } from '../core/streams.js';
 import { initGrabber } from './scaffold.js';
 import { REPORT_FORMATS, type ReportFormat } from './format.js';
+import { EXPLAINABLE, explainCommands, explanations } from './explain.js';
 import { OUTPUT_PROFILE_NAMES } from '../xmltv/profile.js';
 import type { OutputProfileName } from '../xmltv/profile.js';
 import { outputOptions } from '../xmltv/serialize.js';
@@ -82,6 +83,15 @@ Options:
                         a number of channel-days, or a share like 5%
       --dry-run         grab/build only: say what a run would fetch, and stop.
                         --format json for a machine-readable one
+      --explain <what>  Once the run is done, list on stderr what it said of
+                        one thing, and what that most likely means. Repeatable.
+                        build/merge: unmatched — the programmes that nearly
+                        merged with another source's, and what would join them.
+                        build/grab: empty — the channel-days a source answered
+                        with nothing, and why; requests — each site's requests
+                        and where its time went; held — the sites a source told
+                        to slow down, and the pace that earned it. Its events
+                        as JSON: --reporter json --log-level debug
       --extensions <names>  build/merge/serve/filter: keep only these provider
                         extensions, comma-separated (e.g. lcn,uniqueID)
       --no-extensions   build/merge/serve/filter: leave every provider
@@ -720,6 +730,9 @@ async function execute(
       'grab-at': { type: 'string', transform: timeOfDay },
       raw: { type: 'boolean' },
       format: { type: 'string', choices: REPORT_FORMATS },
+      // Repeatable, and each for the commands whose run it is about: what a
+      // run said of one thing, explained once it is done.
+      explain: { type: 'string', choices: EXPLAINABLE, multiple: true },
       strict: { type: 'boolean' },
       // `epg channels` only: the file naming the channels somebody wants a
       // guide for, and whether a mismatch should fail a CI step.
@@ -779,6 +792,30 @@ async function execute(
 
   if (!COMMANDS.includes(command)) {
     throw new UsageError(`Unknown command: ${command}`);
+  }
+
+  // Before anything a command does: an option it would only pass over is a
+  // mistake to say rather than to swallow.
+  if (values.explain !== undefined) {
+    for (const name of values.explain) {
+      const commands = explainCommands(name);
+
+      if (!commands.includes(command)) {
+        throw new UsageError(`--explain ${name} is for ${commands.join(', ')}, not ${command}`);
+      }
+    }
+
+    if (values['dry-run']) {
+      throw new UsageError('--explain is for a run, not --dry-run');
+    }
+
+    // On stderr, beside what else a run says there: what reads it is a person.
+    // A program has every one of them as an event of its own.
+    if (values.format === 'json') {
+      throw new UsageError(
+        '--explain is for reading — for its events as JSON: --reporter json --log-level debug',
+      );
+    }
   }
 
   // Before the config is even looked for: a guide named on the command line is
@@ -936,8 +973,12 @@ async function execute(
   // disjoint: `merge:done` is the command's, everything inside a run is not.
   const { reporter: said } = reportingTo(chosen ? { reporter: chosen } : {}, config.events);
   const emit = said ? stamped(said) : silent;
+
+  // What `--explain` asked for, kept as the run says it.
+  const { reporter: collector, render: renderExplanations } = explanations(values.explain ?? []);
+  const reporter = collector ? combineReporters(chosen, collector) : chosen;
   const runOptions = {
-    ...(chosen ? { reporter: chosen } : {}),
+    ...(reporter ? { reporter } : {}),
     ...(values.offset !== undefined ? { offset: values.offset } : {}),
     ...(signal ? { signal } : {}),
     // The file this loaded, which is what a site's thread imports to find its
@@ -1003,17 +1044,26 @@ async function execute(
       }
 
       emit({ type: 'merge:done', output: String(config.output) });
+      await renderExplanations(stderr, config);
 
       return exitCode(summary, config.allowMissing);
     }
     case 'grab': {
       const summary = await runGrab(config, runOptions);
 
-      return signal?.aborted ? EXIT_CANCELLED : exitCode(summary, config.allowMissing);
+      if (signal?.aborted) {
+        return EXIT_CANCELLED;
+      }
+
+      await renderExplanations(stderr, config);
+
+      return exitCode(summary, config.allowMissing);
     }
     case 'merge': {
       await runMerge(config, runOptions);
+
       emit({ type: 'merge:done', output: String(config.output) });
+      await renderExplanations(stderr, config);
 
       return 0;
     }

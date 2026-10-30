@@ -28,6 +28,7 @@ import { noCounts, type Emit, type GrabCounts } from '../core/events.js';
 import { ProgrammeBuilder } from '../xmltv/builder.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import { resolveChannels } from './channels.js';
+import type { SiteClock, TimeSink } from './clock.js';
 import { parseContext, requestContext, streamContext, type ContextDeps } from './context.js';
 import { LocalSlot } from './local-slot.js';
 import { planRequests, type Pair, type Request } from './planner.js';
@@ -98,6 +99,14 @@ export interface Run {
    * has still said what it asked.
    */
   requested: RequestSink;
+  /**
+   * Told of the site's time as it is spent — see `site:done`'s `msBy`. A site
+   * in a thread's into the memory both threads see, so one whose thread dies
+   * has said where its time went. Said, every run, if only as `undefined`: a
+   * site on this thread's is read off its own clock as its turn ends, and has
+   * nothing to keep as it goes — which costs its clock nothing.
+   */
+  spent: TimeSink | undefined;
 }
 
 /** A parse may hand back either form; the cache only knows the object. */
@@ -215,8 +224,13 @@ export class SiteRun {
     this.#site = resolved.site;
     this.#revalidates = config.conditionalGet === true;
     this.#says = {
-      log: (message, data) =>
-        run.emit({ type: 'site:note', site: resolved.site, message, ...(data ? { data } : {}) }),
+      // A site may log at every step, with fields of its own: nothing made of
+      // it where nobody reads it — nor, from a thread, sent.
+      log: (message, data) => {
+        if (run.emit.hears.has('site:note')) {
+          run.emit({ type: 'site:note', site: resolved.site, message, ...(data ? { data } : {}) });
+        }
+      },
       warn: (message, data) =>
         run.emit({ type: 'site:warning', site: resolved.site, message, ...(data ? { data } : {}) }),
     };
@@ -237,6 +251,7 @@ export class SiteRun {
         ...(run.signal ? { signal: run.signal } : {}),
         emit: run.emit,
         counted: run.requested,
+        spent: run.spent,
       });
     this.#http = this.#session.pacing.http;
     this.#state = this.#session.state;
@@ -304,6 +319,7 @@ export class SiteRun {
    */
   async run(): Promise<void> {
     this.#began = Date.now();
+    this.#session.clock.turn(true);
     let failed = false;
 
     try {
@@ -320,10 +336,8 @@ export class SiteRun {
       this.#count('sitesFailed');
       this.#run.emit({ type: 'site:failed', site: this.#site, error });
     } finally {
-      this.#session.pacing.dispose();
-
-      // Beside `dispose`, and for the same reason: a site that threw, or was
-      // cancelled part way, has as much to hand back as one that finished — the
+      // A site that threw, or was cancelled part way, has as much to hand back
+      // as one that finished — the
       // channel list it fetched, and whatever its own code remembered. Only the
       // groups that changed are written. What the site remembered is pruned
       // first, so a site that no longer asks stops keeping what it kept.
@@ -345,22 +359,37 @@ export class SiteRun {
           this.#count('sitesFailed');
           this.#run.emit({ type: 'site:failed', site: this.#site, error });
         }
+      } finally {
+        // Let go of only once the turn's last wait is over: until then a
+        // cancel is still the site's to hear — its pacing lets go of a hold,
+        // and its clock of what the cancel dropped — however the turn ended,
+        // and whatever saying so above threw.
+        this.#session.pacing.dispose();
       }
 
       // For a failed site too, with what it did count — nought, where it
       // failed before it began — and beside the `site:failed` that says why.
+      //
+      // Wall clock, which is the one a nightly run is long by — and nothing
+      // like its `requestMs` once a site runs several requests at once.
+      const ms = Date.now() - this.#began + this.#settledMs;
+
+      this.#session.clock.turn(false);
       this.#run.emit(
         siteDone(
           this.#site,
-          // Wall clock, which is the one a nightly run is long by — and
-          // nothing like its `requestMs` once a site runs several requests at
-          // once.
-          Date.now() - this.#began + this.#settledMs,
+          ms,
           this.#session.requestsBy,
           this.#counts,
+          this.#session.clock.spent(),
         ),
       );
     }
+  }
+
+  /** Where the site's time goes — see `site:done`'s `msBy`. */
+  get clock(): SiteClock {
+    return this.#session.clock;
   }
 
   /** The work itself, so {@link run} is only about letting go of things. */
@@ -466,12 +495,12 @@ export class SiteRun {
    * against thousands of round trips saved for a store that has to make them.
    */
   async #collectStale(): Promise<Pair[]> {
-    const { cache, emit, enqueue, localWork, now } = this.#run;
+    const { cache, emit, localWork, now } = this.#run;
     const site = this.#site;
 
     const checked = await Promise.all(
       this.#channels.map((channel) =>
-        enqueue(localWork, async (): Promise<Pair[]> => {
+        this.#local(localWork, async (): Promise<Pair[]> => {
           const keys = this.#resolved.window.map((day) => ({
             site,
             channelId: channel.xmltvId,
@@ -498,7 +527,10 @@ export class SiteRun {
             }
 
             this.#count('fromCache');
-            emit({ type: 'entry:cached', site, channelId: channel.xmltvId, day });
+
+            if (emit.hears.has('entry:cached')) {
+              emit({ type: 'entry:cached', site, channelId: channel.xmltvId, day });
+            }
 
             return [];
           });
@@ -645,13 +677,15 @@ export class SiteRun {
         this.#count('empty');
       }
 
-      emit({
-        type: 'entry:fetched',
-        site,
-        channelId: channel.xmltvId,
-        day,
-        programmes: mine.length,
-      });
+      if (emit.hears.has('entry:fetched')) {
+        emit({
+          type: 'entry:fetched',
+          site,
+          channelId: channel.xmltvId,
+          day,
+          programmes: mine.length,
+        });
+      }
 
       return;
     }
@@ -670,14 +704,16 @@ export class SiteRun {
       this.#count('empty', -1);
     }
 
-    emit({
-      type: 'entry:appended',
-      site,
-      channelId: channel.xmltvId,
-      day,
-      added: mine.length,
-      total: programmes.length,
-    });
+    if (emit.hears.has('entry:appended')) {
+      emit({
+        type: 'entry:appended',
+        site,
+        channelId: channel.xmltvId,
+        day,
+        added: mine.length,
+        total: programmes.length,
+      });
+    }
   }
 
   /**
@@ -698,8 +734,12 @@ export class SiteRun {
     day: string,
     payload: unknown,
   ): Promise<void> {
-    const { enqueue, localWork, signal } = this.#run;
-    const slot = new LocalSlot(localWork, enqueue, 1);
+    const { localWork, signal } = this.#run;
+    const slot = new LocalSlot(
+      localWork,
+      (queue, task, options) => this.#local(queue, task, options),
+      1,
+    );
 
     return slot.hold(async () => {
       const parsed = await config.parseDay(
@@ -728,12 +768,41 @@ export class SiteRun {
     day: string,
     programmes: ParsedProgramme[],
   ): Promise<void> {
-    const { enqueue, localWork } = this.#run;
-
-    return enqueue(
-      localWork,
+    return this.#local(
+      this.#run.localWork,
       ({ signal: taskSignal }) => this.#persist(channel, day, programmes, taskSignal),
       { priority: 1 },
+    );
+  }
+
+  /**
+   * The run's `enqueue`, for this site's local work — each of its checks of
+   * what is cached, its parses and their writes, and what a stream hands over
+   * — timed as it waits for a slot and as it is under way: see `msBy`.
+   *
+   * One a cancel drops before its turn never says it stopped waiting, which
+   * would cost every task a promise: the cancel tells the clock instead — see
+   * `SiteClock.cancelled`.
+   */
+  #local<T>(
+    queue: PQueue,
+    task: (options: { signal?: AbortSignal | undefined }) => Promise<T>,
+    options?: { priority?: number },
+  ): Promise<T> {
+    this.clock.queued();
+
+    return this.#run.enqueue(
+      queue,
+      async (slot) => {
+        this.clock.started();
+
+        try {
+          return await task(slot);
+        } finally {
+          this.clock.finished();
+        }
+      },
+      options,
     );
   }
 
@@ -793,7 +862,9 @@ export class SiteRun {
       // One each rather than a count for the request: what a reader wants of a
       // kept channel-day is which one it was, and `site:done` already carries
       // how many there were.
-      emit({ type: 'entry:unchanged', site: this.#site, channelId: channel.xmltvId, day });
+      if (emit.hears.has('entry:unchanged')) {
+        emit({ type: 'entry:unchanged', site: this.#site, channelId: channel.xmltvId, day });
+      }
     }
   }
 
@@ -844,8 +915,9 @@ export class SiteRun {
     }
 
     const asking = this.#revalidationFor(request);
-    const span = SiteRun.#span(request);
     let payload: unknown;
+    /** Its channels and days, as its events say them: made once, where one is wanted. */
+    let span: { channels: string[]; days: string[] } | undefined;
 
     try {
       // The request queue's slot covers this and nothing else, so a parse below is
@@ -863,7 +935,13 @@ export class SiteRun {
           // Timed from inside the task, so what is reported is the request rather
           // than the wait for a slot — a site paced to one request a second would
           // otherwise report every request as having taken a second.
-          this.#run.emit({ type: 'request:started', site: this.#site, ...span });
+          if (this.#run.emit.hears.has('request:started')) {
+            this.#run.emit({
+              type: 'request:started',
+              site: this.#site,
+              ...(span ??= SiteRun.#span(request)),
+            });
+          }
 
           const began = Date.now();
 
@@ -876,12 +954,14 @@ export class SiteRun {
             );
 
           return (this.#revalidates ? revalidation.run(asking, fetch) : fetch()).then((raw) => {
-            this.#run.emit({
-              type: 'request:done',
-              site: this.#site,
-              ...span,
-              ms: Date.now() - began,
-            });
+            if (this.#run.emit.hears.has('request:done')) {
+              this.#run.emit({
+                type: 'request:done',
+                site: this.#site,
+                ...(span ??= SiteRun.#span(request)),
+                ms: Date.now() - began,
+              });
+            }
 
             return raw;
           });
@@ -953,6 +1033,8 @@ export class SiteRun {
     const asking = this.#revalidationFor(request);
     let ignored = 0;
     let failure: unknown;
+    /** Its channels and days, as its events say them: made once, where one is wanted. */
+    let span: { channels: string[]; days: string[] } | undefined;
 
     const write = (pair: Pair, programmes: ParsedProgramme[]): void => {
       writes.push(
@@ -970,69 +1052,82 @@ export class SiteRun {
       // So a pass is paced the way a `parseDay` is, by sending its own fetches
       // through the queue one at a time, and a slot keeps meaning what it always
       // meant: one request to the source.
-      emit({ type: 'request:started', site: this.#site, ...SiteRun.#span(request) });
+      if (emit.hears.has('request:started')) {
+        emit({ type: 'request:started', site: this.#site, ...(span ??= SiteRun.#span(request)) });
+      }
 
       const began = Date.now();
+      // Its document read, and split as it arrives: the source's, where its
+      // writes, or a fetch of its own, are not what the site is doing.
+      this.clock.reading(true);
 
-      await revalidation.run(asking, async () => {
-        for await (const emission of config.stream(
-          streamContext(request, {
-            ...this.#deps(signal),
-            // As a parse's is, and ahead of the planned ones for the same
-            // reason: a pass already under way is finished rather than joined.
-            paced: (task, options) =>
-              this.#sending(task, {
-                priority: 1,
-                label: this.#pacedLabel(options, this.#resolved.requestLabel),
-              }),
-            // A pass holds no slot while it runs, so it waits as it is.
-            away: (wait) => wait(),
-          }),
-        )) {
-          // Between emissions, which is as often as this has anything to say: a
-          // cancelled run stops here rather than writing the rest of a document
-          // nobody is waiting for.
-          signal?.throwIfAborted();
+      try {
+        await revalidation.run(asking, async () => {
+          for await (const emission of config.stream(
+            streamContext(request, {
+              ...this.#deps(signal),
+              // As a parse's is, and ahead of the planned ones for the same
+              // reason: a pass under way is finished rather than joined.
+              paced: (task, options) =>
+                this.#sending(task, {
+                  priority: 1,
+                  label: this.#pacedLabel(options, this.#resolved.requestLabel),
+                }),
+              // A pass holds no slot while it runs, so it waits as it is.
+              away: (wait) => wait(),
+            }),
+          )) {
+            // Between emissions, which is as often as this has anything to
+            // say: a cancelled run stops here rather than writing the rest of
+            // a document nobody is waiting for.
+            signal?.throwIfAborted();
 
-          const { channel, day } = emission;
-          const id = `${channel?.xmltvId}|${day}`;
-          const pair = owed.get(id);
+            const { channel, day } = emission;
+            const id = `${channel?.xmltvId}|${day}`;
+            const pair = owed.get(id);
 
-          if (pair === undefined) {
-            if (this.#written.has(id) && emission.unchanged !== true) {
-              // Said again: added to what the earlier emission wrote, rather
-              // than put in its place. A document not grouped by channel.
-              write({ channel, day }, emission.programmes);
+            if (pair === undefined) {
+              if (this.#written.has(id) && emission.unchanged !== true) {
+                // Said again: added to what the earlier emission wrote,
+                // rather than put in its place. A document not grouped by
+                // channel.
+                write({ channel, day }, emission.programmes);
+              } else {
+                // A channel-day nobody asked about — one already fresh in
+                // the cache, a channel outside the list, or an emission that
+                // makes no sense. Counted, and reported once at the end.
+                ignored++;
+              }
+            } else if (emission.unchanged === true) {
+              // Nothing to write: the pass says what is cached still stands.
+              // Held until the stream ends, since a pass that then fails has
+              // not vouched for anything.
+              owed.delete(id);
+              keeping.push(pair);
             } else {
-              // A channel-day nobody asked about — one already fresh in the
-              // cache, a channel outside the list, or an emission that makes no
-              // sense. Counted, and reported once at the end.
-              ignored++;
+              owed.delete(id);
+              write(pair, emission.programmes);
             }
-          } else if (emission.unchanged === true) {
-            // Nothing to write: the pass says what is cached still stands. Held
-            // until the stream ends, since a pass that then fails has not
-            // vouched for anything.
-            owed.delete(id);
-            keeping.push(pair);
-          } else {
-            owed.delete(id);
-            write(pair, emission.programmes);
+
+            // Backpressure, and the only thing holding the parser back:
+            // writing is queued rather than awaited, so the split runs on while
+            // entries land, but no further ahead than `localConcurrency` of
+            // them.
+            await localWork.onSizeLessThan(localWork.concurrency);
           }
+        });
+      } finally {
+        this.clock.reading(false);
+      }
 
-          // Backpressure, and the only thing holding the parser back: writing is
-          // queued rather than awaited, so the split runs on while entries land,
-          // but no further ahead than `localConcurrency` of them.
-          await localWork.onSizeLessThan(localWork.concurrency);
-        }
-      });
-
-      emit({
-        type: 'request:done',
-        site: this.#site,
-        ...SiteRun.#span(request),
-        ms: Date.now() - began,
-      });
+      if (emit.hears.has('request:done')) {
+        emit({
+          type: 'request:done',
+          site: this.#site,
+          ...(span ??= SiteRun.#span(request)),
+          ms: Date.now() - began,
+        });
+      }
     } catch (error) {
       failure = error;
     }
