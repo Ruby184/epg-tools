@@ -1,3 +1,4 @@
+import type { NearMissWhy } from '../core/events.js';
 import type { XmltvCredits, XmltvPersonValue, XmltvProgramme } from '../xmltv/types.js';
 import type {
   MergeUnion,
@@ -230,13 +231,31 @@ function duration(programme: XmltvProgramme): number | undefined {
  */
 export interface ResolvedMatch {
   windowMs: number;
-  matches: ProgrammeMatcher;
+  /**
+   * What keeps two programmes from being one broadcast — nothing, where they
+   * are. One answer to both questions a merge asks of a pair, whether they are
+   * one and why not, so the two cannot disagree: see {@link NearMissWhy}.
+   */
+  apart(a: XmltvProgramme, b: XmltvProgramme): NearMissWhy | undefined;
   /**
    * How it compares titles — a match's own `normalizeTitle`, or the default
    * for a matcher of one's own, which says nothing about titles. What a
    * `merge.union` of titles compares by too.
    */
   normalizeTitle: (title: string) => string;
+}
+
+/** What kept two programmes from being one — declared with the event that says it. */
+export type { NearMissWhy };
+
+/**
+ * A matcher of one's own as a {@link ResolvedMatch.apart}: beyond its window,
+ * which it is never asked about, `start`; within it, what it says — and where
+ * it says no, `matcher`. Nothing of the shipped rules is asked on its behalf:
+ * what titles it compares, and how, is its own business.
+ */
+function ownMatcher(matches: ProgrammeMatcher, windowMs: number): ResolvedMatch['apart'] {
+  return (a, b) => (shiftOf(a, b) > windowMs ? 'start' : matches(a, b) ? undefined : 'matcher');
 }
 
 /**
@@ -251,11 +270,19 @@ export function resolveMatch(
     // Everything, because a function that never said how far it looks might
     // look anywhere — and the cost of that is in `WindowedMatcher`, which is
     // how a matcher says.
-    return { windowMs: Number.POSITIVE_INFINITY, matches: match, normalizeTitle };
+    return {
+      windowMs: Number.POSITIVE_INFINITY,
+      apart: ownMatcher(match, Number.POSITIVE_INFINITY),
+      normalizeTitle,
+    };
   }
 
   if (match !== undefined && match !== null && 'matches' in match) {
-    return { windowMs: match.windowMs, matches: match.matches, normalizeTitle };
+    return {
+      windowMs: match.windowMs,
+      apart: ownMatcher(match.matches, match.windowMs),
+      normalizeTitle,
+    };
   }
 
   const {
@@ -270,32 +297,42 @@ export function resolveMatch(
   return {
     windowMs: startToleranceMs,
     normalizeTitle: normalize,
-    matches: (a, b) => {
-      const shift = Math.abs(a.start.getTime() - b.start.getTime());
+    apart: (a, b) => {
+      const shift = shiftOf(a, b);
+      // The titles, where they are compared: on an identical start only when a
+      // config says even that has to be corroborated, and never under `never`.
+      const compared = titles === 'always' || (titles !== 'never' && shift !== 0);
+      const titlesDiffer = compared && !titlesMatch(a, b, normalize);
+      const beyond = shift > startToleranceMs;
+      const why: NearMissWhy = titlesDiffer
+        ? beyond
+          ? 'both'
+          : 'title'
+        : beyond
+          ? 'start'
+          : 'runs';
 
-      if (shift > startToleranceMs) {
-        return false;
+      // The titles agreeing and the starts near enough, one broadcast — save
+      // where they start further apart than the shorter lasts. Consecutive
+      // programmes sit exactly one duration apart, and a segment lies within
+      // the show it is part of, so anything that far out is the neighbour or
+      // the part rather than the same broadcast told twice: decidable only
+      // when both say where they end, and never of the same instant.
+      if (
+        why === 'runs' &&
+        (shift === 0 || shift < Math.min(duration(a) ?? Infinity, duration(b) ?? Infinity))
+      ) {
+        return undefined;
       }
 
-      // The same instant: two sources describing one broadcast, unless a
-      // config says even that has to be corroborated by the title.
-      if (shift === 0) {
-        return titles === 'always' ? titlesMatch(a, b, normalize) : true;
-      }
-
-      if (titles !== 'never' && !titlesMatch(a, b, normalize)) {
-        return false;
-      }
-
-      // What keeps a wide tolerance from swallowing the programme next door:
-      // consecutive programmes sit exactly one duration apart, so anything
-      // that far out is the neighbour rather than the same broadcast told
-      // twice. Only decidable when both sides say where they end.
-      const shorter = Math.min(duration(a) ?? Infinity, duration(b) ?? Infinity);
-
-      return shift < shorter;
+      return why;
     },
   };
+}
+
+/** How far apart two programmes start. */
+function shiftOf(a: XmltvProgramme, b: XmltvProgramme): number {
+  return Math.abs(a.start.getTime() - b.start.getTime());
 }
 
 /** First index whose start is at or after `time`, in a list sorted by start. */
@@ -317,40 +354,160 @@ function lowerBound(programmes: XmltvProgramme[], time: number): number {
 }
 
 /**
- * Where in `target` `programme` belongs, and what it belongs with: the index of
- * the programme it should be merged into, or `-1` to insert it.
+ * The nearest programme of another source's a programme did not join — kept
+ * by {@link matchOf} as it scans the window, and by {@link nearMissOf} beyond
+ * it. One for a whole list, set afresh for each programme: asking costs a
+ * merge nothing per programme.
+ */
+interface Refused {
+  index: number;
+  gapMs: number;
+  /** What kept them apart — asked of one beyond the window only once it is the nearest. */
+  why: NearMissWhy | undefined;
+}
+
+/** A near miss, as {@link MergeWatch.nearMiss} is told it. */
+interface NearMiss {
+  index: number;
+  gapMs: number;
+  candidate: XmltvProgramme;
+  why: NearMissWhy;
+}
+
+/**
+ * Whether `candidate` is another source's than the list folding in — see
+ * {@link MergeOrigin}: the one rule for which of `target` the list may have
+ * nearly joined, and which it combined with.
+ */
+function others(origin: MergeOrigin | undefined, candidate: XmltvProgramme): boolean {
+  // This source's own, held from the day before, is the programme before this
+  // one, not one it nearly was, nor another source agreeing with it.
+  return origin === undefined || !ownedBy(origin.sites.get(candidate), origin.site);
+}
+
+/**
+ * The index of the programme of `target` that `programme` should be merged
+ * into, or `-1` to insert it — and, where given `refused`, the nearest within
+ * the window that another source's said no to, and why. Each pair judged once.
  *
  * The nearest acceptable candidate wins. A source shifted by a minute against
  * two of another's programmes must join the one it is a minute from, not
  * whichever the scan reached first.
  */
-function findMatch(
+function matchOf(
   target: XmltvProgramme[],
   programme: XmltvProgramme,
   match: ResolvedMatch,
   taken: ReadonlySet<number>,
+  origin: MergeOrigin | undefined,
+  refused: Refused | undefined,
 ): number {
   const start = programme.start.getTime();
+  const { windowMs } = match;
   let best = -1;
   let bestShift = Number.POSITIVE_INFINITY;
 
-  for (let index = lowerBound(target, start - match.windowMs); index < target.length; index++) {
+  for (let index = lowerBound(target, start - windowMs); index < target.length; index++) {
     const candidate = target[index]!;
     const shift = candidate.start.getTime() - start;
 
-    if (shift > match.windowMs) {
+    // Past the window — or, with a match in hand, past where anything could be
+    // nearer than it: the list is sorted, so all that follows is further.
+    if (shift > windowMs || (best !== -1 && shift >= bestShift)) {
       break;
     }
 
     const distance = Math.abs(shift);
 
-    if (distance < bestShift && !taken.has(index) && match.matches(candidate, programme)) {
+    // Taken already, or no nearer than a match in hand: nothing to ask.
+    if (taken.has(index) || (best !== -1 && distance >= bestShift)) {
+      continue;
+    }
+
+    const why = match.apart(candidate, programme);
+
+    if (why === undefined) {
       best = index;
       bestShift = distance;
+    } else if (
+      refused !== undefined &&
+      distance <= NEAR_MISS_MS &&
+      distance < refused.gapMs &&
+      others(origin, candidate)
+    ) {
+      refused.index = index;
+      refused.gapMs = distance;
+      refused.why = why;
     }
   }
 
   return best;
+}
+
+/**
+ * The near miss of a programme that matched nothing: what {@link matchOf} kept
+ * of the window, or — where the window had nothing even nearly it — the
+ * nearest other source's programme within {@link NEAR_MISS_MS}, beyond it.
+ * Anything beyond the window is further than what is in it, so that wider
+ * scan is only for where the window had none, and why is asked of the
+ * nearest, once.
+ */
+function nearMissOf(
+  target: XmltvProgramme[],
+  programme: XmltvProgramme,
+  match: ResolvedMatch,
+  taken: ReadonlySet<number>,
+  origin: MergeOrigin | undefined,
+  refused: Refused,
+): NearMiss | undefined {
+  const start = programme.start.getTime();
+  const { windowMs } = match;
+
+  if (refused.index === -1 && NEAR_MISS_MS > windowMs) {
+    for (let index = lowerBound(target, start - NEAR_MISS_MS); index < target.length; index++) {
+      const candidate = target[index]!;
+      const shift = candidate.start.getTime() - start;
+
+      if (shift > NEAR_MISS_MS) {
+        break;
+      }
+
+      const distance = Math.abs(shift);
+
+      if (
+        distance > windowMs &&
+        distance < refused.gapMs &&
+        !taken.has(index) &&
+        others(origin, candidate)
+      ) {
+        refused.index = index;
+        refused.gapMs = distance;
+        refused.why = undefined;
+      }
+    }
+  }
+
+  if (refused.index === -1) {
+    return undefined;
+  }
+
+  const candidate = target[refused.index]!;
+
+  return {
+    index: refused.index,
+    gapMs: refused.gapMs,
+    candidate,
+    why: refused.why ?? match.apart(candidate, programme) ?? 'matcher',
+  };
+}
+
+/** {@link Refused} with nothing in it yet. */
+function refusedAfresh(refused: Refused): Refused {
+  refused.index = -1;
+  refused.gapMs = Number.POSITIVE_INFINITY;
+  refused.why = undefined;
+
+  return refused;
 }
 
 /**
@@ -396,6 +553,8 @@ export function mergeInto(
   match: ResolvedMatch,
   watch?: MergeWatch,
 ): XmltvProgramme[] {
+  const origin = watch?.origin;
+
   // Every candidate is decided against `target` as it stands, and only then is
   // anything added to it. Otherwise a list's second programme could be paired
   // with its own first one the moment that landed in `target` — the tolerance
@@ -404,35 +563,77 @@ export function mergeInto(
   const inserts: XmltvProgramme[] = [];
   const taken = new Set<number>();
 
+  const looking = watch?.nearMiss !== undefined;
+  const refused: Refused | undefined = looking
+    ? { index: -1, gapMs: Number.POSITIVE_INFINITY, why: undefined }
+    : undefined;
+  /** What matched nothing, with what it nearly did — said once the whole list is placed. */
+  const missed: Array<[programme: XmltvProgramme, near: NearMiss]> = [];
+
   for (const programme of pool(incoming)) {
     // Taken entries are passed over: one programme of `target` stands for one
     // broadcast, so it absorbs one programme of `incoming` and no more.
-    const index = findMatch(target, programme, match, taken);
+    const index = matchOf(
+      target,
+      programme,
+      match,
+      taken,
+      origin,
+      refused && refusedAfresh(refused),
+    );
 
     if (index === -1) {
       inserts.push(programme);
 
-      if (watch !== undefined) {
-        const near = nearest(target, programme, taken);
+      const near = refused && nearMissOf(target, programme, match, taken, origin, refused);
 
-        if (near !== undefined) {
-          watch.nearMiss(near.gapMs, programme, near.candidate);
-        }
+      if (near !== undefined) {
+        missed.push([programme, near]);
       }
     } else {
       taken.add(index);
       merges.push([index, programme]);
-      watch?.combined();
+
+      // Two sources agreeing — not one source and its own programme, held
+      // over from the day before and said again today.
+      if (others(origin, target[index]!)) {
+        watch?.combined?.();
+      }
+    }
+  }
+
+  // Said once the whole list is placed: a programme a later one of it then
+  // took is no near miss, and the nearest still left in its place is. The
+  // left only ever narrow, so one still left was the nearest all along.
+  for (const [programme, near] of missed) {
+    let nearest: NearMiss | undefined = near;
+
+    if (taken.has(near.index)) {
+      // Matches nothing still: the window is only narrower.
+      matchOf(target, programme, match, taken, origin, refusedAfresh(refused!));
+      nearest = nearMissOf(target, programme, match, taken, origin, refused!);
+    }
+
+    if (nearest !== undefined) {
+      watch!.nearMiss!(nearest.gapMs, programme, nearest.candidate, nearest.why);
     }
   }
 
   // Merging first, while the indices above still mean what they meant. A merge
-  // keeps the base's start, so it moves nothing.
+  // keeps the base's start, so it moves nothing — and its sites, with this one.
   for (const [index, programme] of merges) {
-    target[index] = mergeProgrammes(target[index]!, programme);
+    const base = target[index]!;
+    const merged = mergeProgrammes(base, programme);
+
+    if (origin !== undefined) {
+      origin.sites.set(merged, withSite(origin.sites.get(base), origin.site));
+    }
+
+    target[index] = merged;
   }
 
   for (const programme of inserts) {
+    origin?.sites.set(programme, origin.site);
     // After anything starting at the same instant, so what could not be merged
     // still follows what it arrived behind.
     target.splice(lowerBound(target, programme.start.getTime() + 1), 0, programme);
@@ -462,49 +663,72 @@ export const NEAR_MISS_MS = 30 * 60_000;
  * single-source channels pays nothing for it.
  */
 export interface MergeWatch {
-  /** One of `incoming` joined a programme already in `target`. */
-  combined(): void;
   /**
-   * One of `incoming` joined nothing, and something was close.
-   *
-   * `gapMs` is what the two starts are apart. Larger than the match tolerance
-   * means they failed on time; smaller means they failed on titles, which is
-   * the same news about a different cause.
+   * Whose list is folded in, and whose each programme of `target` is — kept as
+   * the merge makes new programmes out of old ones, for saying which two
+   * nearly matched, and for not taking a source's own for another's.
    */
-  nearMiss(gapMs: number, programme: XmltvProgramme, candidate: XmltvProgramme): void;
+  origin?: MergeOrigin;
+  /**
+   * One of `incoming` joined a programme already in `target` — another site's,
+   * where `origin` says whose: not its own, held over from the day before.
+   */
+  combined?(): void;
+  /**
+   * One of `incoming` joined nothing, and `candidate` — the nearest of `target`
+   * within {@link NEAR_MISS_MS}, another site's where `origin` says whose — is
+   * left unjoined too, once the whole of `incoming` is placed.
+   *
+   * `gapMs` is what the two starts are apart, and `why` what kept them apart.
+   */
+  nearMiss?(
+    gapMs: number,
+    programme: XmltvProgramme,
+    candidate: XmltvProgramme,
+    why: NearMissWhy,
+  ): void;
 }
 
 /**
- * The unmatched programme nearest this one, where anything is near enough.
- *
- * Only asked after a match failed, and only when somebody is watching — a scan
- * of its own, because {@link findMatch} deliberately never looks past the
- * tolerance it was given.
+ * Which sites each programme of a merge came from, for saying which two nearly
+ * matched — kept by {@link mergeInto} for every programme it puts in `target`:
+ * one added, `site`'s; one merged, its base's and then each that joined it.
  */
-function nearest(
-  target: XmltvProgramme[],
-  programme: XmltvProgramme,
-  taken: ReadonlySet<number>,
-): { gapMs: number; candidate: XmltvProgramme } | undefined {
-  const start = programme.start.getTime();
-  let found: { gapMs: number; candidate: XmltvProgramme } | undefined;
+export interface MergeOrigin {
+  /** Whose list is folded in now. */
+  site: string;
+  /** Every programme's sites, as far as it has been told — see {@link Sites}. */
+  sites: WeakMap<XmltvProgramme, Sites>;
+}
 
-  for (let index = lowerBound(target, start - NEAR_MISS_MS); index < target.length; index++) {
-    const candidate = target[index]!;
-    const shift = candidate.start.getTime() - start;
+/**
+ * Whose a programme is: the one site it came from, or — once others joined it
+ * — each of them, its base's first. A string for the one, which is nearly
+ * every programme, rather than a list each.
+ */
+export type Sites = string | readonly string[];
 
-    if (shift > NEAR_MISS_MS) {
-      break;
-    }
+/** Whether `site` is one of a programme's `sites`. */
+export function ownedBy(sites: Sites | undefined, site: string): boolean {
+  return sites === site || (Array.isArray(sites) && sites.includes(site));
+}
 
-    const gapMs = Math.abs(shift);
+/** The site a programme came from first — its base's, once others joined it. */
+export function firstSite(sites: Sites | undefined): string | undefined {
+  return typeof sites === 'string' ? sites : sites?.[0];
+}
 
-    if (!taken.has(index) && (found === undefined || gapMs < found.gapMs)) {
-      found = { gapMs, candidate };
-    }
+/** `sites`, with `site` among them. */
+function withSite(sites: Sites | undefined, site: string): Sites {
+  if (sites === undefined) {
+    return site;
   }
 
-  return found;
+  if (ownedBy(sites, site)) {
+    return sites;
+  }
+
+  return typeof sites === 'string' ? [sites, site] : [...sites, site];
 }
 
 /**
@@ -587,7 +811,7 @@ export function backfillInto(
   // own first one the moment that lands, and a run of them filling one hole
   // would turn each other away.
   for (const [index, programme] of pooled.entries()) {
-    if (findMatch(target, programme, match, taken) !== -1) {
+    if (matchOf(target, programme, match, taken, undefined, undefined) !== -1) {
       continue;
     }
 

@@ -1,3 +1,4 @@
+import { EventEmitter, getEventListeners } from 'node:events';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -25,10 +26,18 @@ import {
   UnchangedError,
 } from '../src/grabber/main.js';
 import { errorMessage } from '../src/core/error.js';
-import type { EpgEvent } from '../src/core/events.js';
+import {
+  EVENT_TYPES,
+  noCounts,
+  type EpgEvent,
+  type EpgEventInput,
+  type EpgEventMap,
+  type TimeSpent,
+} from '../src/core/events.js';
 import { MANY_LABELS, openSession } from '../src/grabber/session.js';
-import { SiteRun } from '../src/grabber/site-run.js';
-import { combineReporters, jsonReporter } from '../src/core/reporters.js';
+import PQueue from 'p-queue';
+import { SiteRun, type Run } from '../src/grabber/site-run.js';
+import { combineReporters, emitterReporter, jsonReporter } from '../src/core/reporters.js';
 import { collect } from './reporting.js';
 import type {
   ChannelsBatching,
@@ -1378,6 +1387,87 @@ describe('grab', () => {
       expect(seen[0]).toBeUndefined();
       expect(seen).toContain('from-the-first-request');
       expect(seen.filter((entry) => entry === undefined)).toHaveLength(1);
+    });
+
+    it('is saved by a site that still hears a cancel, so its pace lets go of a hold', async () => {
+      const run = new AbortController();
+      const cache = new MemoryCache();
+      let listening: boolean | undefined;
+      const save = cache.setState.bind(cache);
+
+      // Asked, as the site saves what it remembered: is its pacing still
+      // listening for the run's cancel?
+      cache.setState = async (...args: Parameters<typeof save>) => {
+        listening = getEventListeners(run.signal, 'abort').some(
+          (listener) => listener.name === 'cancelled',
+        );
+
+        return save(...args);
+      };
+
+      await grab(
+        [
+          makeConfig({
+            async request({ state }) {
+              state.set('token', 'remembered');
+
+              return {};
+            },
+          }),
+        ],
+        { cache, now: NOW, signal: run.signal },
+      );
+
+      expect(listening).toBe(true);
+    });
+
+    it('lets go of the run’s cancel, though saying its save failed throws', async () => {
+      const stop = new AbortController();
+      const cache = new MemoryCache();
+
+      cache.setState = async () => {
+        throw new Error('the store is gone');
+      };
+
+      const run: Run = {
+        defaults: { days: 1 },
+        cache,
+        now: NOW,
+        grabbedAt: NOW.toISOString(),
+        startDay: TODAY,
+        timeZone: 'UTC',
+        // A reporter nothing keeps the throws of.
+        emit: Object.assign(
+          (event: EpgEventInput) => {
+            if (event.type === 'site:failed') {
+              throw new Error('the reporter is gone');
+            }
+          },
+          { hears: new Set(EVENT_TYPES) },
+        ),
+        signal: stop.signal,
+        localWork: new PQueue({ concurrency: 1 }),
+        enqueue: (queue, task, options = {}) =>
+          queue.add(task, { ...options, signal: stop.signal }),
+        tally: noCounts(),
+        requested: () => {},
+        spent: undefined,
+      };
+      const site = new SiteRun(
+        makeConfig({
+          async request({ state }) {
+            state.set('token', 'remembered');
+
+            return {};
+          },
+        }),
+        run,
+      );
+
+      await expect(site.run()).rejects.toThrow('the reporter is gone');
+      expect(
+        getEventListeners(stop.signal, 'abort').map((listener) => listener.name),
+      ).not.toContain('cancelled');
     });
 
     it('is the same bag its channel list was handed', async () => {
@@ -2800,6 +2890,27 @@ describe('a site that streams its whole window', () => {
   function some(day: string, channel: GrabberChannel): StreamedChannelDay {
     return { channel, day, programmes: [programme(`${day}T06:00:00.000Z`, channel.siteId)] };
   }
+
+  it('gives the time its document takes to arrive to the source, not to nothing', async () => {
+    const report = collect();
+
+    await grab(
+      [
+        streamSite(() => [], {
+          // A document arriving slowly, long after any headers did.
+          async *stream({ channels, days }) {
+            await new Promise((resolve) => setTimeout(resolve, 40));
+            yield some(days[0]!, channels[0]!);
+          },
+        }),
+      ],
+      { cache: new MemoryCache(), now: NOW, reporter: report.reporter },
+    );
+
+    const [done] = report.of('site:done');
+
+    expect(done!.msBy.source).toBeGreaterThanOrEqual(30);
+  });
 
   it('writes every channel-day it yields, and counts them as fetched', async () => {
     const cache = new MemoryCache();
@@ -4438,6 +4549,92 @@ describe('what a run reports', () => {
   });
 });
 
+describe('what a run makes of what its reporter does not want', () => {
+  it('asks once it is under way, so what listens from as it is started is heard', async () => {
+    const events = new EventEmitter<EpgEventMap>();
+    let fetched = 0;
+    const running = grab([makeConfig()], {
+      cache: new MemoryCache(),
+      now: NOW,
+      reporter: emitterReporter(events),
+    });
+
+    events.on('entry:fetched', () => {
+      fetched++;
+    });
+    await running;
+
+    expect(fetched).toBe(1);
+  });
+
+  it('makes none of it, of a site that requests or one that streams', async () => {
+    const unwanted = new Set<EpgEvent['type']>([
+      'site:note',
+      'request:started',
+      'request:done',
+      'entry:fetched',
+      'entry:appended',
+      'entry:cached',
+      'pacing:rateLimit',
+    ]);
+    const said = makeConfig({
+      // Two days, one request a window: its second waits on its rateLimit.
+      days: 2,
+      rateLimit: { requests: 1, perMs: 10 },
+      // Its days from the cache, the second time.
+      staleness: { alwaysRefetchDays: 0 },
+      parseDay({ day, log }) {
+        log('parsed it');
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+    // A document not grouped by channel: its one channel-day said twice.
+    const streamed: StreamSiteConfig = {
+      site: 'stream.example',
+      channels: [channel('a')],
+      days: 1,
+      async *stream({ channels, days }) {
+        for (const at of ['06', '09']) {
+          yield {
+            channel: channels[0]!,
+            day: days[0]!,
+            programmes: [programme(`${days[0]}T${at}:00:00.000Z`, 'site-a')],
+          };
+        }
+      },
+    };
+    /** The kinds two runs make, the second from the cache, for a reporter wanting what `wants` does. */
+    const kinds = async (wants?: (type: EpgEvent['type']) => boolean): Promise<Set<string>> => {
+      const heard = new Set<string>();
+      const reporter = Object.assign(
+        (event: EpgEvent) => void heard.add(event.type),
+        wants === undefined ? {} : { wants },
+      );
+      const cache = new MemoryCache();
+
+      await grab([said, streamed], { cache, now: NOW, reporter });
+      await grab([said], { cache, now: NOW, reporter });
+
+      return heard;
+    };
+
+    // Each of them made, where it is wanted.
+    const all = await kinds();
+
+    expect([...unwanted].filter((type) => !all.has(type))).toEqual([]);
+
+    // And none of them where it is not — each left out on its own, so that the
+    // kind a run asks about and the kind it then makes cannot part unseen.
+    for (const type of unwanted) {
+      const some = await kinds((kind) => kind !== type);
+
+      expect(some.has(type), type).toBe(false);
+      expect(some).toContain('site:done');
+    }
+  });
+});
+
 describe('what a run says its requests were for', () => {
   /** An error as ky throws one for a status, shaped rather than made. */
   const status = (code: number): Error =>
@@ -4488,9 +4685,24 @@ describe('what a run says its requests were for', () => {
 
     expect(done.requests).toBe(6);
     expect(done.requestsBy).toEqual({
-      listings: { requests: 1, requestMs: expect.any(Number), failed: {} },
-      detail: { requests: 4, requestMs: expect.any(Number), failed: { 404: 1, timeout: 1 } },
-      paced: { requests: 1, requestMs: expect.any(Number), failed: {} },
+      listings: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: {},
+      },
+      detail: {
+        requests: 4,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: { 404: 1, timeout: 1 },
+      },
+      paced: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: {},
+      },
     });
     // In the order each was first asked for.
     expect(Object.keys(done.requestsBy)).toEqual(['listings', 'detail', 'paced']);
@@ -4532,7 +4744,12 @@ describe('what a run says its requests were for', () => {
 
     expect(Object.keys(by('listed.example'))).toEqual(['channels', 'request']);
     expect(by('stream.example')).toEqual({
-      stream: { requests: 1, requestMs: expect.any(Number), failed: {} },
+      stream: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: {},
+      },
     });
   });
 
@@ -4636,8 +4853,18 @@ describe('what a run says its requests were for', () => {
     await grab([streamed], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
 
     expect(doneOf(report.events).requestsBy).toEqual({
-      pages: { requests: 2, requestMs: expect.any(Number), failed: {} },
-      episodes: { requests: 1, requestMs: expect.any(Number), failed: {} },
+      pages: {
+        requests: 2,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: {},
+      },
+      episodes: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: {},
+      },
     });
   });
 
@@ -4660,7 +4887,12 @@ describe('what a run says its requests were for', () => {
 
     expect(report.events.at(-1)).toMatchObject({ type: 'grab:done' });
     expect((report.events.at(-1) as Extract<EpgEvent, { type: 'grab:done' }>).requestsBy).toEqual({
-      request: { requests: 3, requestMs: expect.any(Number), failed: { 503: 2 } },
+      request: {
+        requests: 3,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: { 503: 2 },
+      },
     });
   });
 
@@ -4793,6 +5025,7 @@ describe('what a run says its requests were for', () => {
     expect(doneOf(report.events).requestsBy.detail).toEqual({
       requests: 1,
       requestMs: expect.any(Number),
+      waitedMs: expect.any(Number),
       failed: {},
     });
   });
@@ -4886,6 +5119,7 @@ describe('what a run says its requests were for', () => {
       requests: 0,
       ms: 0,
       requestMs: 0,
+      msBy: { source: 0, held: 0, rateLimit: 0, working: 0, queued: 0, other: 0 },
       requestsBy: {},
       fetched: 0,
       empty: 0,
@@ -5165,8 +5399,18 @@ describe('what a run says its requests were for', () => {
     await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
 
     expect(doneOf(report.events).requestsBy).toEqual({
-      constructor: { requests: 1, requestMs: expect.any(Number), failed: {} },
-      toString: { requests: 1, requestMs: expect.any(Number), failed: { 404: 1 } },
+      constructor: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: {},
+      },
+      toString: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: { 404: 1 },
+      },
     });
     expect((report.events.at(-1) as Extract<EpgEvent, { type: 'grab:done' }>).requestsBy).toEqual(
       doneOf(report.events).requestsBy,
@@ -5190,7 +5434,12 @@ describe('what a run says its requests were for', () => {
     await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
 
     expect(doneOf(report.events).requestsBy).toEqual({
-      relácie: { requests: 3, requestMs: expect.any(Number), failed: {} },
+      relácie: {
+        requests: 3,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: {},
+      },
     });
   });
 
@@ -5376,22 +5625,32 @@ describe('what a run says its requests were for', () => {
     expect(doneOf(report.events).requestsBy.detail).toEqual({
       requests: 1,
       requestMs: expect.any(Number),
+      waitedMs: expect.any(Number),
       failed: { error: 1 },
     });
   });
 
   it('says what a session settled before the run says as the run it joins says it', async () => {
+    const hears = new Set(EVENT_TYPES);
     const before: EpgEvent['type'][] = [];
     const after: EpgEvent['type'][] = [];
     // Paced, so its queue says when it is held as well.
     const session = openSession(
       makeConfig({ rateLimit: { requests: MANY_LABELS, perMs: 20 } }),
       new MemoryCache(),
-      { emit: (event) => before.push(event.type) },
+      // Wanting nothing — what the run it joins wants is what it then makes.
+      {
+        emit: Object.assign((event: EpgEventInput) => void before.push(event.type), {
+          hears: new Set<EpgEvent['type']>(),
+        }),
+      },
     );
 
     try {
-      session.joinRun({ requested: () => {}, emit: (event) => after.push(event.type) });
+      session.joinRun({
+        requested: () => {},
+        emit: Object.assign((event: EpgEventInput) => void after.push(event.type), { hears }),
+      });
 
       for (let id = 0; id <= MANY_LABELS; id++) {
         await session.send(async () => id, { label: `item-${id}` });
@@ -5424,7 +5683,12 @@ describe('what a run says its requests were for', () => {
     });
 
     expect(doneOf(cancelled.events).requestsBy).toEqual({
-      request: { requests: 1, requestMs: expect.any(Number), failed: {} },
+      request: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: {},
+      },
     });
 
     const unchanged = collect();
@@ -5441,7 +5705,12 @@ describe('what a run says its requests were for', () => {
     );
 
     expect(doneOf(unchanged.events).requestsBy).toEqual({
-      request: { requests: 1, requestMs: expect.any(Number), failed: {} },
+      request: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: {},
+      },
     });
   });
 
@@ -5520,6 +5789,136 @@ describe('what a run says its requests were for', () => {
     expect(await failedWith((reason) => reason)).toEqual({});
     expect(await failedWith((reason) => new Error('gave up', { cause: reason }))).toEqual({});
     expect(await failedWith(() => new Error('gave up', { cause: aborted }))).toEqual({});
+  });
+});
+
+describe('where a run says a site’s time went', () => {
+  const doneOf = (events: EpgEvent[], site = 'example.com') =>
+    events.find((event) => event.type === 'site:done' && event.site === site) as Extract<
+      EpgEvent,
+      { type: 'site:done' }
+    >;
+  const whole = (msBy: TimeSpent): number => Object.values(msBy).reduce((sum, ms) => sum + ms, 0);
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('gives it to its requests and its own work, and adds up to ms', async () => {
+    const report = collect();
+    const config = makeConfig({
+      async request() {
+        await sleep(60);
+
+        return {};
+      },
+      parseDay({ day }) {
+        // Thirty milliseconds of work of its own, on this thread.
+        const until = performance.now() + 30;
+
+        while (performance.now() < until) {
+          // Working.
+        }
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    const { ms, msBy } = doneOf(report.events);
+
+    expect(msBy.source).toBeGreaterThanOrEqual(50);
+    expect(msBy.working).toBeGreaterThanOrEqual(25);
+    expect(whole(msBy)).toBe(ms);
+  });
+
+  it('says its work waited for a slot another site held', async () => {
+    const report = collect();
+    // The run's one slot, held a while by a parse waiting on no request.
+    const holding = makeConfig({
+      site: 'holding.example',
+      async parseDay({ day }) {
+        await sleep(120);
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+    const waiting = makeConfig({
+      site: 'waiting.example',
+      async request() {
+        await sleep(20);
+
+        return {};
+      },
+    });
+
+    await grab([holding, waiting], {
+      cache: new MemoryCache(),
+      now: NOW,
+      localConcurrency: 1,
+      reporter: report.reporter,
+    });
+
+    const { ms, msBy } = doneOf(report.events, 'waiting.example');
+
+    expect(msBy.queued).toBeGreaterThanOrEqual(60);
+    expect(whole(msBy)).toBe(ms);
+  });
+
+  it('times a list settled before the grab only while its request is out', async () => {
+    const session = openSession(makeConfig(), new MemoryCache());
+
+    try {
+      await session.send(
+        async () => {
+          await sleep(30);
+
+          return [];
+        },
+        { label: 'channels' },
+      );
+      // Settled: a hold now, waiting for the turn, is no time of its.
+      session.clock.held(true);
+      await sleep(30);
+
+      expect(session.clock.spent().source).toBeGreaterThanOrEqual(25);
+      expect(session.clock.spent().held).toBe(0);
+    } finally {
+      session.pacing.dispose();
+    }
+  });
+
+  it('says how long each kind of request waited for its turn', async () => {
+    const report = collect();
+    const config = makeConfig({
+      channels: [channel('one.example'), channel('two.example')],
+      // The second planned request waits for the window.
+      rateLimit: { requests: 1, perMs: 80 },
+      async parseDay({ day, paced }) {
+        // Three at once, one at a time: the second and third wait their turn.
+        await Promise.all(
+          ['a', 'b', 'c'].map((id) =>
+            paced(
+              async () => {
+                await sleep(30);
+
+                return id;
+              },
+              { label: 'detail' },
+            ),
+          ),
+        );
+
+        return [programme(`${day}T06:00:00.000Z`)];
+      },
+    });
+
+    await grab([config], { cache: new MemoryCache(), now: NOW, reporter: report.reporter });
+
+    const { request, detail } = doneOf(report.events).requestsBy;
+
+    expect(request!.waitedMs).toBeGreaterThanOrEqual(30);
+    // Each channel-day's three: the second waits one, the third two — and
+    // the window, which every request is under.
+    expect(detail!.waitedMs).toBeGreaterThanOrEqual(150);
   });
 });
 

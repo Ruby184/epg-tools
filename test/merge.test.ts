@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { CacheStore, ChannelDayKey } from '../src/cache/types.js';
 import type { EpgEvent } from '../src/core/events.js';
 import type { GrabberChannel, SiteConfig } from '../src/grabber/types.js';
@@ -753,7 +753,127 @@ describe('mergeProgrammeLists', () => {
   });
 });
 
+describe('why two programmes did not match', () => {
+  const at = (start: string, title: string, stop?: string): XmltvProgramme => ({
+    ...prog('X', start, title),
+    ...(stop === undefined ? {} : { stop: parseXmltvDate(stop) }),
+  });
+  const why = (match: ReturnType<typeof resolveMatch>, a: XmltvProgramme, b: XmltvProgramme) =>
+    match.apart(a, b);
+
+  it('says the titles, the starts, both, or the runs, by the rules it matched by', () => {
+    const match = resolveMatch();
+
+    // Nothing, of one broadcast: one answer to whether they are, and why not.
+    expect(why(match, at('2026-01-15T10:00:00Z', 'News'), at('2026-01-15T10:02:00Z', 'News'))).toBe(
+      undefined,
+    );
+
+    expect(
+      why(match, at('2026-01-15T10:00:00Z', 'News'), at('2026-01-15T10:02:00Z', 'Správy')),
+    ).toBe('title');
+    expect(why(match, at('2026-01-15T10:00:00Z', 'Film'), at('2026-01-15T10:07:00Z', 'Film'))).toBe(
+      'start',
+    );
+    expect(why(match, at('2026-01-15T10:00:00Z', 'News'), at('2026-01-15T10:07:00Z', 'Film'))).toBe(
+      'both',
+    );
+    // Near enough and the same title, but further apart than the shorter
+    // lasts: two clips in a row, which no tolerance would join…
+    expect(
+      why(
+        match,
+        at('2026-01-15T10:00:00Z', 'Clip', '20260115100200 +0000'),
+        at('2026-01-15T10:03:00Z', 'Clip', '20260115100500 +0000'),
+      ),
+    ).toBe('runs');
+    // …or a segment within the show it is part of.
+    expect(
+      why(
+        match,
+        at('2026-01-15T06:00:00Z', 'Morning', '20260115090000 +0000'),
+        at('2026-01-15T06:04:00Z', 'Morning', '20260115060600 +0000'),
+      ),
+    ).toBe('runs');
+  });
+
+  it('counts the titles only where they are compared', () => {
+    // Never: the starts alone, whatever the titles say.
+    expect(
+      why(
+        resolveMatch({ titles: 'never' }),
+        at('2026-01-15T10:00:00Z', 'News'),
+        at('2026-01-15T10:07:00Z', 'Správy'),
+      ),
+    ).toBe('start');
+    // Always: on an identical start too.
+    expect(
+      why(
+        resolveMatch({ titles: 'always' }),
+        at('2026-01-15T10:00:00Z', 'News'),
+        at('2026-01-15T10:00:00Z', 'Správy'),
+      ),
+    ).toBe('title');
+  });
+
+  it('says a matcher of one’s own said no, whatever the shipped rules would say', () => {
+    // At the same instant, under the same title: its own reasons.
+    expect(
+      why(
+        resolveMatch(() => false),
+        at('2026-01-15T10:00:00Z', 'News'),
+        at('2026-01-15T10:00:00Z', 'News'),
+      ),
+    ).toBe('matcher');
+    // Titles the shipped rules would call different are its business too:
+    // nothing of them is asked on its behalf.
+    expect(
+      why(
+        resolveMatch({ windowMs: 180_000, matches: () => false }),
+        at('2026-01-15T10:00:00Z', 'News'),
+        at('2026-01-15T10:02:00Z', 'Správy'),
+      ),
+    ).toBe('matcher');
+  });
+
+  it('says a matcher with a window that two start beyond it, and never asks it', () => {
+    const asked = vi.fn(() => true);
+
+    expect(
+      why(
+        resolveMatch({ windowMs: 60_000, matches: asked }),
+        at('2026-01-15T10:00:00Z', 'News'),
+        at('2026-01-15T10:02:00Z', 'News'),
+      ),
+    ).toBe('start');
+    expect(asked).not.toHaveBeenCalled();
+  });
+});
+
 describe('mergeProgrammeLists start tolerance', () => {
+  it('joins the nearest it matches, though a farther one comes after it', () => {
+    const merged = mergeProgrammeLists(
+      [
+        [
+          prog('X', '2026-01-15T10:00:00Z', 'News', 'sk'),
+          prog('X', '2026-01-15T10:04:00Z', 'News', 'sk'),
+        ],
+        // A minute from the first, three from the second: both within reach.
+        [
+          prog('X', '2026-01-15T10:01:00Z', 'News', 'en', {
+            desc: [{ value: 'the second source' }],
+          }),
+        ],
+      ],
+      'merge',
+    );
+
+    // Joined to the first — nearest — and the second left as it was.
+    expect(merged).toHaveLength(2);
+    expect(merged[0]!.desc).toEqual([{ value: 'the second source' }]);
+    expect(merged[1]!.desc).toBeUndefined();
+  });
+
   it('merges a shifted start when the titles agree', () => {
     const merged = mergeProgrammeLists(
       [
@@ -1726,6 +1846,328 @@ describe.skipIf(!xmltvReady)('generateGuide', () => {
     // the examples are only there to say whether it is one channel or all.
     expect(said[0]?.nearMiss).toBe(12);
     expect(said[0]?.examples).toHaveLength(5);
+  });
+
+  it('says each near miss, whose each one is, and what kept them apart', async () => {
+    const said: Extract<EpgEvent, { type: 'merge:unmatched' }>[] = [];
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        [`site-a.sk|X|${DAY}`]: [
+          prog('X', '2026-01-15T10:00:00Z', 'Správy', 'sk'),
+          prog('X', '2026-01-15T12:00:00Z', 'Film', 'sk'),
+          prog('X', '2026-01-15T14:00:00Z', 'Šport', 'sk'),
+        ],
+        [`site-b.com|X|${DAY}`]: [
+          // Near enough, under another name.
+          prog('X', '2026-01-15T10:02:00Z', 'News', 'en'),
+          // The same name, too far apart.
+          prog('X', '2026-01-15T12:07:00Z', 'Film', 'en'),
+          // Neither.
+          prog('X', '2026-01-15T14:07:00Z', 'Football', 'en'),
+        ],
+      }),
+      days: 1,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:unmatched') {
+          said.push(event);
+        }
+      },
+    });
+
+    expect(said.map(({ type: _type, level: _level, phase: _phase, ...rest }) => rest)).toEqual([
+      {
+        channelId: 'X',
+        shiftMs: 120_000,
+        why: 'title',
+        programme: { site: 'site-b.com', title: 'News', start: '20260115100200 +0000' },
+        nearby: { site: 'site-a.sk', title: 'Správy', start: '20260115100000 +0000' },
+      },
+      {
+        channelId: 'X',
+        shiftMs: 420_000,
+        why: 'start',
+        programme: { site: 'site-b.com', title: 'Film', start: '20260115120700 +0000' },
+        nearby: { site: 'site-a.sk', title: 'Film', start: '20260115120000 +0000' },
+      },
+      {
+        channelId: 'X',
+        shiftMs: 420_000,
+        why: 'both',
+        programme: { site: 'site-b.com', title: 'Football', start: '20260115140700 +0000' },
+        nearby: { site: 'site-a.sk', title: 'Šport', start: '20260115140000 +0000' },
+      },
+    ]);
+    // At `debug`: a guide on two grids says thousands of these.
+    expect(said[0]).toMatchObject({ level: 'debug', phase: 'merge' });
+  });
+
+  it('says how much later a near miss starts than the one it nearly met — or earlier', async () => {
+    const said: Extract<EpgEvent, { type: 'merge:unmatched' }>[] = [];
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'Správy', 'sk')],
+        [`site-b.com|X|${DAY}`]: [prog('X', '2026-01-15T09:53:00Z', 'Správy', 'en')],
+      }),
+      days: 1,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:unmatched') {
+          said.push(event);
+        }
+      },
+    });
+
+    expect(said).toEqual([expect.objectContaining({ shiftMs: -420_000, why: 'start' })]);
+  });
+
+  it('takes for no near miss a programme a later one of the same list then joined', async () => {
+    const said: Extract<EpgEvent, { type: 'merge:unmatched' }>[] = [];
+    const summary: Extract<EpgEvent, { type: 'merge:summary' }>[] = [];
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        [`site-a.sk|X|${DAY}`]: [
+          prog('X', '2026-01-15T19:45:00Z', 'Reklama', 'sk'),
+          prog('X', '2026-01-15T20:00:00Z', 'Film', 'sk'),
+          prog('X', '2026-01-15T23:00:00Z', 'Správy', 'sk'),
+        ],
+        // B's filler is nearest A's film, which B's own film then joins: the
+        // filler's near miss is A's advert, the nearest still left.
+        [`site-b.com|X|${DAY}`]: [
+          prog('X', '2026-01-15T19:53:00Z', 'Filler', 'en'),
+          prog('X', '2026-01-15T20:00:00Z', 'Film', 'en'),
+          // And one whose only candidate was taken: none at all.
+          prog('X', '2026-01-15T22:53:00Z', 'Promo', 'en'),
+          prog('X', '2026-01-15T23:00:00Z', 'Správy', 'en'),
+        ],
+      }),
+      days: 1,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:unmatched') {
+          said.push(event);
+        } else if (event.type === 'merge:summary') {
+          summary.push(event);
+        }
+      },
+    });
+
+    expect(said.map((event) => [event.programme.title, event.nearby.title])).toEqual([
+      ['Filler', 'Reklama'],
+    ]);
+    expect(summary[0]).toMatchObject({ combined: 2, nearMiss: 1 });
+  });
+
+  it('says what the sources made of each other once, though a channel is derived from them', async () => {
+    const said: EpgEvent[] = [];
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        [`site-a.sk|X|${DAY}`]: [
+          prog('X', '2026-01-15T10:00:00Z', 'Správy', 'sk'),
+          prog('X', '2026-01-15T12:00:00Z', 'Film', 'sk'),
+        ],
+        [`site-b.com|X|${DAY}`]: [
+          prog('X', '2026-01-15T10:00:00Z', 'Správy', 'en'),
+          prog('X', '2026-01-15T12:07:00Z', 'Film', 'en'),
+        ],
+      }),
+      days: 1,
+      now: NOW,
+      derived: [{ xmltvId: 'X.plus1', from: 'X', offset: 60 }],
+      reporter: (event) => said.push(event),
+    });
+
+    const unmatched = said.filter((event) => event.type === 'merge:unmatched');
+
+    expect(unmatched).toEqual([expect.objectContaining({ channelId: 'X' })]);
+    expect(said.find((event) => event.type === 'merge:summary')).toMatchObject({
+      combined: 1,
+      nearMiss: 1,
+    });
+  });
+
+  it('makes no near miss for a reporter that does not want one, and counts it all the same', async () => {
+    const said: EpgEvent[] = [];
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'Správy', 'sk')],
+        [`site-b.com|X|${DAY}`]: [prog('X', '2026-01-15T10:07:00Z', 'News', 'en')],
+      }),
+      days: 1,
+      now: NOW,
+      // Told everything it is handed, and wanting all but those.
+      reporter: Object.assign((event: EpgEvent) => said.push(event), {
+        wants: (type: EpgEvent['type']) => type !== 'merge:unmatched',
+      }),
+    });
+
+    expect(said.some((event) => event.type === 'merge:unmatched')).toBe(false);
+    expect(said.find((event) => event.type === 'merge:summary')).toMatchObject({ nearMiss: 1 });
+  });
+
+  it('takes no source’s own programme of the day before for one it nearly was', async () => {
+    const NEXT_DAY = '2026-01-16';
+    const said: Extract<EpgEvent, { type: 'merge:unmatched' }>[] = [];
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T12:00:00Z', 'Obed', 'sk')],
+        [`site-a.sk|X|${NEXT_DAY}`]: [prog('X', '2026-01-16T12:00:00Z', 'Obed', 'sk')],
+        // B's late programme, held into the next day, and B's next one after it.
+        [`site-b.com|X|${DAY}`]: [prog('X', '2026-01-15T23:50:00Z', 'Late', 'en')],
+        [`site-b.com|X|${NEXT_DAY}`]: [prog('X', '2026-01-16T00:05:00Z', 'Night', 'en')],
+      }),
+      days: 2,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:unmatched') {
+          said.push(event);
+        }
+      },
+    });
+
+    // Two programmes of B's in a row, not two sources that nearly agreed.
+    expect(said).toEqual([]);
+  });
+
+  it('takes no source’s own programme of the day before for one it nearly was, though another joined it', async () => {
+    const NEXT_DAY = '2026-01-16';
+    const said: Extract<EpgEvent, { type: 'merge:unmatched' }>[] = [];
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        // A's and B's late programme, one broadcast, held into the next day.
+        [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T23:50:00Z', 'Late', 'sk')],
+        [`site-a.sk|X|${NEXT_DAY}`]: [prog('X', '2026-01-16T12:00:00Z', 'Obed', 'sk')],
+        [`site-b.com|X|${DAY}`]: [prog('X', '2026-01-15T23:50:00Z', 'Late', 'en')],
+        [`site-b.com|X|${NEXT_DAY}`]: [prog('X', '2026-01-16T00:05:00Z', 'Night', 'en')],
+      }),
+      days: 2,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:unmatched') {
+          said.push(event);
+        }
+      },
+    });
+
+    // B's programme as much as A's: two of B's in a row.
+    expect(said).toEqual([]);
+  });
+
+  it('counts no source’s own programme of the day before, said again, as two that agreed', async () => {
+    const NEXT_DAY = '2026-01-16';
+    const said: Extract<EpgEvent, { type: 'merge:summary' }>[] = [];
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T12:00:00Z', 'Obed', 'sk')],
+        [`site-a.sk|X|${NEXT_DAY}`]: [prog('X', '2026-01-16T12:00:00Z', 'Obed', 'sk')],
+        // B's late programme, and B saying it again with the next day's.
+        [`site-b.com|X|${DAY}`]: [prog('X', '2026-01-15T23:50:00Z', 'Late', 'en')],
+        [`site-b.com|X|${NEXT_DAY}`]: [
+          prog('X', '2026-01-15T23:50:00Z', 'Late', 'en'),
+          prog('X', '2026-01-16T00:05:00Z', 'Night', 'en'),
+        ],
+      }),
+      days: 2,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:summary') {
+          said.push(event);
+        }
+      },
+    });
+
+    expect(said[0]).toMatchObject({ combined: 0 });
+  });
+
+  it('watches a day’s first source too, against another’s programme held over from the day before', async () => {
+    const NEXT_DAY = '2026-01-16';
+    const unmatched: Extract<EpgEvent, { type: 'merge:unmatched' }>[] = [];
+    const summary: Extract<EpgEvent, { type: 'merge:summary' }>[] = [];
+
+    await generate({
+      sites: [siteA, siteB],
+      cache: createFakeCache({
+        // Only B answered for the first day, so its late programmes are held.
+        [`site-b.com|X|${DAY}`]: [
+          prog('X', '2026-01-15T23:30:00Z', 'Late', 'en'),
+          prog('X', '2026-01-15T23:50:00Z', 'Later', 'en'),
+        ],
+        // A, first of the next day, meets one of them and nearly meets the other.
+        [`site-a.sk|X|${NEXT_DAY}`]: [
+          prog('X', '2026-01-15T23:30:00Z', 'Late', 'sk'),
+          prog('X', '2026-01-15T23:57:00Z', 'Later', 'sk'),
+        ],
+      }),
+      days: 2,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:unmatched') {
+          unmatched.push(event);
+        } else if (event.type === 'merge:summary') {
+          summary.push(event);
+        }
+      },
+    });
+
+    expect(unmatched).toEqual([
+      expect.objectContaining({
+        why: 'start',
+        programme: expect.objectContaining({ site: 'site-a.sk', title: 'Later' }),
+        nearby: expect.objectContaining({ site: 'site-b.com', title: 'Later' }),
+      }),
+    ]);
+    expect(summary[0]).toMatchObject({ combined: 1, nearMiss: 1 });
+  });
+
+  it('says which site a near miss is with, though two had merged it, or a third joined it', async () => {
+    const siteC = makeSite('site-c.cz', [{ xmltvId: 'X', siteId: 'c-x' }]);
+    const said: Extract<EpgEvent, { type: 'merge:unmatched' }>[] = [];
+
+    await generate({
+      sites: [siteA, siteB, siteC],
+      cache: createFakeCache({
+        // A's and B's 10:00 are one programme, made anew; B's 12:00 is B's alone.
+        [`site-a.sk|X|${DAY}`]: [prog('X', '2026-01-15T10:00:00Z', 'Správy', 'sk')],
+        [`site-b.com|X|${DAY}`]: [
+          prog('X', '2026-01-15T10:00:00Z', 'Správy', 'en'),
+          prog('X', '2026-01-15T12:00:00Z', 'Film', 'en'),
+        ],
+        // And C nearly meets each.
+        [`site-c.cz|X|${DAY}`]: [
+          prog('X', '2026-01-15T10:07:00Z', 'Správy', 'cs'),
+          prog('X', '2026-01-15T12:07:00Z', 'Film', 'cs'),
+        ],
+      }),
+      days: 1,
+      now: NOW,
+      reporter: (event) => {
+        if (event.type === 'merge:unmatched') {
+          said.push(event);
+        }
+      },
+    });
+
+    expect(said.map((event) => [event.programme.site, event.nearby.site])).toEqual([
+      // The merged one is its base's: the higher site's.
+      ['site-c.cz', 'site-a.sk'],
+      ['site-c.cz', 'site-b.com'],
+    ]);
   });
 
   it('skips missing cache entries silently', async () => {

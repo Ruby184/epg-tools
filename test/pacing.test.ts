@@ -3,9 +3,11 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { KyInstance } from 'ky';
 import { describe, expect, it, vi } from 'vitest';
+import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
+import { openSession } from '../src/grabber/session.js';
 import { retryAfterMs, sitePacing } from '../src/grabber/pacing.js';
 import type { AnySiteConfig } from '../src/grabber/types.js';
-import { emitter } from '../src/core/events.js';
+import { emitter, type Emit } from '../src/core/events.js';
 import { collect } from './reporting.js';
 
 /** A site config with just enough on it for the pacing to be built. */
@@ -240,9 +242,187 @@ describe('sitePacing', () => {
 
       // Ten minutes is what it asked for; a grab is not sitting still for that.
       expect(report.messages).toContain('[example.tv] HTTP 429: holding requests for 40ms');
+      // Said beside what it was given, so a reader knows it was cut short.
+      expect(report.of('pacing:held')).toEqual([
+        expect.objectContaining({ status: 429, ms: 40, retryAfterMs: 600_000 }),
+      ]);
       dispose();
     } finally {
       server.close();
+    }
+  });
+
+  it('says a hold made longer, rather than one begun', async () => {
+    // The second asks for longer than is left of the first: one hold, longer.
+    const server = await scripted([
+      { status: 429 },
+      { status: 429, headers: { 'retry-after': '5' } },
+    ]);
+
+    try {
+      const report = collect();
+      const { http, dispose } = sitePacing(site({ backoff: { fallbackMs: 2_000 } }), {
+        emit: emitter({ reporter: report.reporter }),
+      });
+
+      await hit(http, server.url);
+      await hit(http, server.url);
+
+      const [begun, longer] = report.of('pacing:held');
+
+      expect(begun).not.toHaveProperty('lengthened');
+      expect(longer).toMatchObject({ ms: 5_000, retryAfterMs: 5_000, lengthened: true });
+      expect(report.messages).toContain(
+        '[example.tv] HTTP 429: holding requests longer, for 5000ms from now',
+      );
+      dispose();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('refuses an emit that says nothing of what it wants, before a grab could throw on it', () => {
+    // As a JavaScript caller would hand it: a function, and nothing more.
+    const plain = ((): void => {}) as unknown as Emit;
+
+    expect(() => sitePacing(site(), { emit: plain })).toThrow(
+      /emit with no hears: make it with emitter/,
+    );
+  });
+
+  it('says the source asked for nothing, where it sent no Retry-After', async () => {
+    const server = await scripted([{ status: 503 }]);
+
+    try {
+      const report = collect();
+      const { http, dispose } = sitePacing(site({ backoff: { fallbackMs: 30 } }), {
+        emit: emitter({ reporter: report.reporter }),
+      });
+
+      await hit(http, server.url);
+
+      const [held] = report.of('pacing:held');
+
+      expect(held).toMatchObject({ status: 503, ms: 30 });
+      expect(held).not.toHaveProperty('retryAfterMs');
+      dispose();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('tells the clock how long a request waited behind a hold, and no longer', async () => {
+    const server = await scripted([{ status: 429 }, { status: 200 }]);
+    const session = openSession(
+      site({ backoff: { fallbackMs: 40 } }),
+      new CacheManager({ driver: new MemoryCacheDriver() }),
+    );
+
+    try {
+      session.clock.turn(true);
+      await session.send(() => hit(session.pacing.http, server.url), { label: 'request' });
+      // Held: this one waits behind it for the forty milliseconds.
+      await session.send(() => hit(session.pacing.http, server.url), { label: 'request' });
+      const { held } = session.clock.spent();
+
+      // Nothing waiting, so nothing more held up — though the hold says nothing
+      // of that, and a timer that runs late on a busy machine is no failure.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(held).toBeGreaterThanOrEqual(30);
+      expect(session.clock.spent().held).toBe(held);
+    } finally {
+      session.pacing.dispose();
+      server.close();
+    }
+  });
+
+  it('tells the clock the run was cancelled, so what it dropped waits no more', async () => {
+    const run = new AbortController();
+    const session = openSession(site(), new CacheManager({ driver: new MemoryCacheDriver() }), {
+      signal: run.signal,
+    });
+
+    try {
+      session.clock.turn(true);
+      // Local work waiting for a slot, which the cancel drops.
+      session.clock.queued();
+      run.abort();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(session.clock.spent().queued).toBeLessThan(5);
+    } finally {
+      session.pacing.dispose();
+    }
+  });
+
+  it('tells the clock a request ky retries after a 429 was held, not out to the source', async () => {
+    const server = await scripted([{ status: 429 }, { status: 200 }]);
+    const session = openSession(
+      site({ backoff: { fallbackMs: 60 } }),
+      new CacheManager({ driver: new MemoryCacheDriver() }),
+    );
+
+    try {
+      session.clock.turn(true);
+      // One request, retried by ky itself: what a site asking one at a time does.
+      await session.send(
+        async () => {
+          const response = await session.pacing.http.get(server.url, {
+            retry: { limit: 1, delay: () => 60 },
+          });
+
+          await response.body?.cancel();
+        },
+        { label: 'request' },
+      );
+
+      expect(server.hits).toBe(2);
+      expect(session.clock.spent().held).toBeGreaterThanOrEqual(50);
+    } finally {
+      session.pacing.dispose();
+      server.close();
+    }
+  });
+
+  it('tells the clock of a run cancelled before the site was set up', async () => {
+    const run = new AbortController();
+
+    run.abort();
+
+    const session = openSession(site(), new CacheManager({ driver: new MemoryCacheDriver() }), {
+      signal: run.signal,
+    });
+
+    try {
+      session.clock.turn(true);
+      // Dropped the moment it is asked: nothing waits.
+      session.clock.queued();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(session.clock.spent().queued).toBe(0);
+    } finally {
+      session.pacing.dispose();
+    }
+  });
+
+  it('tells the clock how long its own rate limit held a request back', async () => {
+    const session = openSession(
+      site({ rateLimit: { requests: 1, perMs: 60 } }),
+      new CacheManager({ driver: new MemoryCacheDriver() }),
+    );
+
+    try {
+      session.clock.turn(true);
+      // Two at once: the second waits for the window.
+      await Promise.all([
+        session.send(async () => {}, { label: 'request' }),
+        session.send(async () => {}, { label: 'request' }),
+      ]);
+
+      expect(session.clock.spent().rateLimit).toBeGreaterThanOrEqual(40);
+    } finally {
+      session.pacing.dispose();
     }
   });
 

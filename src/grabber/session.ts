@@ -16,12 +16,16 @@
 import type { CacheStore } from '../cache/types.js';
 import { causes, failureOf } from '../core/error.js';
 import {
+  emitOf,
   noRequests,
+  silent,
   type Emit,
   type EpgEventInput,
   type GrabCounts,
+  type MeasuredTime,
   type RequestCounts,
 } from '../core/events.js';
+import { SiteClock, timeSpent, type TimeSink } from './clock.js';
 import { sitePacing, type SitePacing } from './pacing.js';
 import { isUnchanged } from './revalidate.js';
 import { SiteStateHandle } from './state.js';
@@ -56,6 +60,12 @@ export interface SiteSession {
    */
   readonly spanMs: number;
   /**
+   * Where the site's time goes, its requests' share of it measured here, its
+   * pacing's by {@link pacing}, and the rest by whoever runs its turn — see
+   * `site:done`'s `msBy`.
+   */
+  readonly clock: SiteClock;
+  /**
    * One request through the queue, counted and timed under `label` — handed
    * the queue's own signal, which is the run's.
    *
@@ -73,9 +83,10 @@ export interface SiteSession {
   ): Promise<T>;
   /**
    * Be part of `run` from here: its `requested` told what has been counted so
-   * far, and of every request after, and its `emit` what the session says — for
-   * a session opened before the run it reports to, as one settling a channel
-   * list is.
+   * far, and of every request after, and its `emit` what the session says —
+   * for a session opened before the run it reports to, as one settling a
+   * channel list is. Its time is read off its {@link clock} by whoever says
+   * the site is done.
    */
   joinRun(run: { requested: RequestSink; emit: Emit }): void;
 }
@@ -99,6 +110,7 @@ export function addRequests(
 
   total.requests += done.requests;
   total.requestMs += done.requestMs;
+  total.waitedMs += done.waitedMs;
 
   for (const [failure, n] of Object.entries(done.failed)) {
     total.failed[failure] = (total.failed[failure] ?? 0) + n;
@@ -128,14 +140,20 @@ export function totalOf(counted: Iterable<RequestCounts>): { requests: number; r
   return { requests, requestMs };
 }
 
-/** A site's `site:done`: its requests added up from `requestsBy`, beside its channel-days. */
+/**
+ * A site's `site:done`: its requests added up from `requestsBy`, beside its
+ * channel-days, and its wall clock `ms` with what of it was `measured` — see
+ * `timeSpent`.
+ */
 export function siteDone(
   site: string,
-  ms: number,
+  wall: number,
   requestsBy: Record<string, RequestCounts>,
   counts: GrabCounts,
+  measured: Record<MeasuredTime, number>,
 ): Extract<EpgEventInput, { type: 'site:done' }> {
   const { requests, requestMs } = totalOf(Object.values(requestsBy));
+  const { ms, msBy } = timeSpent(wall, measured);
   // The counts and nothing else, whatever else `counts` holds — an event.
   const { fetched, empty, fromCache, unchanged, failed, sitesFailed } = counts;
 
@@ -146,6 +164,7 @@ export function siteDone(
     ms,
     requestMs,
     requestsBy,
+    msBy,
     fetched,
     empty,
     fromCache,
@@ -173,9 +192,9 @@ export function mergedRequests(
 /** What `by` holds, as an event carries it: copies, which go on saying what they said. */
 export function requestsObject(by: Map<string, RequestCounts>): Record<string, RequestCounts> {
   return Object.fromEntries(
-    [...by].map(([label, { requests, requestMs, failed }]) => [
+    [...by].map(([label, { requests, requestMs, waitedMs, failed }]) => [
       label,
-      { requests, requestMs, failed: { ...failed } },
+      { requests, requestMs, waitedMs, failed: { ...failed } },
     ]),
   );
 }
@@ -225,13 +244,21 @@ export function openSession(
     emit?: Emit;
     /** The run's, told of each request as it is done — see {@link SiteSession.joinRun}. */
     counted?: RequestSink;
+    /** Told of the site's time as it is spent: a thread's shared memory — see `Run.spent`. */
+    spent?: TimeSink | undefined;
   } = {},
 ): SiteSession {
   /** Whoever is told what the session says: the run's, once it has joined one. */
   let say = options.emit;
+  const clock = new SiteClock(options.spent);
   const pacing = sitePacing(config, {
     ...(options.signal ? { signal: options.signal } : {}),
-    emit: (event) => say?.(event),
+    // To whoever is told now, and wanting what they want.
+    emit: emitOf(
+      (event) => say?.(event),
+      () => (say ?? silent).hears,
+    ),
+    clock,
   });
   /** By label, in the order each was first sent — which is the order they are reported in. */
   const by = new Map<string, RequestCounts>();
@@ -267,22 +294,31 @@ export function openSession(
     get spanMs() {
       return asked === undefined || answered === undefined ? 0 : answered - asked;
     },
+    clock,
     joinRun(run) {
       tellAll(run.requested, by);
       sink = run.requested;
       say = run.emit;
     },
     send: (task, { label, ...sending }) => {
-      asked ??= Date.now();
+      const queued = Date.now();
+      // Waiting its turn — and outside a turn, what puts the site on the clock
+      // until it is settled.
+      const counted = clock.ask();
+
+      asked ??= queued;
 
       // The run's signal on every task, as the run's own queues have it: a
       // waiting request is dropped on a cancel rather than started.
-      return pacing.queue.add(
+      const sent = pacing.queue.add(
         async (slot) => {
-          // Sent now — and so listed in the order each label was first sent.
-          count(label, { requests: 1, requestMs: 0, failed: {} });
-
           const began = Date.now();
+
+          // Sent now — and so listed in the order each label was first sent,
+          // with how long it waited for its turn.
+          count(label, { requests: 1, requestMs: 0, waitedMs: began - queued, failed: {} });
+          clock.sent();
+
           let failure: string | undefined;
 
           try {
@@ -292,16 +328,27 @@ export function openSession(
 
             throw error;
           } finally {
+            clock.answered();
             answered = Date.now();
             count(label, {
               requests: 0,
               requestMs: answered - began,
+              waitedMs: 0,
               failed: failure === undefined ? {} : { [failure]: 1 },
             });
           }
         },
         { ...sending, ...(options.signal ? { signal: options.signal } : {}) },
       );
+      if (counted) {
+        // Settled however it went — answered, or dropped by a cancel before
+        // its turn — and no longer keeping the site on the clock.
+        const settled = (): void => clock.settled();
+
+        void sent.then(settled, settled);
+      }
+
+      return sent;
     },
   };
 }

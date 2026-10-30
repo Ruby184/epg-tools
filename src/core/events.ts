@@ -167,7 +167,77 @@ export function noCounts(): GrabCounts {
 
 /** A label's requests at nought, before any is counted — see {@link RequestCounts}. */
 export function noRequests(): RequestCounts {
-  return { requests: 0, requestMs: 0, failed: {} };
+  return { requests: 0, requestMs: 0, waitedMs: 0, failed: {} };
+}
+
+/**
+ * Where a site's `ms` went — `site:done`'s `msBy`. At each moment the site was
+ * in the first of these that held, so the parts never overlap and add up to
+ * `ms`: a site that took 170 seconds over two requests answered in under one
+ * says here what it was doing with the rest.
+ */
+export interface TimeSpent {
+  /**
+   * At least one of its requests out, waiting on the source, and none held —
+   * once however many were: the wall clock they covered, where `requestMs`
+   * adds up each one's own, and is the same only for a site that sends one at
+   * a time. A streaming site's pass reading its document is the source's too,
+   * where nothing else of the site's holds: its body arriving long after its
+   * headers did, and split as it does — the two are one, and not told apart.
+   */
+  source: number;
+  /**
+   * Its requests held, the source having said slow down — a `429` or `503` —
+   * with one of them outstanding: waiting its turn, or out, which under a
+   * hold is one ky retries once the source's `Retry-After` is up, or one sent
+   * before it that the hold holds up as much. First of them all, so a site
+   * asking one at a time is seen to be held, and not waiting on the source.
+   */
+  held: number;
+  /** None out, and waiting on its own `rateLimit` to let the next one go. */
+  rateLimit: number;
+  /** Its own work on this machine under way: a `parseDay`, a write to the cache, a check of what is cached. */
+  working: number;
+  /** None of that under way, and some of it waiting for one of the run's `localConcurrency` slots. */
+  queued: number;
+  /** None of these: its own code between them, reading what it remembered, its turn's beginning and end. */
+  other: number;
+}
+
+/** The parts of {@link TimeSpent} a run measures — `other` is what is left of `ms`. */
+export type MeasuredTime = Exclude<keyof TimeSpent, 'other'>;
+
+/** Every part of {@link TimeSpent} a run measures — which a moment is given to is `SiteClock`'s to say. */
+export const MEASURED_TIME = [
+  'source',
+  'held',
+  'rateLimit',
+  'working',
+  'queued',
+] as const satisfies readonly MeasuredTime[];
+
+/**
+ * What kept two programmes from being one — `merge:unmatched`'s `why`.
+ *
+ * Under the shipped match: `title` — they started near enough, and their
+ * titles differ, which `normalizeTitle` decides; `start` — their titles agree,
+ * and they start too far apart, which `startToleranceMs` decides; `both`; and
+ * `runs` — their titles agree and they start near enough, but further apart
+ * than the shorter of them lasts: two programmes in a row, or one within the
+ * other, as a segment is within its show. Under the config's own
+ * `match`: `matcher` — it said no, for reasons of its own — or, for one with a
+ * `windowMs`, `start`: they start beyond it, where it is never asked.
+ */
+export type NearMissWhy = 'title' | 'start' | 'both' | 'runs' | 'matcher';
+
+/** One side of a `merge:unmatched` pair. */
+export interface UnmatchedProgramme {
+  /** The site it came from. */
+  site: string;
+  /** Its title — the first it has. */
+  title: string;
+  /** Its start, as the guide writes it: `20261024200500 +0200`. */
+  start: string;
 }
 
 /**
@@ -193,9 +263,19 @@ export interface RequestCounts {
   /**
    * How long they spent waiting on the source, pacing not included: the
    * label's share of `site:done`'s `requestMs`, and nothing like its `ms`,
-   * which is the site's wall clock.
+   * which is the site's wall clock. Each request's own time, added up — four
+   * in flight together for a second each are four seconds here, and one
+   * second of `msBy.source`.
    */
   requestMs: number;
+  /**
+   * How long they waited in the site's queue before each was sent: for the
+   * source to stop holding them, for its `rateLimit`, or for one of its
+   * `concurrency` slots — added up as `requestMs` is. A parse's `paced` calls go
+   * ahead of the planned requests, so where both are waiting it is the planned
+   * ones whose `waitedMs` grows.
+   */
+  waitedMs: number;
   /**
    * The ones that failed, by what failed them: the status the source answered
    * with (`'404'`), `'timeout'`, `'network'` where nothing answered, or
@@ -286,6 +366,10 @@ export type EpgEventInput =
    * `requestsBy` is `requests` and `requestMs` again, by what each request was
    * for, with what failed them — see {@link RequestCounts}. "5291 requests"
    * does not say that 3,242 of them were detail calls answered `404`.
+   *
+   * `msBy` is `ms` again, by what the site was doing — see {@link TimeSpent}.
+   * A site whose `ms` is far above what its requests explain was waiting on
+   * something else, and this says which.
    */
   | ({
       type: 'site:done';
@@ -294,6 +378,7 @@ export type EpgEventInput =
       ms: number;
       requestMs: number;
       requestsBy: Record<string, RequestCounts>;
+      msBy: TimeSpent;
     } & GrabCounts)
   /** The site could not be read or run at all, so none of it was grabbed. */
   | { type: 'site:failed'; site: string; error: unknown }
@@ -356,13 +441,53 @@ export type EpgEventInput =
   /** Emissions nobody asked about. Diagnostic only; a count is plenty. */
   | { type: 'stream:ignored'; site: string; count: number }
   // ── pacing ───────────────────────────────────────────────────────────────
-  /** Told to slow down, and holding every request for `ms`. */
-  | { type: 'pacing:held'; site: string; status: number; ms: number }
+  /**
+   * Told to slow down, and holding every request for `ms`. `retryAfterMs` is
+   * how long the source's `Retry-After` asked for, before `backoff.maxMs` had
+   * its say — absent where it sent none, and `ms` is then `backoff.fallbackMs`,
+   * or `backoff.maxMs` where that is the less. `lengthened` where it is not a
+   * hold begun but one already holding, made to end later by another response
+   * that asked for longer.
+   */
+  | {
+      type: 'pacing:held';
+      site: string;
+      status: number;
+      ms: number;
+      retryAfterMs?: number;
+      lengthened?: true;
+    }
   | { type: 'pacing:slowed'; site: string; concurrency: number }
   | { type: 'pacing:recovered'; site: string; concurrency: number }
   | { type: 'pacing:rateLimit'; site: string; waiting: boolean }
   // ── merging, and tidying up ──────────────────────────────────────────────
   | { type: 'merge:channel'; channelId: string }
+  /**
+   * Two programmes from different sources that nearly merged, and did not:
+   * one that joined nothing, and the nearest unmatched one already there,
+   * within half an hour, from another source — one before it in the merge, or
+   * one whose programme was held over from the day before, whatever its place.
+   * Each of what `merge:summary` counts as a
+   * near miss — at `debug`, since a guide whose sources run on two grids has
+   * thousands. `--explain unmatched`, on `epg merge` or `epg build`, lists
+   * them all, and what would join them.
+   */
+  | {
+      type: 'merge:unmatched';
+      channelId: string;
+      /**
+       * How much later `programme` starts than `nearby` — below nought where it
+       * starts earlier — so which of two sources runs behind is read off it,
+       * not worked out again from the starts as written.
+       */
+      shiftMs: number;
+      /** What kept them apart — see {@link NearMissWhy}. */
+      why: NearMissWhy;
+      /** The one that joined nothing. */
+      programme: UnmatchedProgramme;
+      /** The unmatched one already there, nearest it. */
+      nearby: UnmatchedProgramme;
+    }
   /**
    * What the merge made of the sources, once the whole guide is out.
    *
@@ -379,9 +504,15 @@ export type EpgEventInput =
    */
   | {
       type: 'merge:summary';
-      /** Programmes a later source joined to one already there. */
+      /**
+       * Programmes one source joined to another's already there — not to its
+       * own, held over from the day before and said again.
+       */
       combined: number;
-      /** Programmes that joined nothing, with something close by. */
+      /**
+       * Programmes that joined nothing, with another source's within half an
+       * hour left unjoined too — each one a `merge:unmatched`.
+       */
       nearMiss: number;
       /** A few of them, in full — a count alone says nothing about why. */
       examples: {
@@ -492,6 +623,7 @@ export const EVENT_KINDS = {
   'pacing:recovered': { level: 'info', phase: 'grab' },
   'pacing:rateLimit': { level: 'debug', phase: 'grab' },
   'merge:channel': { level: 'debug', phase: 'merge' },
+  'merge:unmatched': { level: 'debug', phase: 'merge' },
   'merge:summary': { level: 'info', phase: 'merge' },
   'merge:done': { level: 'info', phase: 'merge' },
   'merge:note': { level: 'info', phase: 'merge' },
@@ -505,6 +637,12 @@ export const EVENT_KINDS = {
   'serve:reloaded': { level: 'info', phase: 'serve' },
   'serve:stopped': { level: 'info', phase: 'serve' },
 } as const satisfies Record<EpgEventType, EventKind>;
+
+/** Every kind of event, as {@link EVENT_KINDS} lists them. */
+export const EVENT_TYPES = Object.keys(EVENT_KINDS) as EpgEventType[];
+
+/** Every kind, as a set — what a reporter that did not say wants. */
+const EVERY_KIND: ReadonlySet<EpgEventType> = new Set(EVENT_TYPES);
 
 /**
  * What a reporter is given: what happened, and how loudly.
@@ -538,11 +676,47 @@ export type EpgEventMap = {
  * on a sink, and both commands end by draining what they queued rather than
  * awaiting each line — see `streams.ts`. A reporter that wants to do something
  * slow should queue it and be drained by whatever owns it.
+ *
+ * `wants` says which kinds of event it does anything with — what its level
+ * shows, or what it counts — so that a run need not make an event nobody will
+ * read: what it makes often, an `entry:fetched` a channel-day or a
+ * `merge:unmatched` a programme, is made only where a reporter wants it.
+ * Without one, a reporter wants every kind, as a sink of one's own is told
+ * everything. Asked of each kind once, the first time a run asks — see
+ * {@link stamped} — and never trusted to filter: a reporter is still handed
+ * whatever is made.
  */
-export type Reporter = (event: EpgEvent) => void;
+export type Reporter = ((event: EpgEvent) => void) & {
+  wants?: (type: EpgEventType) => boolean;
+};
 
-/** What the run says, before it is stamped. */
-export type Emit = (event: EpgEventInput) => void;
+/**
+ * What the run says, before it is stamped — and `hears`, the kinds of event
+ * its reporters want, as they said it the first time the run asked: every
+ * kind, where they did not say. What a run makes often, it makes only where `hears` has
+ * it. One set, whether the run is here or a site's thread. Made by
+ * {@link emitter}.
+ */
+export type Emit = ((event: EpgEventInput) => void) & {
+  readonly hears: ReadonlySet<EpgEventType>;
+};
+
+/**
+ * An {@link Emit}: what it says events with, and `hears` — the set itself, or
+ * what answers it as it is asked, for one taken the first time it is, or that
+ * is another's. The one way one is made, so a set asked for later is asked
+ * for the same way wherever it is.
+ */
+export function emitOf(
+  say: (event: EpgEventInput) => void,
+  hears: ReadonlySet<EpgEventType> | (() => ReadonlySet<EpgEventType>),
+): Emit {
+  return Object.defineProperty(
+    say,
+    'hears',
+    typeof hears === 'function' ? { get: hears } : { value: hears },
+  ) as Emit;
+}
 
 /**
  * Stamp what an emitter said, and pass it on.
@@ -553,7 +727,20 @@ export type Emit = (event: EpgEventInput) => void;
  * the type came from.
  */
 export function stamped(reporter: Reporter): Emit {
-  return (event) => reporter({ ...event, ...EVENT_KINDS[event.type] } as EpgEvent);
+  let hears: ReadonlySet<EpgEventType> | undefined;
+
+  return emitOf(
+    (event) => reporter({ ...event, ...EVENT_KINDS[event.type] } as EpgEvent),
+    // What it wants, asked of each kind once, the first time the run asks —
+    // never before its first wait, so a listener added as it is started is
+    // asked about too — and held to from then on. Asked of the reporter, as
+    // its own: a `wants` that reads `this` reads it.
+    () =>
+      (hears ??=
+        reporter.wants === undefined
+          ? EVERY_KIND
+          : new Set(EVENT_TYPES.filter((type) => reporter.wants!(type)))),
+  );
 }
 
 /** How often the loop is sampled — see {@link watchEventLoop}. */
@@ -614,7 +801,7 @@ export async function watchEventLoop(): Promise<{
 }
 
 /** A run nobody is listening to. */
-export const silent: Emit = () => {};
+export const silent: Emit = emitOf(() => {}, new Set());
 
 /** What a caller says when asked where the events go. */
 export interface ReportedOptions {
@@ -816,6 +1003,20 @@ export function keepingThrows<T extends ReportedOptions>(options: T): KeptThrows
     }
   };
 
+  // Asked as the reporter is told, and what it throws kept as what that
+  // throws is: a reporter that cannot say what it wants is given everything.
+  if (reporter.wants !== undefined) {
+    keepingReporter.wants = (type) => {
+      try {
+        return reporter.wants!(type);
+      } catch (error) {
+        keep(error, { type } as EpgEvent);
+
+        return true;
+      }
+    };
+  }
+
   keeping.add(keepingReporter);
 
   return {
@@ -882,31 +1083,53 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
 }
 
 /**
- * The options a run reports through, with the config's own emitter added.
+ * The options a run reports through, with the config's own emitter — or
+ * reporter — added.
  *
  * `reporter` is how a run talks to whoever started it, and a library caller
  * passes its own. `events` is what the *program* asked to be told, and it is
  * in the config because that is where a program says it — so every way of
  * starting a run honours it, not only the command that happens to read the
- * config file.
+ * config file. A reporter there is joined as it is: one that says what it
+ * wants, which an emitter given alone could not.
  */
 export function reportingTo<T extends ReportedOptions>(
   options: T,
-  events: EpgEventSink | undefined,
+  events: EpgEventSink | Reporter | undefined,
 ): T {
   if (events === undefined) {
     return options;
   }
 
-  return { ...options, reporter: combineReporters(options.reporter, emitterReporter(events)) };
+  return {
+    ...options,
+    reporter: combineReporters(
+      options.reporter,
+      typeof events === 'function' ? events : emitterReporter(events),
+    ),
+  };
 }
 
 /**
  * What {@link emitterReporter} needs of an emitter — Node's own fits, and so
- * does anything with an `emit` taking a name and a value.
+ * does anything with an `emit` taking a name and a value. One that can say how
+ * many listen for a kind is asked, so a run need not make what none hears.
  */
 export interface EpgEventSink {
   emit(type: EpgEvent['type'], event: EpgEvent): unknown;
+  listenerCount?(type: EpgEvent['type']): number;
+}
+
+/** How {@link emitterReporter} says what its emitter hears. */
+export interface EmitterReporterOptions {
+  /**
+   * The kinds the emitter hears, asked of each once a run asks — for one
+   * whose listeners are not all that hear: an `emit` of its own that passes
+   * every event on, or a listener for any kind. By default, the kinds something
+   * listens for, where the emitter can say how many do, and otherwise every
+   * kind.
+   */
+  wants?: (type: EpgEventType) => boolean;
 }
 
 /**
@@ -927,12 +1150,31 @@ export interface EpgEventSink {
  *
  * Typing the emitter with {@link EpgEventMap} is what makes each listener's
  * argument the event it asked for. Nothing is filtered: an emitter with no
- * listener for a type is the cheapest sink there is.
+ * listener for a type is the cheapest sink there is — and, asked by its
+ * `listenerCount`, one a run need not make that event for at all. One that
+ * hears more than its listeners do says so with `options.wants`:
+ *
+ * ```ts
+ * emitterReporter(bridge, { wants: () => true });
+ * ```
  */
-export function emitterReporter(events: EpgEventSink): Reporter {
-  return (event) => {
+export function emitterReporter(
+  events: EpgEventSink,
+  options: EmitterReporterOptions = {},
+): Reporter {
+  const reporter: Reporter = (event) => {
     events.emit(event.type, event);
   };
+
+  // Asked once a run first asks: a listener added part way through one hears
+  // the next.
+  if (options.wants !== undefined) {
+    reporter.wants = (type) => options.wants!(type);
+  } else if (events.listenerCount !== undefined) {
+    reporter.wants = (type) => events.listenerCount!(type) > 0;
+  }
+
+  return reporter;
 }
 
 /**
@@ -1002,7 +1244,22 @@ export function combineReporters(...reporters: (Reporter | undefined)[]): Report
     });
   };
 
-  return combined;
+  // Wanted by any of them — every kind by one that did not say, and none by
+  // none at all. Asked only until one wants it: the rest are given it then
+  // whatever they would say. One that throws is thrown through, to what keeps
+  // a run's throws — which takes it for one that wants it, as one is given
+  // everything — so it is asked no further either.
+  return Object.assign(combined, {
+    wants: (type: EpgEventType) => {
+      for (const reporter of listening) {
+        if (reporter.wants?.(type) ?? true) {
+          return true;
+        }
+      }
+
+      return false;
+    },
+  });
 }
 
 /**

@@ -17,6 +17,7 @@ import {
 } from '../src/core/events.js';
 import type { ChannelDayKey, StoredEntryMeta } from '../src/cache/main.js';
 import { defineConfig, type EpgConfig } from '../src/config.js';
+import { emitterReporter } from '../src/core/reporters.js';
 import { parseXmltvString } from '../src/xmltv/main.js';
 import { defineSiteConfig, type SiteConfig } from '../src/grabber/types.js';
 import type { XmltvProgramme } from '../src/xmltv/types.js';
@@ -380,7 +381,12 @@ describe('a site whose channel list fails', () => {
       (event) => event.type === 'site:done' && event.site === 'broken.example',
     ) as Extract<EpgEvent, { type: 'site:done' }>;
     const counted = {
-      channels: { requests: 1, requestMs: expect.any(Number), failed: { 404: 1 } },
+      channels: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: { 404: 1 },
+      },
     };
 
     expect(done.requests).toBe(1);
@@ -1584,6 +1590,28 @@ describe('what a config asked to be told', () => {
     await runGrab({ ...config(dir), events }, { now: NOW });
 
     expect(heard).toEqual(['done 1']);
+  });
+
+  it('takes a reporter as the config’s events, for an emitter that hears more than its listeners', async () => {
+    const dir = await tempDir();
+    const forwarded: string[] = [];
+
+    // Every event on to somewhere else, with no listener for any of them.
+    class Bridge extends EventEmitter {
+      override emit(type: string | symbol, ...args: unknown[]): boolean {
+        forwarded.push(String(type));
+
+        return super.emit(type, ...args);
+      }
+    }
+
+    await runGrab(
+      { ...config(dir), events: emitterReporter(new Bridge(), { wants: () => true }) },
+      { now: NOW },
+    );
+
+    expect(forwarded).toContain('entry:fetched');
+    expect(forwarded).toContain('request:started');
   });
 
   it('reaches it once from a build, through both halves', async () => {

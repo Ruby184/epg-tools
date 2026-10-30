@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { Writable } from 'node:stream';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   atLevel,
   EVENT_KINDS,
@@ -168,6 +168,64 @@ describe('the event union', () => {
 describe('render', () => {
   it.each<[EpgEventInput, string]>([
     [
+      {
+        type: 'merge:unmatched',
+        channelId: 'ct1.cz',
+        shiftMs: 300_000,
+        why: 'title',
+        programme: { site: 'b.tv', title: 'DVTV: Jakub Kříž', start: '20261024200500 +0200' },
+        nearby: { site: 'a.tv', title: 'DVTV', start: '20261024200000 +0200' },
+      },
+      'ct1.cz: 300s apart, titles differ — "DVTV: Jakub Kříž" (b.tv, 20:05) / "DVTV" (a.tv, 20:00)',
+    ],
+    // A start said to the hour, or to the day: as much of the clock as there is.
+    [
+      {
+        type: 'merge:unmatched',
+        channelId: 'ct1.cz',
+        shiftMs: 180_000,
+        why: 'runs',
+        programme: { site: 'b.tv', title: 'Clip', start: '2026102420 +0200' },
+        nearby: { site: 'a.tv', title: 'Clip', start: '20261024 +0200' },
+      },
+      'ct1.cz: 180s apart, they start further apart than the shorter lasts — "Clip" (b.tv, 20:00) / "Clip" (a.tv, 2026-10-24)',
+    ],
+    [
+      {
+        type: 'merge:unmatched',
+        channelId: 'ct1.cz',
+        shiftMs: 0,
+        why: 'matcher',
+        programme: { site: 'b.tv', title: 'News', start: '20261024200000 +0200' },
+        nearby: { site: 'a.tv', title: 'News', start: '20261024200000 +0200' },
+      },
+      `ct1.cz: 0ms apart, the config's match said no — "News" (b.tv, 20:00) / "News" (a.tv, 20:00)`,
+    ],
+    [
+      // Earlier rather than later: apart by as much either way.
+      {
+        type: 'merge:unmatched',
+        channelId: 'ct1.cz',
+        shiftMs: -420_000,
+        why: 'start',
+        programme: { site: 'b.tv', title: 'News', start: '20261024195300 +0200' },
+        nearby: { site: 'a.tv', title: 'News', start: '20261024200000 +0200' },
+      },
+      'ct1.cz: 420s apart, starts too far apart — "News" (b.tv, 19:53) / "News" (a.tv, 20:00)',
+    ],
+    [
+      // A start said to the month, and to the year alone.
+      {
+        type: 'merge:unmatched',
+        channelId: 'ct1.cz',
+        shiftMs: 0,
+        why: 'matcher',
+        programme: { site: 'b.tv', title: 'Film', start: '202610 +0000' },
+        nearby: { site: 'a.tv', title: 'Film', start: '2026 +0000' },
+      },
+      `ct1.cz: 0ms apart, the config's match said no — "Film" (b.tv, 2026-10) / "Film" (a.tv, 2026)`,
+    ],
+    [
       { type: 'entry:cached', site: 'a.tv', channelId: 'one', day: '2026-09-01' },
       '[a.tv] one 2026-09-01: fresh in cache, skipping',
     ],
@@ -195,6 +253,10 @@ describe('render', () => {
       '[a.tv] HTTP 429: holding requests for 60ms',
     ],
     [
+      { type: 'pacing:held', site: 'a.tv', status: 429, ms: 90, lengthened: true },
+      '[a.tv] HTTP 429: holding requests longer, for 90ms from now',
+    ],
+    [
       { type: 'request:started', site: 'a.tv', channels: ['one'], days: ['2026-09-01'] },
       '[a.tv] one 2026-09-01: asking',
     ],
@@ -209,6 +271,7 @@ describe('render', () => {
         requests: 96,
         ms: 42_000,
         requestMs: 28_500,
+        msBy: { source: 0, held: 0, rateLimit: 0, working: 0, queued: 0, other: 42_000 },
         requestsBy: {},
         fetched: 412,
         empty: 0,
@@ -226,9 +289,15 @@ describe('render', () => {
         requests: 5291,
         ms: 697_000,
         requestMs: 585_000,
+        msBy: { source: 0, held: 0, rateLimit: 0, working: 0, queued: 0, other: 697_000 },
         requestsBy: {
-          request: { requests: 49, requestMs: 12_000, failed: {} },
-          detail: { requests: 5242, requestMs: 573_000, failed: { 404: 3242, timeout: 3 } },
+          request: { requests: 49, requestMs: 12_000, waitedMs: 0, failed: {} },
+          detail: {
+            requests: 5242,
+            requestMs: 573_000,
+            waitedMs: 0,
+            failed: { 404: 3242, timeout: 3 },
+          },
         },
         fetched: 144,
         empty: 0,
@@ -249,7 +318,8 @@ describe('render', () => {
         requests: 3,
         ms: 3000,
         requestMs: 2000,
-        requestsBy: { listings: { requests: 3, requestMs: 2000, failed: { 500: 1 } } },
+        msBy: { source: 0, held: 0, rateLimit: 0, working: 0, queued: 0, other: 3000 },
+        requestsBy: { listings: { requests: 3, requestMs: 2000, waitedMs: 0, failed: { 500: 1 } } },
         fetched: 2,
         empty: 0,
         fromCache: 0,
@@ -268,6 +338,7 @@ describe('render', () => {
         requests: 3,
         ms: 3000,
         requestMs: 2000,
+        msBy: { source: 0, held: 0, rateLimit: 0, working: 0, queued: 0, other: 3000 },
         requestsBy: {
           request: { requests: 1, requestMs: 500 },
           detail: { requests: 2, requestMs: 1500 },
@@ -305,6 +376,7 @@ describe('render', () => {
         requests: 1,
         ms: 2543,
         requestMs: 2100,
+        msBy: { source: 0, held: 0, rateLimit: 0, working: 0, queued: 0, other: 2543 },
         requestsBy: {},
         fetched: 0,
         empty: 0,
@@ -721,6 +793,7 @@ describe('progressReporter', () => {
       ms: 0,
       requestMs: 0,
       requestsBy: {},
+      msBy: { source: 0, held: 0, rateLimit: 0, working: 0, queued: 0, other: 0 },
       fetched: 0,
       empty: 0,
       fromCache: 0,
@@ -745,9 +818,17 @@ describe('progressReporter', () => {
 
     run(progressReporter({ stream: out }), [
       started,
-      // Neither of these moves a number the line shows.
+      // None of these moves a number the line shows.
       { type: 'request:started', site: 'a.tv', channels: ['one'], days: ['2026-09-01'] },
       { type: 'stream:ignored', site: 'a.tv', count: 2 },
+      {
+        type: 'merge:unmatched',
+        channelId: 'one',
+        shiftMs: 420_000,
+        why: 'start',
+        programme: { site: 'b.tv', title: 'Show', start: '20260901060700 +0000' },
+        nearby: { site: 'a.tv', title: 'Show', start: '20260901060000 +0000' },
+      },
     ]);
 
     expect(out.raw).toBe('a.tv · 0/6 channel-days');
@@ -925,6 +1006,31 @@ describe('emitterReporter and combineReporters', () => {
     expect(seen).toEqual(['started http://127.0.0.1:8080/guide.xml', 'reloaded']);
   });
 
+  it('wants what its emitter has listeners for, as it has them, and everything of one that cannot say', () => {
+    const events = new EventEmitter<EpgEventMap>();
+    const report = emitterReporter(events);
+
+    events.on('serve:started', () => {});
+
+    expect(report.wants!('serve:started')).toBe(true);
+    expect(report.wants!('merge:unmatched')).toBe(false);
+
+    // One added part way through a run is heard from then on.
+    events.on('merge:unmatched', () => {});
+    expect(report.wants!('merge:unmatched')).toBe(true);
+
+    expect(emitterReporter({ emit: () => true }).wants).toBeUndefined();
+
+    // One that hears more than its listeners do says what it does.
+    const forwarding = emitterReporter(events, { wants: (type) => type !== 'serve:response' });
+
+    expect(forwarding.wants!('merge:unmatched')).toBe(true);
+    expect(forwarding.wants!('serve:response')).toBe(false);
+    expect(emitterReporter({ emit: () => true }, { wants: () => false }).wants!('site:done')).toBe(
+      false,
+    );
+  });
+
   it('gives every event to each reporter, and skips the ones that are not there', () => {
     const said: string[] = [];
     const report = combineReporters(
@@ -985,6 +1091,216 @@ describe('emitterReporter and combineReporters', () => {
   });
 });
 
+describe('what a reporter wants', () => {
+  /** A terminal, as the live line asks for. */
+  class Terminal extends Sink {
+    readonly isTTY = true;
+    readonly columns = 200;
+  }
+
+  it('is what a shipped one shows at its level, and its failures whatever that is', () => {
+    const text = textReporter({ stream: new Sink(), level: 'info' });
+    const quiet = textReporter({ stream: new Sink(), level: 'error' });
+    const json = jsonReporter({ stream: new Sink(), level: 'info' });
+    const logger = loggerReporter({ logger: { info() {}, warn() {}, error() {} }, level: 'error' });
+
+    expect(text.wants!('merge:summary')).toBe(true);
+    expect(text.wants!('merge:unmatched')).toBe(false);
+    // What ends a run, whatever it shows: the failures held for it are written then.
+    expect(quiet.wants!('entry:failed')).toBe(true);
+    expect(quiet.wants!('grab:done')).toBe(true);
+    expect(quiet.wants!('run:cancelled')).toBe(true);
+    expect(quiet.wants!('site:done')).toBe(false);
+    expect(json.wants!('merge:unmatched')).toBe(false);
+    expect(jsonReporter({ stream: new Sink() }).wants!('merge:unmatched')).toBe(true);
+    expect(logger.wants!('request:failed')).toBe(true);
+    expect(logger.wants!('merge:summary')).toBe(false);
+  });
+
+  it('is, of the live line, what it counts beside what its lines want', () => {
+    const live = progressReporter({ stream: new Terminal(), level: 'info' });
+
+    // Counted though it is never shown at `info`.
+    expect(live.wants!('entry:fetched')).toBe(true);
+    // Drawn again as it was, which is nothing.
+    expect(live.wants!('request:started')).toBe(false);
+    expect(live.wants!('merge:unmatched')).toBe(false);
+    expect(live.wants!('merge:done')).toBe(true);
+    // Off a terminal, the lines alone.
+    expect(progressReporter({ stream: new Sink(), level: 'info' }).wants!('entry:fetched')).toBe(
+      false,
+    );
+  });
+
+  it('filters a kind this version does not know by its own level, rather than throwing', () => {
+    const out = new Sink();
+    const log = (): void => {};
+    // As a later version's log, read back, would hand it one.
+    const unknown = (level: EventLevel): EpgEvent =>
+      ({ type: 'future:thing', site: 'a.tv', level, phase: 'grab' }) as unknown as EpgEvent;
+    const shipped = [
+      textReporter({ stream: new Sink(), level: 'info' }),
+      jsonReporter({ stream: out, level: 'info' }),
+      loggerReporter({ logger: { info: log, warn: log, error: log }, level: 'info' }),
+      progressReporter({ stream: new Terminal(), level: 'info' }),
+    ];
+
+    for (const reporter of shipped) {
+      expect(() => reporter(unknown('debug'))).not.toThrow();
+      expect(() => reporter(unknown('warn'))).not.toThrow();
+    }
+
+    expect(out.lines.map((line) => JSON.parse(line).level)).toEqual(['warn']);
+  });
+
+  it('does nothing with a kind it says it does not want, though it is given it', () => {
+    const sink = new Sink();
+    const terminal = new Terminal();
+    const told: string[] = [];
+    const log = (line: string): void => {
+      told.push(line);
+    };
+    const shipped = [
+      textReporter({ stream: sink, level: 'error' }),
+      jsonReporter({ stream: sink, level: 'warn' }),
+      loggerReporter({ logger: { info: log, warn: log, error: log, debug: log }, level: 'error' }),
+      progressReporter({ stream: terminal, level: 'info' }),
+    ];
+    const writes = [vi.spyOn(sink, 'write'), vi.spyOn(terminal, 'write')];
+    let unwanted = 0;
+
+    for (const reporter of shipped) {
+      for (const [type, kind] of Object.entries(EVENT_KINDS) as Array<
+        [EpgEvent['type'], EventKind]
+      >) {
+        if (!reporter.wants!(type)) {
+          unwanted++;
+          // Nothing of it but its kind: nothing is to read any more of it.
+          reporter({ type, ...kind } as EpgEvent);
+        }
+      }
+    }
+
+    expect(unwanted).toBeGreaterThan(0);
+
+    for (const write of writes) {
+      expect(write).not.toHaveBeenCalled();
+    }
+
+    expect(told).toEqual([]);
+  });
+
+  it('is wanted by any of several, every kind by one that did not say, and none by none', () => {
+    const none: Reporter = Object.assign(() => {}, { wants: () => false });
+    const some: Reporter = Object.assign(() => {}, {
+      wants: (type: EpgEvent['type']) => type === 'merge:unmatched',
+    });
+
+    expect(combineReporters(none, some).wants!('merge:unmatched')).toBe(true);
+    expect(combineReporters(none, some).wants!('merge:summary')).toBe(false);
+    expect(combineReporters(none, () => {}).wants!('merge:summary')).toBe(true);
+    expect(combineReporters().wants!('merge:summary')).toBe(false);
+  });
+
+  it('is asked of the reporter as its own, and what it throws is kept as a throw is', () => {
+    const kinds = new Set<EpgEvent['type']>(['merge:summary']);
+    // A `wants` written as a method, reading `this`.
+    const own = Object.assign(() => {}, {
+      kinds,
+      wants(this: { kinds: Set<EpgEvent['type']> }, type: EpgEvent['type']) {
+        return this.kinds.has(type);
+      },
+    }) as Reporter;
+    const broken = new TypeError('cannot read properties of undefined');
+    const throwing: Reporter = Object.assign(() => {}, {
+      wants: (): boolean => {
+        throw broken;
+      },
+    });
+    const keeping = keepingThrows({ reporter: throwing });
+
+    expect(stamped(own).hears.has('merge:summary')).toBe(true);
+    expect(
+      stamped(keepingThrows({ reporter: own }).options.reporter!).hears.has('merge:summary'),
+    ).toBe(true);
+    // Given everything, and the throw said once the run is done.
+    expect(stamped(keeping.options.reporter!).hears.has('merge:unmatched')).toBe(true);
+    expect(() => keeping.rethrow()).toThrow(ReporterError);
+  });
+
+  it('asks several only until one wants it, and throws one that throws through', () => {
+    const throwing: Reporter = Object.assign(() => {}, {
+      wants: (): boolean => {
+        throw new TypeError('no');
+      },
+    });
+    const asked: string[] = [];
+    const wanting: Reporter = Object.assign(() => {}, {
+      wants: () => {
+        asked.push('wanting');
+
+        return true;
+      },
+    });
+    const not: Reporter = Object.assign(() => {}, {
+      wants: () => {
+        asked.push('not');
+
+        return false;
+      },
+    });
+
+    expect(() => combineReporters(not, throwing, wanting).wants!('merge:unmatched')).toThrow(
+      TypeError,
+    );
+    expect(asked).toEqual(['not']);
+    // What one that wants it says decides it: those after it are given it
+    // whatever they would say.
+    expect(combineReporters(wanting, throwing, not).wants!('merge:unmatched')).toBe(true);
+    expect(asked).toEqual(['not', 'wanting']);
+
+    // Under what keeps a run's throws: given everything, and said once it is done.
+    const keeping = keepingThrows({ reporter: combineReporters(not, throwing) });
+
+    expect(keeping.options.reporter!.wants!('merge:unmatched')).toBe(true);
+    expect(() => keeping.rethrow()).toThrow(ReporterError);
+  });
+
+  it('is passed on by what stamps a reporter, or keeps what it throws', () => {
+    const some: Reporter = Object.assign(() => {}, {
+      wants: (type: EpgEvent['type']) => type === 'merge:unmatched',
+    });
+    const kept = keepingThrows({ reporter: some }).options.reporter!;
+
+    expect(stamped(some).hears.has('merge:unmatched')).toBe(true);
+    expect(stamped(some).hears.has('merge:summary')).toBe(false);
+    expect(kept.wants!('merge:summary')).toBe(false);
+    // One that did not say wants everything; a run nobody listens to, nothing.
+    expect(stamped(() => {}).hears.has('merge:summary')).toBe(true);
+    expect(silent.hears.has('merge:summary')).toBe(false);
+  });
+
+  it('is asked of each kind once, the first time the run asks, and held to that', () => {
+    const events = new EventEmitter<EpgEventMap>();
+    const report = emitterReporter(events);
+    const asked = vi.spyOn(report, 'wants');
+    const emit = stamped(report);
+
+    // Nothing asked yet: a listener added as the run is started is heard.
+    expect(asked).not.toHaveBeenCalled();
+    events.on('entry:fetched', () => {});
+    expect(emit.hears.has('entry:fetched')).toBe(true);
+    expect(asked).toHaveBeenCalledTimes(Object.keys(EVENT_KINDS).length);
+    asked.mockClear();
+
+    // A listener from part way through: heard from the next run on.
+    events.on('merge:unmatched', () => {});
+    expect(emit.hears.has('merge:unmatched')).toBe(false);
+    expect(asked).not.toHaveBeenCalled();
+    expect(stamped(report).hears.has('merge:unmatched')).toBe(true);
+  });
+});
+
 describe('keepingThrows and ReporterError', () => {
   const at = (type: 'site:done' | 'site:failed' | 'serve:reloaded') =>
     event(
@@ -999,6 +1315,7 @@ describe('keepingThrows and ReporterError', () => {
               ms: 0,
               requestMs: 0,
               requestsBy: {},
+              msBy: { source: 0, held: 0, rateLimit: 0, working: 0, queued: 0, other: 0 },
               fetched: 0,
               empty: 0,
               fromCache: 0,

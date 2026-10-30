@@ -144,7 +144,12 @@ describe('defineSchedulesDirectSite', () => {
     const { requestsBy } = done;
 
     expect(Object.keys(requestsBy)).toEqual(['channels', 'md5', 'schedules', 'programs']);
-    expect(requestsBy.channels).toEqual({ requests: 1, requestMs: expect.any(Number), failed: {} });
+    expect(requestsBy.channels).toEqual({
+      requests: 1,
+      requestMs: expect.any(Number),
+      waitedMs: expect.any(Number),
+      failed: {},
+    });
 
     for (const [label, path] of [
       ['md5', 'schedules/md5'],
@@ -154,6 +159,7 @@ describe('defineSchedulesDirectSite', () => {
       expect(requestsBy[label]).toEqual({
         requests: source.countOf(path),
         requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
         failed: {},
       });
     }

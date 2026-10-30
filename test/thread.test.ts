@@ -5,7 +5,7 @@ import PQueue from 'p-queue';
 import { describe, expect, it, vi } from 'vitest';
 import { CacheManager, MemoryCacheDriver } from '../src/cache/main.js';
 import type { CacheStore } from '../src/cache/types.js';
-import type { EpgEventInput, RequestCounts } from '../src/core/events.js';
+import { EVENT_TYPES, type EpgEventInput, type RequestCounts } from '../src/core/events.js';
 import { build } from '../src/build.js';
 import { grab, StateKey } from '../src/grabber/main.js';
 import type { Run } from '../src/grabber/site-run.js';
@@ -19,6 +19,7 @@ import {
   type SiteThreadData,
 } from '../src/grabber/thread.js';
 import { addRequests, openSession, requestsObject } from '../src/grabber/session.js';
+import { SiteClock } from '../src/grabber/clock.js';
 import { CountReader, CountWriter, sharedCounts } from '../src/grabber/shared-counts.js';
 import { getXmltvOffset } from '../src/xmltv/main.js';
 
@@ -45,9 +46,12 @@ function hosting(
     grabbedAt: NOW.toISOString(),
     startDay: DAY,
     timeZone: 'UTC',
-    emit: (event) => {
-      events.push(event);
-    },
+    emit: Object.assign(
+      (event: EpgEventInput) => {
+        events.push(event);
+      },
+      { hears: new Set(EVENT_TYPES) },
+    ),
     ...(signal ? { signal } : {}),
     localWork: new PQueue({ concurrency: 4 }),
     enqueue: (queue, task, options = {}) =>
@@ -56,6 +60,7 @@ function hosting(
     requested: (label, done) => {
       requested.push([label, done]);
     },
+    spent: undefined,
   };
 
   return { run, events, requested };
@@ -72,6 +77,7 @@ function started(site: string, extra: Partial<SiteThreadData> = {}): SiteThreadD
     defaults: { days: 1 },
     localConcurrency: 4,
     counts: sharedCounts(),
+    hears: EVENT_TYPES,
     ...extra,
   };
 }
@@ -158,6 +164,7 @@ function siteDoneOf(fetched: number): EpgEventInput {
     requests: 0,
     ms: 5,
     requestMs: 0,
+    msBy: { source: 0, held: 0, rateLimit: 0, working: 0, queued: 0, other: 5 },
     requestsBy: {},
     fetched,
     empty: 0,
@@ -283,14 +290,17 @@ describe('a site in a thread', () => {
     const { run, events } = hosting(cache, controller.signal);
     const said = run.emit;
 
-    run.emit = (event) => {
-      said(event);
+    run.emit = Object.assign(
+      (event: EpgEventInput) => {
+        said(event);
 
-      // Once the request is waiting, which it does until it is told to stop.
-      if (event.type === 'request:started') {
-        controller.abort(new Error('run cancelled'));
-      }
-    };
+        // Once the request is waiting, which it does until it is told to stop.
+        if (event.type === 'request:started') {
+          controller.abort(new Error('run cancelled'));
+        }
+      },
+      { hears: said.hears },
+    );
 
     await converse(run, started('slow.example'));
 
@@ -605,7 +615,12 @@ describe('a site in a thread', () => {
     await converse(run, started('offset.example'), (message) => kinds.push(message.kind));
 
     expect(toldOf(requested)).toEqual({
-      request: { requests: 1, requestMs: expect.any(Number), failed: {} },
+      request: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: {},
+      },
     });
     // One name, for the label's two counts — and no message for the request
     // itself.
@@ -649,7 +664,12 @@ describe('a site in a thread', () => {
     await converse(run, started('failing.example'));
 
     expect(toldOf(requested)).toEqual({
-      request: { requests: 1, requestMs: expect.any(Number), failed: { network: 1 } },
+      request: {
+        requests: 1,
+        requestMs: expect.any(Number),
+        waitedMs: expect.any(Number),
+        failed: { network: 1 },
+      },
     });
   });
 
@@ -789,8 +809,11 @@ describe('a site in a thread', () => {
       // memory — the last of them counted just before the thread went.
       writer.begin(Date.now() - 50);
       writer.count('fetched', 1);
-      writer.add('request', { requests: 1, requestMs: 30, failed: {} });
-      writer.add('request', { requests: 1, requestMs: 10, failed: { 404: 1 } });
+      writer.add('request', { requests: 1, requestMs: 30, waitedMs: 6, failed: {} });
+      writer.add('request', { requests: 1, requestMs: 10, waitedMs: 0, failed: { 404: 1 } });
+      // And where its time went, as its clock said it.
+      writer.spend('source', 30.4);
+      writer.spend('working', 9.6);
       lose(new Error('the thread exited'));
       port.close();
 
@@ -805,19 +828,33 @@ describe('a site in a thread', () => {
         sitesFailed: 1,
         requests: 2,
         requestMs: 40,
-        requestsBy: { request: { requests: 2, requestMs: 40, failed: { 404: 1 } } },
+        requestsBy: { request: { requests: 2, requestMs: 40, waitedMs: 6, failed: { 404: 1 } } },
       });
-      // From when it began.
-      expect((events[1] as { ms: number }).ms).toBeGreaterThanOrEqual(50);
+
+      const { ms, msBy } = events[1] as Extract<EpgEventInput, { type: 'site:done' }>;
+
+      // From when it began — and what of it the thread had measured, the rest
+      // of it other.
+      expect(ms).toBeGreaterThanOrEqual(50);
+      expect(msBy).toEqual({
+        source: 30,
+        held: 0,
+        rateLimit: 0,
+        working: 10,
+        queued: 0,
+        other: ms - 40,
+      });
       // Its channel-days at once, as its turn ended, and its label's place —
       // what it asked once the run hangs up.
       expect(run.tally).toMatchObject({ fetched: 1, sitesFailed: 1 });
-      expect(toldOf(requested)).toEqual({ request: { requests: 0, requestMs: 0, failed: {} } });
+      expect(toldOf(requested)).toEqual({
+        request: { requests: 0, requestMs: 0, waitedMs: 0, failed: {} },
+      });
 
       hangUp();
 
       expect(toldOf(requested)).toEqual({
-        request: { requests: 2, requestMs: 40, failed: { 404: 1 } },
+        request: { requests: 2, requestMs: 40, waitedMs: 6, failed: { 404: 1 } },
       });
       expect(run.tally).toMatchObject({ fetched: 1, sitesFailed: 1 });
     } finally {
@@ -867,7 +904,7 @@ describe('a site in a thread', () => {
 
     try {
       writer.begin();
-      writer.add('request', { requests: 1, requestMs: 5, failed: {} });
+      writer.add('request', { requests: 1, requestMs: 5, waitedMs: 0, failed: {} });
       port.postMessage({ kind: 'done' });
 
       const hangUp = await hosted;
@@ -875,7 +912,9 @@ describe('a site in a thread', () => {
       hangUp();
       hangUp();
 
-      expect(toldOf(requested)).toEqual({ request: { requests: 1, requestMs: 5, failed: {} } });
+      expect(toldOf(requested)).toEqual({
+        request: { requests: 1, requestMs: 5, waitedMs: 0, failed: {} },
+      });
     } finally {
       close();
     }
@@ -992,16 +1031,18 @@ describe('a site in a thread', () => {
       port.postMessage({
         kind: 'requested',
         label: 'more',
-        done: { requests: 1, requestMs: 4, failed: {} },
+        done: { requests: 1, requestMs: 4, waitedMs: 0, failed: {} },
       });
       port.postMessage({ kind: 'done' });
 
       const hangUp = await hosted;
 
       // As it was said, not once the run hangs up — and once.
-      expect(requested).toEqual([['more', { requests: 1, requestMs: 4, failed: {} }]]);
+      expect(requested).toEqual([['more', { requests: 1, requestMs: 4, waitedMs: 0, failed: {} }]]);
       hangUp();
-      expect(toldOf(requested)).toEqual({ more: { requests: 1, requestMs: 4, failed: {} } });
+      expect(toldOf(requested)).toEqual({
+        more: { requests: 1, requestMs: 4, waitedMs: 0, failed: {} },
+      });
     } finally {
       close();
     }
@@ -1014,15 +1055,15 @@ describe('a site in a thread', () => {
 
     try {
       writer.begin();
-      writer.add('request', { requests: 1, requestMs: 5, failed: {} });
+      writer.add('request', { requests: 1, requestMs: 5, waitedMs: 0, failed: {} });
       port.postMessage({ kind: 'done' });
 
       const hangUp = await hosted;
 
       // A request a parse did not wait for, answered after its site was done —
       // and under a label, and a failure, first named then.
-      writer.add('detail', { requests: 1, requestMs: 0, failed: {} });
-      writer.add('detail', { requests: 0, requestMs: 7, failed: { 503: 1 } });
+      writer.add('detail', { requests: 1, requestMs: 0, waitedMs: 0, failed: {} });
+      writer.add('detail', { requests: 0, requestMs: 7, waitedMs: 0, failed: { 503: 1 } });
       await new Promise((resolve) => setImmediate(resolve));
 
       // Each label in its place among the run's as it was first sent.
@@ -1031,8 +1072,8 @@ describe('a site in a thread', () => {
       hangUp();
 
       expect(toldOf(requested)).toEqual({
-        request: { requests: 1, requestMs: 5, failed: {} },
-        detail: { requests: 1, requestMs: 7, failed: { 503: 1 } },
+        request: { requests: 1, requestMs: 5, waitedMs: 0, failed: {} },
+        detail: { requests: 1, requestMs: 7, waitedMs: 0, failed: { 503: 1 } },
       });
     } finally {
       close();
@@ -1143,6 +1184,85 @@ describe('a site in a thread', () => {
       (await hosted)();
     } finally {
       close();
+    }
+  });
+
+  it('says how long a call waited for a slot, and nothing of one that never asks for one', async () => {
+    const cache = new CacheManager({ driver: new MemoryCacheDriver() });
+    const { run } = hosting(cache);
+
+    run.localWork = new PQueue({ concurrency: 1 });
+
+    let unblock = (): void => {};
+
+    void run.localWork.add(() => new Promise<void>((resolve) => (unblock = resolve)));
+
+    const { hosted, port, close } = hostOnly(run);
+
+    try {
+      const answers = new Map<number, { queuedMs?: number }>();
+      const both = new Promise<void>((resolve) => {
+        port.on('message', (message: { kind: string; id: number; queuedMs?: number }) => {
+          if (message.kind === 'answer' && answers.set(message.id, message).size === 2) {
+            resolve();
+          }
+        });
+      });
+
+      port.postMessage({ kind: 'cache', id: 1, op: 'getMeta', args: [{}] });
+      port.postMessage({ kind: 'cache', id: 2, op: 'getState', args: ['lost.example', 'one'] });
+      await vi.waitFor(() => expect(run.localWork.size).toBe(1));
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      unblock();
+      await both;
+
+      expect(answers.get(1)!.queuedMs).toBeGreaterThanOrEqual(35);
+      expect(answers.get(2)).not.toHaveProperty('queuedMs');
+
+      port.postMessage({ kind: 'done' });
+      (await hosted)();
+    } finally {
+      close();
+    }
+  });
+
+  it('tells the site’s clock what a call waited for a slot on the run’s thread', async () => {
+    const { port1, port2 } = new MessageChannel();
+
+    // The run's side, answering after 40ms, 25 of them spent waiting for a slot.
+    port1.on('message', (message: { kind: string; id: number }) => {
+      if (message.kind === 'cache') {
+        setTimeout(() => {
+          port1.postMessage({ kind: 'answer', id: message.id, value: undefined, queuedMs: 25 });
+        }, 40);
+      }
+    });
+
+    const cache = new RemoteCache(port2, undefined);
+    const clock = new SiteClock();
+
+    try {
+      cache.timeWith(clock);
+      clock.turn(true);
+      clock.queued();
+      clock.started();
+      await cache.getMeta({ site: 'a.tv', channelId: 'one', day: DAY });
+
+      // Its work's time, less the 25 it waited — which is now waiting for a slot.
+      expect(clock.spent().queued).toBeCloseTo(25, 1);
+      expect(clock.spent().working).toBeGreaterThanOrEqual(10);
+
+      // And a state call, answered on the run's thread with no slot: nothing
+      // of it is waiting elsewhere.
+      const before = clock.spent();
+
+      await cache.getState('a.tv', 'one');
+      expect(clock.spent().queued).toBe(before.queued);
+
+      await cache.close();
+    } finally {
+      port1.close();
+      port2.close();
     }
   });
 

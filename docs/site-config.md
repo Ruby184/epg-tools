@@ -1737,6 +1737,12 @@ capped by `maxMs`, `fallbackMs` when the header says nothing), and then resumes
 **with its tasks intact**: nothing is dropped, nothing is refetched, the channel
 days waiting their turn simply wait a little longer. Requests already in flight
 are left alone, and `ky`'s own per-request retry then does its usual job on top.
+Each hold is a `pacing:held`, its `ms` what it was given and its `retryAfterMs`
+what the source asked for — so a hold `maxMs` cut short says so. A response
+told off while a hold is running, that asks for longer than is left, makes the
+hold longer, and is a `pacing:held` too, marked `lengthened` — and
+[`--explain held`](./configuration.md#what-a-run-said-explained) reads them
+back with the pace that earned them.
 
 `adapt` also halves the site's `concurrency` on a slow-down and gives it back
 one clean response at a time, ten in a row per step — a retreat that is quicker

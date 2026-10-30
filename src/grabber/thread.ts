@@ -41,6 +41,7 @@
  */
 
 import { availableParallelism } from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import { inspect } from 'node:util';
 import { MessageChannel, Worker } from 'node:worker_threads';
@@ -51,14 +52,17 @@ import type { CacheStore, ChannelDayKey } from '../cache/types.js';
 import { resolveConfigSource, type ConfigSource, type EpgConfig } from '../config.js';
 import { errorMessage, MAX_CAUSE_DEPTH } from '../core/error.js';
 import {
+  emitOf,
   noCounts,
   noRequests,
   type EpgEventInput,
+  type EpgEventType,
   type GrabCounts,
   type RequestCounts,
 } from '../core/events.js';
 import type { XmltvProgramme } from '../xmltv/types.js';
 import { assertPlainData } from './channels.js';
+import { addedTime, measuredOf, type SiteClock } from './clock.js';
 import {
   addRequests,
   mergedRequests,
@@ -93,6 +97,12 @@ export interface SiteThreadData {
   codec?: CodecName;
   /** The memory its request counts go in, which the run's thread reads — see `shared-counts.ts`. */
   counts: SharedArrayBuffer;
+  /**
+   * The kinds of event the run's reporter wants, as the run took them when it
+   * began — its own `Emit.hears` — so that what nobody reads is neither made
+   * nor sent.
+   */
+  hears: EpgEventType[];
 }
 
 /** Either end of the conversation: a worker, its `parentPort`, or a channel's port. */
@@ -128,6 +138,16 @@ export class SiteNotRunError extends Error {
 /** The cache's methods, which is all the worker's store asks the main thread. */
 type CacheOp = Exclude<keyof CacheStore, 'close'> | 'writeEncoded';
 
+/**
+ * Whether the run's thread answers `op` through a slot of its `localWork` —
+ * every call but what a site remembers, which is small and read once a turn.
+ * The one rule both sides keep to: the run's thread, to say how long a call
+ * waited for its slot, and a site's, to tell its clock it is waiting there.
+ */
+function throughLocalWork(op: CacheOp): boolean {
+  return op !== 'getState' && op !== 'setState';
+}
+
 type ToHost =
   | { kind: 'event'; event: EpgEventInput }
   | { kind: 'cache'; id: number; op: CacheOp; args: unknown[] }
@@ -140,7 +160,12 @@ type ToHost =
   | { kind: 'failed'; error: unknown };
 
 type ToWorker =
-  | { kind: 'answer'; id: number; value?: unknown; error?: unknown }
+  /**
+   * A cache call answered — with how long it waited for a slot of the run's
+   * `localWork` first, where it did, which is time the site's clock otherwise
+   * gives to its work: see `SiteClock.back`.
+   */
+  | { kind: 'answer'; id: number; value?: unknown; error?: unknown; queuedMs?: number }
   | { kind: 'abort'; reason: unknown };
 
 /** An error as it crosses: what the reporters read, and nothing a clone would lose. */
@@ -274,6 +299,7 @@ function handableOf(message: ToHost | ToWorker): ToHost | ToWorker | undefined {
         ? {
             kind: 'answer',
             id: message.id,
+            ...(message.queuedMs === undefined ? {} : { queuedMs: message.queuedMs }),
             error: plain(
               new TypeError("The run's cache answered with what no thread can be handed"),
             ),
@@ -458,6 +484,7 @@ export class SiteThreads {
         ? { codec: run.cache.codecName }
         : {}),
       counts: reader.buffer,
+      hears: [...run.emit.hears],
     };
     const { port1, port2 } = new MessageChannel();
     let pooled: PooledWorker;
@@ -757,10 +784,14 @@ export function hostSite(port: SitePort, run: Run, hosting: Hosting): Promise<()
         addRequests(by, label, done);
       }
 
-      const done = siteDone(site, Date.now() - began!, requestsObject(by), {
-        ...counted,
-        sitesFailed: 1,
-      });
+      const done = siteDone(
+        site,
+        Date.now() - began!,
+        requestsObject(by),
+        { ...counted, sitesFailed: 1 },
+        // Where its time went, as far as its thread said before it went.
+        reader.spent(),
+      );
 
       // Once: a site that failed has counted it, and said why.
       if (counted.sitesFailed === 0) {
@@ -845,21 +876,31 @@ export function hostSite(port: SitePort, run: Run, hosting: Hosting): Promise<()
           break;
         case 'cache': {
           const { id, op, args } = message;
-          const answering =
-            op === 'getState' || op === 'setState'
-              ? answer(cache, op, args)
-              : localWork.add(() => answer(cache, op, args), {
-                  // A channel-day written — encoded already, for a store with
-                  // a codec — or read to be added to, ahead of a sweep.
+          /** How long it waited for a slot of `localWork` — none, for what never asks for one. */
+          let queuedMs: number | undefined;
+          const asked = performance.now();
+          const answering = !throughLocalWork(op)
+            ? answer(cache, op, args)
+            : localWork.add(
+                () => {
+                  queuedMs = performance.now() - asked;
+
+                  return answer(cache, op, args);
+                },
+                {
+                  // A channel-day written — encoded already, for a store
+                  // with a codec — or read to be added to, ahead of a sweep.
                   priority: op === 'write' || op === 'writeEncoded' || op === 'read' ? 1 : 0,
-                });
+                },
+              );
+          const waited = (): { queuedMs?: number } => (queuedMs === undefined ? {} : { queuedMs });
 
           void answering.then(
             (value) => {
-              send(port, { kind: 'answer', id, value });
+              send(port, { kind: 'answer', id, value, ...waited() });
             },
             (error: unknown) => {
-              send(port, { kind: 'answer', id, error: plain(error) });
+              send(port, { kind: 'answer', id, error: plain(error), ...waited() });
             },
           );
           break;
@@ -938,10 +979,19 @@ export class RemoteCache implements CacheStore {
   readonly #port: SitePort;
   /** The codec the run's store keeps its entries with, run here when there is one. */
   readonly #codec: CodecName | undefined;
+  /** Each call not yet answered — and the clock told it went to the run's thread, where one was. */
   readonly #waiting = new Map<
     number,
-    { resolve(value: unknown): void; reject(error: unknown): void }
+    {
+      resolve(value: unknown): void;
+      reject(error: unknown): void;
+      /** The clock told it went to the run's thread, and when. */
+      clock: SiteClock | undefined;
+      since: number;
+    }
   >();
+  /** The clock of the site this asks for — see {@link timeWith}. */
+  #clock: SiteClock | undefined;
   /** What {@link close} is waiting on, told once no call is left waiting — a turn later. */
   #drained: (() => void) | undefined;
   /** Whether {@link close} is done, after which nothing is answered. */
@@ -964,7 +1014,8 @@ export class RemoteCache implements CacheStore {
     // Nothing asked from here is answered either: refused, rather than sent.
     this.#closed = true;
 
-    for (const { reject } of this.#waiting.values()) {
+    for (const { reject, clock, since } of this.#waiting.values()) {
+      clock?.back(since, 0);
       reject(new Error('The run stopped answering its cache before this call was answered'));
     }
 
@@ -979,6 +1030,9 @@ export class RemoteCache implements CacheStore {
     }
 
     const waiting = this.#waiting.get(message.id);
+
+    // Back, with what of it was a wait for a slot on the run's thread.
+    waiting?.clock?.back(waiting.since, message.queuedMs ?? 0);
 
     // Its caller told first, so one asking again as it goes on is still waited
     // for by a close that is waiting.
@@ -1008,19 +1062,33 @@ export class RemoteCache implements CacheStore {
     }
 
     const id = this.#next++;
+    // What the run's thread answers through a slot of its local work: the
+    // site's work waits on it there, where the clock is told.
+    const clock = throughLocalWork(op) ? this.#clock : undefined;
+    const since = clock?.elsewhere() ?? 0;
 
     return new Promise((resolve, reject) => {
-      this.#waiting.set(id, { resolve, reject });
+      this.#waiting.set(id, { resolve, reject, clock, since });
 
       try {
         send(this.#port, { kind: 'cache', id, op, args }, transfer);
       } catch (error) {
         // Never sent — what no thread can be handed, as what a site keeps may
         // hold — so never to be answered.
+        clock?.back(since, 0);
         this.#forget(id);
         throw error;
       }
     });
+  }
+
+  /**
+   * Tell `clock` how long each call waits for a slot on the run's thread: time
+   * the site's own work is said to have taken otherwise, where it is the run's
+   * `localConcurrency` that held it up.
+   */
+  timeWith(clock: SiteClock): void {
+    this.#clock = clock;
   }
 
   getMeta(key: ChannelDayKey): ReturnType<CacheStore['getMeta']> {
@@ -1190,7 +1258,6 @@ export async function workSite(
     // As the run's own queues are: the run's signal handed to every task — see `grab`.
     const enqueue: Enqueue = (queue, task, options = {}) =>
       queue.add(task, { ...options, signal: stop.signal });
-
     const run: Run = {
       defaults: data.defaults,
       cache,
@@ -1198,9 +1265,10 @@ export async function workSite(
       grabbedAt: data.grabbedAt,
       startDay: data.startDay,
       timeZone: data.timeZone,
-      emit: (event) => {
+      // The run's own set, so a site asks here what it would ask there.
+      emit: emitOf((event) => {
         send(port, { kind: 'event', event: plainEvent(event) });
-      },
+      }, new Set(data.hears)),
       signal: stop.signal,
       localWork,
       enqueue,
@@ -1225,12 +1293,18 @@ export async function workSite(
           send(port, { kind: 'requested', label, done: left });
         }
       },
+      // Into the memory both threads see, as each stretch is spent — see `writer`.
+      spent: (part, ms) => {
+        writer.spend(part, ms);
+      },
     };
 
     const site = new SiteRun(
       data.channels === undefined ? found : { ...found, channels: data.channels },
       run,
     );
+
+    cache.timeWith(site.clock);
 
     // Into memory rather than said, so the run's thread knows it the moment it
     // is so: a thread that dies a moment later may have run some of the site,
@@ -1266,6 +1340,7 @@ function withSettled(
       event.ms + settled.spanMs,
       mergedRequests(settled.requestsBy, event.requestsBy),
       event,
+      addedTime(measuredOf(event.msBy), settled.clock.spent()),
     ),
   };
 }

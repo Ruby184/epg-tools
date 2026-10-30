@@ -187,6 +187,7 @@ into place, so a reader never sees half a guide.
 | `--channels <what>` | `build`/`grab`/`merge`/`serve`/`filter`: [keep only these channels](./docs/configuration.md#keeping-only-some-channels), and fetch nothing for the rest — ids, or a playlist, `*.channels.xml`, guide or plain list naming them; repeatable |
 | `--allow-missing <n>` | exit 0 with up to this much of the guide missing — a number of channel-days, or a share like `5%`; [a site that answered nothing is never forgiven](./docs/configuration.md#allowing-some-of-the-guide-to-be-missing) |
 | `--dry-run` | `grab`/`build` only: [say what a run would fetch](./docs/configuration.md#what-a-run-would-do), and stop — `--format json` for a machine-readable one |
+| `--explain <what>` | [list on stderr](./docs/configuration.md#what-a-run-said-explained), once the run is done, what it said of one thing and what that most likely means: `unmatched` for `build`/`merge` — the programmes that nearly merged, and what would join them; `empty`, `requests` or `held` for `build`/`grab`. Repeatable |
 | `--threads[=n]` | `build`/`grab`/`serve`: run the sites in [worker threads](./docs/configuration.md#sites-in-threads-of-their-own), one per core or at most `n`; `--no-threads` overrides a config that asks for them |
 | `--before <day>` | `cache prune` only: remove days before `YYYY-MM-DD`, default today |
 | `--keys` | `cache state` with a group only: the keys it holds, not what it holds |

@@ -23,6 +23,7 @@ import {
   type RequestSink,
   type SiteSession,
 } from './session.js';
+import { noTime } from './clock.js';
 import { SiteRun, type Run } from './site-run.js';
 import { siteName } from './site.js';
 import { SiteNotRunError, SiteThreads, threadCount } from './thread.js';
@@ -35,6 +36,14 @@ import type { AnySiteConfig, GrabOptions, GrabSummary } from './types.js';
  * buys nothing but open files and live programme lists.
  */
 const DEFAULT_LOCAL_CONCURRENCY = 16;
+
+/**
+ * How many slots the run's local work has: `localConcurrency`, at least one —
+ * what a run is given, and what `--explain` says it had.
+ */
+export function localSlots(localConcurrency: number | undefined): number {
+  return Math.max(1, localConcurrency ?? DEFAULT_LOCAL_CONCURRENCY);
+}
 
 export async function grab(configs: AnySiteConfig[], options: GrabOptions): Promise<GrabSummary> {
   return grabWith(configs, options, new Map());
@@ -130,7 +139,7 @@ async function grabbing(
    * throttled by them, nor take a request's slot.
    */
   const localWork = new PQueue({
-    concurrency: Math.max(1, options.localConcurrency ?? DEFAULT_LOCAL_CONCURRENCY),
+    concurrency: localSlots(options.localConcurrency),
   });
 
   // Watched for the whole run, because the number it produces is the one that
@@ -180,6 +189,10 @@ async function grabbing(
     enqueue,
     tally,
     requested,
+    // Nothing to keep of a site's time as it goes: each site's is read off its
+    // own clock as its turn ends — and a run's is no sum of its sites', which
+    // run side by side.
+    spent: undefined,
   };
 
   // Said first, and the way a site says it when its list fails in its own turn,
@@ -204,6 +217,7 @@ async function grabbing(
         // What its list cost — the `404` it was answered with included.
         session?.requestsBy ?? {},
         { ...noCounts(), sitesFailed: 1 },
+        session?.clock.spent() ?? noTime(),
       ),
     );
   };

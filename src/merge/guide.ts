@@ -11,11 +11,11 @@ import {
 import { errorMessage, GrabberError } from '../core/error.js';
 import { writeOutput, type OutputOptions, type OutputTarget } from '../core/output.js';
 import { emitter } from '../core/events.js';
-import type { Says } from '../core/events.js';
+import type { Says, UnmatchedProgramme } from '../core/events.js';
 import { channelElement, covered, defaultChannelInfo, resolveSites } from '../grabber/channels.js';
 import { siteDayZone } from '../grabber/site.js';
 import type { GrabberChannel } from '../grabber/types.js';
-import { getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
+import { formatXmltvDate, getXmltvOffset, writeXmltvStream, xmltvDate } from '../xmltv/main.js';
 import { outputOptions } from '../xmltv/serialize.js';
 import type { XmltvChannel, XmltvProgramme } from '../xmltv/types.js';
 import { mergeChannels } from './channel.js';
@@ -23,14 +23,25 @@ import { derivedChannelElement, resolveDerived, shiftProgrammes } from './derive
 import {
   backfillInto,
   DEFAULT_FILL_STOP_MS,
+  firstSite,
   mergeInto,
   resolveMatch,
+  type MergeOrigin,
   type MergeWatch,
+  type Sites,
 } from './programme.js';
 import { resolveUnion } from './union.js';
 import type { ChannelSource, RegistryEntry } from './registry.js';
 import { channelSelection, configured, unmatched, unmatchedMessage } from './select.js';
-import type { BuildGuideOptions, FillGapsContext, FillGapsOptions, GuideContext } from './types.js';
+import type {
+  BuildGuideOptions,
+  ChannelStrategy,
+  FillGapsContext,
+  FillGapsOptions,
+  GuideContext,
+  MergeOptions,
+  ProgrammeStrategy,
+} from './types.js';
 
 /**
  * How many channel-days are read from the cache ahead of the writer when
@@ -285,12 +296,30 @@ function titleOf(programme: XmltvProgramme): string {
   return programme.title[0]?.value ?? '';
 }
 
+/** One side of a near miss, as `merge:unmatched` says it. */
+function nearMissSide(programme: XmltvProgramme, site: string): UnmatchedProgramme {
+  return { site, title: titleOf(programme), start: formatXmltvDate(programme.start) };
+}
+
+/**
+ * The strategies a merge goes by: the config's, and where it says none, the
+ * defaults — what a guide is built by, and what `--explain` says it was.
+ */
+export function mergeStrategies(merge: MergeOptions | undefined): {
+  channelStrategy: ChannelStrategy;
+  programmeStrategy: ProgrammeStrategy;
+} {
+  return {
+    channelStrategy: merge?.channelStrategy ?? 'merge-programmes',
+    programmeStrategy: merge?.programmeStrategy ?? 'merge',
+  };
+}
+
 export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator<string> {
   const now = options.now ?? new Date();
   const timeZone = resolveTimeZone(options.timeZone);
   const days = [...dayRange(options.startDay ?? dayIn(now, timeZone), options.days ?? 7)];
-  const channelStrategy = options.merge?.channelStrategy ?? 'merge-programmes';
-  const programmeStrategy = options.merge?.programmeStrategy ?? 'merge';
+  const { channelStrategy, programmeStrategy } = mergeStrategies(options.merge);
   const { cache } = options;
   const emit = emitter(options);
 
@@ -855,7 +884,12 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
   }: {
     entry: RegistryEntry;
     day: string;
-  }): Promise<{ entry: RegistryEntry; day: string; lists: XmltvProgramme[][] }> => {
+  }): Promise<{
+    entry: RegistryEntry;
+    day: string;
+    lists: XmltvProgramme[][];
+    sites: string[];
+  }> => {
     // A derived channel reads what it shifts. Its source's rows rather than its
     // source's *output*, so the lists stay separate and the merging below does
     // for the derived channel exactly what it does for the channel it shifts.
@@ -871,14 +905,17 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     );
 
     const lists: XmltvProgramme[][] = [];
+    /** Whose each list is, in step with them. */
+    const sites: string[] = [];
 
-    for (const mine of cached) {
+    for (const [index, mine] of cached.entries()) {
       if (mine !== undefined) {
         lists.push(clamped(offsetMs === 0 ? mine : shiftProgrammes(mine, offsetMs, entry.xmltvId)));
+        sites.push(read.sources[index]!.config.site);
       }
     }
 
-    return { entry, day, lists };
+    return { entry, day, lists, sites };
   };
 
   async function* programmes(): AsyncGenerator<XmltvProgramme> {
@@ -916,18 +953,23 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
     /** The offset to write a synthesized time in — the last real one seen. */
     let offset = 0;
     /**
-     * What one channel's sources made of each other — see `merge:summary`.
-     *
-     * Built only for the lists after the first, which is where the question
-     * means anything: the first list of a day folds into yesterday's tail, and
-     * a programme joining *that* is one source's own broadcast continuing
-     * rather than two sources agreeing.
+     * Which site each programme of a channel came from, for a channel more
+     * than one site covers — the only kind with a near miss to say. Kept by
+     * the merge as it makes new programmes out of old ones.
      */
-    const watching = (channelId: string): MergeWatch => ({
+    const origins = new WeakMap<XmltvProgramme, Sites>();
+    /**
+     * What one channel's sources made of each other — see `merge:summary` —
+     * as `site`'s list folds in: the first of a day's too, which folds into
+     * yesterday's tail, where another source's programme may be held over. Its
+     * own, continuing, is no other source's: `origin` says whose each is.
+     */
+    const watching = (channelId: string, origin: MergeOrigin): MergeWatch => ({
+      origin,
       combined: () => {
         combined += 1;
       },
-      nearMiss: (gapMs, programme, candidate) => {
+      nearMiss: (gapMs, programme, candidate, why) => {
         nearMiss += 1;
 
         if (examples.length < MAX_NEAR_MISSES) {
@@ -938,10 +980,25 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
             nearby: titleOf(candidate),
           });
         }
+
+        // Made only where a reporter wants it — one at `debug`, `--explain
+        // unmatched`, a sink that did not say — since each side's start is
+        // formatted as the guide writes it, for thousands of these where two
+        // sources run on two grids, and a run at `info` reads none of them.
+        if (emit.hears.has('merge:unmatched')) {
+          emit({
+            type: 'merge:unmatched',
+            channelId,
+            shiftMs: programme.start.getTime() - candidate.start.getTime(),
+            why,
+            programme: nearMissSide(programme, origin.site),
+            nearby: nearMissSide(candidate, firstSite(origins.get(candidate)) ?? ''),
+          });
+        }
       },
     });
 
-    for await (const { entry, day, lists } of readAhead(
+    for await (const { entry, day, lists, sites } of readAhead(
       plan,
       Math.max(1, options.readAhead ?? DEFAULT_READ_AHEAD),
       readChannelDay,
@@ -953,8 +1010,21 @@ export async function* generateGuide(options: BuildGuideOptions): AsyncGenerator
       options.signal?.throwIfAborted();
 
       if (listStrategy === 'merge') {
+        // Whose each programme is, for a channel more than one site covers —
+        // from the first list on, and on a day only one of them answered for,
+        // since tomorrow's lists meet what today's leave. Not for a channel
+        // derived from one: the same lists again, shifted, whose sources
+        // agreeing or nearly agreeing is said once, of the channel itself.
+        const several = entry.derivedFrom === undefined && entry.sources.length > 1;
+
         for (const [index, list] of lists.entries()) {
-          mergeInto(pending, list, match, index > 0 ? watching(entry.xmltvId) : undefined);
+          mergeInto(
+            pending,
+            list,
+            match,
+            // Made only where it is kept: one source's channel pays nothing.
+            several ? watching(entry.xmltvId, { site: sites[index]!, sites: origins }) : undefined,
+          );
         }
       } else if (listStrategy === 'backfill') {
         // Across the sites of *this day* first, into an array of its own, and
